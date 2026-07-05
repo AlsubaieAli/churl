@@ -133,6 +133,7 @@
 - Round-trip test corpus (≥ 20 real-world curl commands)
 - `churl import` subcommand wired up (replaces M0 stub)
 - **Body-size cap** (closes the M3 open question): stream the response body with a cap — default 10 MB, config-overridable (`max_body_bytes`); `Response` gains a `truncated` flag; the response status line shows `truncated at N MB` when hit
+- **Configurable request timeout**: `timeout_secs` in config (default 30, the current hard-coded `DEFAULT_TIMEOUT`) — same knob class as `max_body_bytes`; per-endpoint override deferred until a real need appears
 - **Insert-mode Ctrl-S/Ctrl-C**: intercepted *before* edtui in insert/visual mode (send / cancel-or-quit work without Esc). The one documented exception to the "edtui owns non-Normal modes" routing rule — Ctrl-S/Ctrl-C are not text-input keys
 - `-u`/`Authorization:` import lands as a plain header in M4; M5 remaps it into the first-class auth model
 
