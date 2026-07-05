@@ -125,7 +125,7 @@
 - Theme system: built-in (dark/light), user-override via config
 - Keymap customisation: crokey map loaded from config; `churl keymaps` subcommand prints current map
 - Jump-mode: letter-labelled pane/element navigation (à la EasyMotion/Helix `gw`)
-- `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`
+- `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`. Substitution applies to URL, query params, headers, auth fields, and body (owner request 2026-07-05)
 - Tests: template substitution unit tests; keymap round-trip
 
 **Next**: M6
@@ -145,3 +145,18 @@
 - GitHub release action (tag-triggered)
 
 **Next**: ship
+
+---
+
+## Post-M6 backlog (owner requests, 2026-07-05)
+
+Not yet scheduled into milestones; each becomes an M7+ milestone (or folds into an existing one) when picked up.
+
+- **Auth types** — first-class auth on `Request` (basic, bearer, API key in header or query; OAuth2 client-credentials later). Model + persistence extension, a request-pane section, and curl import/export mapping (`-u`, `Authorization:` header). Natural slot: alongside/after M4, and M5 templating must substitute into auth fields.
+- **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M5 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
+- **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
+
+### Deferred nits (from M2 review)
+
+- Explorer pane has no scroll offset — a tree taller than the pane runs off-screen (the picker overlay already keeps its selection in view). Fix with M3's viewport work.
+- Ctrl-C is consumed by edtui while in insert mode; quit requires Esc first. Acceptable vim semantics, revisit if it surprises users.
