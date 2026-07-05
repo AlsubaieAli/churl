@@ -180,6 +180,9 @@
 - `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`. Substitution applies to URL, query params, headers, auth fields (first-class since M5), and body (owner request 2026-07-05)
 - Tests: template substitution unit tests; keymap round-trip
 
+**Open questions**:
+- Variable scoping (owner question 2026-07-05): base URLs are meant to be profile vars (`url = "{{base_url}}/users"`, per-profile values). Does M6 also need a collection-level var scope (collection defaults overriding workspace profiles) in the precedence chain, or do profiles suffice? Decide before M6 starts.
+
 **Next**: M7
 
 ---
@@ -194,6 +197,7 @@
 - Full-screen response toggle (`F` key)
 - **Response headers view**: toggle between body and full headers in the response pane (closes the M3 open question; count-only until then)
 - **Wrap toggle** in the response viewer (closes the M3 horizontal-scroll open question — wrap chosen over horizontal scroll)
+- **Response body search** (owner request 2026-07-05): `/`-style incremental search within the response viewer with match navigation — the explorer `/` fuzzy search never covered response bodies, and search beats folding for large payloads
 - Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
@@ -210,6 +214,8 @@ Not yet scheduled into milestones; each becomes an M8+ milestone (or folds into 
 - ~~Auth types~~ → **promoted to milestone M5** in the 2026-07-05 plan review (OAuth2 client-credentials remains here as backlog).
 - **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M6 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
 - **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
+- **Cookies / sessions** (owner question 2026-07-05) — the client has no cookie store, so a `Set-Cookie` from a login endpoint is not carried into the next request. Storage was designed for it from day one (ARCHITECTURE: cookies belong in the SQLite state DB, never in workspace files). Naturally couples with request sequences (sessions matter most for E2E flows) — promote together or fold in when sequences are picked up.
+- **Proxy configuration + per-request TLS-skip** (owner question 2026-07-05) — reqwest already honours `HTTP_PROXY`/`HTTPS_PROXY` env vars, but there is no config knob, no per-workspace proxy, and no story for local intercepting proxies (Charles/mitmproxy — which also needs opt-in TLS-skip, currently rejected on import as `-k`). One backlog item: `proxy` config knob + explicit insecure-TLS opt-in, and `-k` import stops being ignored.
 
 ### Deferred nits (from M2/M3 reviews)
 
