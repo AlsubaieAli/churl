@@ -21,7 +21,14 @@ clap = { version = "4", features = ["derive"] }
 
 # TUI
 ratatui = "0.30"
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
+edtui = "0.11"
+crokey = "1.4"
+nucleo-matcher = "0.3"
+
+# Async
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+futures = "0.3"
 
 # Serialization / persistence
 serde = { version = "1", features = ["derive"] }

@@ -19,6 +19,12 @@ clap.workspace = true
 color-eyre.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+edtui.workspace = true
+crokey.workspace = true
+nucleo-matcher.workspace = true
+tokio.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+tempfile.workspace = true

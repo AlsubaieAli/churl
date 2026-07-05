@@ -6,7 +6,7 @@
 |---|---|---|
 | M0 | Skeleton + CI | **done** |
 | M1 | Data model + persistence | **done** |
-| M2 | Layout + navigation | planned |
+| M2 | Layout + navigation | **done** |
 | M3 | Request execution + response render | planned |
 | M4 | curl import / export | planned |
 | M5 | Themes + keymaps + jump-mode + templating | planned |
@@ -71,7 +71,19 @@
 - tokio runtime + `EventStream`; `App` struct with `tokio::select!` loop
 - Tests: navigation state machine unit tests; snapshot tests for each pane
 
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (46 tests) all green; `cargo run -p churl -- --version` works; snapshot suite covers the three-pane layout with a selected endpoint, search overlay with a typed query, palette overlay, and the no-workspace empty state (80x24 `TestBackend`).
+
+**Notes**:
+- Fuzzy engine is `nucleo-matcher` (sync), not the threaded `nucleo` crate — see DECISIONS.md.
+- Explorer tree is collection → endpoint in M2; nested folders don't exist in the M1 data model yet, so the planned `folder` level is deferred until persistence grows folders.
+- Explorer loads endpoint files lazily on first expand (or on search-overlay open); startup only stats collection directories.
+- Request pane metadata (method/URL/headers/params) is read-only in M2; only the body is edtui-editable. Full editing UX matures in later milestones.
+- Key routing precedence pinned in DECISIONS.md; edtui owns insert/visual modality internally.
+- `AppMsg` has only `Redraw`; `Response` arrives with M3.
+
 **Next**: M3
+
+**Open questions**: none
 
 ---
 

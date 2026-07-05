@@ -17,7 +17,8 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
         }
         None => {
             install_hooks()?;
-            churl::tui::run()?;
+            churl::tui::run().await?;
         }
     }
 

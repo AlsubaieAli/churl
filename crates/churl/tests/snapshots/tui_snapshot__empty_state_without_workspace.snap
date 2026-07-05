@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
+┃                      ┃│                          ││                          │
+┃no workspace          ┃│no endpoint selected      ││no endpoint selected      │
+┃                      ┃│                          ││                          │
+┃run churl in a directo┃│                          ││                          │
+┃containing churl.toml ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
+ EXPLORER · no workspace · j/k move · enter select · / search · : palette · q qu
