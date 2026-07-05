@@ -23,5 +23,13 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.29"
 
+# Serialization / persistence
+serde = { version = "1", features = ["derive"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+dirs = "6"
+
 # Testing
 insta = { version = "1", features = ["filters"] }
+proptest = "1"
+tempfile = "3"

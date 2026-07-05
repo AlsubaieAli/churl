@@ -1,0 +1,19 @@
+# Search endpoint.
+# seq is deliberately high: sorts last.
+seq = 10
+name = "search"
+
+[request]
+method = "GET"
+url = "https://api.example.com/search"
+
+# query params below
+
+[[request.params]]
+name = "q"
+value = "rust"
+
+[[request.params]]
+# limit results
+name = "limit"
+value = "10"

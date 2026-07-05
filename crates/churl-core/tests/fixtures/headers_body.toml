@@ -1,0 +1,22 @@
+# Endpoint: create user.
+seq = 2
+name = "create-user"
+
+[request]
+method = "POST"
+url = "https://api.example.com/users"
+
+# auth goes first
+[[request.headers]]
+name = "Authorization"
+value = "{{auth_header}}"
+
+[[request.headers]]
+name = "X-Debug"
+value = "1"
+enabled = false # toggled off while testing
+
+# the payload
+[request.body]
+type = "json"
+content = '{"name": "ali"}'
