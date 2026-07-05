@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use churl_core::http::{HttpError, build_client, execute};
+use churl_core::http::{DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, execute};
 use churl_core::model::{Body, BodyKind, Header, Method, Param, Request};
 use wiremock::matchers::{body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -31,10 +31,14 @@ async fn get_200_returns_status_headers_and_body() {
         .mount(&server)
         .await;
 
-    let client = build_client().unwrap();
-    let response = execute(&client, &get(format!("{}/users", server.uri())))
-        .await
-        .unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(
+        &client,
+        &get(format!("{}/users", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status, 200);
     assert_eq!(response.body, b"hello world");
@@ -67,8 +71,10 @@ async fn post_body_derives_content_type() {
         content: r#"{"a":1}"#.to_owned(),
     });
 
-    let client = build_client().unwrap();
-    let response = execute(&client, &request).await.unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
     assert_eq!(response.status, 201);
 }
 
@@ -94,8 +100,10 @@ async fn user_content_type_header_overrides_derived() {
         content: "{}".to_owned(),
     });
 
-    let client = build_client().unwrap();
-    let response = execute(&client, &request).await.unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
     assert_eq!(response.status, 200);
 }
 
@@ -125,8 +133,10 @@ async fn disabled_header_and_param_are_excluded() {
         enabled: false,
     }];
 
-    let client = build_client().unwrap();
-    let response = execute(&client, &request).await.unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
     assert_eq!(
         response.status, 404,
         "disabled header/param must not be sent"
@@ -151,27 +161,37 @@ async fn enabled_param_appends_to_existing_query() {
         enabled: true,
     }];
 
-    let client = build_client().unwrap();
-    let response = execute(&client, &request).await.unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
     assert_eq!(response.status, 200);
 }
 
 #[tokio::test]
 async fn connection_refused_is_an_error() {
     // Port 1 is not listening; connect fails fast.
-    let client = build_client().unwrap();
-    let err = execute(&client, &get("http://127.0.0.1:1/".to_owned()))
-        .await
-        .unwrap_err();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let err = execute(
+        &client,
+        &get("http://127.0.0.1:1/".to_owned()),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, HttpError::Request(_)), "got {err:?}");
 }
 
 #[tokio::test]
 async fn invalid_url_is_reported() {
-    let client = build_client().unwrap();
-    let err = execute(&client, &get("not a url".to_owned()))
-        .await
-        .unwrap_err();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let err = execute(
+        &client,
+        &get("not a url".to_owned()),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, HttpError::InvalidUrl { .. }), "got {err:?}");
 }
 
@@ -184,13 +204,81 @@ async fn aborting_the_task_cancels_the_request() {
         .mount(&server)
         .await;
 
-    let client = build_client().unwrap();
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
     let request = get(format!("{}/slow", server.uri()));
-    let handle = tokio::spawn(async move { execute(&client, &request).await });
+    let handle =
+        tokio::spawn(async move { execute(&client, &request, &ExecuteOptions::default()).await });
     // Give the request time to actually go in flight before cancelling it.
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.abort();
     let joined = handle.await;
     assert!(joined.is_err());
     assert!(joined.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn body_over_cap_is_truncated_at_cap_boundary() {
+    let server = MockServer::start().await;
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    Mock::given(method("GET"))
+        .and(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        max_body_bytes: 1024,
+    };
+    let response = execute(&client, &get(format!("{}/big", server.uri())), &options)
+        .await
+        .unwrap();
+
+    assert!(response.truncated);
+    assert_eq!(response.body.len(), 1024);
+    assert_eq!(response.body, payload[..1024]);
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn body_exactly_at_cap_is_not_truncated() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/exact"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 1024]))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        max_body_bytes: 1024,
+    };
+    let response = execute(&client, &get(format!("{}/exact", server.uri())), &options)
+        .await
+        .unwrap();
+
+    assert!(!response.truncated);
+    assert_eq!(response.body.len(), 1024);
+}
+
+#[tokio::test]
+async fn small_body_under_default_cap_is_unchanged() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/small"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("tiny"))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(
+        &client,
+        &get(format!("{}/small", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.truncated);
+    assert_eq!(response.body, b"tiny");
 }

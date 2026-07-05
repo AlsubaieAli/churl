@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 
@@ -10,10 +12,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Import a curl command as an endpoint (not yet implemented)
+    /// Import a curl command as an endpoint (prints TOML; --out writes a file)
     Import {
-        /// The curl command to import
+        /// The curl command to import (quote the whole command)
         curl: String,
+        /// Override the endpoint name derived from the URL
+        #[arg(long)]
+        name: Option<String>,
+        /// Write the endpoint TOML to this file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -22,9 +30,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Import { curl: _ }) => {
-            eprintln!("curl import: not yet implemented");
-            std::process::exit(1);
+        Some(Command::Import { curl, name, out }) => {
+            run_import(&curl, name, out)?;
         }
         None => {
             install_hooks()?;
@@ -32,6 +39,34 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// `churl import`: parse the curl command, print the endpoint's TOML to stdout
+/// (warnings on stderr), or write it through the persistence save with `--out`.
+/// A parse failure prints the error on stderr and exits non-zero.
+fn run_import(curl: &str, name: Option<String>, out: Option<PathBuf>) -> Result<()> {
+    let result = match churl_core::import::import_curl(curl) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
+    let mut endpoint = result.endpoint;
+    if let Some(name) = name {
+        endpoint.name = name;
+    }
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    match out {
+        Some(path) => {
+            churl_core::persistence::save_endpoint(&path, &endpoint)?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => print!("{}", churl_core::persistence::endpoint_to_toml(&endpoint)?),
+    }
     Ok(())
 }
 

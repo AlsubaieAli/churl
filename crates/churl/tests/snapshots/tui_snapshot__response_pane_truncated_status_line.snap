@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: "lines.join(\"\\n\")"
+---
+┌ Explorer ─────────────────────────────────┐┌ Request ─────────────────────────────────────────────────────────────┐┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│> ▸ orders                                 ││                                                                      │┃200 OK · 142 ms · 10.0 MB · 1 hdrs · truncated at 10.0 MB    ┃
+│  ▸ users                                  ││no endpoint selected                                                  │┃xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+│                                           ││                                                                      │┃                                                             ┃
+└───────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ RESPONSE · demo · j/k move · enter select · ctrl-s send · / search · : palette · q quit

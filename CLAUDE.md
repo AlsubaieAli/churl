@@ -39,12 +39,18 @@ crates/
       lib.rs               # pub const VERSION + module exports
       model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace
       persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection
-      config.rs            # global config.toml loading (incl. [keys] override strings) + secrets heuristics
+      config.rs            # global config.toml loading (incl. [keys] overrides, timeout_secs, max_body_bytes)
+                           #   + secrets heuristics
       history.rs           # rusqlite HistoryStore, user_version migrations
-      http.rs              # reqwest+rustls execute(); runtime-agnostic async fn (no AbortHandle in core)
+      http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
+                           #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core)
+      import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error)
+      export.rs            # Endpoint → curl command (shlex::try_quote; round-trip contract with import)
     tests/
       persistence.rs       # comment-preservation corpus, manifest+secrets, lazy loading
       roundtrip_prop.rs    # proptest Endpoint round-trip
+      curl_roundtrip.rs    # ≥20-command curl import→export→import corpus
+      http.rs              # wiremock execution suite incl. body-size cap
       fixtures/            # comment-bearing endpoint TOML fixtures
   churl/                   # binary crate + thin lib for integration tests
     src/
@@ -58,7 +64,8 @@ crates/
         highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, returns Highlighted
         components/        # explorer, request (edtui), response (virtualised viewer), picker, search, palette, statusline
     tests/
-      tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state
+      tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
+      cli_import.rs        # `churl import` integration tests against the real binary
 docs/
   ARCHITECTURE.md
   DECISIONS.md

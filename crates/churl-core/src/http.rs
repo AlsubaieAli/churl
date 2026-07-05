@@ -11,8 +11,29 @@ use std::time::{Duration, Instant};
 
 use crate::model::{BodyKind, Header, Method, Request, Response, Timing};
 
-/// Default per-request timeout applied to the shared client.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default per-request timeout applied to the shared client; the config knob is
+/// `timeout_secs` (see [`crate::config::Config::timeout`]).
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default response body-size cap (10 MB); the config knob is `max_body_bytes`
+/// (see [`crate::config::Config::max_body_bytes`]).
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Per-execution knobs, resolved by the caller (config → defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecuteOptions {
+    /// Maximum number of body bytes to read; the rest of the stream is dropped
+    /// and the response is marked `truncated`.
+    pub max_body_bytes: u64,
+}
+
+impl Default for ExecuteOptions {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+        }
+    }
+}
 
 /// Error executing an HTTP request.
 #[derive(Debug, thiserror::Error)]
@@ -33,12 +54,13 @@ pub enum HttpError {
     Request(#[source] reqwest::Error),
 }
 
-/// Builds the shared [`reqwest::Client`]: rustls TLS, a 30 s default timeout, and
-/// reqwest's default redirect policy (follow up to 10 hops).
-pub fn build_client() -> Result<reqwest::Client, HttpError> {
+/// Builds the shared [`reqwest::Client`]: rustls TLS, the given per-request
+/// timeout ([`DEFAULT_TIMEOUT`] when nothing is configured), and reqwest's
+/// default redirect policy (follow up to 10 hops).
+pub fn build_client(timeout: Duration) -> Result<reqwest::Client, HttpError> {
     reqwest::Client::builder()
         .tls_backend_rustls()
-        .timeout(DEFAULT_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(HttpError::Request)
 }
@@ -50,8 +72,18 @@ pub fn build_client() -> Result<reqwest::Client, HttpError> {
 /// carries a body, a `Content-Type` is derived from its [`BodyKind`] *unless* the
 /// caller supplied an enabled `Content-Type` header — the user's header always wins.
 /// Timing measures total wall-clock from just before send to the body being fully
-/// read; connect timing is not split out in M3 and stays `None`.
-pub async fn execute(client: &reqwest::Client, request: &Request) -> Result<Response, HttpError> {
+/// read (or the cap being hit); connect timing is not split out in M3 and stays
+/// `None`.
+///
+/// The body is streamed chunk-wise and accumulated up to `options.max_body_bytes`.
+/// A chunk that would exceed the cap is cut at the cap boundary, the response is
+/// marked `truncated`, and the rest of the stream is dropped — a runaway download
+/// can never balloon memory past the cap.
+pub async fn execute(
+    client: &reqwest::Client,
+    request: &Request,
+    options: &ExecuteOptions,
+) -> Result<Response, HttpError> {
     let url = build_url(request)?;
     let mut builder = client.request(reqwest_method(request.method), url);
 
@@ -74,16 +106,28 @@ pub async fn execute(client: &reqwest::Client, request: &Request) -> Result<Resp
     }
 
     let start = Instant::now();
-    let response = builder.send().await.map_err(map_send_error)?;
+    let mut response = builder.send().await.map_err(map_send_error)?;
     let status = response.status().as_u16();
     let headers = collect_headers(response.headers());
-    let body = response.bytes().await.map_err(map_send_error)?.to_vec();
+
+    let cap = usize::try_from(options.max_body_bytes).unwrap_or(usize::MAX);
+    let mut body: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await.map_err(map_send_error)? {
+        if body.len() + chunk.len() > cap {
+            body.extend_from_slice(&chunk[..cap - body.len()]);
+            truncated = true;
+            break; // drop the response; the rest of the stream is never read
+        }
+        body.extend_from_slice(&chunk);
+    }
     let total = start.elapsed();
 
     Ok(Response {
         status,
         headers,
         body,
+        truncated,
         timing: Timing {
             connect: None,
             total,

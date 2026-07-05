@@ -3,7 +3,10 @@
 //! Key routing precedence (pinned in DECISIONS.md):
 //! 1. An open overlay (search/palette) consumes every key.
 //! 2. Request pane focused with edtui in a non-Normal mode (insert/visual/…):
-//!    all keys go to edtui.
+//!    all keys go to edtui — except a CONTROL-modified key that the keymap
+//!    resolves to Send or Quit, which is dispatched instead (the single
+//!    documented exception: Ctrl-S/Ctrl-C are not text-input keys, and the
+//!    lookup goes through the keymap so user remaps are honoured).
 //! 3. Otherwise the crokey keymap is consulted first; unmapped keys fall
 //!    through to edtui when the request pane is focused.
 
@@ -12,7 +15,9 @@ use std::path::Path;
 use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
 
+use churl_core::config::Config;
 use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
+use churl_core::http::ExecuteOptions;
 use churl_core::model::{Body, BodyKind, Response};
 use churl_core::persistence::{OpenWorkspace, PersistenceError};
 use color_eyre::Result;
@@ -143,6 +148,9 @@ pub struct App {
     rx: mpsc::UnboundedReceiver<AppMsg>,
     /// The shared reqwest client; `None` in snapshot-test construction (runtime-free).
     pub client: Option<Client>,
+    /// Per-execution knobs (body-size cap) resolved from config in
+    /// [`App::install_runtime`]; defaults under snapshot-test construction.
+    execute_options: ExecuteOptions,
     /// The single in-flight request, if any.
     in_flight: Option<InFlightRequest>,
     /// Monotonic request counter; a landed response with a stale generation is dropped.
@@ -208,6 +216,7 @@ impl App {
             tx,
             rx,
             client: None,
+            execute_options: ExecuteOptions::default(),
             in_flight: None,
             generation: 0,
             response: ResponseState::Idle,
@@ -220,12 +229,17 @@ impl App {
         })
     }
 
-    /// Installs the runtime-dependent pieces: the HTTP client, the off-thread
-    /// highlight worker, and the history store. Called from [`super::run`] after
-    /// [`App::new`]; snapshot tests skip it so they stay runtime-free. A failed
-    /// history open is non-fatal — it disables history and warns on the statusline.
-    pub fn install_runtime(&mut self) -> Result<()> {
-        self.client = Some(churl_core::http::build_client()?);
+    /// Installs the runtime-dependent pieces: the HTTP client (with the
+    /// config-resolved timeout), the execution options (body-size cap), the
+    /// off-thread highlight worker, and the history store. Called from
+    /// [`super::run`] after [`App::new`]; snapshot tests skip it so they stay
+    /// runtime-free. A failed history open is non-fatal — it disables history
+    /// and warns on the statusline.
+    pub fn install_runtime(&mut self, config: &Config) -> Result<()> {
+        self.client = Some(churl_core::http::build_client(config.timeout())?);
+        self.execute_options = ExecuteOptions {
+            max_body_bytes: config.max_body_bytes(),
+        };
         self.highlight_tx = Some(highlight::spawn(self.tx.clone()));
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
@@ -271,6 +285,19 @@ impl App {
             Mode::Search | Mode::Palette => self.handle_overlay_key(key),
             Mode::Normal => {
                 if self.focus == Pane::Request && self.editor.mode != EditorMode::Normal {
+                    // The single exception to "edtui owns non-Normal modes"
+                    // (DECISIONS.md): a CONTROL-modified key that the keymap
+                    // resolves to Send or Quit is dispatched instead of being
+                    // handed to edtui, so Ctrl-S sends and Ctrl-C cancels/quits
+                    // straight from insert mode. Resolving through the keymap
+                    // honours user remaps; requiring CONTROL guarantees no
+                    // text-input key is ever stolen.
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && let Some(action @ (Action::Send | Action::Quit)) =
+                            self.keymap.lookup(key)
+                    {
+                        return self.dispatch(action, Some(key));
+                    }
                     self.editor_events.on_key_event(key, &mut self.editor);
                     return Ok(());
                 }
@@ -413,8 +440,9 @@ impl App {
 
         let tx = self.tx.clone();
         let task_meta = meta.clone();
+        let options = self.execute_options;
         let handle = tokio::spawn(async move {
-            let outcome = churl_core::http::execute(&client, &request)
+            let outcome = churl_core::http::execute(&client, &request, &options)
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppMsg::Response {
@@ -709,6 +737,7 @@ mod tests {
             status: 200,
             headers: Vec::new(),
             body: b"{}".to_vec(),
+            truncated: false,
             timing: Timing {
                 connect: None,
                 total: Duration::from_millis(3),
@@ -739,5 +768,88 @@ mod tests {
         app.on_response(5, Ok(response()), meta());
         assert!(matches!(app.response, ResponseState::Done { .. }));
         assert!(app.in_flight.is_none());
+    }
+
+    /// Puts a fresh app in insert mode on the request pane.
+    fn insert_mode_app(keymap: KeyMap) -> App {
+        let mut app = App::new(None, keymap).unwrap();
+        app.focus = Pane::Request;
+        app.editor.mode = EditorMode::Insert;
+        app
+    }
+
+    /// Insert mode + Ctrl-S dispatches Send (here: the no-endpoint statusline
+    /// hint) instead of reaching edtui; the editor stays in insert mode.
+    #[test]
+    fn insert_mode_ctrl_s_dispatches_send() {
+        let mut app = insert_mode_app(KeyMap::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(
+            app.status.as_deref(),
+            Some("no endpoint selected — nothing to send")
+        );
+        assert_eq!(String::from(app.editor.lines.clone()), "");
+        assert_eq!(app.editor.mode, EditorMode::Insert);
+        assert!(!app.should_quit);
+    }
+
+    /// Insert mode + Ctrl-C with a request in flight cancels it (never quits,
+    /// never reaches edtui).
+    #[tokio::test]
+    async fn insert_mode_ctrl_c_cancels_in_flight() {
+        let mut app = insert_mode_app(KeyMap::default());
+        let handle = tokio::spawn(async {});
+        app.generation = 1;
+        app.in_flight = Some(InFlightRequest {
+            handle: handle.abort_handle(),
+            generation: 1,
+            meta: meta(),
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.in_flight.is_none());
+        assert!(matches!(app.response, ResponseState::Cancelled));
+        assert!(!app.should_quit);
+        assert_eq!(String::from(app.editor.lines.clone()), "");
+    }
+
+    /// Insert mode + Ctrl-C with nothing in flight falls back to Quit
+    /// (the Ctrl-C-in-request-context behaviour, unchanged from Normal mode).
+    #[test]
+    fn insert_mode_ctrl_c_without_in_flight_quits() {
+        let mut app = insert_mode_app(KeyMap::default());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.should_quit);
+    }
+
+    /// Plain `s`/`c` in insert mode are text input and still reach edtui.
+    #[test]
+    fn insert_mode_plain_chars_reach_edtui() {
+        let mut app = insert_mode_app(KeyMap::default());
+        for c in ['s', 'c'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(String::from(app.editor.lines.clone()), "sc");
+        assert!(!app.should_quit);
+        assert!(app.status.is_none());
+    }
+
+    /// The interception resolves through the keymap: a remapped send key with
+    /// CONTROL is intercepted in insert mode too.
+    #[test]
+    fn insert_mode_remapped_ctrl_send_is_intercepted() {
+        let overrides =
+            std::collections::BTreeMap::from([("ctrl-b".to_string(), "send".to_string())]);
+        let mut app = insert_mode_app(KeyMap::with_overrides(&overrides).unwrap());
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(
+            app.status.as_deref(),
+            Some("no endpoint selected — nothing to send")
+        );
+        assert_eq!(String::from(app.editor.lines.clone()), "");
     }
 }
