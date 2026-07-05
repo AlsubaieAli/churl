@@ -88,6 +88,15 @@ pub fn save_endpoint(path: &Path, ep: &Endpoint) -> Result<(), PersistenceError>
     save_value(path, ep)
 }
 
+/// Serializes an [`Endpoint`] to its on-disk TOML shape (identical to a fresh
+/// [`save_endpoint`]) without touching the filesystem — used by `churl import`
+/// to print to stdout.
+pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, toml_edit::ser::Error> {
+    let mut doc = toml_edit::ser::to_document(ep)?;
+    normalize_table(doc.as_table_mut());
+    Ok(doc.to_string())
+}
+
 /// Loads the workspace manifest (`churl.toml`) from the workspace root directory.
 pub fn load_workspace_manifest(root: &Path) -> Result<Workspace, PersistenceError> {
     load_value(&root.join(MANIFEST_FILENAME))

@@ -6,8 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
+shlex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true

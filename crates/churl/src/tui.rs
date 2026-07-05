@@ -30,7 +30,7 @@ pub async fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let workspace = app::open_workspace(&cwd)?;
     let mut app = App::new(workspace, keymap)?;
-    app.install_runtime()?;
+    app.install_runtime(&config)?;
 
     let mut terminal = init();
     let result = app.run(&mut terminal).await;

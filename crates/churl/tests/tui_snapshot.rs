@@ -124,6 +124,7 @@ fn json_response(body: &str) -> Response {
             enabled: true,
         }],
         body: body.as_bytes().to_vec(),
+        truncated: false,
         timing: Timing {
             connect: None,
             total: Duration::from_millis(142),
@@ -151,6 +152,34 @@ fn response_pane_with_json_body() {
     };
     // No highlight worker under TestBackend → deterministic plain text.
     insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn response_pane_truncated_status_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.focus = Pane::Response;
+    // A capped response: 10 MB held, marked truncated. Rendered at 180 columns
+    // so the full status line (with the truncated marker) fits the pane.
+    let mut response = json_response(&"x".repeat(10 * 1024 * 1024));
+    response.truncated = true;
+    app.response = ResponseState::Done {
+        view: ResponseView::build(&response, 1),
+    };
+    let backend = TestBackend::new(180, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal init failed");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let lines: Vec<String> = (0..24)
+        .map(|y| {
+            (0..180)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect()
+        })
+        .collect();
+    insta::assert_snapshot!(lines.join("\n"));
 }
 
 #[test]

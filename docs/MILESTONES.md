@@ -8,7 +8,7 @@
 | M1 | Data model + persistence | **done** |
 | M2 | Layout + navigation | **done** |
 | M3 | Request execution + response render | **done** |
-| M4 | curl import / export + M3 follow-ups | planned |
+| M4 | curl import / export + M3 follow-ups | **done** |
 | M5 | Auth | planned |
 | M6 | Themes + keymaps + jump-mode + templating | planned |
 | M7 | Polish + perf + release | planned |
@@ -136,6 +136,18 @@
 - **Configurable request timeout**: `timeout_secs` in config (default 30, the current hard-coded `DEFAULT_TIMEOUT`) — same knob class as `max_body_bytes`; per-endpoint override deferred until a real need appears
 - **Insert-mode Ctrl-S/Ctrl-C**: intercepted *before* edtui in insert/visual mode (send / cancel-or-quit work without Esc). The one documented exception to the "edtui owns non-Normal modes" routing rule — Ctrl-S/Ctrl-C are not text-input keys
 - `-u`/`Authorization:` import lands as a plain header in M4; M5 remaps it into the first-class auth model
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (123 tests) all green; `cargo run -p churl -- --version` works; `cargo run -p churl -- import "curl https://example.com"` prints endpoint TOML. New tests (55): round-trip corpus (25 commands, import → export → import semantic equality) + Stripe-style import + paste-safe export; per-flag import unit tests incl. every error variant (`Tokenize`, `MissingUrl`, `MultipleUrls`, `UnknownFlag`, `MissingValue`, `Unsupported` for `-F`/`@file`, `InvalidMethod`); export unit tests (quoting, disabled header/param exclusion, param query encoding, GET-with-body `-X GET`); body-cap wiremock suite (over-cap truncates at boundary, exact-cap not truncated, small body unchanged); config knob tests (`timeout_secs`/`max_body_bytes` parse + defaults); truncated status-line unit test + 180-column snapshot; insert-mode routing tests (Ctrl-S sends, Ctrl-C cancels in-flight / quits otherwise, plain `s`/`c` reach edtui, remapped CONTROL send intercepted); `churl import` CLI integration tests (stdout TOML, stderr warnings, `--name`, `--out`, non-zero error exit).
+
+**Notes**:
+- Flag policy is strict: any flag outside the supported set is a hard `UnknownFlag` error; `@file` data payloads and `-F` multipart are `Unsupported` errors (never silently dropped, never file reads). Query strings stay in the URL on import — never exploded into `Param`s (lossless).
+- Export shell-quotes every argument via `shlex::try_quote` (single paste-safe line). `-X` is omitted for a body-less GET but emitted for a GET *with* a body, so the round-trip survives import's body-implies-POST inference.
+- `churl import` prints the endpoint TOML via the persistence serializer (`endpoint_to_toml`, identical to on-disk shape); `--out` writes through `save_endpoint`. No workspace discovery in M4.
+- `execute` now takes `&ExecuteOptions` and streams the body chunk-wise (`Response.truncated`, cut at the cap boundary); `build_client` takes the timeout `Duration`. Both knobs resolve from config (`Config::max_body_bytes()` / `Config::timeout()`).
+- Insert-mode Ctrl-S/Ctrl-C interception resolves through the crokey keymap (not hardcoded key codes), so user remaps are honoured; only CONTROL-modified keys can be intercepted, so no text-input key is ever stolen.
+
+**Open questions**:
+- Multipart (`-F`) import: the data model has no multipart body. Reject-with-error is the M4 behaviour — should multipart become a model feature (own milestone or M7 backlog), or stay permanently unsupported? Owner call.
 
 **Next**: M5
 

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,29 @@ pub struct Config {
     /// entries loudly at startup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
+    /// Response body-size cap in bytes; `None` means the 10 MB default
+    /// ([`crate::http::DEFAULT_MAX_BODY_BYTES`]). Resolved via [`Config::max_body_bytes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
+    /// Per-request timeout in seconds; `None` means the 30 s default
+    /// ([`crate::http::DEFAULT_TIMEOUT`]). Resolved via [`Config::timeout`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl Config {
+    /// The resolved response body-size cap: `max_body_bytes`, or the 10 MB default.
+    pub fn max_body_bytes(&self) -> u64 {
+        self.max_body_bytes
+            .unwrap_or(crate::http::DEFAULT_MAX_BODY_BYTES)
+    }
+
+    /// The resolved per-request timeout: `timeout_secs`, or the 30 s default.
+    pub fn timeout(&self) -> Duration {
+        self.timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(crate::http::DEFAULT_TIMEOUT)
+    }
 }
 
 /// Returns the path of the global config file (`<config_dir>/churl/config.toml`),
@@ -173,6 +197,27 @@ mod tests {
         std::fs::write(&path, "theme = \"gruvbox\"\n").unwrap();
         let config = load_config(&path).unwrap();
         assert!(config.keys.is_empty());
+    }
+
+    #[test]
+    fn config_parses_timeout_and_body_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "timeout_secs = 90\nmax_body_bytes = 1048576\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.timeout_secs, Some(90));
+        assert_eq!(config.timeout(), Duration::from_secs(90));
+        assert_eq!(config.max_body_bytes, Some(1_048_576));
+        assert_eq!(config.max_body_bytes(), 1_048_576);
+    }
+
+    #[test]
+    fn config_timeout_and_body_cap_defaults() {
+        let config = Config::default();
+        assert_eq!(config.timeout(), Duration::from_secs(30));
+        assert_eq!(config.max_body_bytes(), 10 * 1024 * 1024);
+        assert_eq!(config.timeout(), crate::http::DEFAULT_TIMEOUT);
+        assert_eq!(config.max_body_bytes(), crate::http::DEFAULT_MAX_BODY_BYTES);
     }
 
     #[test]

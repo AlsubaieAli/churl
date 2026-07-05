@@ -11,11 +11,11 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param` |
 | `persistence` | TOML round-trip via `toml_edit` (format-preserving); lazy collection loading |
 | `template` | Hand-rolled `{{var}}` substitution; precedence: CLI flag → profile → process env |
-| `import` | curl command parsing (shlex + hand-rolled flag map) |
-| `export` | curl command generation from `Endpoint` |
-| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only in M3, `connect` stays `None`); `execute` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. No `{{var}}` templating (M6); URL/headers/body used verbatim |
+| `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
+| `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
+| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. No `{{var}}` templating (M6); URL/headers/body used verbatim |
 | `history` | SQLite via `rusqlite` (bundled); schema managed via migrations at startup |
-| `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings) and per-workspace `churl.toml`; never contains secrets |
+| `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings, `timeout_secs`, `max_body_bytes` — resolved via `Config::timeout()`/`Config::max_body_bytes()`) and per-workspace `churl.toml`; never contains secrets |
 
 ### `churl` (binary + thin lib)
 
@@ -23,7 +23,7 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 
 | Module | Responsibility |
 |---|---|
-| `main` | `Cli` (clap derive); `Command` variants; `#[tokio::main]`; color-eyre hook installation |
+| `main` | `Cli` (clap derive); `Command` variants (`import` since M4: curl → endpoint TOML on stdout, or `--out` file via persistence; warnings on stderr, errors exit non-zero); `#[tokio::main]`; color-eyre hook installation |
 | `tui` | Terminal init/restore; `run()` entry point (config → keymap → workspace → `App`) |
 | `tui::app` | `App` state (`Pane` focus, `Mode` overlays, `AppMsg`); key routing; `tokio::select!` loop; top-level `render` |
 | `tui::events` | `Action` enum + crokey `KeyMap` (defaults + `[keys]` config overrides); `FuzzyFinder` (nucleo-matcher) |
@@ -47,7 +47,7 @@ Since M3 `AppMsg` also carries `Response { generation, outcome, meta }` (a stale
 Key routing precedence (per key event, in `Mode::Normal` the crokey map is authoritative):
 
 1. An open overlay (search `/`, palette `:`) consumes everything — `Esc` closes, `Enter` accepts, `Up`/`Down`/`Ctrl-n`/`Ctrl-p` move, other chars edit the query.
-2. Request pane focused with edtui in a non-Normal mode (insert/visual/…): all keys go to edtui.
+2. Request pane focused with edtui in a non-Normal mode (insert/visual/…): all keys go to edtui — except a CONTROL-modified key that the keymap resolves to `Send` or `Quit` (Ctrl-S / Ctrl-C by default), which is dispatched instead. The single documented exception (M4, DECISIONS.md): both are non-text keys, and the keymap lookup honours user remaps.
 3. Otherwise: crokey `KeyMap` lookup first; unmapped keys fall through to edtui when the request pane is focused. Navigation actions (`j`/`k`/`h`/`l`/`g`/`G`/`Enter`) forward their original key event to edtui when the request pane has focus, so vim motions keep working there.
 
 ## On-disk format

@@ -69,8 +69,11 @@ pub struct ResponseView {
     line_offsets: Vec<usize>,
     /// Syntax token derived from the response `Content-Type`.
     syntax: SyntaxToken,
-    /// Raw body size in bytes.
+    /// Raw body size in bytes (the truncated size when `truncated` — what we
+    /// actually hold).
     byte_size: usize,
+    /// Whether the body was cut off at the configured size cap.
+    truncated: bool,
     /// HTTP status code.
     status: u16,
     /// Coarse timing.
@@ -102,6 +105,7 @@ impl ResponseView {
         Self {
             syntax: SyntaxToken::from_content_type(content_type),
             byte_size: response.body.len(),
+            truncated: response.truncated,
             status: response.status,
             timing: response.timing,
             header_count: response.headers.len(),
@@ -262,7 +266,8 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
 }
 
 /// The one-line status summary for a completed response (e.g.
-/// `200 OK · 142 ms · 4.1 KB · 3 hdrs`).
+/// `200 OK · 142 ms · 4.1 KB · 3 hdrs`), with a ` · truncated at <size>`
+/// suffix when the body hit the configured cap.
 fn status_summary(view: &ResponseView) -> String {
     let phrase = reason_phrase(view.status);
     let status = if phrase.is_empty() {
@@ -270,12 +275,16 @@ fn status_summary(view: &ResponseView) -> String {
     } else {
         format!("{} {}", view.status, phrase)
     };
-    format!(
+    let mut summary = format!(
         "{status} · {} · {} · {} hdrs",
         fmt_ms(view.timing.total),
         fmt_bytes(view.byte_size),
         view.header_count
-    )
+    );
+    if view.truncated {
+        summary.push_str(&format!(" · truncated at {}", fmt_bytes(view.byte_size)));
+    }
+    summary
 }
 
 /// The viewport cache key: response generation, scroll, height, and syntax.
@@ -344,6 +353,7 @@ mod tests {
             status: 200,
             headers: Vec::new(),
             body: body.as_bytes().to_vec(),
+            truncated: false,
             timing: Timing {
                 connect: None,
                 total: Duration::from_millis(5),
@@ -394,5 +404,17 @@ mod tests {
         assert_eq!(fmt_bytes(512), "512 B");
         assert_eq!(fmt_bytes(4198), "4.1 KB");
         assert_eq!(fmt_bytes(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn status_summary_appends_truncated_marker() {
+        let mut v = view("body");
+        assert!(!status_summary(&v).contains("truncated"));
+        v.truncated = true;
+        v.byte_size = 10 * 1024 * 1024;
+        assert_eq!(
+            status_summary(&v),
+            "200 OK · 5 ms · 10.0 MB · 0 hdrs · truncated at 10.0 MB"
+        );
     }
 }

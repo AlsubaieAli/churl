@@ -188,8 +188,11 @@ pub struct Response {
     pub status: u16,
     /// Response headers.
     pub headers: Vec<Header>,
-    /// Raw response body bytes.
+    /// Raw response body bytes. When `truncated` is set, this holds exactly the
+    /// first `max_body_bytes` of the wire body (see [`crate::http::ExecuteOptions`]).
     pub body: Vec<u8>,
+    /// Whether the body was cut off at the configured size cap.
+    pub truncated: bool,
     /// Coarse request timing.
     pub timing: Timing,
 }
