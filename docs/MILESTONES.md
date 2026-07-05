@@ -7,7 +7,7 @@
 | M0 | Skeleton + CI | **done** |
 | M1 | Data model + persistence | **done** |
 | M2 | Layout + navigation | **done** |
-| M3 | Request execution + response render | planned |
+| M3 | Request execution + response render | **done** |
 | M4 | curl import / export | planned |
 | M5 | Themes + keymaps + jump-mode + templating | planned |
 | M6 | Polish + perf + release | planned |
@@ -99,6 +99,23 @@
 - History writes to SQLite on each completed request
 - Tests: wiremock HTTP mocking; 1 MB draw perf test
 
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` all green; `cargo run -p churl -- --version` works. New tests (22): `churl-core` wiremock suite (GET 200 headers/body, POST derived Content-Type, user Content-Type override, disabled header/param excluded, param appended to existing query, connection-refused error, invalid-URL error, task-abort cancels the request); response-view unit tests (multiline offsets, empty body, trailing/no-trailing newline, scroll clamp, byte formatting); highlight unit tests (Content-Type→token, JSON→spans); explorer scroll-offset unit test; stale-generation drop test; snapshot tests (response pane with JSON body, in-flight, failed, 1 MB draw `< 50 ms`, explorer scrolled to keep the selection visible).
+
+**Notes**:
+- `churl-core::http::execute` is runtime-agnostic (plain `async fn`); the TUI owns the `tokio::spawn`ed task + `AbortHandle` and a `generation` counter drops stale results. Ctrl-C cancels an in-flight request; `q`/`Esc` always quit.
+- Response viewer is virtualised (line-offset index; only the visible lines are ever materialised). No line wrapping in M3 — long lines truncate at the pane width.
+- Syntax highlighting is off-thread (dedicated `std::thread` + `SyntaxSet`/theme loaded lazily), viewport-only, cached by a viewport hash; starts stateless per viewport (known multi-line-construct imperfection — see DECISIONS.md). Foreground RGB only, two-face Nord theme.
+- Response status line shows `status · time · size · N hdrs`; a full response-headers view is deferred (see open questions).
+- History rows are inserted synchronously on success/failure/cancel; a failed history open disables history for the session (non-fatal, statusline warning).
+- The M2 explorer scroll-offset nit is fixed here: the explorer keeps the selected row in the viewport (`scroll_to_fit`, mirroring the picker overlay).
+- reqwest 0.13 renamed the pure-rustls feature `rustls-tls` → `rustls` (see DECISIONS.md); `build_client` selects it via `tls_backend_rustls()`.
+- Send is captured by edtui while the body editor is in a non-Normal (insert/visual) mode, per the pinned key-routing precedence — trigger it from Normal mode or another pane. (Same class as the M2 Ctrl-C-in-insert nit.)
+
+**Open questions**:
+- **Response body-size cap** — no cap in M3; a giant response is read fully into memory. Revisit at M6.
+- **Response headers view** — only a header *count* shows in the status line; a full headers tab/pane is not built yet.
+- **Horizontal scroll / wrapping** — long lines truncate at the pane width; no wrap toggle or horizontal scroll yet.
+
 **Next**: M4
 
 ---
@@ -158,5 +175,5 @@ Not yet scheduled into milestones; each becomes an M7+ milestone (or folds into 
 
 ### Deferred nits (from M2 review)
 
-- Explorer pane has no scroll offset — a tree taller than the pane runs off-screen (the picker overlay already keeps its selection in view). Fix with M3's viewport work.
-- Ctrl-C is consumed by edtui while in insert mode; quit requires Esc first. Acceptable vim semantics, revisit if it surprises users.
+- ~~Explorer pane has no scroll offset — a tree taller than the pane runs off-screen.~~ **Fixed in M3** (`ExplorerState::scroll_to_fit` keeps the selection in the viewport).
+- Ctrl-C is consumed by edtui while in insert mode; quit requires Esc first. Acceptable vim semantics, revisit if it surprises users. (Same routing rule means Ctrl-S "send" is also captured in insert mode — send from Normal mode or another pane.)

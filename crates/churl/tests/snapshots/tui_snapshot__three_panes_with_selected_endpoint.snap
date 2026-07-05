@@ -3,10 +3,10 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
-┃  ▸ orders            ┃│POST https://api.test/user││POST https://api.test/user│
-┃  ▾ users             ┃│headers:                  ││                          │
-┃    List users        ┃│  Content-Type: applicatio││no response yet — send arr│
-┃>   Create user       ┃│body:                     ││                          │
+┃  ▸ orders            ┃│POST https://api.test/user││no response yet           │
+┃  ▾ users             ┃│headers:                  ││POST https://api.test/user│
+┃    List users        ┃│  Content-Type: applicatio││                          │
+┃>   Create user       ┃│body:                     ││press ctrl-s to send      │
 ┃    Get user          ┃│{"name": "Ada"}           ││                          │
 ┃                      ┃│                          ││                          │
 ┃                      ┃│                          ││                          │
@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 ┃                      ┃│                          ││                          │
 ┃                      ┃│  Normal                  ││                          │
 ┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
- EXPLORER · demo · j/k move · enter select · / search · : palette · q quit
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · / search · : palette

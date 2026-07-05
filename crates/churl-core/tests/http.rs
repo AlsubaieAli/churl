@@ -1,0 +1,196 @@
+//! HTTP execution tests against an in-process `wiremock` server (no real network).
+
+use std::time::Duration;
+
+use churl_core::http::{HttpError, build_client, execute};
+use churl_core::model::{Body, BodyKind, Header, Method, Param, Request};
+use wiremock::matchers::{body_string, header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Builds a bare GET request to `url`.
+fn get(url: String) -> Request {
+    Request {
+        method: Method::Get,
+        url,
+        headers: Vec::new(),
+        params: Vec::new(),
+        body: None,
+    }
+}
+
+#[tokio::test]
+async fn get_200_returns_status_headers_and_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-total", "7")
+                .set_body_string("hello world"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let response = execute(&client, &get(format!("{}/users", server.uri())))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"hello world");
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("x-total") && h.value == "7"),
+        "expected x-total header, got {:?}",
+        response.headers
+    );
+    assert!(response.timing.connect.is_none());
+}
+
+#[tokio::test]
+async fn post_body_derives_content_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/items"))
+        .and(header("content-type", "application/json"))
+        .and(body_string(r#"{"a":1}"#))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/items", server.uri()));
+    request.method = Method::Post;
+    request.body = Some(Body {
+        kind: BodyKind::Json,
+        content: r#"{"a":1}"#.to_owned(),
+    });
+
+    let client = build_client().unwrap();
+    let response = execute(&client, &request).await.unwrap();
+    assert_eq!(response.status, 201);
+}
+
+#[tokio::test]
+async fn user_content_type_header_overrides_derived() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/items"))
+        .and(header("content-type", "application/vnd.custom+json"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/items", server.uri()));
+    request.method = Method::Post;
+    request.headers = vec![Header {
+        name: "Content-Type".to_owned(),
+        value: "application/vnd.custom+json".to_owned(),
+        enabled: true,
+    }];
+    request.body = Some(Body {
+        kind: BodyKind::Json,
+        content: "{}".to_owned(),
+    });
+
+    let client = build_client().unwrap();
+    let response = execute(&client, &request).await.unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn disabled_header_and_param_are_excluded() {
+    // A strict mock that only matches when BOTH the header and the query param are
+    // present. If a disabled header/param leaked onto the wire it would match and
+    // return 222; excluded correctly, wiremock finds no match and returns 404.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .and(header("x-secret", "leak"))
+        .and(query_param("debug", "1"))
+        .respond_with(ResponseTemplate::new(222))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/f", server.uri()));
+    request.headers = vec![Header {
+        name: "X-Secret".to_owned(),
+        value: "leak".to_owned(),
+        enabled: false,
+    }];
+    request.params = vec![Param {
+        name: "debug".to_owned(),
+        value: "1".to_owned(),
+        enabled: false,
+    }];
+
+    let client = build_client().unwrap();
+    let response = execute(&client, &request).await.unwrap();
+    assert_eq!(
+        response.status, 404,
+        "disabled header/param must not be sent"
+    );
+}
+
+#[tokio::test]
+async fn enabled_param_appends_to_existing_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "rust"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/search?q=rust", server.uri()));
+    request.params = vec![Param {
+        name: "page".to_owned(),
+        value: "2".to_owned(),
+        enabled: true,
+    }];
+
+    let client = build_client().unwrap();
+    let response = execute(&client, &request).await.unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn connection_refused_is_an_error() {
+    // Port 1 is not listening; connect fails fast.
+    let client = build_client().unwrap();
+    let err = execute(&client, &get("http://127.0.0.1:1/".to_owned()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HttpError::Request(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn invalid_url_is_reported() {
+    let client = build_client().unwrap();
+    let err = execute(&client, &get("not a url".to_owned()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HttpError::InvalidUrl { .. }), "got {err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborting_the_task_cancels_the_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/slow"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let request = get(format!("{}/slow", server.uri()));
+    let handle = tokio::spawn(async move { execute(&client, &request).await });
+    // Give the request time to actually go in flight before cancelling it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.abort();
+    let joined = handle.await;
+    assert!(joined.is_err());
+    assert!(joined.unwrap_err().is_cancelled());
+}

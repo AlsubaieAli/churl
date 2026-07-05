@@ -4,6 +4,7 @@
 pub mod app;
 pub mod components;
 pub mod events;
+pub mod highlight;
 
 use color_eyre::Result;
 use ratatui::DefaultTerminal;
@@ -29,6 +30,7 @@ pub async fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let workspace = app::open_workspace(&cwd)?;
     let mut app = App::new(workspace, keymap)?;
+    app.install_runtime()?;
 
     let mut terminal = init();
     let result = app.run(&mut terminal).await;

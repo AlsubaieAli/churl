@@ -3,9 +3,9 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
-┃                      ┃│                          ││                          │
-┃no workspace          ┃│no endpoint selected      ││no endpoint selected      │
-┃                      ┃│                          ││                          │
+┃                      ┃│                          ││no response yet           │
+┃no workspace          ┃│no endpoint selected      ││                          │
+┃                      ┃│                          ││no endpoint selected      │
 ┃run churl in a directo┃│                          ││                          │
 ┃containing churl.toml ┃│                          ││                          │
 ┃                      ┃│                          ││                          │
@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 ┃                      ┃│                          ││                          │
 ┃                      ┃│                          ││                          │
 ┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
- EXPLORER · no workspace · j/k move · enter select · / search · : palette · q qu
+ EXPLORER · no workspace · j/k move · enter select · ctrl-s send · / search · :

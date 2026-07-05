@@ -3,9 +3,9 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ────────────┐┌ Request ─────────────────┐┌ Response ────────────────┐
-│> ▸ orders            ││                          ││                          │
-│  ▸ users             ││no endpoint selected      ││no endpoint selected      │
-│                      ││                          ││                          │
+│> ▸ orders            ││                          ││no response yet           │
+│  ▸ users             ││no endpoint selected      ││                          │
+│                      ││                          ││no endpoint selected      │
 │                      ││                          ││                          │
 │              ┏ Commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
 │              ┃> █                                             ┃              │
@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 │                      ││                          ││                          │
 │                      ││                          ││                          │
 └──────────────────────┘└──────────────────────────┘└──────────────────────────┘
- EXPLORER · demo · j/k move · enter select · / search · : palette · q quit
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · / search · : palette

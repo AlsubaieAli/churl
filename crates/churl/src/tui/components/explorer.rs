@@ -75,6 +75,11 @@ pub struct ExplorerState {
     expanded: HashSet<usize>,
     /// Cursor position as an index into [`ExplorerState::rows`].
     pub cursor: usize,
+    /// Index of the first visible row; kept so the cursor stays in the viewport
+    /// even when the tree is taller than the pane (adjusted by [`scroll_to_fit`]).
+    ///
+    /// [`scroll_to_fit`]: ExplorerState::scroll_to_fit
+    scroll: usize,
 }
 
 impl ExplorerState {
@@ -96,7 +101,26 @@ impl ExplorerState {
             collections,
             expanded: HashSet::new(),
             cursor: 0,
+            scroll: 0,
         })
+    }
+
+    /// Adjusts the scroll offset so the cursor stays within a `height`-row
+    /// viewport, clamped so we never scroll past the last screenful, and returns
+    /// the offset. Called by [`render`] with the pane's inner height.
+    pub fn scroll_to_fit(&mut self, height: usize) -> usize {
+        if height == 0 {
+            self.scroll = 0;
+            return 0;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor + 1 - height;
+        }
+        let max_scroll = self.rows().len().saturating_sub(height);
+        self.scroll = self.scroll.min(max_scroll);
+        self.scroll
     }
 
     /// Flattens the tree into the currently visible rows.
@@ -280,8 +304,15 @@ impl ExplorerState {
     }
 }
 
-/// Renders the explorer pane. Pure: no I/O, deterministic for snapshots.
-pub fn render(frame: &mut Frame, area: Rect, state: &ExplorerState, focused: bool, has_ws: bool) {
+/// Renders the explorer pane. Pure: no I/O, deterministic for snapshots. Takes
+/// `&mut` because it updates the scroll offset to keep the cursor in view.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut ExplorerState,
+    focused: bool,
+    has_ws: bool,
+) {
     let block = Block::bordered()
         .border_type(if focused {
             BorderType::Thick
@@ -304,10 +335,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExplorerState, focused: boo
         return;
     }
 
+    let height = inner.height as usize;
+    let offset = state.scroll_to_fit(height);
     let rows = state.rows();
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
+        .skip(offset)
+        .take(height)
         .map(|(i, row)| {
             let cursor = if i == state.cursor { "> " } else { "  " };
             let marker = match row.kind {
@@ -481,6 +516,36 @@ mod tests {
         let selected = state.jump_to(*ci, *ei).unwrap().expect("jump target");
         assert_eq!(selected.display_path, "users/Create user");
         assert_eq!(state.rows()[state.cursor].name, "Create user");
+    }
+
+    #[test]
+    fn scroll_offset_keeps_selection_in_viewport() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = explorer(dir.path());
+        state.move_down(); // onto "users"
+        state.select().unwrap(); // expand → 5 rows total
+        assert_eq!(state.rows().len(), 5);
+
+        // Cursor at the bottom, viewport only 2 rows tall: scroll must follow so
+        // the selected row stays visible.
+        state.bottom();
+        assert_eq!(state.cursor, 4);
+        let offset = state.scroll_to_fit(2);
+        assert_eq!(offset, 3, "bottom row must be the last visible one");
+        assert!(
+            state.cursor >= offset && state.cursor < offset + 2,
+            "cursor {} must be within [{offset}, {})",
+            state.cursor,
+            offset + 2
+        );
+
+        // Jumping back to the top pulls the offset back to zero.
+        state.top();
+        assert_eq!(state.scroll_to_fit(2), 0);
+
+        // A viewport taller than the tree never scrolls.
+        state.bottom();
+        assert_eq!(state.scroll_to_fit(50), 0);
     }
 
     #[test]
