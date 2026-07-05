@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/churl-core",
+    "crates/churl",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/placeholder/churl"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+color-eyre = "0.6"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Testing
+insta = { version = "1", features = ["filters"] }
