@@ -7,11 +7,28 @@
 //! and rejected as [`ImportError::Unsupported`]; churl never reads files during
 //! an import. The query string stays in the URL — import does not explode it
 //! into [`crate::model::Param`]s (lossless and simple).
+//!
+//! Auth remap (M5): `-u user:pass` becomes first-class [`Auth::Basic`] and an
+//! `Authorization: Bearer …` header becomes [`Auth::Bearer`]; literal secret
+//! values are replaced with `{{password}}`/`{{token}}` placeholders (no secrets
+//! in workspace files — stdout and `--out` both end up on disk). With multiple
+//! auth sources, the first one in the command takes the first-class slot and
+//! the rest stay plain headers, with a warning.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::model::{Body, BodyKind, Endpoint, Header, Method, Request};
+use crate::config::is_template_placeholder;
+use crate::model::{Auth, Body, BodyKind, Endpoint, Header, Method, Request};
+
+/// Short label for an auth kind, used in multiple-auth-source warnings.
+fn auth_kind_label(auth: &Auth) -> &'static str {
+    match auth {
+        Auth::Basic { .. } => "basic",
+        Auth::Bearer { .. } => "bearer",
+        Auth::ApiKey { .. } => "apikey",
+    }
+}
 
 /// A successfully imported endpoint plus non-fatal warnings (flags accepted but
 /// ignored or remapped, e.g. `--compressed`, `-k`, `-o`, `-u`).
@@ -87,6 +104,9 @@ struct Parser {
     data_parts: Vec<String>,
     /// Set by `--json`: forces [`BodyKind::Json`] and an `Accept` header.
     json: bool,
+    /// First-class auth (`-u` or a `Authorization: Bearer …` header); the slot
+    /// goes to whichever auth source appears first in the command.
+    auth: Option<Auth>,
     url: Option<String>,
     warnings: Vec<String>,
 }
@@ -210,11 +230,40 @@ impl Parser {
 
     /// Splits a `-H` value on the first `:`; the value side is trimmed. A
     /// colon-less header lands with an empty value.
+    ///
+    /// An `Authorization: Bearer …` header (name case-insensitive; `Bearer `
+    /// prefix matched exactly) is remapped to first-class [`Auth::Bearer`],
+    /// with a literal token replaced by a `{{token}}` placeholder. Any other
+    /// `Authorization:` header (including M4-era `Basic <base64>`) stays a
+    /// plain header.
     fn add_header(&mut self, value: &str) {
         let (name, val) = match value.split_once(':') {
             Some((name, val)) => (name.trim(), val.trim()),
             None => (value.trim(), ""),
         };
+        if name.eq_ignore_ascii_case("authorization")
+            && let Some(token) = val.strip_prefix("Bearer ")
+        {
+            if let Some(kept) = &self.auth {
+                self.warnings.push(format!(
+                    "multiple auth sources; kept {} as first-class auth",
+                    auth_kind_label(kept)
+                ));
+            } else {
+                let token = if is_template_placeholder(token) {
+                    token.to_owned()
+                } else {
+                    self.warnings.push(
+                        "Bearer token replaced with {{token}} placeholder — no secrets in \
+                         workspace files; supply the real value via a profile/env (M6)"
+                            .to_owned(),
+                    );
+                    "{{token}}".to_owned()
+                };
+                self.auth = Some(Auth::Bearer { token });
+                return;
+            }
+        }
         self.headers.push(Header {
             name: name.to_owned(),
             value: val.to_owned(),
@@ -236,18 +285,48 @@ impl Parser {
         Ok(())
     }
 
-    /// `-u user:pass` → plain `Authorization: Basic <base64>` header (M4
-    /// decision; M5 remaps it into the first-class auth model).
+    /// `-u user:pass` → first-class [`Auth::Basic`] (M5). A literal password is
+    /// replaced with a `{{password}}` placeholder — no secrets in workspace
+    /// files; a password that is already a `{{...}}` placeholder is kept
+    /// verbatim. Without a colon the whole value is the username (curl would
+    /// prompt for the password). When another auth source already claimed the
+    /// first-class slot, `-u` falls back to the M4-era plain
+    /// `Authorization: Basic <base64>` header.
     fn add_basic_auth(&mut self, value: &str) {
-        self.headers.push(Header {
-            name: "Authorization".to_owned(),
-            value: format!("Basic {}", BASE64.encode(value)),
-            enabled: true,
-        });
-        self.warnings.push(
-            "-u imported as a plain Authorization: Basic header; M5 remaps it to first-class auth"
-                .to_owned(),
-        );
+        if let Some(kept) = &self.auth {
+            let label = auth_kind_label(kept);
+            self.headers.push(Header {
+                name: "Authorization".to_owned(),
+                value: format!("Basic {}", BASE64.encode(value)),
+                enabled: true,
+            });
+            self.warnings.push(format!(
+                "multiple auth sources; kept {label} as first-class auth"
+            ));
+            return;
+        }
+        let (username, password) = match value.split_once(':') {
+            Some((user, pass)) if is_template_placeholder(pass) => {
+                (user.to_owned(), pass.to_owned())
+            }
+            Some((user, _)) => {
+                self.warnings.push(
+                    "-u password replaced with {{password}} placeholder — no secrets in \
+                     workspace files; supply the real value via a profile/env (M6)"
+                        .to_owned(),
+                );
+                (user.to_owned(), "{{password}}".to_owned())
+            }
+            None => {
+                self.warnings.push(
+                    "-u had no password (curl would prompt); {{password}} placeholder added — \
+                     supply the real value via a profile/env (M6)"
+                        .to_owned(),
+                );
+                (value.to_owned(), "{{password}}".to_owned())
+            }
+        };
+        self.auth = Some(Auth::Basic { username, password });
     }
 
     fn set_url(&mut self, value: String) -> Result<(), ImportError> {
@@ -303,6 +382,7 @@ impl Parser {
                     headers: self.headers,
                     params: Vec::new(), // query string stays in the URL
                     body,
+                    auth: self.auth,
                 },
             },
             warnings: self.warnings,
@@ -581,12 +661,151 @@ mod tests {
     }
 
     #[test]
-    fn user_becomes_basic_auth_header_with_warning() {
+    fn user_remaps_to_basic_auth_with_placeholder_password() {
         let result = import("curl -u alice:s3cr3t https://e.com/private");
-        let header = &result.endpoint.request.headers[0];
-        assert_eq!(header.name, "Authorization");
-        assert_eq!(header.value, "Basic YWxpY2U6czNjcjN0");
-        assert!(result.warnings.iter().any(|w| w.contains("M5")));
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Basic {
+                username: "alice".to_owned(),
+                password: "{{password}}".to_owned(),
+            })
+        );
+        assert!(result.endpoint.request.headers.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("{{password}}") && w.contains("no secrets")),
+            "warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn user_with_placeholder_password_is_kept_verbatim() {
+        let result = import("curl -u 'alice:{{admin_pass}}' https://e.com/private");
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Basic {
+                username: "alice".to_owned(),
+                password: "{{admin_pass}}".to_owned(),
+            })
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn user_without_colon_gets_placeholder_password() {
+        let result = import("curl -u alice https://e.com/private");
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Basic {
+                username: "alice".to_owned(),
+                password: "{{password}}".to_owned(),
+            })
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("prompt")),
+            "warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn bearer_header_remaps_to_bearer_auth_with_placeholder() {
+        let result = import("curl -H 'Authorization: Bearer ghp_16C7e42F' https://e.com/me");
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Bearer {
+                token: "{{token}}".to_owned(),
+            })
+        );
+        assert!(result.endpoint.request.headers.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("{{token}}") && w.contains("no secrets")),
+            "warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn bearer_header_with_placeholder_token_is_kept_verbatim() {
+        // Header name matching is case-insensitive; the token is already a
+        // placeholder so no warning fires.
+        let result = import("curl -H 'authorization: Bearer {{gh_token}}' https://e.com/me");
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Bearer {
+                token: "{{gh_token}}".to_owned(),
+            })
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn other_authorization_headers_stay_plain() {
+        // M4-era Basic base64 export and a lowercase "bearer" scheme (the
+        // `Bearer ` prefix is matched exactly) both stay plain headers.
+        for command in [
+            "curl -H 'Authorization: Basic YWxpY2U6czNjcjN0' https://e.com/x",
+            "curl -H 'Authorization: bearer abc' https://e.com/x",
+            "curl -H 'Authorization: Digest xyz' https://e.com/x",
+        ] {
+            let result = import(command);
+            assert_eq!(result.endpoint.request.auth, None, "{command}");
+            assert_eq!(result.endpoint.request.headers.len(), 1, "{command}");
+            assert_eq!(result.endpoint.request.headers[0].name, "Authorization");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        }
+    }
+
+    #[test]
+    fn multiple_auth_sources_keep_the_first_as_first_class() {
+        // -u first: basic wins; the Bearer header stays plain.
+        let result =
+            import("curl -u alice:s3cr3t -H 'Authorization: Bearer {{t}}' https://e.com/x");
+        assert!(matches!(
+            result.endpoint.request.auth,
+            Some(Auth::Basic { .. })
+        ));
+        assert_eq!(
+            result.endpoint.request.headers[0].value, "Bearer {{t}}",
+            "losing bearer stays a plain header"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("multiple auth sources") && w.contains("kept basic")),
+            "warnings: {:?}",
+            result.warnings
+        );
+
+        // Bearer header first: bearer wins; -u falls back to the plain
+        // M4-era Authorization: Basic header.
+        let result =
+            import("curl -H 'Authorization: Bearer {{t}}' -u alice:s3cr3t https://e.com/x");
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Bearer {
+                token: "{{t}}".to_owned(),
+            })
+        );
+        assert_eq!(
+            result.endpoint.request.headers[0].value,
+            "Basic YWxpY2U6czNjcjN0"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("multiple auth sources") && w.contains("kept bearer")),
+            "warnings: {:?}",
+            result.warnings
+        );
     }
 
     #[test]

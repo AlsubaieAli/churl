@@ -1,0 +1,13 @@
+# Endpoint with first-class auth.
+seq = 4
+name = "private-report"
+
+[request]
+method = "GET"
+url = "https://api.example.com/reports/private"
+
+# credentials come from the profile, never this file
+[request.auth]
+type = "basic" # basic | bearer | apikey
+username = "alice"
+password = "{{password}}" # placeholder, resolved in M6

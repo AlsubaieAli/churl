@@ -6,8 +6,18 @@
 //! appended to the URL query (import keeps the query in the URL string), and
 //! only enabled headers are emitted. Every argument is shell-quoted via
 //! [`shlex::try_quote`]; single spaces, no line continuations.
+//!
+//! Auth round-trip addendum (M5): [`Auth::Basic`] exports as `-u 'user:pass'`
+//! and [`Auth::Bearer`] as `-H 'Authorization: Bearer <token>'` — both
+//! round-trip *structurally* (re-import reproduces `request.auth`) as long as
+//! secret values are `{{...}}` placeholders, which workspace files guarantee.
+//! [`Auth::ApiKey`] exports to its wire form — a `-H 'name: value'` header or a
+//! URL query pair — and re-imports as a plain header / URL query, i.e.
+//! *wire-equivalent*, not structural. Values are emitted verbatim, placeholders
+//! included.
 
-use crate::model::{Endpoint, Method, Request};
+use crate::auth::{AuthWire, apply_auth};
+use crate::model::{Auth, Endpoint, Method, Request};
 
 /// Renders `endpoint` as a one-line `curl` command.
 ///
@@ -20,6 +30,21 @@ pub fn export_curl(endpoint: &Endpoint) -> String {
     if !(request.method == Method::Get && request.body.is_none()) {
         args.push("-X".to_owned());
         args.push(request.method.to_string());
+    }
+    match &request.auth {
+        Some(Auth::Basic { username, password }) => {
+            args.push("-u".to_owned());
+            args.push(format!("{username}:{password}"));
+        }
+        // Bearer and header-placed api keys export as their wire header;
+        // query-placed api keys are appended to the URL in `url_with_params`.
+        Some(auth) => {
+            if let AuthWire::Header { name, value } = apply_auth(auth) {
+                args.push("-H".to_owned());
+                args.push(format!("{name}: {value}"));
+            }
+        }
+        None => {}
     }
     for header in request.headers.iter().filter(|header| header.enabled) {
         args.push("-H".to_owned());
@@ -38,14 +63,23 @@ pub fn export_curl(endpoint: &Endpoint) -> String {
 }
 
 /// The request URL with every enabled param appended to its query string
-/// (percent-encoded), preserving any query already present.
+/// (percent-encoded), preserving any query already present. A query-placed
+/// api-key auth is appended last, mirroring execute's injection order.
 fn url_with_params(request: &Request) -> String {
     let mut url = request.url.clone();
-    for param in request.params.iter().filter(|param| param.enabled) {
+    let push_pair = |url: &mut String, name: &str, value: &str| {
         url.push(if url.contains('?') { '&' } else { '?' });
-        url.push_str(&percent_encode(&param.name));
+        url.push_str(&percent_encode(name));
         url.push('=');
-        url.push_str(&percent_encode(&param.value));
+        url.push_str(&percent_encode(value));
+    };
+    for param in request.params.iter().filter(|param| param.enabled) {
+        push_pair(&mut url, &param.name, &param.value);
+    }
+    if let Some(auth) = &request.auth
+        && let AuthWire::Query { name, value } = apply_auth(auth)
+    {
+        push_pair(&mut url, &name, &value);
     }
     url
 }
@@ -81,7 +115,7 @@ fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Body, BodyKind, Header, Param};
+    use crate::model::{ApiKeyPlacement, Auth, Body, BodyKind, Header, Param};
 
     fn endpoint(request: Request) -> Endpoint {
         Endpoint {
@@ -98,6 +132,7 @@ mod tests {
             headers: Vec::new(),
             params: Vec::new(),
             body: None,
+            auth: None,
         }
     }
 
@@ -162,6 +197,64 @@ mod tests {
             enabled: false,
         }];
         assert_eq!(export_curl(&endpoint(request)), "curl https://e.com/x");
+    }
+
+    #[test]
+    fn basic_auth_exports_as_dash_u() {
+        let mut request = get("https://e.com/x");
+        request.auth = Some(Auth::Basic {
+            username: "alice".to_owned(),
+            password: "{{password}}".to_owned(),
+        });
+        assert_eq!(
+            export_curl(&endpoint(request)),
+            "curl -u 'alice:{{password}}' https://e.com/x"
+        );
+    }
+
+    #[test]
+    fn bearer_auth_exports_as_authorization_header() {
+        let mut request = get("https://e.com/x");
+        request.auth = Some(Auth::Bearer {
+            token: "{{token}}".to_owned(),
+        });
+        assert_eq!(
+            export_curl(&endpoint(request)),
+            "curl -H 'Authorization: Bearer {{token}}' https://e.com/x"
+        );
+    }
+
+    #[test]
+    fn apikey_header_auth_exports_as_header() {
+        let mut request = get("https://e.com/x");
+        request.auth = Some(Auth::ApiKey {
+            name: "X-Api-Key".to_owned(),
+            value: "{{api_key}}".to_owned(),
+            placement: ApiKeyPlacement::Header,
+        });
+        assert_eq!(
+            export_curl(&endpoint(request)),
+            "curl -H 'X-Api-Key: {{api_key}}' https://e.com/x"
+        );
+    }
+
+    #[test]
+    fn apikey_query_auth_appends_to_url_after_params() {
+        let mut request = get("https://e.com/search?q=rust");
+        request.params = vec![Param {
+            name: "page".to_owned(),
+            value: "2".to_owned(),
+            enabled: true,
+        }];
+        request.auth = Some(Auth::ApiKey {
+            name: "api key".to_owned(),
+            value: "{{api_key}}".to_owned(),
+            placement: ApiKeyPlacement::Query,
+        });
+        assert_eq!(
+            export_curl(&endpoint(request)),
+            "curl 'https://e.com/search?q=rust&page=2&api%20key=%7B%7Bapi_key%7D%7D'"
+        );
     }
 
     #[test]

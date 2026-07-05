@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::config::secret_violations;
+use crate::config::{auth_secret_violations, secret_violations};
 use crate::model::{Endpoint, Workspace};
 
 /// Filename of the workspace manifest inside a workspace root.
@@ -75,6 +75,26 @@ pub enum PersistenceError {
         /// Offending variables as `"<profile>.<var>"` strings.
         names: Vec<String>,
     },
+    /// Refused to serialize an endpoint whose auth carries literal secret values
+    /// instead of `{{var}}` placeholders (see
+    /// [`crate::config::auth_secret_violations`]). Applies to file saves *and*
+    /// the stdout TOML path — a redirected stdout is a workspace file too.
+    #[error("refusing to save endpoint with literal secret auth values: {}", names.join(", "))]
+    SecretsInAuth {
+        /// Offending fields as `"auth.<field>"` strings.
+        names: Vec<String>,
+    },
+}
+
+/// Gate on [`crate::config::auth_secret_violations`] shared by every
+/// churl-initiated endpoint serialization.
+fn check_auth_secrets(ep: &Endpoint) -> Result<(), PersistenceError> {
+    let violations = auth_secret_violations(ep);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(PersistenceError::SecretsInAuth { names: violations })
+    }
 }
 
 /// Loads an [`Endpoint`] from a single endpoint TOML file.
@@ -84,15 +104,27 @@ pub fn load_endpoint(path: &Path) -> Result<Endpoint, PersistenceError> {
 
 /// Saves an [`Endpoint`] to `path`, preserving comments and formatting of an
 /// existing file (see [module docs](self)).
+///
+/// Refuses with [`PersistenceError::SecretsInAuth`] when the endpoint's auth
+/// carries literal secret values instead of `{{var}}` placeholders.
 pub fn save_endpoint(path: &Path, ep: &Endpoint) -> Result<(), PersistenceError> {
+    check_auth_secrets(ep)?;
     save_value(path, ep)
 }
 
 /// Serializes an [`Endpoint`] to its on-disk TOML shape (identical to a fresh
 /// [`save_endpoint`]) without touching the filesystem — used by `churl import`
 /// to print to stdout.
-pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, toml_edit::ser::Error> {
-    let mut doc = toml_edit::ser::to_document(ep)?;
+///
+/// Refuses with [`PersistenceError::SecretsInAuth`] exactly like
+/// [`save_endpoint`]: a redirected stdout is a workspace file too.
+pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, PersistenceError> {
+    check_auth_secrets(ep)?;
+    let mut doc =
+        toml_edit::ser::to_document(ep).map_err(|source| PersistenceError::Serialize {
+            path: PathBuf::from("<stdout>"),
+            source,
+        })?;
     normalize_table(doc.as_table_mut());
     Ok(doc.to_string())
 }

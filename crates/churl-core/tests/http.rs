@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use churl_core::http::{DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, execute};
-use churl_core::model::{Body, BodyKind, Header, Method, Param, Request};
+use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Header, Method, Param, Request};
 use wiremock::matchers::{body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -15,6 +15,7 @@ fn get(url: String) -> Request {
         headers: Vec::new(),
         params: Vec::new(),
         body: None,
+        auth: None,
     }
 }
 
@@ -166,6 +167,193 @@ async fn enabled_param_appends_to_existing_query() {
         .await
         .unwrap();
     assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn basic_auth_sends_base64_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/private"))
+        // base64("alice:s3cr3t")
+        .and(header("authorization", "Basic YWxpY2U6czNjcjN0"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/private", server.uri()));
+    request.auth = Some(Auth::Basic {
+        username: "alice".to_owned(),
+        password: "s3cr3t".to_owned(),
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn bearer_auth_sends_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .and(header("authorization", "Bearer {{token}}"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/me", server.uri()));
+    request.auth = Some(Auth::Bearer {
+        token: "{{token}}".to_owned(),
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn apikey_header_auth_sends_named_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/things"))
+        .and(header("x-api-key", "{{api_key}}"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/things", server.uri()));
+    request.auth = Some(Auth::ApiKey {
+        name: "X-Api-Key".to_owned(),
+        value: "{{api_key}}".to_owned(),
+        placement: ApiKeyPlacement::Header,
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn apikey_query_auth_appends_pair_preserving_existing_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "rust"))
+        .and(query_param("page", "2"))
+        .and(query_param("api_key", "{{api_key}}"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // Existing URL query + an enabled param + the auth pair, all on the wire.
+    let mut request = get(format!("{}/search?q=rust", server.uri()));
+    request.params = vec![Param {
+        name: "page".to_owned(),
+        value: "2".to_owned(),
+        enabled: true,
+    }];
+    request.auth = Some(Auth::ApiKey {
+        name: "api_key".to_owned(),
+        value: "{{api_key}}".to_owned(),
+        placement: ApiKeyPlacement::Query,
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn enabled_user_authorization_header_beats_auth() {
+    // Only the auth-injected value has a mock; if the user's enabled header wins
+    // (auth header NOT injected), nothing matches and wiremock returns 404.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .and(header("authorization", "Bearer {{token}}"))
+        .respond_with(ResponseTemplate::new(222))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/x", server.uri()));
+    request.headers = vec![Header {
+        name: "Authorization".to_owned(),
+        value: "custom-scheme abc".to_owned(),
+        enabled: true,
+    }];
+    request.auth = Some(Auth::Bearer {
+        token: "{{token}}".to_owned(),
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 404, "user's enabled header must win");
+}
+
+#[tokio::test]
+async fn disabled_user_authorization_header_does_not_beat_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .and(header("authorization", "Bearer {{token}}"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/x", server.uri()));
+    request.headers = vec![Header {
+        name: "Authorization".to_owned(),
+        value: "custom-scheme abc".to_owned(),
+        enabled: false,
+    }];
+    request.auth = Some(Auth::Bearer {
+        token: "{{token}}".to_owned(),
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200, "disabled header must not block auth");
+}
+
+#[tokio::test]
+async fn apikey_header_beaten_by_same_name_enabled_user_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .and(header("x-api-key", "{{api_key}}"))
+        .respond_with(ResponseTemplate::new(222))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/x", server.uri()));
+    request.headers = vec![Header {
+        name: "x-api-key".to_owned(), // case-insensitive match against auth's name
+        value: "user-supplied".to_owned(),
+        enabled: true,
+    }];
+    request.auth = Some(Auth::ApiKey {
+        name: "X-Api-Key".to_owned(),
+        value: "{{api_key}}".to_owned(),
+        placement: ApiKeyPlacement::Header,
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 404, "user's same-name header must win");
 }
 
 #[tokio::test]

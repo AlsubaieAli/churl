@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
+┃  ▾ private           ┃│GET https://api.test/repor││no response yet           │
+┃>   Private report    ┃│auth: basic alice · passwo││GET https://api.test/repor│
+┃                      ┃│body:                     ││                          │
+┃                      ┃│                          ││press ctrl-s to send      │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│                          ││                          │
+┃                      ┃│  Normal                  ││                          │
+┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · / search · : palette

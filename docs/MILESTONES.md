@@ -9,7 +9,7 @@
 | M2 | Layout + navigation | **done** |
 | M3 | Request execution + response render | **done** |
 | M4 | curl import / export + M3 follow-ups | **done** |
-| M5 | Auth | planned |
+| M5 | Auth | **done** |
 | M6 | Themes + keymaps + jump-mode + templating | planned |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
@@ -166,6 +166,20 @@
 - curl import/export remap: `-u` → basic auth; recognisable `Authorization: Bearer …` → bearer; migration note for M4-imported plain headers
 - OAuth2 client-credentials stays in the backlog
 - Tests: model round-trip, execute injection (wiremock), import remap corpus
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (153 tests) all green; `cargo run -p churl -- --version` works; `churl import "curl -u alice:s3cr3t …"` prints a `[request.auth]` basic table with a `{{password}}` placeholder and the remap warning on stderr. New tests (30): `Auth` internally-tagged TOML round-trip per kind + default-placement skip; `apply_auth` wire-effect unit tests; `auth_secret_violations` per kind; wiremock injection suite (basic base64, bearer, apikey header, apikey query appended after params with the existing URL query preserved, enabled user `Authorization` beats auth, disabled user header does not, apikey header beaten by a same-name enabled user header); import remap suite (`-u` placeholder+warning, placeholder pass kept, colon-less `-u`, Bearer remap, placeholder token kept, other `Authorization` schemes stay plain, multiple-auth-sources first-wins both orders); export per kind + apikey wire-equivalence round-trip; comment-bearing `[request.auth]` fixture (byte-identical unchanged save, comments survive mutation); auth merge add/kind-change/remove (stale keys dropped); `save_endpoint` + `endpoint_to_toml` literal-secret refusal; proptest strategy extended with `Option<Auth>`; request-pane snapshots (placeholder shown verbatim, literal masked).
+
+**Notes**:
+- The auth model is an internally-tagged enum (`[request.auth]`, `type = "basic" | "bearer" | "apikey"`); toml_edit handles the tagged representation fine (no fallback struct needed). `placement = "header"` is the apikey default and omitted on serialize.
+- Plugin guardrail (§M9): `churl-core::auth::apply_auth` is the single dispatch point — every kind resolves to an `AuthWire::Header`/`AuthWire::Query` effect there; `execute()` only applies effects and never matches on `Auth`.
+- **No secrets in workspace files**: import replaces literal `-u` passwords / Bearer tokens with `{{password}}`/`{{token}}` placeholders (a value that is already a placeholder is kept verbatim, no warning); `save_endpoint` *and* `endpoint_to_toml` (the `churl import` stdout path — a redirected stdout is a workspace file too) refuse literal secret auth values. Secret-named fields: `password` and `token` always; apikey `value` only when its `name` looks secret (`looks_like_secret_name`).
+- Precedence: an enabled user `Authorization` (or same-named apikey) header always beats the auth-injected header; a disabled one does not. Query-placed api keys are appended after enabled params; no precedence rule for query pairs (a same-named user param and the auth pair are both sent).
+- **M4 → M5 migration**: M4-imported `Authorization: Basic <base64>` plain headers are left as-is (they still execute correctly); re-import the original curl command to get first-class auth. With multiple auth sources in one command, the first takes the first-class slot and the rest stay plain headers (warning emitted).
+- No `{{var}}` resolution in M5 — placeholders are sent verbatim until M6's template resolver (auth fields are already in M6's substitution list).
+- Basic and bearer round-trip curl export→import structurally; apikey exports to its wire form (header / URL query pair) and re-imports as a plain header/query — wire-equivalent by design, pinned in a test.
+- The request pane shows a read-only auth line; `{{...}}` placeholders render verbatim, literal secret values render masked (`*****`), never raw.
+
+**Open questions**: none
 
 **Next**: M6
 

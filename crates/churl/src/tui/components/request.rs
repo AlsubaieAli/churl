@@ -1,7 +1,8 @@
 //! Request pane: method + URL + headers/params (read-only in M2) above an
 //! edtui editor holding the request body.
 
-use churl_core::model::Request;
+use churl_core::config::{is_template_placeholder, looks_like_secret_name};
+use churl_core::model::{ApiKeyPlacement, Auth, Request};
 use edtui::{EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -37,6 +38,9 @@ pub fn render(
     };
 
     let mut meta: Vec<Line> = vec![Line::from(format!("{} {}", request.method, request.url))];
+    if let Some(auth) = &request.auth {
+        meta.push(Line::from(auth_line(auth)));
+    }
     if !request.headers.is_empty() {
         meta.push(Line::from("headers:"));
         for header in &request.headers {
@@ -65,4 +69,42 @@ pub fn render(
         .theme(theme)
         .wrap(true)
         .render(body_area, frame.buffer_mut());
+}
+
+/// The read-only auth meta line. Rendering concern only: `{{...}}` placeholders
+/// show verbatim; a *literal* secret value is masked as `*****` and never
+/// rendered (driven by the same placeholder / secret-name checks core uses to
+/// gate saves). Non-secret-named api-key values render verbatim.
+fn auth_line(auth: &Auth) -> String {
+    match auth {
+        Auth::Basic { username, password } => {
+            format!("auth: basic {username} · password {}", mask(password))
+        }
+        Auth::Bearer { token } => format!("auth: bearer {}", mask(token)),
+        Auth::ApiKey {
+            name,
+            value,
+            placement,
+        } => {
+            let shown = if looks_like_secret_name(name) {
+                mask(value)
+            } else {
+                value
+            };
+            let place = match placement {
+                ApiKeyPlacement::Header => "header",
+                ApiKeyPlacement::Query => "query",
+            };
+            format!("auth: apikey {name}={shown} ({place})")
+        }
+    }
+}
+
+/// Masks a literal secret value; `{{...}}` placeholders pass through verbatim.
+fn mask(value: &str) -> &str {
+    if is_template_placeholder(value) {
+        value
+    } else {
+        "*****"
+    }
 }
