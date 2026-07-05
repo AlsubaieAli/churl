@@ -8,9 +8,12 @@
 | M1 | Data model + persistence | **done** |
 | M2 | Layout + navigation | **done** |
 | M3 | Request execution + response render | **done** |
-| M4 | curl import / export | planned |
-| M5 | Themes + keymaps + jump-mode + templating | planned |
-| M6 | Polish + perf + release | planned |
+| M4 | curl import / export + M3 follow-ups | planned |
+| M5 | Auth | planned |
+| M6 | Themes + keymaps + jump-mode + templating | planned |
+| M7 | Polish + perf + release | planned |
+
+> Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
 
 ---
 
@@ -111,30 +114,49 @@
 - reqwest 0.13 renamed the pure-rustls feature `rustls-tls` → `rustls` (see DECISIONS.md); `build_client` selects it via `tls_backend_rustls()`.
 - Send is captured by edtui while the body editor is in a non-Normal (insert/visual) mode, per the pinned key-routing precedence — trigger it from Normal mode or another pane. (Same class as the M2 Ctrl-C-in-insert nit.)
 
-**Open questions**:
-- **Response body-size cap** — no cap in M3; a giant response is read fully into memory. Revisit at M6.
-- **Response headers view** — only a header *count* shows in the status line; a full headers tab/pane is not built yet.
-- **Horizontal scroll / wrapping** — long lines truncate at the pane width; no wrap toggle or horizontal scroll yet.
+**Open questions** — all three resolved in the 2026-07-05 plan review:
+- ~~Response body-size cap~~ → **M4** (configurable cap + `truncated` flag).
+- ~~Response headers view~~ → **M7** (headers toggle; count-only until then).
+- ~~Horizontal scroll / wrapping~~ → **M7** (wrap toggle chosen over horizontal scroll).
 
 **Next**: M4
 
 ---
 
-## M4 — curl import / export
+## M4 — curl import / export + M3 follow-ups
 
-**Scope**: Full curl command parsing and generation; round-trip corpus.
+**Scope**: Full curl command parsing and generation; round-trip corpus. Plus two M3 review decisions (owner, 2026-07-05): the response body-size cap and insert-mode Ctrl-S/Ctrl-C interception.
 
 **Deliverables**:
 - `churl-core::import`: shlex tokenisation; hand-rolled flag map covering `-X`, `-H`, `-d`/`--data`/`--data-raw`/`--data-binary`/`--json`, `-F` (multipart), `-u`, `-L`, `--compressed`, `-k`, `-o`, `-s`, `-v`, URL positional
 - `churl-core::export`: generate `curl` command from `Endpoint`
 - Round-trip test corpus (≥ 20 real-world curl commands)
 - `churl import` subcommand wired up (replaces M0 stub)
+- **Body-size cap** (closes the M3 open question): stream the response body with a cap — default 10 MB, config-overridable (`max_body_bytes`); `Response` gains a `truncated` flag; the response status line shows `truncated at N MB` when hit
+- **Insert-mode Ctrl-S/Ctrl-C**: intercepted *before* edtui in insert/visual mode (send / cancel-or-quit work without Esc). The one documented exception to the "edtui owns non-Normal modes" routing rule — Ctrl-S/Ctrl-C are not text-input keys
+- `-u`/`Authorization:` import lands as a plain header in M4; M5 remaps it into the first-class auth model
 
 **Next**: M5
 
 ---
 
-## M5 — Themes + keymaps + jump-mode + templating/profiles
+## M5 — Auth
+
+**Scope**: Minimal first-class auth (promoted from the post-release backlog, owner decision 2026-07-05 — its own milestone so M4 stays lean; costs the `-u`-as-header remap step).
+
+**Deliverables**:
+- `churl-core::model`: auth on `Request` — basic, bearer, API key (header or query placement); TOML persistence (format-preserving, same merge rules); **no secrets in workspace files** — auth *values* are `{{var}}` placeholders or env references, enforced by the existing name-marker heuristic
+- Request pane: read-only auth line (type + masked/placeholder value)
+- Execution: auth applied in `churl-core::http::execute` (header/query injection); user-supplied `Authorization` header still wins
+- curl import/export remap: `-u` → basic auth; recognisable `Authorization: Bearer …` → bearer; migration note for M4-imported plain headers
+- OAuth2 client-credentials stays in the backlog
+- Tests: model round-trip, execute injection (wiremock), import remap corpus
+
+**Next**: M6
+
+---
+
+## M6 — Themes + keymaps + jump-mode + templating/profiles
 
 **Scope**: User configuration surface.
 
@@ -142,14 +164,14 @@
 - Theme system: built-in (dark/light), user-override via config
 - Keymap customisation: crokey map loaded from config; `churl keymaps` subcommand prints current map
 - Jump-mode: letter-labelled pane/element navigation (à la EasyMotion/Helix `gw`)
-- `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`. Substitution applies to URL, query params, headers, auth fields, and body (owner request 2026-07-05)
+- `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`. Substitution applies to URL, query params, headers, auth fields (first-class since M5), and body (owner request 2026-07-05)
 - Tests: template substitution unit tests; keymap round-trip
 
-**Next**: M6
+**Next**: M7
 
 ---
 
-## M6 — Polish + perf + release
+## M7 — Polish + perf + release
 
 **Scope**: Performance validation, final UX touches, release preparation.
 
@@ -157,6 +179,9 @@
 - Cold-start benchmark: `hyperfine 'churl --help'` < 100 ms on reference hardware
 - JSON folding in response viewer
 - Full-screen response toggle (`F` key)
+- **Response headers view**: toggle between body and full headers in the response pane (closes the M3 open question; count-only until then)
+- **Wrap toggle** in the response viewer (closes the M3 horizontal-scroll open question — wrap chosen over horizontal scroll)
+- Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
 - GitHub release action (tag-triggered)
@@ -165,15 +190,16 @@
 
 ---
 
-## Post-M6 backlog (owner requests, 2026-07-05)
+## Post-release backlog (owner requests, 2026-07-05)
 
-Not yet scheduled into milestones; each becomes an M7+ milestone (or folds into an existing one) when picked up.
+Not yet scheduled into milestones; each becomes an M8+ milestone (or folds into an existing one) when picked up.
 
-- **Auth types** — first-class auth on `Request` (basic, bearer, API key in header or query; OAuth2 client-credentials later). Model + persistence extension, a request-pane section, and curl import/export mapping (`-u`, `Authorization:` header). Natural slot: alongside/after M4, and M5 templating must substitute into auth fields.
-- **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M5 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
+- ~~Auth types~~ → **promoted to milestone M5** in the 2026-07-05 plan review (OAuth2 client-credentials remains here as backlog).
+- **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M6 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
 - **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
 
-### Deferred nits (from M2 review)
+### Deferred nits (from M2/M3 reviews)
 
 - ~~Explorer pane has no scroll offset — a tree taller than the pane runs off-screen.~~ **Fixed in M3** (`ExplorerState::scroll_to_fit` keeps the selection in the viewport).
-- Ctrl-C is consumed by edtui while in insert mode; quit requires Esc first. Acceptable vim semantics, revisit if it surprises users. (Same routing rule means Ctrl-S "send" is also captured in insert mode — send from Normal mode or another pane.)
+- ~~Ctrl-C/Ctrl-S consumed by edtui in insert mode.~~ → **Scheduled into M4** (owner decision 2026-07-05: intercept both before edtui — they are not text-input keys).
+- Highlight job re-enqueued while an identical job is in flight; CRLF bodies keep `\r` in the line index → **scheduled into M7** polish.
