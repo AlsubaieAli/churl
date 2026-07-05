@@ -6,8 +6,10 @@ use std::fs;
 use std::path::Path;
 
 use churl_core::model::{
-    Body, BodyKind, Endpoint, Header, Method, Param, Profile, Request, Workspace,
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Method, Param, Profile, Request,
+    Workspace,
 };
+use churl_core::persistence::endpoint_to_toml;
 use churl_core::persistence::{
     Collection, OpenWorkspace, PersistenceError, load_endpoint, load_workspace_manifest,
     save_endpoint, save_workspace_manifest,
@@ -44,6 +46,16 @@ const FIXTURES: &[(&str, &str, &[&str])] = &[
             "# seq is deliberately high: sorts last.",
             "# query params below",
             "# limit results",
+        ],
+    ),
+    (
+        "auth.toml",
+        include_str!("fixtures/auth.toml"),
+        &[
+            "# Endpoint with first-class auth.",
+            "# credentials come from the profile, never this file",
+            "# basic | bearer | apikey",
+            "# placeholder, resolved in M6",
         ],
     ),
 ];
@@ -114,6 +126,7 @@ fn headers_render_as_array_of_tables() {
                 kind: BodyKind::Json,
                 content: "{}".into(),
             }),
+            auth: None,
         },
     };
     save_endpoint(&path, &endpoint).unwrap();
@@ -128,6 +141,101 @@ fn headers_render_as_array_of_tables() {
     );
     assert!(!text.contains("headers = ["), "no inline arrays:\n{text}");
     assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+}
+
+#[test]
+fn auth_merge_add_change_kind_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-merge.toml");
+    fs::write(&path, include_str!("fixtures/basic.toml")).unwrap();
+    let mut endpoint = load_endpoint(&path).unwrap();
+    assert!(endpoint.request.auth.is_none());
+
+    // Auth added → a [request.auth] table appears; existing comments survive.
+    endpoint.request.auth = Some(Auth::Basic {
+        username: "alice".into(),
+        password: "{{password}}".into(),
+    });
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[request.auth]"), "{text}");
+    assert!(text.contains("# My favourite endpoint."), "{text}");
+    assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+
+    // Kind changed basic → bearer: stale username/password keys must be dropped.
+    endpoint.request.auth = Some(Auth::Bearer {
+        token: "{{token}}".into(),
+    });
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(r#"type = "bearer""#), "{text}");
+    assert!(
+        !text.contains("username") && !text.contains("password"),
+        "stale basic keys must be removed on kind change:\n{text}"
+    );
+    assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+
+    // Auth removed → the table disappears.
+    endpoint.request.auth = None;
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("[request.auth]"), "{text}");
+    assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+}
+
+/// An endpoint whose bearer token is a literal secret, not a placeholder.
+fn literal_secret_endpoint() -> Endpoint {
+    Endpoint {
+        seq: 0,
+        name: "leaky".into(),
+        request: Request {
+            method: Method::Get,
+            url: "https://api.example.com/x".into(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: Some(Auth::Bearer {
+                token: "ghp_definitely_a_literal".into(),
+            }),
+        },
+    }
+}
+
+#[test]
+fn save_endpoint_refuses_literal_secret_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("leaky.toml");
+    let err = save_endpoint(&path, &literal_secret_endpoint()).unwrap_err();
+    match err {
+        PersistenceError::SecretsInAuth { names } => {
+            assert_eq!(names, vec!["auth.token".to_string()]);
+        }
+        other => panic!("expected SecretsInAuth, got {other:?}"),
+    }
+    assert!(!path.exists(), "refused save must not write the file");
+}
+
+#[test]
+fn endpoint_to_toml_refuses_literal_secret_auth() {
+    // The stdout path used by `churl import` is gated too: a redirected stdout
+    // is a workspace file.
+    let err = endpoint_to_toml(&literal_secret_endpoint()).unwrap_err();
+    assert!(
+        matches!(&err, PersistenceError::SecretsInAuth { names } if names == &["auth.token"]),
+        "expected SecretsInAuth, got {err:?}"
+    );
+
+    // Placeholder values serialize fine, as an internally-tagged table.
+    let mut clean = literal_secret_endpoint();
+    clean.request.auth = Some(Auth::ApiKey {
+        name: "X-Api-Key".into(),
+        value: "{{api_key}}".into(),
+        placement: ApiKeyPlacement::Query,
+    });
+    let toml = endpoint_to_toml(&clean).unwrap();
+    assert!(toml.contains("[request.auth]"), "{toml}");
+    assert!(toml.contains(r#"type = "apikey""#), "{toml}");
+    assert!(toml.contains(r#"placement = "query""#), "{toml}");
 }
 
 fn demo_workspace() -> Workspace {

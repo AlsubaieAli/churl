@@ -7,7 +7,7 @@
 
 use churl_core::export::export_curl;
 use churl_core::import::import_curl;
-use churl_core::model::{BodyKind, Method};
+use churl_core::model::{ApiKeyPlacement, Auth, BodyKind, Endpoint, Method, Request};
 
 /// Realistic curl commands (GitHub/Stripe/Slack-style APIs) with mixed flags
 /// and quoting edge cases.
@@ -45,11 +45,14 @@ const CORPUS: &[&str] = &[
     "curl -o export.json -u alice:s3cr3t https://api.example.com/private/export",
     // Text body that is neither JSON nor form.
     "curl -d 'plain text payload, no structure' -H 'Content-Type: text/plain' https://api.example.com/echo",
+    // First-class auth (M5): placeholder credentials round-trip structurally.
+    "curl -u 'alice:{{password}}' https://api.example.com/private",
+    "curl -H 'Authorization: Bearer {{token}}' https://api.example.com/me",
 ];
 
 #[test]
 fn corpus_round_trips_semantically() {
-    assert!(CORPUS.len() >= 20, "corpus must stay at ≥ 20 commands");
+    assert!(CORPUS.len() >= 27, "corpus must not shrink (M5 size: 27)");
     for command in CORPUS {
         let first = import_curl(command)
             .unwrap_or_else(|err| panic!("first import failed for {command:?}: {err}"));
@@ -80,13 +83,85 @@ fn stripe_style_form_post_imports_faithfully() {
     let body = request.body.as_ref().unwrap();
     assert_eq!(body.content, "amount=2000&currency=usd");
     assert_eq!(body.kind, BodyKind::Form);
-    assert!(
-        request
-            .headers
-            .iter()
-            .any(|h| h.name == "Authorization" && h.value.starts_with("Basic "))
+    // -u with an empty password: username kept, password placeholder-ized.
+    assert_eq!(
+        request.auth,
+        Some(Auth::Basic {
+            username: "sk_test_abc".to_owned(),
+            password: "{{password}}".to_owned(),
+        })
     );
+    assert!(request.headers.is_empty());
     assert_eq!(result.endpoint.name, "charges");
+}
+
+#[test]
+fn basic_and_bearer_auth_round_trip_structurally() {
+    for (command, expected) in [
+        (
+            "curl -u 'bob:{{pw}}' https://api.example.com/private",
+            Auth::Basic {
+                username: "bob".to_owned(),
+                password: "{{pw}}".to_owned(),
+            },
+        ),
+        (
+            "curl -H 'Authorization: Bearer {{token}}' https://api.example.com/me",
+            Auth::Bearer {
+                token: "{{token}}".to_owned(),
+            },
+        ),
+    ] {
+        let first = import_curl(command).unwrap();
+        assert_eq!(first.endpoint.request.auth, Some(expected.clone()));
+        let second = import_curl(&export_curl(&first.endpoint)).unwrap();
+        assert_eq!(
+            second.endpoint.request.auth,
+            Some(expected),
+            "auth must round-trip structurally for {command:?}"
+        );
+    }
+}
+
+#[test]
+fn apikey_auth_round_trips_wire_equivalent_not_structural() {
+    // ApiKey exports to its wire form (a header or a query pair) and re-imports
+    // as a plain header / URL query — wire-equivalent, no `request.auth`.
+    let endpoint = |auth: Auth| Endpoint {
+        seq: 0,
+        name: "things".to_owned(),
+        request: Request {
+            method: Method::Get,
+            url: "https://api.example.com/things".to_owned(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: Some(auth),
+        },
+    };
+
+    let header_form = endpoint(Auth::ApiKey {
+        name: "X-Api-Key".to_owned(),
+        value: "{{api_key}}".to_owned(),
+        placement: ApiKeyPlacement::Header,
+    });
+    let reimported = import_curl(&export_curl(&header_form)).unwrap().endpoint;
+    assert_eq!(reimported.request.auth, None);
+    assert_eq!(reimported.request.headers.len(), 1);
+    assert_eq!(reimported.request.headers[0].name, "X-Api-Key");
+    assert_eq!(reimported.request.headers[0].value, "{{api_key}}");
+
+    let query_form = endpoint(Auth::ApiKey {
+        name: "api_key".to_owned(),
+        value: "{{api_key}}".to_owned(),
+        placement: ApiKeyPlacement::Query,
+    });
+    let reimported = import_curl(&export_curl(&query_form)).unwrap().endpoint;
+    assert_eq!(reimported.request.auth, None);
+    assert_eq!(
+        reimported.request.url, "https://api.example.com/things?api_key=%7B%7Bapi_key%7D%7D",
+        "query-placed api key lands in the URL query"
+    );
 }
 
 #[test]

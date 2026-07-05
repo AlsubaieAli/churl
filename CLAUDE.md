@@ -37,13 +37,18 @@ crates/
   churl-core/              # pure library — zero TUI deps, ever
     src/
       lib.rs               # pub const VERSION + module exports
-      model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace
+      model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace,
+                           #   Auth/ApiKeyPlacement (internally-tagged [request.auth])
+      auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
+                           #   (M9 plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection
       config.rs            # global config.toml loading (incl. [keys] overrides, timeout_secs, max_body_bytes)
-                           #   + secrets heuristics
+                           #   + secrets heuristics (looks_like_secret_name, is_template_placeholder,
+                           #   secret_violations, auth_secret_violations)
       history.rs           # rusqlite HistoryStore, user_version migrations
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
-                           #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core)
+                           #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core);
+                           #   applies AuthWire effects (enabled user header with the same name wins)
       import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error)
       export.rs            # Endpoint → curl command (shlex::try_quote; round-trip contract with import)
     tests/

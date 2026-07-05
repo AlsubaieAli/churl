@@ -128,10 +128,41 @@ pub fn looks_like_secret_name(name: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
-/// Returns `true` when `value` is a `{{...}}` template placeholder rather than a literal.
-fn is_template_placeholder(value: &str) -> bool {
+/// Returns `true` when `value` is a `{{...}}` template placeholder rather than a
+/// literal. The placeholder shape also covers future env references such as
+/// `{{env:FOO}}` (M6 resolves them; until then placeholders are sent verbatim).
+pub fn is_template_placeholder(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with("{{") && trimmed.ends_with("}}")
+}
+
+/// Finds secret-named auth fields on `endpoint` whose value is a literal rather
+/// than a `{{...}}` template placeholder ([`is_template_placeholder`]).
+///
+/// Secret-named fields: `Basic.password` and `Bearer.token` always (their names
+/// are the markers); `ApiKey.value` only when the api-key *name* looks secret
+/// ([`looks_like_secret_name`], e.g. `X-Api-Key`). Returns field paths such as
+/// `"auth.password"`; an empty vec means the endpoint is clean. Loads never
+/// refuse — only churl-initiated writes are gated (see
+/// [`crate::persistence::save_endpoint`] / [`crate::persistence::endpoint_to_toml`]).
+pub fn auth_secret_violations(endpoint: &crate::model::Endpoint) -> Vec<String> {
+    use crate::model::Auth;
+    let mut violations = Vec::new();
+    match &endpoint.request.auth {
+        Some(Auth::Basic { password, .. }) if !is_template_placeholder(password) => {
+            violations.push("auth.password".to_owned());
+        }
+        Some(Auth::Bearer { token }) if !is_template_placeholder(token) => {
+            violations.push("auth.token".to_owned());
+        }
+        Some(Auth::ApiKey { name, value, .. })
+            if looks_like_secret_name(name) && !is_template_placeholder(value) =>
+        {
+            violations.push("auth.value".to_owned());
+        }
+        _ => {}
+    }
+    violations
 }
 
 /// Finds profile variables in `ws` whose name looks secret ([`looks_like_secret_name`])
@@ -249,6 +280,78 @@ mod tests {
         for name in ["base_url", "user", "timeout_ms", "region"] {
             assert!(!looks_like_secret_name(name), "{name} should be fine");
         }
+    }
+
+    #[test]
+    fn auth_secret_violations_per_kind() {
+        use crate::model::{ApiKeyPlacement, Auth, Endpoint, Method, Request};
+        let endpoint = |auth: Option<Auth>| Endpoint {
+            seq: 0,
+            name: "t".into(),
+            request: Request {
+                method: Method::Get,
+                url: "https://e.com/".into(),
+                headers: Vec::new(),
+                params: Vec::new(),
+                body: None,
+                auth,
+            },
+        };
+        // No auth → clean.
+        assert!(auth_secret_violations(&endpoint(None)).is_empty());
+        // Literal password/token → violation; placeholder → clean.
+        assert_eq!(
+            auth_secret_violations(&endpoint(Some(Auth::Basic {
+                username: "alice".into(),
+                password: "hunter2".into(),
+            }))),
+            vec!["auth.password".to_string()]
+        );
+        assert!(
+            auth_secret_violations(&endpoint(Some(Auth::Basic {
+                username: "alice".into(),
+                password: "{{password}}".into(),
+            })))
+            .is_empty()
+        );
+        assert_eq!(
+            auth_secret_violations(&endpoint(Some(Auth::Bearer {
+                token: "ghp_literal".into(),
+            }))),
+            vec!["auth.token".to_string()]
+        );
+        assert!(
+            auth_secret_violations(&endpoint(Some(Auth::Bearer {
+                token: "{{token}}".into(),
+            })))
+            .is_empty()
+        );
+        // ApiKey: only a secret-looking *name* gates the value.
+        assert_eq!(
+            auth_secret_violations(&endpoint(Some(Auth::ApiKey {
+                name: "X-Api-Key".into(),
+                value: "abc123".into(),
+                placement: ApiKeyPlacement::Header,
+            }))),
+            vec!["auth.value".to_string()]
+        );
+        assert!(
+            auth_secret_violations(&endpoint(Some(Auth::ApiKey {
+                name: "X-Api-Key".into(),
+                value: "{{api_key}}".into(),
+                placement: ApiKeyPlacement::Header,
+            })))
+            .is_empty()
+        );
+        assert!(
+            auth_secret_violations(&endpoint(Some(Auth::ApiKey {
+                name: "tenant".into(),
+                value: "acme".into(),
+                placement: ApiKeyPlacement::Query,
+            })))
+            .is_empty(),
+            "non-secret-named apikey values are allowed as literals"
+        );
     }
 
     #[test]

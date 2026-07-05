@@ -114,6 +114,60 @@ fn palette_overlay() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
+#[test]
+fn request_pane_auth_line_placeholder_shown_verbatim() {
+    // Basic auth with a {{password}} placeholder: rendered verbatim.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("private");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("report.toml"),
+        concat!(
+            "seq = 0\nname = \"Private report\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://api.test/report\"\n\n[request.auth]\ntype = \"basic\"\n",
+            "username = \"alice\"\npassword = \"{{password}}\"\n",
+        ),
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter); // expand "private"
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // select "Private report"
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn request_pane_auth_line_masks_literal_secret() {
+    // A hand-written file may carry a literal secret (loads never refuse);
+    // the auth line must mask it as ***** and never render it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("private");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("things.toml"),
+        concat!(
+            "seq = 0\nname = \"List things\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://api.test/things\"\n\n[request.auth]\ntype = \"apikey\"\n",
+            "name = \"X-Api-Key\"\nvalue = \"abc123-literal\"\n",
+        ),
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    let rendered = snapshot(&mut app);
+    assert!(
+        !rendered.contains("abc123-literal"),
+        "literal secret must never render"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
 /// Builds a JSON response with the given body.
 fn json_response(body: &str) -> Response {
     Response {

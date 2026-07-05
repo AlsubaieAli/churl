@@ -8,14 +8,15 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 
 | Module | Responsibility |
 |---|---|
-| `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param` |
+| `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
+| `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
 | `persistence` | TOML round-trip via `toml_edit` (format-preserving); lazy collection loading |
 | `template` | Hand-rolled `{{var}}` substitution; precedence: CLI flag → profile → process env |
 | `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
 | `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
-| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. No `{{var}}` templating (M6); URL/headers/body used verbatim |
+| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. Auth injected via `auth::apply_auth` (M5): header effects skipped when an enabled user header with the same name exists (the user's header wins), query effects appended after enabled params. No `{{var}}` templating (M6); URL/headers/body/auth used verbatim |
 | `history` | SQLite via `rusqlite` (bundled); schema managed via migrations at startup |
-| `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings, `timeout_secs`, `max_body_bytes` — resolved via `Config::timeout()`/`Config::max_body_bytes()`) and per-workspace `churl.toml`; never contains secrets |
+| `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings, `timeout_secs`, `max_body_bytes` — resolved via `Config::timeout()`/`Config::max_body_bytes()`) and per-workspace `churl.toml`; never contains secrets. Secrets heuristics: `looks_like_secret_name`, `is_template_placeholder`, `secret_violations` (manifest), `auth_secret_violations` (endpoint auth, M5) |
 
 ### `churl` (binary + thin lib)
 
@@ -77,6 +78,11 @@ value = "application/json"
 [request.body]              # optional; type = text|json|form (default text)
 type = "json"
 content = '{"q": true}'
+
+[request.auth]              # optional (M5); type = basic|bearer|apikey
+type = "basic"              # secret values must be {{var}} placeholders —
+username = "alice"          # save_endpoint/endpoint_to_toml refuse literals
+password = "{{password}}"
 ```
 
 Saves are format-preserving: comments and ordering in hand-edited files survive a churl round-trip (see DECISIONS.md for merge semantics and edge cases).

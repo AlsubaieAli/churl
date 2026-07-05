@@ -119,6 +119,59 @@ pub enum BodyKind {
     Form,
 }
 
+/// Where an [`Auth::ApiKey`] credential is placed on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeyPlacement {
+    /// Sent as a request header (the default).
+    #[default]
+    Header,
+    /// Appended to the URL query string.
+    Query,
+}
+
+/// Returns whether a placement is the default; used to omit `placement = "header"`
+/// from serialized output.
+fn is_default_placement(placement: &ApiKeyPlacement) -> bool {
+    *placement == ApiKeyPlacement::default()
+}
+
+/// Auth on a request. Persisted as an internally-tagged `[request.auth]` table
+/// (`type = "basic" | "bearer" | "apikey"`).
+///
+/// Secret-valued fields (`password`, `token`, and secret-named api-key values)
+/// must hold `{{var}}` placeholders in workspace files, never literals — see
+/// [`crate::config::auth_secret_violations`]. The wire effect of each kind is
+/// resolved exclusively by [`crate::auth::apply_auth`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Auth {
+    /// `type = "basic"` — user/pass, sent as `Authorization: Basic <base64>`.
+    Basic {
+        /// Basic-auth username (not treated as a secret).
+        username: String,
+        /// Basic-auth password; a `{{var}}` placeholder in workspace files.
+        password: String,
+    },
+    /// `type = "bearer"` — sent as `Authorization: Bearer <token>`.
+    Bearer {
+        /// Bearer token; a `{{var}}` placeholder in workspace files.
+        token: String,
+    },
+    /// `type = "apikey"` — arbitrary name/value pair, header or query placement.
+    #[serde(rename = "apikey")]
+    ApiKey {
+        /// Header or query-parameter name, e.g. `X-Api-Key`.
+        name: String,
+        /// Credential value; a `{{var}}` placeholder when `name` looks secret.
+        value: String,
+        /// Wire placement; defaults to [`ApiKeyPlacement::Header`] and is omitted
+        /// from serialized output when default.
+        #[serde(default, skip_serializing_if = "is_default_placement")]
+        placement: ApiKeyPlacement,
+    },
+}
+
 /// A request body: raw content plus its [`BodyKind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Body {
@@ -145,6 +198,9 @@ pub struct Request {
     /// Optional request body; omitted from serialized output when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
+    /// Optional first-class auth; omitted from serialized output when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Auth>,
 }
 
 /// A saved endpoint: one `.toml` file inside a collection directory.
@@ -270,6 +326,85 @@ mod tests {
         };
         let toml = toml_edit::ser::to_string(&disabled).unwrap();
         assert!(toml.contains("enabled = false"));
+    }
+
+    #[test]
+    fn auth_toml_round_trip_per_kind() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Wrapper {
+            auth: Auth,
+        }
+        let cases = [
+            Auth::Basic {
+                username: "alice".into(),
+                password: "{{password}}".into(),
+            },
+            Auth::Bearer {
+                token: "{{token}}".into(),
+            },
+            Auth::ApiKey {
+                name: "X-Api-Key".into(),
+                value: "{{api_key}}".into(),
+                placement: ApiKeyPlacement::Header,
+            },
+            Auth::ApiKey {
+                name: "api_key".into(),
+                value: "{{api_key}}".into(),
+                placement: ApiKeyPlacement::Query,
+            },
+        ];
+        for auth in cases {
+            let wrapper = Wrapper { auth };
+            let toml = toml_edit::ser::to_string(&wrapper)
+                .unwrap_or_else(|err| panic!("serialize failed for {wrapper:?}: {err}"));
+            let back: Wrapper = toml_edit::de::from_str(&toml)
+                .unwrap_or_else(|err| panic!("deserialize failed for {toml:?}: {err}"));
+            assert_eq!(back, wrapper, "round-trip mismatch via:\n{toml}");
+        }
+    }
+
+    #[test]
+    fn auth_default_placement_is_skipped_on_serialize() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            auth: Auth,
+        }
+        let header = toml_edit::ser::to_string(&Wrapper {
+            auth: Auth::ApiKey {
+                name: "X-Api-Key".into(),
+                value: "{{k}}".into(),
+                placement: ApiKeyPlacement::Header,
+            },
+        })
+        .unwrap();
+        assert!(
+            !header.contains("placement"),
+            "default placement must be omitted:\n{header}"
+        );
+        assert!(header.contains(r#"type = "apikey""#), "{header}");
+
+        let query = toml_edit::ser::to_string(&Wrapper {
+            auth: Auth::ApiKey {
+                name: "k".into(),
+                value: "v".into(),
+                placement: ApiKeyPlacement::Query,
+            },
+        })
+        .unwrap();
+        assert!(query.contains(r#"placement = "query""#), "{query}");
+
+        // A missing placement key deserializes to the header default.
+        let back: Wrapper =
+            toml_edit::de::from_str("[auth]\ntype = \"apikey\"\nname = \"k\"\nvalue = \"v\"\n")
+                .unwrap();
+        assert_eq!(
+            back.auth,
+            Auth::ApiKey {
+                name: "k".into(),
+                value: "v".into(),
+                placement: ApiKeyPlacement::Header,
+            }
+        );
     }
 
     #[test]

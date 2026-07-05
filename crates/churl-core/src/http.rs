@@ -5,10 +5,17 @@
 //! handled at the *task* level by the caller — the TUI spawns the future with
 //! `tokio::spawn` and keeps the resulting `AbortHandle` — so `churl-core` never needs
 //! to know about the runtime. There is no `{{var}}` templating here; URLs, headers,
-//! and body are used verbatim (templating arrives in M5).
+//! and body are used verbatim (templating arrives in M6).
+//!
+//! First-class auth (M5) is injected here: the request's [`crate::model::Auth`]
+//! resolves to an [`AuthWire`] effect via [`crate::auth::apply_auth`] (the single
+//! auth dispatch point), and this module only applies the effect — a header
+//! (skipped when an enabled user header with the same name exists; the user's
+//! header always wins) or a query pair appended after enabled params.
 
 use std::time::{Duration, Instant};
 
+use crate::auth::{AuthWire, apply_auth};
 use crate::model::{BodyKind, Header, Method, Request, Response, Timing};
 
 /// Default per-request timeout applied to the shared client; the config knob is
@@ -84,7 +91,8 @@ pub async fn execute(
     request: &Request,
     options: &ExecuteOptions,
 ) -> Result<Response, HttpError> {
-    let url = build_url(request)?;
+    let auth_wire = request.auth.as_ref().map(apply_auth);
+    let url = build_url(request, auth_wire.as_ref())?;
     let mut builder = client.request(reqwest_method(request.method), url);
 
     let mut user_content_type = false;
@@ -96,6 +104,19 @@ pub async fn execute(
             user_content_type = true;
         }
         builder = builder.header(header.name.as_str(), header.value.as_str());
+    }
+
+    // Auth header injection, after user headers: injected only when no enabled
+    // user header with the same name (case-insensitive) exists — the user's
+    // header always wins. Query placement is handled in `build_url`.
+    if let Some(AuthWire::Header { name, value }) = &auth_wire {
+        let user_has_header = request
+            .headers
+            .iter()
+            .any(|header| header.enabled && header.name.eq_ignore_ascii_case(name));
+        if !user_has_header {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
     }
 
     if let Some(body) = &request.body {
@@ -136,18 +157,27 @@ pub async fn execute(
 }
 
 /// Parses the request URL and appends every enabled param as a query pair,
-/// preserving any query already present in the URL string.
-fn build_url(request: &Request) -> Result<reqwest::Url, HttpError> {
+/// preserving any query already present in the URL string. A query-placed auth
+/// effect is appended last, after the enabled params (no precedence rule: a
+/// same-named user param and the auth pair are both sent).
+fn build_url(request: &Request, auth_wire: Option<&AuthWire>) -> Result<reqwest::Url, HttpError> {
     let mut url = reqwest::Url::parse(&request.url).map_err(|err| HttpError::InvalidUrl {
         url: request.url.clone(),
         reason: err.to_string(),
     })?;
-    if request.params.iter().any(|param| param.enabled) {
+    let auth_query = match auth_wire {
+        Some(AuthWire::Query { name, value }) => Some((name, value)),
+        _ => None,
+    };
+    if request.params.iter().any(|param| param.enabled) || auth_query.is_some() {
         let mut pairs = url.query_pairs_mut();
         for param in &request.params {
             if param.enabled {
                 pairs.append_pair(&param.name, &param.value);
             }
+        }
+        if let Some((name, value)) = auth_query {
+            pairs.append_pair(name, value);
         }
     }
     Ok(url)

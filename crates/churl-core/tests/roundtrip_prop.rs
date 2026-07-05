@@ -1,6 +1,8 @@
 //! Property test: any `Endpoint` survives a save → load round-trip unchanged.
 
-use churl_core::model::{Body, BodyKind, Endpoint, Header, Method, Param, Request};
+use churl_core::model::{
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Method, Param, Request,
+};
 use churl_core::persistence::{load_endpoint, save_endpoint};
 use proptest::prelude::*;
 
@@ -45,6 +47,29 @@ fn body() -> impl Strategy<Value = Body> {
     (body_kind(), text()).prop_map(|(kind, content)| Body { kind, content })
 }
 
+/// A `{{var}}` template placeholder — secret-valued auth fields must hold one,
+/// or `save_endpoint` (correctly) refuses to write the file.
+fn placeholder() -> impl Strategy<Value = String> {
+    "[a-z_]{1,12}".prop_map(|name| format!("{{{{{name}}}}}"))
+}
+
+fn auth() -> impl Strategy<Value = Auth> {
+    prop_oneof![
+        (text(), placeholder()).prop_map(|(username, password)| Auth::Basic { username, password }),
+        placeholder().prop_map(|token| Auth::Bearer { token }),
+        (
+            text(),
+            placeholder(),
+            prop::sample::select(vec![ApiKeyPlacement::Header, ApiKeyPlacement::Query]),
+        )
+            .prop_map(|(name, value, placement)| Auth::ApiKey {
+                name,
+                value,
+                placement,
+            }),
+    ]
+}
+
 fn endpoint() -> impl Strategy<Value = Endpoint> {
     (
         any::<u32>(),
@@ -54,18 +79,22 @@ fn endpoint() -> impl Strategy<Value = Endpoint> {
         prop::collection::vec(header(), 0..=5),
         prop::collection::vec(param(), 0..=5),
         prop::option::of(body()),
+        prop::option::of(auth()),
     )
-        .prop_map(|(seq, name, method, url, headers, params, body)| Endpoint {
-            seq,
-            name,
-            request: Request {
-                method,
-                url,
-                headers,
-                params,
-                body,
+        .prop_map(
+            |(seq, name, method, url, headers, params, body, auth)| Endpoint {
+                seq,
+                name,
+                request: Request {
+                    method,
+                    url,
+                    headers,
+                    params,
+                    body,
+                    auth,
+                },
             },
-        })
+        )
 }
 
 proptest! {
