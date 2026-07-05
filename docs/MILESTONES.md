@@ -13,6 +13,7 @@
 | M6 | Themes + keymaps + jump-mode + templating | planned |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
+| M9 | Plugin system | planned |
 
 > Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
 
@@ -218,7 +219,31 @@
 - **Insecure-TLS opt-in**: explicit `insecure = true` (global or per-workspace) for local intercepting proxies (Charles/mitmproxy); curl import's `-k` maps to a warning pointing at the knob instead of "always ignored"; export emits `-k` when set
 - Tests: wiremock cookie round-trip, proxy config plumbing, `-k` import/export remap
 
-**Next**: M9 (from backlog)
+**Next**: M9
+
+---
+
+## M9 — Plugin system
+
+**Scope**: Community extensibility (owner request 2026-07-05 — deliberately last: the plugin API freezes the shapes everything M5–M8 stabilises).
+
+**Deliverables** (design session first; tech choice is an open question below):
+- Plugin runtime + discovery (`~/.config/churl/plugins/`), enable/disable via config; a broken plugin fails loudly and never takes the app down
+- Extension points, in priority order: ① request/response middleware (pre-send mutate, post-receive inspect), ② custom importers/exporters (beyond curl), ③ template functions (into the M6 `{{var}}` chain), ④ custom auth kinds (beyond M5's basic/bearer/api-key), ⑤ palette commands
+- Plugin manifest (name, version, API version, capabilities) + compatibility check on load
+- Docs: plugin authoring guide + a worked example plugin
+- Tests: a fixture plugin exercising each extension point; load-failure isolation
+
+**Open questions**:
+- Runtime tech (decide in the M9 design session): embedded Lua (mlua — the lazygit/wezterm route), WASM (extism/wasmtime — sandboxed, language-agnostic, heavier), or a subprocess protocol (simplest, slowest per call). The standing "no JS runtime" decision (DECISIONS.md, binary-bloat rationale) excludes Deno/JS regardless.
+
+**Plugin-readiness guardrails — ACTIVE FROM M5** (the "act early" half of the owner request; every milestone session must respect these so M9 doesn't require re-architecting):
+- **M5 (auth)**: apply auth through a single dispatch point (one `apply_auth(...)` seam in core, match on auth kind there) — a future plugin-provided auth kind slots into that match, not into scattered call sites.
+- **M6 (templating)**: route all `{{var}}` resolution through one resolver function that takes a name → value lookup — plugin template *functions* later extend that lookup. Keep palette commands data-driven (id/label/action entries in one table), never hardcoded match arms spread across the TUI.
+- **M7 (viewer polish)**: keep content-type → formatter/highlighter selection in the single existing mapping point (`SyntaxToken::from_content_type`); JSON folding and wrap must not fork per-format code paths.
+- **Always**: anything a plugin would touch flows through `churl-core` types (`Request`/`Response`/`Endpoint`) — they are the de-facto plugin API, so treat their serde shapes as stable; `execute()` stays the single HTTP chokepoint so middleware has exactly one place to wrap.
+
+**Next**: ship follow-ups from backlog
 
 ---
 
