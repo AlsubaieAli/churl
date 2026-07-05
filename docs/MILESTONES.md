@@ -12,6 +12,7 @@
 | M5 | Auth | planned |
 | M6 | Themes + keymaps + jump-mode + templating | planned |
 | M7 | Polish + perf + release | planned |
+| M8 | Cookies + proxy | planned |
 
 > Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
 
@@ -203,19 +204,33 @@
 - `cargo publish` dry-run passes for both crates
 - GitHub release action (tag-triggered)
 
-**Next**: ship
+**Next**: ship 0.1, then M8
+
+---
+
+## M8 — Cookies + proxy
+
+**Scope**: Session and network-environment support (promoted from the backlog, owner decision 2026-07-05 — first post-release milestone).
+
+**Deliverables**:
+- **Cookie jar**: opt-in per workspace (`cookies = true` in `churl.toml`); reqwest cookie store enabled on the client; `Set-Cookie` responses carried into subsequent requests. Persistent cookies live in the SQLite state DB (the day-one ARCHITECTURE decision — never in workspace files); a `churl cookies` subcommand (or palette action) lists/clears the jar
+- **Proxy configuration**: `proxy` knob in global config (URL, applies to http+https), overriding the already-honoured `HTTP_PROXY`/`HTTPS_PROXY` env vars; per-workspace override in `churl.toml`
+- **Insecure-TLS opt-in**: explicit `insecure = true` (global or per-workspace) for local intercepting proxies (Charles/mitmproxy); curl import's `-k` maps to a warning pointing at the knob instead of "always ignored"; export emits `-k` when set
+- Tests: wiremock cookie round-trip, proxy config plumbing, `-k` import/export remap
+
+**Next**: M9 (from backlog)
 
 ---
 
 ## Post-release backlog (owner requests, 2026-07-05)
 
-Not yet scheduled into milestones; each becomes an M8+ milestone (or folds into an existing one) when picked up.
+Not yet scheduled into milestones; each becomes an M9+ milestone (or folds into an existing one) when picked up.
 
 - ~~Auth types~~ → **promoted to milestone M5** in the 2026-07-05 plan review (OAuth2 client-credentials remains here as backlog).
 - **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M6 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
 - **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
-- **Cookies / sessions** (owner question 2026-07-05) — the client has no cookie store, so a `Set-Cookie` from a login endpoint is not carried into the next request. Storage was designed for it from day one (ARCHITECTURE: cookies belong in the SQLite state DB, never in workspace files). Naturally couples with request sequences (sessions matter most for E2E flows) — promote together or fold in when sequences are picked up.
-- **Proxy configuration + per-request TLS-skip** (owner question 2026-07-05) — reqwest already honours `HTTP_PROXY`/`HTTPS_PROXY` env vars, but there is no config knob, no per-workspace proxy, and no story for local intercepting proxies (Charles/mitmproxy — which also needs opt-in TLS-skip, currently rejected on import as `-k`). One backlog item: `proxy` config knob + explicit insecure-TLS opt-in, and `-k` import stops being ignored.
+- ~~Cookies / sessions~~ → **promoted to milestone M8** (owner decision 2026-07-05).
+- ~~Proxy configuration + per-request TLS-skip~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 
 ### Deferred nits (from M2/M3 reviews)
 
