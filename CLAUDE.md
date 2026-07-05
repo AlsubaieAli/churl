@@ -39,7 +39,7 @@ crates/
       lib.rs               # pub const VERSION + module exports
       model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace
       persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection
-      config.rs            # global config.toml loading + secrets heuristics
+      config.rs            # global config.toml loading (incl. [keys] override strings) + secrets heuristics
       history.rs           # rusqlite HistoryStore, user_version migrations
     tests/
       persistence.rs       # comment-preservation corpus, manifest+secrets, lazy loading
@@ -48,10 +48,14 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive) → subcommand | TUI
-      tui.rs               # ratatui + crossterm placeholder TUI
+      main.rs              # Cli (clap derive) → subcommand | TUI; #[tokio::main]
+      tui.rs               # terminal init/restore + run() entry point (thin)
+      tui/
+        app.rs             # App state, Pane/Mode/AppMsg, key routing, tokio::select! loop, render
+        events.rs          # Action enum, crokey KeyMap (+config overrides), nucleo-matcher FuzzyFinder
+        components/        # explorer, request (edtui), response, picker, search, palette, statusline
     tests/
-      tui_snapshot.rs      # insta snapshot via TestBackend
+      tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state
 docs/
   ARCHITECTURE.md
   DECISIONS.md
@@ -68,7 +72,7 @@ docs/
   - Binary / integration glue (`churl` crate, `main.rs`): `color-eyre` for context-rich reporting.
 - **`churl-core` discipline**: never add TUI deps (ratatui, crossterm, …) to `churl-core`. Model + persistence + HTTP live there; rendering never does.
 - **Snapshots**: committed `.snap` files live in `crates/churl/tests/snapshots/`. When a snapshot changes intentionally, run `INSTA_UPDATE=always cargo test --all` then review and commit the updated `.snap` files.
-- **Async**: not in M0. Tokio arrives in M2/M3 — don't add it earlier.
+- **Async**: tokio since M2 (`tokio::select!` over crossterm `EventStream`, tick, app mpsc channel). The render path stays sync and pure — snapshot tests construct `App` and call `render` without a runtime; never make rendering depend on tokio.
 
 ## Milestone workflow
 

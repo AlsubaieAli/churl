@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┌ Explorer ────────────┐┌ Request ─────────────────┐┌ Response ────────────────┐
+│> ▸ orders            ││                          ││                          │
+│  ▸ users             ││no endpoint selected      ││no endpoint selected      │
+│                      ││                          ││                          │
+│                      ││                          ││                          │
+│              ┏ Commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
+│              ┃> █                                             ┃              │
+│              ┃> quit                                          ┃              │
+│              ┃  focus next pane                               ┃              │
+│              ┃  focus previous pane                           ┃              │
+│              ┃  focus explorer                                ┃              │
+│              ┃  focus request                                 ┃              │
+│              ┃  focus response                                ┃              │
+│              ┃  move up                                       ┃              │
+│              ┃  move down                                     ┃              │
+│              ┃  select / toggle                               ┃              │
+│              ┃  collapse / parent                             ┃              │
+│              ┃  expand / descend                              ┃              │
+│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
+│                      ││                          ││                          │
+│                      ││                          ││                          │
+│                      ││                          ││                          │
+└──────────────────────┘└──────────────────────────┘└──────────────────────────┘
+ EXPLORER · demo · j/k move · enter select · / search · : palette · q quit

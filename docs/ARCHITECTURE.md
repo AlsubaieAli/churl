@@ -15,7 +15,7 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `export` | curl command generation from `Endpoint` |
 | `http` | Request execution via `reqwest` + `rustls`; coarse timing (connect + total); `AbortHandle` per in-flight request |
 | `history` | SQLite via `rusqlite` (bundled); schema managed via migrations at startup |
-| `config` | `~/.config/churl/config.toml` and per-workspace `churl.toml`; never contains secrets |
+| `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings) and per-workspace `churl.toml`; never contains secrets |
 
 ### `churl` (binary + thin lib)
 
@@ -23,25 +23,31 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 
 | Module | Responsibility |
 |---|---|
-| `main` | `Cli` (clap derive); `Command` variants; color-eyre hook installation |
-| `tui` | Terminal init/restore; render loop; top-level `App` state |
-| `tui::components` | Ratatui component tree: Explorer pane, Request editor (edtui), Response viewer, Command palette |
-| `tui::events` | `Key→Action` semantic map (crokey); fuzzy search via nucleo |
-| `tui::app` | `App` struct; `tokio::select!` loop multiplexing crossterm `EventStream` / tick timer / `mpsc` app-message channel |
+| `main` | `Cli` (clap derive); `Command` variants; `#[tokio::main]`; color-eyre hook installation |
+| `tui` | Terminal init/restore; `run()` entry point (config → keymap → workspace → `App`) |
+| `tui::app` | `App` state (`Pane` focus, `Mode` overlays, `AppMsg`); key routing; `tokio::select!` loop; top-level `render` |
+| `tui::events` | `Action` enum + crokey `KeyMap` (defaults + `[keys]` config overrides); `FuzzyFinder` (nucleo-matcher) |
+| `tui::components` | One module per pane/overlay: `explorer` (tree state machine), `request` (edtui body editor), `response` (M2 placeholder), `picker` (generic fuzzy overlay), `search`, `palette`, `statusline` |
 
 ### Event / render loop (M2+)
 
 ```
 crossterm EventStream ──┐
-tick timer ─────────────┤──► tokio::select! ──► handle() ──► state mutation
-app mpsc channel ───────┘                                  └──► terminal.draw()
+tick timer (250 ms) ────┤──► tokio::select! ──► handle_key() ──► state mutation
+app mpsc channel ───────┘                                     └──► terminal.draw()
 
-HTTP requests: spawned as tokio tasks, each with an AbortHandle.
+HTTP requests (M3): spawned as tokio tasks, each with an AbortHandle.
 Results arrive on the app mpsc channel as AppMsg::Response { .. }.
 The render loop never awaits I/O.
 ```
 
-M0 uses a plain synchronous `crossterm::event::read()` loop — async arrives in M2.
+`AppMsg` carries only `Redraw` until M3. All render functions are pure (`fn render(frame, area, &state)`), so snapshot tests drive them through a `TestBackend` without a tokio runtime.
+
+Key routing precedence (per key event, in `Mode::Normal` the crokey map is authoritative):
+
+1. An open overlay (search `/`, palette `:`) consumes everything — `Esc` closes, `Enter` accepts, `Up`/`Down`/`Ctrl-n`/`Ctrl-p` move, other chars edit the query.
+2. Request pane focused with edtui in a non-Normal mode (insert/visual/…): all keys go to edtui.
+3. Otherwise: crokey `KeyMap` lookup first; unmapped keys fall through to edtui when the request pane is focused. Navigation actions (`j`/`k`/`h`/`l`/`g`/`G`/`Enter`) forward their original key event to edtui when the request pane has focus, so vim motions keep working there.
 
 ## On-disk format
 

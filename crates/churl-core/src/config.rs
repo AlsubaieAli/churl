@@ -4,6 +4,7 @@
 //! `~/.config/churl/config.toml` on Linux). Workspace files (`churl.toml`, endpoint
 //! files) must never contain secrets — see [`secret_violations`].
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,12 @@ pub struct Config {
     /// Name of the colour theme to use; `None` means the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// Keybinding overrides under a flat `[keys]` table: key-combination string →
+    /// action name (e.g. `"ctrl-p" = "open-palette"`). Core carries only strings;
+    /// the TUI layer parses combinations and action names and rejects unknown
+    /// entries loudly at startup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
 }
 
 /// Returns the path of the global config file (`<config_dir>/churl/config.toml`),
@@ -140,6 +147,32 @@ mod tests {
         std::fs::write(&path, "theme = \"gruvbox\"\n").unwrap();
         let config = load_config(&path).unwrap();
         assert_eq!(config.theme.as_deref(), Some("gruvbox"));
+    }
+
+    #[test]
+    fn config_parses_keys_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[keys]\n\"ctrl-p\" = \"open-palette\"\nq = \"quit\"\n",
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(
+            config.keys.get("ctrl-p").map(String::as_str),
+            Some("open-palette")
+        );
+        assert_eq!(config.keys.get("q").map(String::as_str), Some("quit"));
+    }
+
+    #[test]
+    fn config_keys_default_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"gruvbox\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert!(config.keys.is_empty());
     }
 
     #[test]
