@@ -36,8 +36,15 @@ Cargo.toml                 # workspace root, shared deps / package metadata
 crates/
   churl-core/              # pure library — zero TUI deps, ever
     src/
-      lib.rs               # pub const VERSION, pub mod model
-      model.rs             # Method enum + Display + FromStr
+      lib.rs               # pub const VERSION + module exports
+      model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace
+      persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection
+      config.rs            # global config.toml loading + secrets heuristics
+      history.rs           # rusqlite HistoryStore, user_version migrations
+    tests/
+      persistence.rs       # comment-preservation corpus, manifest+secrets, lazy loading
+      roundtrip_prop.rs    # proptest Endpoint round-trip
+      fixtures/            # comment-bearing endpoint TOML fixtures
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)

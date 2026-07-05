@@ -53,6 +53,27 @@ M0 uses a plain synchronous `crossterm::event::read()` loop — async arrives in
     <endpoint>.toml             # one file per endpoint; explicit `seq` for ordering
 ```
 
+Endpoint file shape (M1):
+
+```toml
+seq = 1                     # explicit ordering within the collection
+name = "Get user"
+
+[request]
+method = "GET"
+url = "https://api.example.com/users/{{id}}"
+
+[[request.headers]]         # array-of-tables; `enabled = false` to disable a line
+name = "Accept"
+value = "application/json"
+
+[request.body]              # optional; type = text|json|form (default text)
+type = "json"
+content = '{"q": true}'
+```
+
+Saves are format-preserving: comments and ordering in hand-edited files survive a churl round-trip (see DECISIONS.md for merge semantics and edge cases).
+
 High-churn state (history, cookies, cached responses) lives in:
 ```
 $XDG_DATA_HOME/churl/state.sqlite

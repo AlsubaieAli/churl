@@ -5,7 +5,7 @@
 | Milestone | Name | Status |
 |---|---|---|
 | M0 | Skeleton + CI | **done** |
-| M1 | Data model + persistence | planned |
+| M1 | Data model + persistence | **done** |
 | M2 | Layout + navigation | planned |
 | M3 | Request execution + response render | planned |
 | M4 | curl import / export | planned |
@@ -45,7 +45,16 @@
 - `churl-core::history`: SQLite schema via rusqlite (bundled); migration runner; insert/query history entries
 - Tests: round-trip property tests, migration idempotency
 
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (24 tests) all green; unchanged endpoint round-trip is byte-identical across a 3-fixture comment corpus; proptest (256 cases) covers fresh-save and merge-save paths; migrations idempotent across reopens.
+
+**Notes**:
+- Saving canonicalizes an explicit `enabled = true` line away (it's the default and is skipped on serialize).
+- Merge preserves comments on unchanged/changed scalar values and equal-length arrays-of-tables; when the header/param count changes, that array is replaced wholesale and its comments are lost.
+- `Workspace` in `model` is the parsed `churl.toml` manifest; `persistence::OpenWorkspace` is the lazy on-disk handle.
+
 **Next**: M2
+
+**Open questions**: none
 
 ---
 

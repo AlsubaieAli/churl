@@ -1,0 +1,8 @@
+# My favourite endpoint.
+# Handle with care.
+seq = 1
+name = "get-user" # human-readable name
+
+[request]
+method = "GET" # only reads
+url = "https://api.example.com/users/1" # prod URL
