@@ -13,7 +13,7 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `template` | Hand-rolled `{{var}}` substitution; precedence: CLI flag → profile → process env |
 | `import` | curl command parsing (shlex + hand-rolled flag map) |
 | `export` | curl command generation from `Endpoint` |
-| `http` | Request execution via `reqwest` + `rustls`; coarse timing (connect + total); `AbortHandle` per in-flight request |
+| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only in M3, `connect` stays `None`); `execute` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. No `{{var}}` templating (M5); URL/headers/body used verbatim |
 | `history` | SQLite via `rusqlite` (bundled); schema managed via migrations at startup |
 | `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings) and per-workspace `churl.toml`; never contains secrets |
 
@@ -27,7 +27,8 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 | `tui` | Terminal init/restore; `run()` entry point (config → keymap → workspace → `App`) |
 | `tui::app` | `App` state (`Pane` focus, `Mode` overlays, `AppMsg`); key routing; `tokio::select!` loop; top-level `render` |
 | `tui::events` | `Action` enum + crokey `KeyMap` (defaults + `[keys]` config overrides); `FuzzyFinder` (nucleo-matcher) |
-| `tui::components` | One module per pane/overlay: `explorer` (tree state machine), `request` (edtui body editor), `response` (M2 placeholder), `picker` (generic fuzzy overlay), `search`, `palette`, `statusline` |
+| `tui::highlight` | Off-thread syntect worker: a dedicated `std::thread` owns the `SyntaxSet`/theme (lazy-loaded on first job), receives `HighlightJob`s over `std::sync::mpsc`, returns `AppMsg::Highlighted`. `SyntaxToken` (json/xml/html/plain) derives from the response `Content-Type` |
+| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset), `request` (edtui body editor), `response` (virtualised viewer: line-offset index + `ResponseState`/`ResponseView`), `picker` (generic fuzzy overlay), `search`, `palette`, `statusline` |
 
 ### Event / render loop (M2+)
 
@@ -41,7 +42,7 @@ Results arrive on the app mpsc channel as AppMsg::Response { .. }.
 The render loop never awaits I/O.
 ```
 
-`AppMsg` carries only `Redraw` until M3. All render functions are pure (`fn render(frame, area, &state)`), so snapshot tests drive them through a `TestBackend` without a tokio runtime.
+Since M3 `AppMsg` also carries `Response { generation, outcome, meta }` (a stale generation — after cancel/resend — is dropped) and `Highlighted { hash, lines }`. Render functions stay pure (`fn render(frame, area, &state)`); the response pane's `render` additionally *returns* an optional `HighlightJob` for the caller to enqueue (top-level `render` already takes `&mut App`). Under `TestBackend` no highlight worker exists, so snapshots deterministically show plain text.
 
 Key routing precedence (per key event, in `Mode::Normal` the crokey map is authoritative):
 

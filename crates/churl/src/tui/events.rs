@@ -43,6 +43,14 @@ pub enum Action {
     Top,
     /// Jump to the last row.
     Bottom,
+    /// Scroll the response body down half a page.
+    HalfPageDown,
+    /// Scroll the response body up half a page.
+    HalfPageUp,
+    /// Execute the selected endpoint's request.
+    Send,
+    /// Cancel the in-flight request.
+    Cancel,
     /// Open the fuzzy endpoint search overlay.
     OpenSearch,
     /// Open the command palette overlay.
@@ -64,6 +72,14 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Expand, "expand", "expand / descend"),
     (Action::Top, "top", "jump to top"),
     (Action::Bottom, "bottom", "jump to bottom"),
+    (
+        Action::HalfPageDown,
+        "half-page-down",
+        "scroll half page down",
+    ),
+    (Action::HalfPageUp, "half-page-up", "scroll half page up"),
+    (Action::Send, "send", "send request"),
+    (Action::Cancel, "cancel", "cancel request"),
     (Action::OpenSearch, "open-search", "search endpoints"),
     (Action::OpenPalette, "open-palette", "command palette"),
 ];
@@ -155,6 +171,11 @@ impl Default for KeyMap {
         bind(key!(l), Action::Expand);
         bind(key!(g), Action::Top);
         bind(key!(shift - g), Action::Bottom);
+        bind(key!(ctrl - d), Action::HalfPageDown);
+        bind(key!(ctrl - u), Action::HalfPageUp);
+        bind(key!(ctrl - s), Action::Send);
+        // `Cancel` has no default binding: Ctrl-C (bound to `Quit`) cancels an
+        // in-flight request, and the command palette exposes `cancel request`.
         bind(key!('/'), Action::OpenSearch);
         bind(key!(':'), Action::OpenPalette);
         Self { map }

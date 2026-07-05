@@ -24,6 +24,9 @@ crokey.workspace = true
 nucleo-matcher.workspace = true
 tokio.workspace = true
 futures.workspace = true
+reqwest.workspace = true
+syntect.workspace = true
+two-face.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

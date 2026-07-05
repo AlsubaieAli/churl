@@ -30,6 +30,13 @@ nucleo-matcher = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 futures = "0.3"
 
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+# Syntax highlighting (churl bin only; never churl-core)
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = "0.4"
+
 # Serialization / persistence
 serde = { version = "1", features = ["derive"] }
 toml_edit = { version = "0.25", features = ["serde"] }
@@ -40,3 +47,4 @@ dirs = "6"
 insta = { version = "1", features = ["filters"] }
 proptest = "1"
 tempfile = "3"
+wiremock = "0.6"
