@@ -13,7 +13,7 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `template` | Hand-rolled `{{var}}` substitution; precedence: CLI flag → profile → process env |
 | `import` | curl command parsing (shlex + hand-rolled flag map) |
 | `export` | curl command generation from `Endpoint` |
-| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only in M3, `connect` stays `None`); `execute` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. No `{{var}}` templating (M5); URL/headers/body used verbatim |
+| `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only in M3, `connect` stays `None`); `execute` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. No `{{var}}` templating (M6); URL/headers/body used verbatim |
 | `history` | SQLite via `rusqlite` (bundled); schema managed via migrations at startup |
 | `config` | `~/.config/churl/config.toml` (incl. flat `[keys]` override strings) and per-workspace `churl.toml`; never contains secrets |
 
