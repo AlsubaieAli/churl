@@ -13,6 +13,7 @@
 | M6 | Themes + keymaps + jump-mode + templating | **done** |
 | M6.5 | UX review round 1 (owner drive-test fixes) | **done** |
 | M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | **done** |
+| M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | planned |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
@@ -297,6 +298,34 @@
 - **#10 Deferred to M7** (owner-north-star triage): no horizontal scroll in URL-bar/prompt inline editing (typing blind past the right edge) and no vertical scroll in row lists — carried in M7's scope.
 - New tests (9): `body_tab_row_keys_reach_edtui`, `reload_remaps_selected_collection_index_for_resolver`, `search_switch_while_dirty_is_guarded`, `jump_switch_while_dirty_guards_and_saves`, `save_failure_blocks_discard_changes_switch`, `rename_collection_repoints_loaded_endpoint_file`, `placement_row_enter_toggles`, `new_endpoint_while_dirty_is_guarded`, `ghost_row_removed_on_escape` — total now 256 (incl. the main session's `rename_endpoint_same_slug_keeps_filename`).
 
+**Next**: M6.7
+
+---
+
+## M6.7 — UX round 2 (owner drive-test 2026-07-06, second pass)
+
+**Scope**: Second owner drive-test of the M6.6 build surfaced four discoverability failures (features that exist but couldn't be found), two dropped requirements, and one design miss. This milestone makes the keymap self-teaching (leader + which-key + help overlay), fixes the real gaps (zoom, explorer toggle, inline-edit scrolling, URL→params sync), and removes the digit-key collision. Ships before M7 — a release you can't discover isn't releasable.
+
+**Deliverables** (in build order — later items render leader/help content from earlier infra):
+
+1. **Leader key + which-key popup**: `Space` becomes the global leader. Pressing it enters a pending-leader state and (immediately) shows a small floating panel listing the bound continuations (which-key style); any unbound key or Esc dismisses. Initial leader map: `<leader>e` toggle explorer, `<leader>s` send (fallback alias for Ctrl-S), `<leader>c` cancel in-flight request (fallback alias), `<leader>p` switch profile, `<leader>q` quit. Leader is inert during text edits (LineEditor/edtui) — Space types a space. The Request-pane row-toggle rebinds `Space` → `t` (freeing Space everywhere). Config: leader key remappable; `[keys.leader]` sub-table for continuations, same fail-loud parsing as pane overlays; `churl keymaps` prints a Leader section.
+2. **Drop global `1`/`2`/`3` pane-focus binds**. Navigation is Tab/Shift-Tab + `f` jump-mode only; `1`–`4` remain solely as Request-overlay tab jumps. **Root-cause first**: the owner observed digits "mostly jumping to Request" regardless of focus — the keymap as written doesn't explain that; find out whether `focus.ctx()`/dispatch has a real bug before deleting the binds (a dispatch bug would affect other overlay keys too). Record the finding in the milestone notes.
+3. **URL→Params sync on edit-commit**: committing a URL edit (Enter) strips any query string from the URL and merges it into the Params tab; the bar thereafter shows the base URL; send composes base URL + enabled params (existing behavior). Merge policy, per committed `name=value` pair, in order: (a) exact name+value row exists → ensure enabled, no duplicate; (b) name exists with different value → first row with that name gets the new value + enabled; (c) name absent → append enabled row; (d) duplicate names within the URL itself (`?tag=a&tag=b`) map positionally onto existing rows of that name, extras appended (multi-value params preserved). Statusline reports the merge ("params: A updated, B added") — never silent. Marks the request dirty (normal save flow). DECISIONS.md entry: this scopes the M4 "query stays in the URL, lossless" rule to *unedited imports* — first edit-commit explodes the query into params and the next save rewrites the TOML accordingly (editing is intentional change).
+4. **Pane zoom** (`z`, focused-pane-only — tmux prefix-z model): `z` in the Request overlay zooms Request, collapsing Response to its stats line; `z` in the Response overlay zooms Response, collapsing Request to its tab bar. Invariant: **a collapsed pane cannot hold focus** — Tab/jump-mode/focus actions targeting the collapsed pane auto-unzoom first. `z` again restores the split. No global variant.
+5. **Explorer sidebar toggle** (`<leader>e`, global — original kickoff-prompt requirement "collapsible explorer", dropped from every milestone until now): hides the 30-column explorer, right column takes the full width. Same invariant as zoom: any action that would focus the explorer (Tab cycle, jump label, palette "focus explorer") auto-reopens it. State is session-only (not persisted).
+6. **Inline-edit scrolling** (pulled forward from M7, M6.6 review finding #10): horizontal viewport scrolling in `LineEditor` renders (URL bar + prompts) — the view follows the cursor, with truncation indicators (`…`) at the clipped edge(s); typing past the right edge must never go blind. Vertical scrolling in the Params/Headers row lists (mirror the explorer's `scroll_to_fit`).
+7. **URL vim-popup editor**: `e` on the URL bar opens a centered floating editor (edtui — already in-tree for Body) seeded with the URL, constrained to a single logical line; vim mode indicator (NORMAL/INSERT) in the popup border/footer — the chrome the inline bar lacks. Enter commits (running the deliverable-3 param merge), Esc in normal mode cancels. Config `url_edit = "inline" | "popup"` selects what `i`/`Enter` on the bar opens (default `inline`); `e` always opens the popup.
+8. **`?` help overlay** (pulled forward from M7): floating pane rendering the *effective* keymap from the live `KeyMap` (never a hardcoded list — it cannot drift), sectioned **Global / Explorer / URL bar / Request / Response / Leader**, scrollable, dismissed with `?`/Esc/`q`. Available from any pane outside text-edit modes.
+9. **Dedicated message row** (owner requirement 2026-07-07): action/transient messages (saves, merges, errors, CRUD results) move out of the statusline into their own row rendered directly *above* it — they must never cover statusline content (the statusline may become owner-customizable later; keep the two components decoupled). The row appears only while a message is live and disappears after expiry — default lifetime **6 s** (a named constant, config-knob-ready), replacing today's shorter `TransientStatus` expiry; a newer message replaces the current one. The statusline keeps only persistent state (focus/endpoint/dirty/profile/in-flight spinner). Expiry still checked on the existing 250 ms tick.
+
+**Keystroke audit** (north star unchanged — common loops in 3–4 keystrokes): *tweak URL → send* and *switch method → resend* are untouched (Ctrl-S stays primary send; leader aliases are fallbacks, not replacements). Zoom-and-read is `z` from the focused pane; explorer toggle is 2 keystrokes from anywhere.
+
+**Tests**: leader state machine (pending → dispatch/dismiss, inert during edits, which-key popup snapshot); keymap Leader-section parsing + `churl keymaps` output; digit-bind removal (1–4 only act in Request); URL-commit merge policy unit tests covering rules a–d + statusline message + dirty flag; TOML rewrite round-trip after explode; zoom state machine incl. focus-collapsed-pane auto-unzoom; explorer toggle incl. auto-reopen paths; LineEditor viewport (cursor kept in view, edge indicators, unicode widths); row-list vertical scroll; popup editor commit/cancel + single-line constraint + `url_edit` config; help overlay renders every bound action (guard test: no section missing) + snapshots per section; message row (appears above statusline, 6 s expiry via backdated set, replacement by newer message, statusline content untouched while a message is live) + snapshots with/without an active message.
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` green from the 256-test baseline; manual PTY drive-test of the two hot loops + zoom/toggle/help.
+
+**Open questions**: none — design fixed with the owner 2026-07-06 (this conversation supersedes the M7 "full-screen response toggle (`F` key)" line, which is replaced by the mutual-zoom design here).
+
 **Next**: M7
 
 ---
@@ -308,17 +337,14 @@
 **Deliverables**:
 - Cold-start benchmark: `hyperfine 'churl --help'` < 100 ms on reference hardware
 - JSON folding in response viewer
-- Full-screen response toggle (`F` key)
 - **Response headers view**: toggle between body and full headers in the response pane (closes the M3 open question; count-only until then)
 - **Wrap toggle** in the response viewer (closes the M3 horizontal-scroll open question — wrap chosen over horizontal scroll)
 - **Response body search** (owner request 2026-07-05): `/`-style incremental search within the response viewer with match navigation — the explorer `/` fuzzy search never covered response bodies, and search beats folding for large payloads
 - Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
-- **Inline-edit scrolling** (carried from the M6.6 review, finding #10): horizontal scroll in the URL-bar/prompt `LineEditor` renders (text longer than the pane currently types blind past the right edge — keep the cursor in view) and vertical scroll in the request-pane row lists (Params/Headers taller than the pane run off-screen; mirror the explorer's `scroll_to_fit`)
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
 - GitHub release action (tag-triggered), building per-platform binaries: macOS arm64 + x86_64, Linux x86_64 **musl static** + aarch64, Windows x86_64 (owner requirement 2026-07-06: installable without Rust — rustls + bundled SQLite already make the binary self-contained)
 - **`curl | sh` installer** (owner request 2026-07-06): `install.sh` in the repo, served via the release — detects OS/arch, downloads the matching release binary, installs to `~/.local/bin` (prompting/`--to` for override). `cargo install churl` remains the Rust-user path
-- **`?` help overlay** (owner request 2026-07-06): in-app overlay rendering the effective keymap (reuses M6's `KeyMap::iter` — the `churl keymaps` output as an overlay)
 - **`churl tutorial` onboarding** (owner request 2026-07-06): scaffolds a demo workspace (commented `churl.toml` with a profile + vars, one collection with `folder.toml`, an example endpoint against a public echo API) so a first-time user sends a request in under a minute; README quickstart mirrors it
 
 **Next**: ship 0.1, then M8
