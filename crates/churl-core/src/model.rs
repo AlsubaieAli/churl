@@ -232,9 +232,29 @@ pub struct Profile {
 pub struct Workspace {
     /// Workspace name.
     pub name: String,
+    /// Workspace-level template variables (shared defaults) under a `[vars]`
+    /// table; omitted from serialized output when empty. Lowest-precedence scope
+    /// in the [`crate::template::Resolver`] chain (env aside). Values must never
+    /// contain literal secrets — see [`crate::config::secret_violations`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, String>,
     /// Named variable profiles; omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<Profile>,
+}
+
+/// Optional per-collection metadata: the parsed form of a collection's
+/// `folder.toml` (`persistence::FOLDER_FILENAME`, reserved since M1 and never
+/// listed as an endpoint). Currently just collection-level template variables —
+/// environment-independent defaults, no per-collection profiles.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionMeta {
+    /// Collection-level template variables under a `[vars]` table; omitted from
+    /// serialized output when empty. Sits between profile and workspace scopes in
+    /// the [`crate::template::Resolver`] chain. Values must never contain literal
+    /// secrets — see [`crate::config::collection_secret_violations`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, String>,
 }
 
 /// An executed HTTP response. Runtime-only: never persisted to TOML.

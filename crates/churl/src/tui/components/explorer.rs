@@ -3,15 +3,18 @@
 //! Collections are listed at startup (a cheap directory scan) but endpoint files
 //! are parsed lazily on first expand, keeping the cold-start budget intact.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use churl_core::model::Endpoint;
-use churl_core::persistence::{Collection, OpenWorkspace, PersistenceError};
+use churl_core::persistence::{Collection, OpenWorkspace, PersistenceError, load_collection_meta};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
+
+use super::jump::JumpState;
+use crate::tui::theme::Theme;
 
 /// What kind of row a flattened explorer row is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,15 +50,20 @@ pub struct SelectedEndpoint {
     pub display_path: String,
     /// Path of the endpoint's TOML file.
     pub file: PathBuf,
+    /// Index of the owning collection (for looking up its `folder.toml` vars).
+    pub collection: usize,
     /// The parsed endpoint.
     pub endpoint: Endpoint,
 }
 
-/// A collection plus its lazily loaded endpoints (`None` until first expand).
+/// A collection plus its lazily loaded endpoints (`None` until first expand) and
+/// its parsed `folder.toml` variables (`None` until first requested).
 #[derive(Debug)]
 struct CollectionNode {
     collection: Collection,
     endpoints: Option<Vec<(PathBuf, Endpoint)>>,
+    /// Cached collection-level template vars from `folder.toml`; loaded lazily.
+    vars: Option<BTreeMap<String, String>>,
 }
 
 impl CollectionNode {
@@ -65,6 +73,21 @@ impl CollectionNode {
             self.endpoints = Some(self.collection.endpoints()?);
         }
         Ok(self.endpoints.as_deref().expect("just loaded"))
+    }
+
+    /// Parses (and caches) the collection's `folder.toml` `[vars]`. A missing
+    /// file yields an empty map. Parse failures are swallowed to an empty map —
+    /// var resolution must never break sending (unresolved `{{var}}`s stay
+    /// verbatim); a malformed `folder.toml` surfaces when the collection is
+    /// expanded and its endpoints are parsed.
+    fn vars(&mut self) -> &BTreeMap<String, String> {
+        if self.vars.is_none() {
+            let vars = load_collection_meta(&self.collection.path)
+                .map(|meta| meta.vars)
+                .unwrap_or_default();
+            self.vars = Some(vars);
+        }
+        self.vars.as_ref().expect("just loaded")
     }
 }
 
@@ -93,6 +116,7 @@ impl ExplorerState {
                 .map(|collection| CollectionNode {
                     collection,
                     endpoints: None,
+                    vars: None,
                 })
                 .collect(),
             None => Vec::new(),
@@ -108,6 +132,15 @@ impl ExplorerState {
     /// Adjusts the scroll offset so the cursor stays within a `height`-row
     /// viewport, clamped so we never scroll past the last screenful, and returns
     /// the offset. Called by [`render`] with the pane's inner height.
+    /// Index of the first visible row (the scroll offset as of the last
+    /// [`scroll_to_fit`] call). Jump-mode uses it to start labelling at the
+    /// viewport instead of the top of the tree.
+    ///
+    /// [`scroll_to_fit`]: ExplorerState::scroll_to_fit
+    pub fn first_visible(&self) -> usize {
+        self.scroll
+    }
+
     pub fn scroll_to_fit(&mut self, height: usize) -> usize {
         if height == 0 {
             self.scroll = 0;
@@ -262,8 +295,19 @@ impl ExplorerState {
         Some(SelectedEndpoint {
             display_path: format!("{}/{}", node.collection.name, endpoint.name),
             file: file.clone(),
+            collection: row.collection,
             endpoint: endpoint.clone(),
         })
+    }
+
+    /// The collection-level template vars (`folder.toml` `[vars]`) for the
+    /// `collection`-th collection, loaded lazily and cached. An unknown index or
+    /// missing/invalid `folder.toml` yields an empty map.
+    pub fn collection_vars(&mut self, collection: usize) -> BTreeMap<String, String> {
+        self.collections
+            .get_mut(collection)
+            .map(|node| node.vars().clone())
+            .unwrap_or_default()
     }
 
     /// Loads every collection's endpoints (for fuzzy search) and returns
@@ -312,14 +356,23 @@ pub fn render(
     state: &mut ExplorerState,
     focused: bool,
     has_ws: bool,
+    theme: &Theme,
+    jump: Option<&JumpState>,
 ) {
+    let (border_type, border_style) = if focused {
+        (BorderType::Thick, theme.border_focused)
+    } else {
+        (BorderType::Plain, theme.border_unfocused)
+    };
+    let title = match jump.and_then(|j| j.label_for_pane(super::super::app::Pane::Explorer)) {
+        Some(label) => format!(" Explorer [{label}] "),
+        None => " Explorer ".to_owned(),
+    };
     let block = Block::bordered()
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .title(" Explorer ");
+        .border_type(border_type)
+        .border_style(border_style)
+        .title(title)
+        .title_style(theme.title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -344,14 +397,29 @@ pub fn render(
         .skip(offset)
         .take(height)
         .map(|(i, row)| {
-            let cursor = if i == state.cursor { "> " } else { "  " };
             let marker = match row.kind {
                 RowKind::Collection if row.expanded => "▾ ",
                 RowKind::Collection => "▸ ",
                 RowKind::Endpoint => "",
             };
             let indent = "  ".repeat(row.depth);
-            Line::from(format!("{cursor}{indent}{marker}{}", row.name))
+            // In jump-mode, overlay the row's label at the start; otherwise the
+            // usual cursor marker.
+            match jump.and_then(|j| j.label_for_row(i)) {
+                Some(label) => Line::from(vec![
+                    Span::styled(label.to_string(), theme.jump_label),
+                    Span::raw(format!(" {indent}{marker}{}", row.name)),
+                ]),
+                None => {
+                    let cursor = if i == state.cursor { "> " } else { "  " };
+                    let text = format!("{cursor}{indent}{marker}{}", row.name);
+                    if i == state.cursor && focused {
+                        Line::from(text).style(theme.selection)
+                    } else {
+                        Line::from(text)
+                    }
+                }
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);

@@ -115,6 +115,19 @@ fn palette_overlay() {
 }
 
 #[test]
+fn jump_overlay_shows_labels() {
+    // Expand a collection so visible rows get labels, then enter jump-mode: the
+    // pane titles carry `[a]`/`[s]`/`[d]` and the visible rows carry their labels
+    // at the start (all visible in the TestBackend text buffer).
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('j')); // onto "users"
+    press(&mut app, KeyCode::Enter); // expand
+    press(&mut app, KeyCode::Char('f')); // enter jump-mode
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
 fn request_pane_auth_line_placeholder_shown_verbatim() {
     // Basic auth with a {{password}} placeholder: rendered verbatim.
     let dir = tempfile::tempdir().unwrap();

@@ -1,11 +1,20 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
+use color_eyre::eyre::eyre;
 
 #[derive(Debug, Parser)]
 #[command(name = "churl", about = "Terminal HTTP client", version)]
 struct Cli {
+    /// Set a template variable (repeatable): `--var key=value`. Highest-precedence
+    /// scope in the `{{var}}` resolver, above profiles and workspace vars.
+    #[arg(long = "var", value_name = "KEY=VALUE", global = true)]
+    vars: Vec<String>,
+    /// Activate a named profile at startup (unknown name is an error).
+    #[arg(long, global = true)]
+    profile: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -23,6 +32,20 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Print the effective keymap (every action, its bindings, and default/overridden)
+    Keymaps,
+}
+
+/// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
+fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut vars = BTreeMap::new();
+    for pair in pairs {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| eyre!("bad --var {pair:?}: expected key=value"))?;
+        vars.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(vars)
 }
 
 #[tokio::main]
@@ -33,12 +56,61 @@ async fn main() -> Result<()> {
         Some(Command::Import { curl, name, out }) => {
             run_import(&curl, name, out)?;
         }
+        Some(Command::Keymaps) => {
+            run_keymaps()?;
+        }
         None => {
+            let vars = parse_vars(&cli.vars)?;
             install_hooks()?;
-            churl::tui::run().await?;
+            churl::tui::run(vars, cli.profile).await?;
         }
     }
 
+    Ok(())
+}
+
+/// `churl keymaps`: print the effective keymap (defaults + config overrides) as
+/// plain aligned text, sorted by action config-name, one line per action:
+/// `action-name    combo[, combo…]    (default | overridden)`.
+fn run_keymaps() -> Result<()> {
+    use churl::tui::events::{Action, KeyMap};
+
+    let config = churl_core::config::load_global_config()?;
+    let effective = KeyMap::with_overrides(&config.keys)?;
+    let default = KeyMap::default();
+
+    let mut actions: Vec<Action> = Action::all().collect();
+    actions.sort_by_key(|a| a.name());
+
+    // Column widths.
+    let name_w = actions.iter().map(|a| a.name().len()).max().unwrap_or(0);
+    let combos_of = |map: &KeyMap, action: Action| {
+        let combos = map.combos_for(action);
+        if combos.is_empty() {
+            "(unbound)".to_owned()
+        } else {
+            combos.join(", ")
+        }
+    };
+    let combo_w = actions
+        .iter()
+        .map(|a| combos_of(&effective, *a).len())
+        .max()
+        .unwrap_or(0);
+
+    for action in actions {
+        let combos = combos_of(&effective, action);
+        let origin = if effective.combos_for(action) == default.combos_for(action) {
+            "default"
+        } else {
+            "overridden"
+        };
+        println!(
+            "{name:<name_w$}  {combos:<combo_w$}  ({origin})  {label}",
+            name = action.name(),
+            label = action.label(),
+        );
+    }
     Ok(())
 }
 

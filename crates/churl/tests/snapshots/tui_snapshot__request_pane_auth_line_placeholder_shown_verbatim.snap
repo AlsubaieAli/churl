@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 ┃                      ┃│                          ││                          │
 ┃                      ┃│  Normal                  ││                          │
 ┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
- EXPLORER · demo · j/k move · enter select · ctrl-s send · / search · : palette
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :

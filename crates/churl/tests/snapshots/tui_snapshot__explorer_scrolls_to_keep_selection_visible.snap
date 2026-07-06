@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 ┃    Endpoint 38       ┃│                          ││                          │
 ┃>   Endpoint 39       ┃│                          ││                          │
 ┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
- EXPLORER · demo · j/k move · enter select · ctrl-s send · / search · : palette
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :

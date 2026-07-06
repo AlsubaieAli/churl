@@ -15,8 +15,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::config::{auth_secret_violations, secret_violations};
-use crate::model::{Endpoint, Workspace};
+use crate::config::{auth_secret_violations, collection_secret_violations, secret_violations};
+use crate::model::{CollectionMeta, Endpoint, Workspace};
 
 /// Filename of the workspace manifest inside a workspace root.
 pub const MANIFEST_FILENAME: &str = "churl.toml";
@@ -73,6 +73,13 @@ pub enum PersistenceError {
     #[error("refusing to save manifest with secret-looking profile variables: {}", names.join(", "))]
     SecretsInManifest {
         /// Offending variables as `"<profile>.<var>"` strings.
+        names: Vec<String>,
+    },
+    /// Refused to save a collection's `folder.toml` containing literal
+    /// secret-looking variables (secrets are process-env only).
+    #[error("refusing to save folder.toml with secret-looking variables: {}", names.join(", "))]
+    SecretsInCollection {
+        /// Offending variables as `"vars.<var>"` strings.
         names: Vec<String>,
     },
     /// Refused to serialize an endpoint whose auth carries literal secret values
@@ -145,6 +152,32 @@ pub fn save_workspace_manifest(root: &Path, ws: &Workspace) -> Result<(), Persis
         return Err(PersistenceError::SecretsInManifest { names: violations });
     }
     save_value(&root.join(MANIFEST_FILENAME), ws)
+}
+
+/// Loads a collection's [`CollectionMeta`] from its `folder.toml`. A missing file
+/// is not an error and yields [`CollectionMeta::default`] (an empty var table).
+pub fn load_collection_meta(dir: &Path) -> Result<CollectionMeta, PersistenceError> {
+    let path = dir.join(FOLDER_FILENAME);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml_edit::de::from_str(&text)
+            .map_err(|source| PersistenceError::Parse { path, source }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(CollectionMeta::default()),
+        Err(source) => Err(PersistenceError::Read { path, source }),
+    }
+}
+
+/// Saves a collection's [`CollectionMeta`] to its `folder.toml`, preserving
+/// comments and formatting of an existing file (same merge machinery as
+/// [`save_workspace_manifest`]).
+///
+/// Refuses with [`PersistenceError::SecretsInCollection`] when any variable looks
+/// like a literal secret (see [`crate::config::collection_secret_violations`]).
+pub fn save_collection_meta(dir: &Path, meta: &CollectionMeta) -> Result<(), PersistenceError> {
+    let violations = collection_secret_violations(meta);
+    if !violations.is_empty() {
+        return Err(PersistenceError::SecretsInCollection { names: violations });
+    }
+    save_value(&dir.join(FOLDER_FILENAME), meta)
 }
 
 /// A workspace opened lazily: only `churl.toml` has been parsed.

@@ -10,7 +10,7 @@
 //! 3. Otherwise the crokey keymap is consulted first; unmapped keys fall
 //!    through to edtui when the request pane is focused.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
@@ -20,6 +20,7 @@ use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
 use churl_core::http::ExecuteOptions;
 use churl_core::model::{Body, BodyKind, Response};
 use churl_core::persistence::{OpenWorkspace, PersistenceError};
+use churl_core::template::{Resolver, Scope};
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
@@ -32,10 +33,12 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use super::components::explorer::{ExplorerState, SelectedEndpoint};
+use super::components::jump::{JumpState, JumpTarget};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView};
 use super::components::{explorer, palette, picker, request, response, statusline};
 use super::events::{Action, FuzzyFinder, KeyMap};
 use super::highlight::{self, HighlightJob};
+use super::theme::Theme;
 
 /// Which pane has focus in [`Mode::Normal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +83,8 @@ pub enum Mode {
     Search,
     /// The command palette overlay is open.
     Palette,
+    /// Jump-mode: label-driven pane/row navigation overlay.
+    Jump,
 }
 
 /// Messages delivered to the event loop over the app channel. No longer `Copy`
@@ -139,7 +144,18 @@ pub struct App {
     pub picker: Option<picker::PickerState>,
     search_targets: Vec<(usize, usize)>,
     palette_actions: Vec<Action>,
+    /// Profile-name items behind an open profile picker (index-aligned;
+    /// `None` marks the "(none)" entry). Non-empty only while switching profiles.
+    profile_choices: Vec<Option<String>>,
+    /// Active jump-mode state, when `mode` is [`Mode::Jump`].
+    pub jump: Option<JumpState>,
     keymap: KeyMap,
+    /// The resolved colour theme, threaded through every render fn.
+    pub theme: Theme,
+    /// `--var key=value` overrides: the highest-precedence resolver scope.
+    cli_vars: BTreeMap<String, String>,
+    /// The active profile name, if any (`--profile` or the SwitchProfile picker).
+    pub active_profile: Option<String>,
     finder: FuzzyFinder,
     /// Set to exit the event loop.
     pub should_quit: bool,
@@ -195,7 +211,9 @@ pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
 }
 
 impl App {
-    /// Builds the app around an optionally opened workspace and a keymap.
+    /// Builds the app around an optionally opened workspace and a keymap, with the
+    /// default theme, no CLI vars, and no active profile. Snapshot tests use this;
+    /// [`App::with_config`] wires the theme/profile/vars from config + CLI.
     pub fn new(workspace: Option<OpenWorkspace>, keymap: KeyMap) -> Result<Self> {
         let explorer = ExplorerState::new(workspace.as_ref())?;
         let (tx, rx) = mpsc::unbounded_channel();
@@ -210,7 +228,12 @@ impl App {
             picker: None,
             search_targets: Vec::new(),
             palette_actions: Vec::new(),
+            profile_choices: Vec::new(),
+            jump: None,
             keymap,
+            theme: Theme::default(),
+            cli_vars: BTreeMap::new(),
+            active_profile: None,
             finder: FuzzyFinder::new(),
             should_quit: false,
             tx,
@@ -229,6 +252,81 @@ impl App {
         })
     }
 
+    /// Builds the app from a workspace, keymap, resolved theme, CLI `--var`
+    /// overrides, and an optional `--profile`. An unknown profile name is a hard
+    /// error listing the available profiles (fail loudly — a typo'd profile would
+    /// silently send with the wrong environment otherwise).
+    pub fn with_config(
+        workspace: Option<OpenWorkspace>,
+        keymap: KeyMap,
+        theme: Theme,
+        cli_vars: BTreeMap<String, String>,
+        profile: Option<String>,
+    ) -> Result<Self> {
+        if let Some(name) = &profile {
+            let available: Vec<&str> = workspace
+                .as_ref()
+                .map(|ws| {
+                    ws.manifest()
+                        .profiles
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !available.contains(&name.as_str()) {
+                return Err(color_eyre::eyre::eyre!(
+                    "unknown profile {name:?} (available: {})",
+                    if available.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        available.join(", ")
+                    }
+                ));
+            }
+        }
+        let mut app = Self::new(workspace, keymap)?;
+        app.theme = theme;
+        app.cli_vars = cli_vars;
+        app.active_profile = profile;
+        Ok(app)
+    }
+
+    /// The variables of the active profile, empty when none is set or it has no
+    /// vars (an already-validated profile name that no longer resolves also
+    /// yields empty).
+    fn profile_vars(&self) -> BTreeMap<String, String> {
+        let Some(name) = &self.active_profile else {
+            return BTreeMap::new();
+        };
+        self.workspace
+            .as_ref()
+            .and_then(|ws| ws.manifest().profiles.iter().find(|p| &p.name == name))
+            .map(|p| p.vars.clone())
+            .unwrap_or_default()
+    }
+
+    /// The workspace-level `[vars]`, empty when there is no workspace.
+    fn workspace_vars(&self) -> BTreeMap<String, String> {
+        self.workspace
+            .as_ref()
+            .map(|ws| ws.manifest().vars.clone())
+            .unwrap_or_default()
+    }
+
+    /// Builds the template [`Resolver`] for a send of `selected`, in precedence
+    /// order: cli `--var` → active profile → the endpoint's collection
+    /// `folder.toml` vars → workspace `[vars]` → process env (implicit).
+    fn build_resolver(&mut self, selected: &SelectedEndpoint) -> Resolver {
+        let collection_vars = self.explorer.collection_vars(selected.collection);
+        Resolver::new(vec![
+            Scope::new("cli", self.cli_vars.clone()),
+            Scope::new("profile", self.profile_vars()),
+            Scope::new("collection", collection_vars),
+            Scope::new("workspace", self.workspace_vars()),
+        ])
+    }
+
     /// Installs the runtime-dependent pieces: the HTTP client (with the
     /// config-resolved timeout), the execution options (body-size cap), the
     /// off-thread highlight worker, and the history store. Called from
@@ -240,7 +338,7 @@ impl App {
         self.execute_options = ExecuteOptions {
             max_body_bytes: config.max_body_bytes(),
         };
-        self.highlight_tx = Some(highlight::spawn(self.tx.clone()));
+        self.highlight_tx = Some(highlight::spawn(self.tx.clone(), self.theme.is_light()));
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
                 Ok(store) => self.history = Some(store),
@@ -283,6 +381,10 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.mode {
             Mode::Search | Mode::Palette => self.handle_overlay_key(key),
+            Mode::Jump => {
+                self.handle_jump_key(key);
+                Ok(())
+            }
             Mode::Normal => {
                 if self.focus == Pane::Request && self.editor.mode != EditorMode::Normal {
                     // The single exception to "edtui owns non-Normal modes"
@@ -338,6 +440,8 @@ impl App {
             Action::FocusResponse => self.focus = Pane::Response,
             Action::OpenSearch => self.open_search()?,
             Action::OpenPalette => self.open_palette(),
+            Action::Jump => self.open_jump(),
+            Action::SwitchProfile => self.open_profile_picker(),
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
             Action::HalfPageDown | Action::HalfPageUp => {
@@ -406,7 +510,7 @@ impl App {
             self.status = Some("request already in flight — ctrl-c to cancel".to_owned());
             return;
         }
-        let Some(selected) = self.selected.as_ref() else {
+        let Some(selected) = self.selected.clone() else {
             self.status = Some("no endpoint selected — nothing to send".to_owned());
             return;
         };
@@ -428,13 +532,19 @@ impl App {
             None => {}
         }
 
+        // Resolve `{{var}}` placeholders on the cloned request only — the seam is
+        // `substitute_request`; resolved values are never written to disk (this
+        // clone is discarded after the send). `execute()` stays substitution-free.
+        self.build_resolver(&selected)
+            .substitute_request(&mut request);
+
         self.generation += 1;
         let generation = self.generation;
         let started = Instant::now();
         let meta = ResponseMeta {
             method: request.method.to_string(),
             url: request.url.clone(),
-            endpoint_path: self.endpoint_rel_path(selected),
+            endpoint_path: self.endpoint_rel_path(&selected),
             executed_at_ms: now_ms(),
         };
 
@@ -605,8 +715,82 @@ impl App {
         self.mode = Mode::Palette;
     }
 
+    /// Enters jump-mode, labelling the three panes and every visible explorer row.
+    fn open_jump(&mut self) {
+        // Label from the first visible row (scroll offset), not the top of the
+        // tree — in a scrolled explorer the offscreen top rows must not eat the
+        // label alphabet while the viewport goes unlabelled.
+        let first_row = self.explorer.first_visible();
+        let row_count = self.explorer.rows().len();
+        self.jump = Some(JumpState::new(first_row, row_count));
+        self.mode = Mode::Jump;
+    }
+
+    /// Cancels jump-mode, returning to normal navigation.
+    fn close_jump(&mut self) {
+        self.jump = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Handles one key in jump-mode: a label char jumps (and cancels the mode);
+    /// `Esc` or the Jump key again cancels; everything else is ignored (jump-mode
+    /// consumes all keys).
+    fn handle_jump_key(&mut self, key: KeyEvent) {
+        // Esc always cancels.
+        if key.code == KeyCode::Esc {
+            self.close_jump();
+            return;
+        }
+        let Some(jump) = &self.jump else {
+            self.close_jump();
+            return;
+        };
+        // An assigned label wins first — the default Jump key `f` also labels the
+        // first explorer row, so a label lookup must take precedence over the
+        // "Jump key again cancels" rule, or that target would be unreachable.
+        if let KeyCode::Char(c) = key.code
+            && let Some(target) = jump.target_for(c)
+        {
+            self.close_jump();
+            match target {
+                JumpTarget::Pane(pane) => self.focus = pane,
+                JumpTarget::Row(row) => {
+                    self.focus = Pane::Explorer;
+                    self.explorer.cursor = row;
+                    // An endpoint row also selects it (same as Enter).
+                    if let Ok(Some(selected)) = self.explorer.select() {
+                        self.load_endpoint(selected);
+                    }
+                }
+            }
+            return;
+        }
+        // Pressing the Jump key again cancels (when it labels no target).
+        if self.keymap.lookup(key) == Some(Action::Jump) {
+            self.close_jump();
+        }
+        // Any other non-label key is ignored; jump-mode stays open.
+    }
+
+    /// Opens the profile picker over the workspace's profile names plus a
+    /// "(none)" entry; accepting one sets the active profile.
+    fn open_profile_picker(&mut self) {
+        let mut choices: Vec<Option<String>> = vec![None];
+        let mut labels: Vec<String> = vec!["(none)".to_owned()];
+        if let Some(ws) = &self.workspace {
+            for profile in &ws.manifest().profiles {
+                choices.push(Some(profile.name.clone()));
+                labels.push(profile.name.clone());
+            }
+        }
+        self.profile_choices = choices;
+        self.picker = Some(picker::PickerState::new(" Switch profile ", labels));
+        self.mode = Mode::Palette;
+    }
+
     fn close_overlay(&mut self) {
         self.picker = None;
+        self.profile_choices.clear();
         self.mode = Mode::Normal;
     }
 
@@ -633,6 +817,8 @@ impl App {
     fn accept_overlay(&mut self) -> Result<()> {
         let mode = self.mode;
         let current = self.picker.as_ref().and_then(picker::PickerState::current);
+        // Capture the profile choices before close_overlay() clears them.
+        let profile_choices = std::mem::take(&mut self.profile_choices);
         self.close_overlay();
         let Some(index) = current else {
             return Ok(());
@@ -647,13 +833,28 @@ impl App {
                 }
             }
             Mode::Palette => {
-                if let Some(&action) = self.palette_actions.get(index) {
+                // A profile picker (profile_choices set) resolves a profile;
+                // otherwise it is the command palette resolving an action.
+                if !profile_choices.is_empty() {
+                    if let Some(choice) = profile_choices.get(index).cloned() {
+                        self.set_profile(choice);
+                    }
+                } else if let Some(&action) = self.palette_actions.get(index) {
                     self.dispatch(action, None)?;
                 }
             }
-            Mode::Normal => {}
+            Mode::Jump | Mode::Normal => {}
         }
         Ok(())
+    }
+
+    /// Sets (or clears with `None`) the active profile, updating the statusline.
+    fn set_profile(&mut self, profile: Option<String>) {
+        match &profile {
+            Some(name) => self.status = Some(format!("profile: {name}")),
+            None => self.status = Some("profile cleared".to_owned()),
+        }
+        self.active_profile = profile;
     }
 }
 
@@ -671,12 +872,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let has_ws = app.workspace.is_some();
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
+    let theme = app.theme.clone();
     explorer::render(
         frame,
         explorer_area,
         &mut app.explorer,
         explorer_focused,
         has_ws,
+        &theme,
+        app.jump.as_ref(),
     );
     let selected_request = app
         .selected
@@ -688,6 +892,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         selected_request,
         &mut app.editor,
         app.focus == Pane::Request && app.mode == Mode::Normal,
+        &theme,
+        app.jump.as_ref(),
     );
     let outcome = response::render(
         frame,
@@ -698,6 +904,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             focused: app.focus == Pane::Response && app.mode == Mode::Normal,
             scroll: app.response_scroll,
             cache: &app.highlight_cache,
+            theme: &theme,
+            jump_label: app
+                .jump
+                .as_ref()
+                .and_then(|j| j.label_for_pane(Pane::Response)),
         },
     );
     app.response_scroll = outcome.clamped_scroll;
@@ -708,13 +919,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     statusline::render(
         frame,
         status,
-        app.focus.name(),
-        app.workspace.as_ref().map(|ws| ws.manifest().name.as_str()),
-        app.status.as_deref(),
+        statusline::StatusCtx {
+            focus: app.focus.name(),
+            workspace: app.workspace.as_ref().map(|ws| ws.manifest().name.as_str()),
+            profile: app.active_profile.as_deref(),
+            message: app.status.as_deref(),
+            theme: &theme,
+        },
     );
 
     if let Some(picker_state) = &app.picker {
-        picker::render(frame, main, picker_state);
+        picker::render(frame, main, picker_state, &theme);
     }
 }
 
@@ -851,5 +1066,165 @@ mod tests {
             Some("no endpoint selected — nothing to send")
         );
         assert_eq!(String::from(app.editor.lines.clone()), "");
+    }
+
+    /// Builds a minimal workspace with one collection + endpoint and two profiles.
+    fn workspace_fixture(root: &Path) -> App {
+        std::fs::write(
+            root.join("churl.toml"),
+            "name = \"demo\"\n\n[vars]\nbase = \"ws\"\n\n[[profiles]]\nname = \"dev\"\n[profiles.vars]\nhost = \"dev.test\"\n\n[[profiles]]\nname = \"prod\"\n[profiles.vars]\nhost = \"prod.test\"\n",
+        )
+        .unwrap();
+        let coll = root.join("users");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("get.toml"),
+            "seq = 0\nname = \"Get user\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://{{host}}/users\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        App::new(ws, KeyMap::default()).unwrap()
+    }
+
+    /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.
+    #[test]
+    fn jump_label_focuses_pane() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Jump);
+        assert!(app.jump.is_some());
+        // 'd' is the Response pane label (a/s/d for the three panes).
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.jump.is_none());
+        assert_eq!(app.focus, Pane::Response);
+    }
+
+    /// A row label focuses the explorer, moves the cursor, and selects an endpoint.
+    #[test]
+    fn jump_row_label_selects_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        // Expand the collection so a leaf row is visible and labellable.
+        app.explorer.expand().unwrap();
+        assert_eq!(app.explorer.rows().len(), 2);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        // Rows follow the three pane labels a/s/d → row 0 is 'f', row 1 is 'g'.
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.explorer.cursor, 1);
+        // The endpoint row was selected and loaded.
+        assert!(app.selected.is_some());
+        assert_eq!(app.selected.as_ref().unwrap().endpoint.name, "Get user");
+    }
+
+    /// The default Jump key `f` also labels the first explorer row: the label
+    /// wins over the "Jump key again cancels" rule so that target stays reachable.
+    #[test]
+    fn jump_f_selects_first_row_not_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Jump);
+        // Row 0 is the "users" collection row → its label is `f`; pressing it
+        // focuses the explorer and toggles (expands) that collection.
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal, "f must act as a label, not cancel");
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.explorer.cursor, 0);
+        assert_eq!(app.explorer.rows().len(), 2, "collection expanded");
+    }
+
+    /// Esc cancels jump-mode without focusing anything.
+    #[test]
+    fn jump_esc_cancels() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        let before = app.focus;
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.jump.is_none());
+        assert_eq!(app.focus, before);
+    }
+
+    /// A non-label char in jump-mode is ignored; the mode stays open.
+    #[test]
+    fn jump_ignores_unknown_char() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Jump, "unknown char must not exit jump-mode");
+    }
+
+    /// `with_config` rejects an unknown profile name, listing the available ones.
+    #[test]
+    fn unknown_profile_is_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("churl.toml"),
+            "name = \"demo\"\n\n[[profiles]]\nname = \"dev\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        let result = App::with_config(
+            ws,
+            KeyMap::default(),
+            Theme::default(),
+            BTreeMap::new(),
+            Some("staging".to_owned()),
+        );
+        let msg = match result {
+            Ok(_) => panic!("expected unknown-profile error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(msg.contains("staging"), "{msg}");
+        assert!(msg.contains("dev"), "must list available: {msg}");
+    }
+
+    /// The active profile's vars beat workspace vars in the send-time resolver.
+    #[test]
+    fn resolver_precedence_profile_beats_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        // No profile: {{host}} is unresolved (workspace has no `host`), left verbatim.
+        let resolver = app.build_resolver(&selected);
+        assert_eq!(resolver.substitute("{{host}}"), "{{host}}");
+        assert_eq!(resolver.substitute("{{base}}"), "ws");
+        // With the prod profile active, {{host}} resolves from the profile.
+        app.set_profile(Some("prod".to_owned()));
+        let resolver = app.build_resolver(&selected);
+        assert_eq!(resolver.substitute("{{host}}"), "prod.test");
+    }
+
+    /// The profile picker sets (and clears) the active profile.
+    #[test]
+    fn switch_profile_picker_sets_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.dispatch(Action::SwitchProfile, None).unwrap();
+        assert_eq!(app.mode, Mode::Palette);
+        // Choices: (none), dev, prod.
+        assert_eq!(app.profile_choices.len(), 3);
+        // Select index 2 (prod).
+        if let Some(picker) = app.picker.as_mut() {
+            picker.selected = 2;
+        }
+        app.accept_overlay().unwrap();
+        assert_eq!(app.active_profile.as_deref(), Some("prod"));
+        assert!(app.profile_choices.is_empty());
     }
 }

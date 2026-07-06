@@ -41,10 +41,14 @@ crates/
                            #   Auth/ApiKeyPlacement (internally-tagged [request.auth])
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
-      persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection
-      config.rs            # global config.toml loading (incl. [keys] overrides, timeout_secs, max_body_bytes)
-                           #   + secrets heuristics (looks_like_secret_name, is_template_placeholder,
-                           #   secret_violations, auth_secret_violations)
+      persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection;
+                           #   CollectionMeta (folder.toml [vars]) load/save (M6)
+      template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
+                           #   substitute / substitute_request (M6)
+      config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
+                           #   timeout_secs, max_body_bytes) + secrets heuristics (looks_like_secret_name,
+                           #   is_template_placeholder, secret_violations incl. workspace [vars],
+                           #   collection_secret_violations, auth_secret_violations)
       history.rs           # rusqlite HistoryStore, user_version migrations
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
                            #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core);
@@ -60,14 +64,16 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive) → subcommand | TUI; #[tokio::main]
-      tui.rs               # terminal init/restore + run() entry point (thin)
+      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps) | TUI; #[tokio::main]
+      tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
-        app.rs             # App state, Pane/Mode/AppMsg, key routing, tokio::select! loop, render;
-                           #   send/cancel (AbortHandle + generation counter), history writes, highlight cache
-        events.rs          # Action enum, crokey KeyMap (+config overrides), nucleo-matcher FuzzyFinder
-        highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, returns Highlighted
-        components/        # explorer, request (edtui), response (virtualised viewer), picker, search, palette, statusline
+        app.rs             # App state, Pane/Mode (incl. Jump)/AppMsg, key routing, tokio::select! loop, render;
+                           #   send-time {{var}} resolution, profile switching, Theme; send/cancel, history, highlight cache
+        events.rs          # Action enum (+Jump/SwitchProfile), crokey KeyMap (+config overrides, iter/combos_for),
+                           #   nucleo-matcher FuzzyFinder
+        theme.rs           # Theme (named style slots) parsed from core strings; dark/light built-ins + [theme_colors]
+        highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, theme-aware, returns Highlighted
+        components/        # explorer, request (edtui), response (virtualised viewer), picker, search, palette, jump, statusline
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary

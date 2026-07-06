@@ -3,6 +3,7 @@
 //! `TestBackend` without a tokio runtime.
 
 pub mod explorer;
+pub mod jump;
 pub mod palette;
 pub mod picker;
 pub mod request;

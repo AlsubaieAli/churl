@@ -7,6 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::tui::events::FuzzyFinder;
+use crate::tui::theme::Theme;
 
 /// State of an open picker overlay.
 #[derive(Debug)]
@@ -72,7 +73,7 @@ impl PickerState {
 }
 
 /// Renders the picker as a centered modal over `area`.
-pub fn render(frame: &mut Frame, area: Rect, picker: &PickerState) {
+pub fn render(frame: &mut Frame, area: Rect, picker: &PickerState, theme: &Theme) {
     let [modal] = Layout::horizontal([Constraint::Length(50)])
         .flex(Flex::Center)
         .areas(area);
@@ -83,7 +84,9 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &PickerState) {
     frame.render_widget(Clear, modal);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
-        .title(picker.title);
+        .border_style(theme.border_focused)
+        .title(picker.title)
+        .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
@@ -105,7 +108,12 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &PickerState) {
         .take(visible)
         .map(|(pos, &item)| {
             let cursor = if pos == picker.selected { "> " } else { "  " };
-            Line::from(format!("{cursor}{}", picker.items[item]))
+            let line = Line::from(format!("{cursor}{}", picker.items[item]));
+            if pos == picker.selected {
+                line.style(theme.selection)
+            } else {
+                line
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);

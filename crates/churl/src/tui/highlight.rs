@@ -64,24 +64,29 @@ pub struct HighlightJob {
     pub lines: Vec<String>,
 }
 
-/// Spawns the highlight worker thread and returns the job sender. The worker
-/// runs until the sender is dropped or the app channel closes.
-pub fn spawn(app_tx: UnboundedSender<AppMsg>) -> Sender<HighlightJob> {
+/// Spawns the highlight worker thread and returns the job sender. `light`
+/// selects the embedded syntect theme (Nord for dark, InspiredGithub for light)
+/// so response bodies match the pane palette. The worker runs until the sender is
+/// dropped or the app channel closes.
+pub fn spawn(app_tx: UnboundedSender<AppMsg>, light: bool) -> Sender<HighlightJob> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<HighlightJob>();
     std::thread::Builder::new()
         .name("churl-highlight".to_owned())
-        .spawn(move || worker(job_rx, app_tx))
+        .spawn(move || worker(job_rx, app_tx, light))
         .expect("spawn highlight worker thread");
     job_tx
 }
 
 /// The worker loop: lazily loads the syntax/theme sets, then highlights each job.
-fn worker(jobs: Receiver<HighlightJob>, app_tx: UnboundedSender<AppMsg>) {
+fn worker(jobs: Receiver<HighlightJob>, app_tx: UnboundedSender<AppMsg>, light: bool) {
     // Lazy load inside the thread so cold start never pays for it.
     let syntax_set = two_face::syntax::extra_newlines();
-    let theme = two_face::theme::extra()
-        .get(EmbeddedThemeName::Nord)
-        .clone();
+    let theme_name = if light {
+        EmbeddedThemeName::InspiredGithub
+    } else {
+        EmbeddedThemeName::Nord
+    };
+    let theme = two_face::theme::extra().get(theme_name).clone();
     for job in jobs {
         let lines = highlight(&syntax_set, &theme, job.syntax, &job.lines);
         if app_tx
