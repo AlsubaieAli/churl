@@ -165,6 +165,8 @@ pub struct RenderCtx<'a> {
     pub theme: &'a Theme,
     /// The jump-mode label for this pane, when jump-mode is active and it fit.
     pub jump_label: Option<char>,
+    /// Monotonic tick counter for the spinner animation (tests can set to 0).
+    pub tick_count: u64,
 }
 
 /// The result of a response-pane render: a highlight job to enqueue (on a cache
@@ -224,6 +226,8 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
         }
         ResponseState::InFlight { started } => {
             let elapsed = started.elapsed().as_millis();
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+            let spinner = spinner_chars[(ctx.tick_count as usize) % spinner_chars.len()];
             frame.render_widget(
                 Paragraph::new(Line::from(format!(
                     "sending… {elapsed} ms · ctrl-c to cancel"
@@ -231,7 +235,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
                 status_area,
             );
             frame.render_widget(
-                Paragraph::new(Line::from("waiting for response…")),
+                Paragraph::new(Line::from(format!("{spinner} waiting for response…"))),
                 body_area,
             );
         }

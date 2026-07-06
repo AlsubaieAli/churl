@@ -2,11 +2,11 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┌ Explorer ────────────┐┌ Request ─────────────────┐┌ Response ────────────────┐
-│> ▸ orders            ││                          ││no response yet           │
-│  ▸ users             ││no endpoint selected      ││                          │
-│                      ││                          ││no endpoint selected      │
-│                      ││                          ││                          │
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ users                   │└────────────────────────────────────────────────┘
+│                            │┌ Request ───────────────────────────────────────┐
+│                            ││                                                │
 │              ┏ Commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
 │              ┃> █                                             ┃              │
 │              ┃> quit                                          ┃              │
@@ -14,15 +14,15 @@ expression: snapshot(&mut app)
 │              ┃  focus previous pane                           ┃              │
 │              ┃  focus explorer                                ┃              │
 │              ┃  focus request                                 ┃              │
-│              ┃  focus response                                ┃              │
-│              ┃  move up                                       ┃              │
+│              ┃  focus response                                ┃──────────────┘
+│              ┃  move up                                       ┃──────────────┐
 │              ┃  move down                                     ┃              │
 │              ┃  select / toggle                               ┃              │
 │              ┃  collapse / parent                             ┃              │
 │              ┃  expand / descend                              ┃              │
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-└──────────────────────┘└──────────────────────────┘└──────────────────────────┘
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :

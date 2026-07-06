@@ -2,27 +2,27 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
-┃    Endpoint 19       ┃│                          ││no response yet           │
-┃    Endpoint 20       ┃│no endpoint selected      ││                          │
-┃    Endpoint 21       ┃│                          ││no endpoint selected      │
-┃    Endpoint 22       ┃│                          ││                          │
-┃    Endpoint 23       ┃│                          ││                          │
-┃    Endpoint 24       ┃│                          ││                          │
-┃    Endpoint 25       ┃│                          ││                          │
-┃    Endpoint 26       ┃│                          ││                          │
-┃    Endpoint 27       ┃│                          ││                          │
-┃    Endpoint 28       ┃│                          ││                          │
-┃    Endpoint 29       ┃│                          ││                          │
-┃    Endpoint 30       ┃│                          ││                          │
-┃    Endpoint 31       ┃│                          ││                          │
-┃    Endpoint 32       ┃│                          ││                          │
-┃    Endpoint 33       ┃│                          ││                          │
-┃    Endpoint 34       ┃│                          ││                          │
-┃    Endpoint 35       ┃│                          ││                          │
-┃    Endpoint 36       ┃│                          ││                          │
-┃    Endpoint 37       ┃│                          ││                          │
-┃    Endpoint 38       ┃│                          ││                          │
-┃>   Endpoint 39       ┃│                          ││                          │
-┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
+┃    Endpoint 19             ┃│no endpoint selected                            │
+┃    Endpoint 20             ┃└────────────────────────────────────────────────┘
+┃    Endpoint 21             ┃┌ Request ───────────────────────────────────────┐
+┃    Endpoint 22             ┃│                                                │
+┃    Endpoint 23             ┃│no endpoint selected                            │
+┃    Endpoint 24             ┃│                                                │
+┃    Endpoint 25             ┃│                                                │
+┃    Endpoint 26             ┃│                                                │
+┃    Endpoint 27             ┃│                                                │
+┃    Endpoint 28             ┃│                                                │
+┃    Endpoint 29             ┃│                                                │
+┃    Endpoint 30             ┃└────────────────────────────────────────────────┘
+┃    Endpoint 31             ┃┌ Response ──────────────────────────────────────┐
+┃    Endpoint 32             ┃│no response yet                                 │
+┃    Endpoint 33             ┃│                                                │
+┃    Endpoint 34             ┃│no endpoint selected                            │
+┃    Endpoint 35             ┃│                                                │
+┃    Endpoint 36             ┃│                                                │
+┃    Endpoint 37             ┃│                                                │
+┃    Endpoint 38             ┃│                                                │
+┃>   Endpoint 39             ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
  EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :

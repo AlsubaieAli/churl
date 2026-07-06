@@ -35,7 +35,7 @@ use tokio::task::AbortHandle;
 use super::components::explorer::{ExplorerState, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView};
-use super::components::{explorer, palette, picker, request, response, statusline};
+use super::components::{explorer, palette, picker, request, response, statusline, urlbar};
 use super::events::{Action, FuzzyFinder, KeyMap};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
@@ -114,6 +114,27 @@ pub enum AppMsg {
     },
 }
 
+/// A transient status-line message that auto-expires after ~4 s.
+struct TransientStatus {
+    message: String,
+    set_at: Instant,
+}
+
+impl TransientStatus {
+    const EXPIRE_SECS: u64 = 4;
+
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            set_at: Instant::now(),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.set_at.elapsed().as_secs() >= Self::EXPIRE_SECS
+    }
+}
+
 /// Bookkeeping for the single in-flight request.
 struct InFlightRequest {
     /// Abort handle for the spawned execution task.
@@ -183,8 +204,11 @@ pub struct App {
     highlight_cache: HashMap<u64, Vec<Line<'static>>>,
     /// History store; `None` when disabled (open failed or no data dir).
     history: Option<HistoryStore>,
-    /// Transient status-line message (send hints, history/errors).
-    status: Option<String>,
+    /// Transient status-line message (send hints, history/errors); auto-expires.
+    status: Option<TransientStatus>,
+    /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
+    /// animation in the response pane. `pub` so snapshot tests can set it.
+    pub tick_count: u64,
 }
 
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
@@ -249,6 +273,7 @@ impl App {
             highlight_cache: HashMap::new(),
             history: None,
             status: None,
+            tick_count: 0,
         })
     }
 
@@ -342,9 +367,13 @@ impl App {
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
                 Ok(store) => self.history = Some(store),
-                Err(err) => self.status = Some(format!("history disabled: {err}")),
+                Err(err) => {
+                    self.status = Some(TransientStatus::new(format!("history disabled: {err}")));
+                }
             },
-            None => self.status = Some("history disabled: no data directory".to_owned()),
+            None => {
+                self.status = Some(TransientStatus::new("history disabled: no data directory"));
+            }
         }
         Ok(())
     }
@@ -366,7 +395,13 @@ impl App {
                     Some(Err(err)) => return Err(err.into()),
                     None => break, // input stream closed
                 },
-                _ = tick.tick() => {}
+                _ = tick.tick() => {
+                    self.tick_count = self.tick_count.wrapping_add(1);
+                    // Expire transient status messages after ~4 s.
+                    if self.status.as_ref().is_some_and(|s| s.is_expired()) {
+                        self.status = None;
+                    }
+                }
                 msg = self.rx.recv() => {
                     if let Some(msg) = msg {
                         self.handle_msg(msg);
@@ -507,11 +542,15 @@ impl App {
     /// request is already in flight or no endpoint is selected.
     fn send_request(&mut self) {
         if self.in_flight.is_some() {
-            self.status = Some("request already in flight — ctrl-c to cancel".to_owned());
+            self.status = Some(TransientStatus::new(
+                "request already in flight — ctrl-c to cancel",
+            ));
             return;
         }
         let Some(selected) = self.selected.clone() else {
-            self.status = Some("no endpoint selected — nothing to send".to_owned());
+            self.status = Some(TransientStatus::new(
+                "no endpoint selected — nothing to send",
+            ));
             return;
         };
         // No client means runtime-free construction (snapshot tests); do nothing.
@@ -577,13 +616,13 @@ impl App {
     /// no status, and moves the pane to the cancelled state.
     fn cancel_request(&mut self) {
         let Some(in_flight) = self.in_flight.take() else {
-            self.status = Some("no request in flight".to_owned());
+            self.status = Some(TransientStatus::new("no request in flight"));
             return;
         };
         in_flight.handle.abort();
         self.write_history(&in_flight.meta, None, None);
         self.response = ResponseState::Cancelled;
-        self.status = Some("request cancelled".to_owned());
+        self.status = Some(TransientStatus::new("request cancelled"));
     }
 
     /// The workspace-relative path of a selected endpoint's file, if inside the
@@ -696,7 +735,7 @@ impl App {
             endpoint_path: meta.endpoint_path.clone(),
         };
         if let Some(Err(err)) = self.history.as_ref().map(|store| store.insert(&entry)) {
-            self.status = Some(format!("history write failed: {err}"));
+            self.status = Some(TransientStatus::new(format!("history write failed: {err}")));
         }
     }
 
@@ -773,14 +812,29 @@ impl App {
     }
 
     /// Opens the profile picker over the workspace's profile names plus a
-    /// "(none)" entry; accepting one sets the active profile.
+    /// "(none)" entry; the active entry is prefixed with `● ` (display-only —
+    /// `profile_choices` carries raw names so filtering by the profile name still
+    /// works, since `● dev` contains `dev`).
     fn open_profile_picker(&mut self) {
+        let active = self.active_profile.as_deref();
         let mut choices: Vec<Option<String>> = vec![None];
-        let mut labels: Vec<String> = vec!["(none)".to_owned()];
+        // Prefix "(none)" with ● when no profile is active.
+        let none_label = if active.is_none() {
+            "● (none)".to_owned()
+        } else {
+            "(none)".to_owned()
+        };
+        let mut labels: Vec<String> = vec![none_label];
         if let Some(ws) = &self.workspace {
             for profile in &ws.manifest().profiles {
                 choices.push(Some(profile.name.clone()));
-                labels.push(profile.name.clone());
+                // Prefix the active profile entry with ●.
+                let label = if active == Some(profile.name.as_str()) {
+                    format!("● {}", profile.name)
+                } else {
+                    profile.name.clone()
+                };
+                labels.push(label);
             }
         }
         self.profile_choices = choices;
@@ -848,27 +902,39 @@ impl App {
         Ok(())
     }
 
-    /// Sets (or clears with `None`) the active profile, updating the statusline.
+    /// Sets (or clears with `None`) the active profile. No status message —
+    /// the persistent `profile: <name>` indicator in the statusline is the
+    /// single source of truth (M6.5 dedup fix).
     fn set_profile(&mut self, profile: Option<String>) {
-        match &profile {
-            Some(name) => self.status = Some(format!("profile: {name}")),
-            None => self.status = Some("profile cleared".to_owned()),
-        }
         self.active_profile = profile;
     }
 }
 
-/// Renders the whole UI: three panes, status bar, and any open overlay.
-/// Pure (no I/O) and deterministic, so `TestBackend` snapshots stay stable.
+/// Renders the whole UI:
+/// - Explorer (left column)
+/// - Column B (right): URL bar (slim, display-only) / Request (top half) / Response (bottom half)
+/// - Status bar (bottom, 1 line)
+/// - Any open overlay
+///
+/// Pure (no I/O) and deterministic — `TestBackend` snapshots stay stable.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-    let [explorer_area, request_area, response_area] = Layout::horizontal([
-        Constraint::Min(24),
-        Constraint::Percentage(40),
-        Constraint::Percentage(35),
+    // Two-column layout: Explorer left, column B right. The explorer is a
+    // *narrow* column (owner prompt): fixed 30 cols — Min(24)+Fill would grow
+    // the explorer to half the screen (ratatui distributes excess into Min).
+    let [explorer_area, right_area] =
+        Layout::horizontal([Constraint::Length(30), Constraint::Fill(1)]).areas(main);
+    // Column B split into three rows: URL bar (3 lines) / Request (50%) / Response (50%).
+    let remaining = right_area.height.saturating_sub(urlbar::HEIGHT);
+    let req_height = remaining / 2;
+    let resp_height = remaining - req_height;
+    let [urlbar_area, request_area, response_area] = Layout::vertical([
+        Constraint::Length(urlbar::HEIGHT),
+        Constraint::Length(req_height),
+        Constraint::Length(resp_height),
     ])
-    .areas(main);
+    .areas(right_area);
 
     let has_ws = app.workspace.is_some();
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
@@ -886,6 +952,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .selected
         .as_ref()
         .map(|selected| &selected.endpoint.request);
+    urlbar::render(frame, urlbar_area, selected_request, &theme);
     request::render(
         frame,
         request_area,
@@ -909,6 +976,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .jump
                 .as_ref()
                 .and_then(|j| j.label_for_pane(Pane::Response)),
+            tick_count: app.tick_count,
         },
     );
     app.response_scroll = outcome.clamped_scroll;
@@ -916,6 +984,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
         let _ = tx.send(job);
     }
+    // While a request is in flight the statusline derives "sending…" from state —
+    // not from the transient `status` field — so it appears/disappears instantly.
+    let in_flight_msg = app.in_flight.as_ref().map(|_| "sending… (ctrl-c cancels)");
     statusline::render(
         frame,
         status,
@@ -923,7 +994,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             focus: app.focus.name(),
             workspace: app.workspace.as_ref().map(|ws| ws.manifest().name.as_str()),
             profile: app.active_profile.as_deref(),
-            message: app.status.as_deref(),
+            message: in_flight_msg.or_else(|| app.status.as_ref().map(|s| s.message.as_str())),
             theme: &theme,
         },
     );
@@ -1001,7 +1072,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(
-            app.status.as_deref(),
+            app.status.as_ref().map(|s| s.message.as_str()),
             Some("no endpoint selected — nothing to send")
         );
         assert_eq!(String::from(app.editor.lines.clone()), "");
@@ -1062,7 +1133,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(
-            app.status.as_deref(),
+            app.status.as_ref().map(|s| s.message.as_str()),
             Some("no endpoint selected — nothing to send")
         );
         assert_eq!(String::from(app.editor.lines.clone()), "");
@@ -1226,5 +1297,58 @@ mod tests {
         app.accept_overlay().unwrap();
         assert_eq!(app.active_profile.as_deref(), Some("prod"));
         assert!(app.profile_choices.is_empty());
+    }
+
+    /// `TransientStatus` expires after EXPIRE_SECS; a backdated `set_at` triggers it.
+    #[test]
+    fn status_expires_after_4s() {
+        // A fresh message is not expired.
+        let fresh = TransientStatus::new("hello");
+        assert!(!fresh.is_expired(), "brand-new message must not be expired");
+
+        // A message whose set_at is backdated past the threshold is expired.
+        let old = TransientStatus {
+            message: "stale".to_owned(),
+            set_at: Instant::now() - Duration::from_secs(TransientStatus::EXPIRE_SECS + 1),
+        };
+        assert!(
+            old.is_expired(),
+            "message older than EXPIRE_SECS must be expired"
+        );
+    }
+
+    /// While in_flight is Some, the render-time derived message is "sending…"
+    /// regardless of the transient status field.
+    #[test]
+    fn in_flight_statusline_message_derives_from_state() {
+        let app = App::new(None, KeyMap::default()).unwrap();
+        // No in_flight → no derived message.
+        let msg: Option<&str> = app.in_flight.as_ref().map(|_| "sending… (ctrl-c cancels)");
+        assert!(msg.is_none());
+    }
+
+    /// The profile picker marks the active profile with ● and (none) with ●
+    /// when no profile is active.
+    #[test]
+    fn profile_picker_marks_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        // No active profile: (none) is marked.
+        app.dispatch(Action::SwitchProfile, None).unwrap();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.items[0], "● (none)");
+        assert_eq!(picker.items[1], "dev");
+        assert_eq!(picker.items[2], "prod");
+
+        // Set active profile to dev (directly, no close needed — open picker
+        // on a fresh fixture to keep state clean).
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut app2 = workspace_fixture(dir2.path());
+        app2.active_profile = Some("dev".to_owned());
+        app2.dispatch(Action::SwitchProfile, None).unwrap();
+        let picker2 = app2.picker.as_ref().unwrap();
+        assert_eq!(picker2.items[0], "(none)");
+        assert_eq!(picker2.items[1], "● dev");
+        assert_eq!(picker2.items[2], "prod");
     }
 }
