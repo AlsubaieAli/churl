@@ -231,7 +231,10 @@
 - Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
-- GitHub release action (tag-triggered)
+- GitHub release action (tag-triggered), building per-platform binaries: macOS arm64 + x86_64, Linux x86_64 **musl static** + aarch64, Windows x86_64 (owner requirement 2026-07-06: installable without Rust — rustls + bundled SQLite already make the binary self-contained)
+- **`curl | sh` installer** (owner request 2026-07-06): `install.sh` in the repo, served via the release — detects OS/arch, downloads the matching release binary, installs to `~/.local/bin` (prompting/`--to` for override). `cargo install churl` remains the Rust-user path
+- **`?` help overlay** (owner request 2026-07-06): in-app overlay rendering the effective keymap (reuses M6's `KeyMap::iter` — the `churl keymaps` output as an overlay)
+- **`churl tutorial` onboarding** (owner request 2026-07-06): scaffolds a demo workspace (commented `churl.toml` with a profile + vars, one collection with `folder.toml`, an example endpoint against a public echo API) so a first-time user sends a request in under a minute; README quickstart mirrors it
 
 **Next**: ship 0.1, then M8
 
