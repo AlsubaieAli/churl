@@ -4,10 +4,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use churl::tui::app::{App, Pane, open_workspace, render};
+use churl::tui::app::{App, ConfirmPurpose, Mode, Pane, open_workspace, render};
+use churl::tui::components::line_editor::LineEditor;
 use churl::tui::components::response::{ResponseMeta, ResponseState, ResponseView};
-use churl::tui::events::KeyMap;
-use churl_core::model::{Header, Response, Timing};
+use churl::tui::events::{Action, KeyMap};
+use churl_core::model::{ApiKeyPlacement, Auth, Header, Response, Timing};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -148,6 +149,10 @@ fn request_pane_auth_line_placeholder_shown_verbatim() {
     press(&mut app, KeyCode::Enter); // expand "private"
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Enter); // select "Private report"
+    // Focus the Request pane and switch to the Auth tab (tab 3) to see the auth
+    // fields; the {{password}} placeholder must render verbatim.
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('3'));
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
@@ -173,6 +178,10 @@ fn request_pane_auth_line_masks_literal_secret() {
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Enter);
+    // Switch to the Auth tab so the api-key value is on screen — it must be
+    // masked (the name X-Api-Key looks secret), never the literal.
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('3'));
     let rendered = snapshot(&mut app);
     assert!(
         !rendered.contains("abc123-literal"),
@@ -371,4 +380,603 @@ fn url_bar_shows_indicators_for_auth_and_placeholders() {
         "URL bar must show auth indicator: {rendered}"
     );
     insta::assert_snapshot!(rendered);
+}
+
+// ---- M6.6: URL bar, tabs, CRUD ----
+
+/// Loads the first endpoint of the fixture's `users` collection into `app`.
+fn load_first_users_endpoint(app: &mut App) {
+    // orders (collapsed) at row 0, users at row 1.
+    press(app, KeyCode::Char('j')); // onto users
+    press(app, KeyCode::Enter); // expand
+    press(app, KeyCode::Char('j')); // List users
+    press(app, KeyCode::Enter); // select
+}
+
+#[test]
+fn url_bar_focused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::UrlBar;
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn url_bar_editing_inline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i')); // begin edit
+    type_str(&mut app, "/extra");
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn url_bar_dirty_dot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::UrlBar;
+    // Edit and commit the URL → dirty.
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "X");
+    press(&mut app, KeyCode::Enter);
+    let rendered = snapshot(&mut app);
+    assert!(rendered.contains('●'), "dirty dot must show: {rendered}");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn request_tab_params() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("api");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("search.toml"),
+        concat!(
+            "seq = 0\nname = \"Search\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://api.test/search\"\n\n[[request.params]]\nname = \"q\"\n",
+            "value = \"rust\"\n\n[[request.params]]\nname = \"page\"\nvalue = \"1\"\nenabled = false\n",
+        ),
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    app.focus = Pane::Request; // Params is the default tab
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn request_tab_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    // "Create user" has a Content-Type header + JSON body.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // Create user
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('2')); // Headers tab
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn request_tab_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // Create user (JSON body)
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('4')); // Body tab
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn method_menu_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::UrlBar;
+    // Shift-M opens the method menu (crossterm reports 'M' + SHIFT).
+    app.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn prompt_new_endpoint_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('j')); // onto users collection
+    press(&mut app, KeyCode::Char('n')); // new endpoint prompt
+    type_str(&mut app, "Update user");
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn confirm_delete_endpoint_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    press(&mut app, KeyCode::Char('d')); // delete confirm (endpoint selected)
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn confirm_discard_changes_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    // Make it dirty, then try to switch to another endpoint.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "X");
+    press(&mut app, KeyCode::Enter);
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Char('j')); // onto another endpoint
+    press(&mut app, KeyCode::Enter); // triggers discard-changes confirm
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn palette_lists_curated_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(':'));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// Every curated palette command dispatches to a non-no-op path: with no
+/// endpoint/collection selected, CRUD/send commands surface a statusline error;
+/// focus commands move focus; SwitchProfile opens its picker; Quit quits.
+#[test]
+fn every_palette_command_dispatches() {
+    use churl::tui::components::palette;
+    // An empty app (no workspace) — CRUD/send have no context, so they must warn.
+    for (index, (label, action)) in palette::COMMANDS.iter().enumerate() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        press(&mut app, KeyCode::Char(':'));
+        if let Some(picker) = app.picker.as_mut() {
+            picker.selected = index;
+        }
+        // Accept via Enter → dispatch.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Assert the documented non-no-op effect per command.
+        let expect_status = |app: &mut App, msg: &str| {
+            let rendered = snapshot(app);
+            assert!(
+                rendered.contains(msg),
+                "{label:?} must surface {msg:?} on the statusline:\n{rendered}"
+            );
+        };
+        match action {
+            Action::Send => expect_status(&mut app, "no endpoint selected"),
+            Action::Cancel => expect_status(&mut app, "no request in flight"),
+            Action::Save => expect_status(&mut app, "no endpoint to save"),
+            Action::NewEndpoint => expect_status(&mut app, "select a collection first"),
+            Action::NewCollection => expect_status(&mut app, "no workspace open"),
+            Action::Rename => expect_status(&mut app, "nothing selected to rename"),
+            Action::Delete => expect_status(&mut app, "nothing selected to delete"),
+            Action::SwitchProfile => {
+                assert_eq!(app.mode, Mode::Palette, "{label:?} must open the picker");
+                assert!(app.picker.is_some());
+            }
+            Action::FocusExplorer => assert_eq!(app.focus, Pane::Explorer),
+            Action::FocusUrlBar => assert_eq!(app.focus, Pane::UrlBar),
+            Action::FocusRequest => assert_eq!(app.focus, Pane::Request),
+            Action::FocusResponse => assert_eq!(app.focus, Pane::Response),
+            Action::Quit => assert!(app.should_quit, "{label:?} must quit"),
+            other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
+        }
+    }
+}
+
+/// URL edit round-trip: focus the bar, edit, commit, save (`w`), and the file on
+/// disk carries the new URL (format-preserving).
+#[test]
+fn url_edit_commit_save_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    let file = dir.path().join("users").join("list.toml");
+    let before = std::fs::read_to_string(&file).unwrap();
+    assert!(before.contains("https://api.test/users"));
+
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "/active");
+    press(&mut app, KeyCode::Enter); // commit
+    // Save with `w`.
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("https://api.test/users/active"),
+        "url must be saved: {after}"
+    );
+    // The seq/name lines survive (format-preserving merge).
+    assert!(after.contains("name = \"List users\""), "{after}");
+}
+
+/// Adding a param via the tab UI and saving writes it as an array-of-tables;
+/// toggling `enabled` off serializes `enabled = false` (true is omitted).
+#[test]
+fn row_add_and_toggle_serialize() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    let file = dir.path().join("users").join("list.toml");
+
+    app.focus = Pane::Request; // Params tab
+    press(&mut app, KeyCode::Char('a')); // add row (enters name edit)
+    type_str(&mut app, "limit");
+    press(&mut app, KeyCode::Enter); // name → value
+    type_str(&mut app, "10");
+    press(&mut app, KeyCode::Enter); // commit row
+    // Toggle it disabled.
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(after.contains("[[request.params]]"), "{after}");
+    assert!(after.contains("name = \"limit\""), "{after}");
+    assert!(after.contains("value = \"10\""), "{after}");
+    assert!(
+        after.contains("enabled = false"),
+        "disabled must serialize: {after}"
+    );
+}
+
+/// Discarding changes drops the edits and switches to the other endpoint.
+#[test]
+fn discard_changes_switches_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    // Dirty the URL.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    // Switch to another endpoint → discard confirm.
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Char('j')); // onto "Create user"
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    // 'd' discards.
+    press(&mut app, KeyCode::Char('d'));
+    // The endpoint actually switched…
+    assert_eq!(app.mode, Mode::Normal);
+    let selected = app.selected.as_ref().expect("an endpoint is loaded");
+    assert!(
+        selected.file.ends_with("users/create.toml"),
+        "must have switched to Create user, got {:?}",
+        selected.file
+    );
+    assert!(
+        !selected.endpoint.request.url.contains("ZZZ"),
+        "discarded edit must not leak into the new endpoint"
+    );
+    // …and the list.toml file was never written.
+    let file = dir.path().join("users").join("list.toml");
+    let contents = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        !contents.contains("ZZZ"),
+        "discarded edit must not persist: {contents}"
+    );
+}
+
+/// Review #2a: switching endpoints via the *search overlay* while dirty must
+/// raise the same discard-changes confirm as the explorer path — never a
+/// silent discard.
+#[test]
+fn search_switch_while_dirty_is_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    // Dirty the URL.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    // Search for "Get user" and accept.
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "get us");
+    press(&mut app, KeyCode::Enter);
+    // Guard must fire; nothing switched yet.
+    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(
+        app.selected.as_ref().unwrap().file.ends_with("list.toml"),
+        "still on List users while the confirm is open"
+    );
+    // Discard → the search target loads.
+    press(&mut app, KeyCode::Char('d'));
+    assert!(
+        app.selected
+            .as_ref()
+            .unwrap()
+            .file
+            .ends_with("users/get.toml"),
+        "search target must load after discard, got {:?}",
+        app.selected.as_ref().unwrap().file
+    );
+    let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
+    assert!(!contents.contains("ZZZ"), "edit must not persist");
+}
+
+/// Review #2b: switching endpoints via a *jump-mode row label* while dirty must
+/// raise the confirm; `s` saves the edits to disk, then switches.
+#[test]
+fn jump_switch_while_dirty_guards_and_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users (row 2)
+    // A saveable dirty edit.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "/active");
+    press(&mut app, KeyCode::Enter);
+    // Jump to the "Create user" row: panes take a/s/d/f, rows g/h/j/k/… from
+    // row 0 → row 3 (Create user) is 'k'.
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges),
+        "jump-mode endpoint switch must be guarded while dirty"
+    );
+    // Save-then-switch.
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(
+        app.selected
+            .as_ref()
+            .unwrap()
+            .file
+            .ends_with("users/create.toml"),
+        "must switch after a successful save, got {:?}",
+        app.selected.as_ref().unwrap().file
+    );
+    let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
+    assert!(
+        contents.contains("https://api.test/users/active"),
+        "the edit must be saved before switching: {contents}"
+    );
+}
+
+/// Review #3: `s` (save-then-switch) with a save that *fails* (literal secret
+/// auth is refused) must stay on the same endpoint with the edits intact and
+/// the error visible — never destroy the unsaved edits it just refused to write.
+#[test]
+fn save_failure_blocks_discard_changes_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    // A dirty edit that cannot be saved: literal bearer token.
+    app.selected.as_mut().unwrap().endpoint.request.auth = Some(Auth::Bearer {
+        token: "ghp_literal_secret".to_owned(),
+    });
+    // Attempt to switch → confirm → 's'.
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Char('j')); // onto "Create user"
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    press(&mut app, KeyCode::Char('s'));
+    // Still on the same endpoint, still dirty, error on the statusline.
+    assert_eq!(app.mode, Mode::Normal);
+    let selected = app.selected.as_ref().expect("endpoint still loaded");
+    assert!(
+        selected.file.ends_with("users/list.toml"),
+        "must NOT switch when the save failed, got {:?}",
+        selected.file
+    );
+    assert!(
+        matches!(&selected.endpoint.request.auth, Some(Auth::Bearer { token }) if token == "ghp_literal_secret"),
+        "the unsaved edit must survive"
+    );
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("not saved"),
+        "the refusal must be visible on the statusline:\n{rendered}"
+    );
+    assert!(rendered.contains('●'), "still dirty: {rendered}");
+    // The file was never written.
+    let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
+    assert!(
+        !contents.contains("auth"),
+        "refused save must not write: {contents}"
+    );
+}
+
+/// Review #5: renaming the collection that contains the loaded endpoint must
+/// repoint `selected.file` into the new directory — the next save must land in
+/// the renamed collection, not fail NotFound.
+#[test]
+fn rename_collection_repoints_loaded_endpoint_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // users/list.toml
+    // Dirty the URL so the follow-up save is observable.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "/renamed-home");
+    press(&mut app, KeyCode::Enter);
+    // Rename the "users" collection (cursor onto its row first).
+    app.focus = Pane::Explorer;
+    app.explorer.cursor = 1; // orders(0), users(1)
+    press(&mut app, KeyCode::Char('r'));
+    app.prompt_editor = LineEditor::new("members");
+    press(&mut app, KeyCode::Enter);
+    // The loaded endpoint's file now points into the renamed directory.
+    let selected_file = app.selected.as_ref().unwrap().file.clone();
+    assert!(
+        selected_file.ends_with("members/list.toml"),
+        "selected.file must follow the renamed collection, got {selected_file:?}"
+    );
+    assert!(selected_file.exists());
+    // And a save works (would previously fail NotFound on the old path).
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+    let contents = std::fs::read_to_string(dir.path().join("members").join("list.toml")).unwrap();
+    assert!(
+        contents.contains("https://api.test/users/renamed-home"),
+        "save must land in the renamed collection: {contents}"
+    );
+}
+
+/// Review #6: Enter on the ApiKey placement row toggles header/query, same as
+/// Space (design: "placement row toggles with Space/Enter").
+#[test]
+fn placement_row_enter_toggles() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("api");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("things.toml"),
+        concat!(
+            "seq = 0\nname = \"Things\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://api.test/things\"\n\n[request.auth]\ntype = \"apikey\"\n",
+            "name = \"X-Api-Key\"\nvalue = \"{{api_key}}\"\n",
+        ),
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // select Things
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('3')); // Auth tab
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j')); // down to the placement row (3)
+    }
+    let placement = |app: &App| match &app.selected.as_ref().unwrap().endpoint.request.auth {
+        Some(Auth::ApiKey { placement, .. }) => *placement,
+        other => panic!("expected apikey auth, got {other:?}"),
+    };
+    assert_eq!(placement(&app), ApiKeyPlacement::Header);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(placement(&app), ApiKeyPlacement::Query, "Enter must toggle");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(placement(&app), ApiKeyPlacement::Header, "…both ways");
+}
+
+/// Review #7: creating a new endpoint while the loaded one is dirty goes
+/// through the guarded seam — the confirm appears instead of a silent discard;
+/// Esc stays put with the edits intact (the file is created on disk either way).
+#[test]
+fn new_endpoint_while_dirty_is_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // users/list.toml
+    // Dirty the URL.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    // New endpoint under "users" (cursor is on the List users endpoint row,
+    // whose owning collection is "users").
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Char('n'));
+    type_str(&mut app, "Fresh One");
+    press(&mut app, KeyCode::Enter);
+    // The file exists, but the load is deferred behind the confirm.
+    assert!(dir.path().join("users").join("fresh-one.toml").exists());
+    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    // Esc: stay on the dirty endpoint, edits intact.
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal);
+    let selected = app.selected.as_ref().unwrap();
+    assert!(selected.file.ends_with("users/list.toml"), "must stay put");
+    assert!(
+        selected.endpoint.request.url.contains("ZZZ"),
+        "edits must survive Esc"
+    );
+}
+
+/// Review #8: `a`(dd row) followed by Esc must not leave a nameless ghost row;
+/// a row whose name was committed survives an Esc during the value edit.
+#[test]
+fn ghost_row_removed_on_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // no params
+    app.focus = Pane::Request; // Params tab
+    // a + Esc → no ghost row.
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Esc);
+    assert!(
+        app.selected
+            .as_ref()
+            .unwrap()
+            .endpoint
+            .request
+            .params
+            .is_empty(),
+        "cancelled add must remove the empty row"
+    );
+    // a + name + Enter + Esc on the value → the row is kept (named).
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "limit");
+    press(&mut app, KeyCode::Enter); // commit name → value edit
+    press(&mut app, KeyCode::Esc); // cancel the value edit only
+    let params = &app.selected.as_ref().unwrap().endpoint.request.params;
+    assert_eq!(params.len(), 1, "a named row must survive Esc");
+    assert_eq!(params[0].name, "limit");
+    assert_eq!(params[0].value, "");
+}
+
+/// Reselecting the currently-loaded endpoint while dirty must not silently
+/// revert it from disk (one-keystroke data loss); a collection row still
+/// toggles while dirty.
+#[test]
+fn reselect_same_endpoint_while_dirty_keeps_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // cursor stays on the List users row
+    // Dirty the URL.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    // Enter on the same endpoint row: no confirm, no reload.
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.mode,
+        Mode::Normal,
+        "same-endpoint reselect needs no confirm"
+    );
+    let selected = app.selected.as_ref().unwrap();
+    assert!(
+        selected.endpoint.request.url.contains("ZZZ"),
+        "edits must survive"
+    );
+    // A collection row still toggles while dirty (no guard, no data loss).
+    press(&mut app, KeyCode::Char('k')); // up onto the users collection row
+    press(&mut app, KeyCode::Enter); // collapse
+    press(&mut app, KeyCode::Enter); // expand
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(
+        app.selected
+            .as_ref()
+            .unwrap()
+            .endpoint
+            .request
+            .url
+            .contains("ZZZ")
+    );
 }

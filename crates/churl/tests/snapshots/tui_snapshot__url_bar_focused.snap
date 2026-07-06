@@ -2,12 +2,12 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┌ Explorer [a] ──────────────┐┌ URL [s] ───────────────────────────────────────┐
-│g ▸ orders                  ││no endpoint selected                            │
-│h ▾ users                   │└────────────────────────────────────────────────┘
-│j   List users              │┌ Request [d] ───────────────────────────────────┐
-│k   Create user             ││                                                │
-│l   Get user                ││no endpoint selected                            │
+┌ Explorer ──────────────────┐┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  ▸ orders                  │┃GET  https://api.test/users                     ┃
+│  ▾ users                   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│>   List users              │┌ Request ───────────────────────────────────────┐
+│    Create user             ││ Params(0)   Headers(0)   Auth   Body           │
+│    Get user                ││  (no params — a to add)                        │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
@@ -15,14 +15,14 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┌ Response [f] ──────────────────────────────────┐
+│                            │┌ Response ──────────────────────────────────────┐
 │                            ││no response yet                                 │
+│                            ││GET https://api.test/users                      │
 │                            ││                                                │
-│                            ││no endpoint selected                            │
-│                            ││                                                │
+│                            ││press ctrl-s to send                            │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- EXPLORER · demo · j/k move · enter select · ctrl-s send · w save · f jump · / s
+ URL · demo · j/k move · enter select · ctrl-s send · w save · f jump · / search

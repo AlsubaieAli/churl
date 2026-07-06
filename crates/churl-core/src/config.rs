@@ -55,8 +55,24 @@ pub struct Config {
     /// action name (e.g. `"ctrl-p" = "open-palette"`). Core carries only strings;
     /// the TUI layer parses combinations and action names and rejects unknown
     /// entries loudly at startup.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ///
+    /// Nested sub-tables under `[keys]` (e.g. `[keys.request]`) are split out into
+    /// [`Config::key_overlays`] by [`Config::split_key_overlays`] after load so
+    /// this stays a flat string→string map. The raw `[keys]` table (which may mix
+    /// flat scalars and sub-tables) deserializes into [`Config::raw_keys`] first.
+    #[serde(skip)]
     pub keys: BTreeMap<String, String>,
+    /// Per-pane keymap overlay tables: `[keys.explorer]`, `[keys.urlbar]`,
+    /// `[keys.request]`, `[keys.response]` — each a `combo → action` map. Split
+    /// from the raw `[keys]` table after load; the TUI layer layers these over the
+    /// pane-context overlays and fails loudly on an unknown table/combo/action.
+    #[serde(skip)]
+    pub key_overlays: BTreeMap<String, BTreeMap<String, String>>,
+    /// The raw `[keys]` table as parsed from TOML: values are either a flat action
+    /// string or a nested overlay table. [`Config::split_key_overlays`] partitions
+    /// it into [`Config::keys`] + [`Config::key_overlays`].
+    #[serde(default, rename = "keys", skip_serializing)]
+    pub raw_keys: BTreeMap<String, KeyEntry>,
     /// Response body-size cap in bytes; `None` means the 10 MB default
     /// ([`crate::http::DEFAULT_MAX_BODY_BYTES`]). Resolved via [`Config::max_body_bytes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +83,36 @@ pub struct Config {
     pub timeout_secs: Option<u64>,
 }
 
+/// One entry in the raw `[keys]` TOML table: either a flat `combo = "action"`
+/// binding, or a nested per-pane overlay sub-table (`[keys.request]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum KeyEntry {
+    /// A flat global binding: the action name string.
+    Action(String),
+    /// A nested overlay table: `combo → action` for one pane context.
+    Overlay(BTreeMap<String, String>),
+}
+
 impl Config {
+    /// Partitions [`Config::raw_keys`] into the flat [`Config::keys`] map and the
+    /// nested [`Config::key_overlays`] tables. Called by [`load_config`] after
+    /// deserialization; idempotent.
+    fn split_key_overlays(&mut self) {
+        self.keys.clear();
+        self.key_overlays.clear();
+        for (name, entry) in &self.raw_keys {
+            match entry {
+                KeyEntry::Action(action) => {
+                    self.keys.insert(name.clone(), action.clone());
+                }
+                KeyEntry::Overlay(table) => {
+                    self.key_overlays.insert(name.clone(), table.clone());
+                }
+            }
+        }
+    }
+
     /// The resolved response body-size cap: `max_body_bytes`, or the 10 MB default.
     pub fn max_body_bytes(&self) -> u64 {
         self.max_body_bytes
@@ -101,10 +146,12 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
             });
         }
     };
-    toml_edit::de::from_str(&text).map_err(|err| ConfigError::Parse {
+    let mut config: Config = toml_edit::de::from_str(&text).map_err(|err| ConfigError::Parse {
         path: path.to_owned(),
         source: err,
-    })
+    })?;
+    config.split_key_overlays();
+    Ok(config)
 }
 
 /// Loads the global config from [`global_config_path`]. Yields [`Config::default`]
@@ -271,6 +318,49 @@ mod tests {
         assert_eq!(
             config.theme_colors.get("selection").map(String::as_str),
             Some("#112233")
+        );
+    }
+
+    #[test]
+    fn config_splits_keys_overlays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            concat!(
+                "[keys]\nq = \"quit\"\n\"ctrl-p\" = \"open-palette\"\n\n",
+                "[keys.request]\n\"]\" = \"tab-next\"\n\n",
+                "[keys.explorer]\nn = \"new-endpoint\"\n",
+            ),
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        // Flat bindings land in `keys`.
+        assert_eq!(config.keys.get("q").map(String::as_str), Some("quit"));
+        assert_eq!(
+            config.keys.get("ctrl-p").map(String::as_str),
+            Some("open-palette")
+        );
+        // Nested tables land in `key_overlays`, keyed by pane name.
+        assert_eq!(
+            config
+                .key_overlays
+                .get("request")
+                .and_then(|t| t.get("]"))
+                .map(String::as_str),
+            Some("tab-next")
+        );
+        assert_eq!(
+            config
+                .key_overlays
+                .get("explorer")
+                .and_then(|t| t.get("n"))
+                .map(String::as_str),
+            Some("new-endpoint")
+        );
+        assert!(
+            !config.keys.contains_key("request"),
+            "overlay not in flat keys"
         );
     }
 

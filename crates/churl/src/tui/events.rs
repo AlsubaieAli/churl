@@ -59,6 +59,44 @@ pub enum Action {
     Jump,
     /// Switch the active variable profile (palette-only; opens the profile picker).
     SwitchProfile,
+    /// Focus the URL bar.
+    FocusUrlBar,
+    /// Edit the focused URL bar's URL inline.
+    EditUrl,
+    /// Cycle the request method to the next (GET→POST→…→GET).
+    MethodCycle,
+    /// Open the one-key method-picker menu.
+    MethodMenu,
+    /// Save the current request to disk (format-preserving).
+    Save,
+    /// Select the next request-pane tab (Params→Headers→Auth→Body→Params).
+    TabNext,
+    /// Select the previous request-pane tab.
+    TabPrev,
+    /// Jump directly to the first request-pane tab (Params).
+    Tab1,
+    /// Jump directly to the second request-pane tab (Headers).
+    Tab2,
+    /// Jump directly to the third request-pane tab (Auth).
+    Tab3,
+    /// Jump directly to the fourth request-pane tab (Body).
+    Tab4,
+    /// Add a row on the active row-list tab (Params/Headers), entering edit.
+    RowAdd,
+    /// Delete the selected row on the active row-list tab.
+    RowDelete,
+    /// Toggle the selected row's `enabled` flag.
+    RowToggle,
+    /// Edit the selected row (or open the auth-kind picker on the Auth kind row).
+    RowEdit,
+    /// Create a new endpoint under the selected collection.
+    NewEndpoint,
+    /// Create a new collection.
+    NewCollection,
+    /// Rename the selected endpoint or collection.
+    Rename,
+    /// Delete the selected endpoint or collection (with a confirm).
+    Delete,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -88,6 +126,25 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::OpenPalette, "open-palette", "command palette"),
     (Action::Jump, "jump", "jump to pane / row"),
     (Action::SwitchProfile, "switch-profile", "switch profile"),
+    (Action::FocusUrlBar, "focus-urlbar", "focus URL bar"),
+    (Action::EditUrl, "edit-url", "edit URL"),
+    (Action::MethodCycle, "method-cycle", "cycle method"),
+    (Action::MethodMenu, "method-menu", "method menu"),
+    (Action::Save, "save", "save request"),
+    (Action::TabNext, "tab-next", "next tab"),
+    (Action::TabPrev, "tab-prev", "previous tab"),
+    (Action::Tab1, "tab-1", "tab: params"),
+    (Action::Tab2, "tab-2", "tab: headers"),
+    (Action::Tab3, "tab-3", "tab: auth"),
+    (Action::Tab4, "tab-4", "tab: body"),
+    (Action::RowAdd, "row-add", "add row"),
+    (Action::RowDelete, "row-delete", "delete row"),
+    (Action::RowToggle, "row-toggle", "toggle row enabled"),
+    (Action::RowEdit, "row-edit", "edit row"),
+    (Action::NewEndpoint, "new-endpoint", "new endpoint"),
+    (Action::NewCollection, "new-collection", "new collection"),
+    (Action::Rename, "rename", "rename"),
+    (Action::Delete, "delete", "delete"),
 ];
 
 impl Action {
@@ -145,11 +202,61 @@ impl FromStr for Action {
     }
 }
 
+/// Which pane's local keymap overlay to consult. A focused pane's overlay is
+/// searched before the global map (see [`KeyMap::lookup_ctx`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PaneCtx {
+    /// The explorer pane (CRUD keys: `n`/`N`/`r`/`d`).
+    Explorer,
+    /// The focusable URL bar (`i`/`m`/`M`).
+    UrlBar,
+    /// The request pane (tab switching + row editing).
+    Request,
+    /// The response pane (no overlay keys yet, but configurable).
+    Response,
+}
+
+impl PaneCtx {
+    /// The config-table suffix for this context (`[keys.<suffix>]`).
+    fn config_name(self) -> &'static str {
+        match self {
+            PaneCtx::Explorer => "explorer",
+            PaneCtx::UrlBar => "urlbar",
+            PaneCtx::Request => "request",
+            PaneCtx::Response => "response",
+        }
+    }
+
+    /// Every context, in a stable order (for `churl keymaps` grouping).
+    pub fn all() -> [PaneCtx; 4] {
+        [
+            PaneCtx::Explorer,
+            PaneCtx::UrlBar,
+            PaneCtx::Request,
+            PaneCtx::Response,
+        ]
+    }
+
+    /// The display header for `churl keymaps` (`explorer` → `Explorer`).
+    pub fn header(self) -> &'static str {
+        match self {
+            PaneCtx::Explorer => "Explorer",
+            PaneCtx::UrlBar => "URL bar",
+            PaneCtx::Request => "Request",
+            PaneCtx::Response => "Response",
+        }
+    }
+}
+
 /// Key-combination → [`Action`] map. Defaults are built with crokey's `key!`
-/// macro; config overrides layer on top via [`KeyMap::with_overrides`].
+/// macro; config overrides layer on top via [`KeyMap::with_overrides`]. A
+/// per-pane `overlays` layer holds pane-local bindings consulted before the
+/// global `map` (see [`KeyMap::lookup_ctx`]) — the vehicle for keys like `1`–`4`
+/// that must mean one thing inside the Request pane and another globally.
 #[derive(Debug)]
 pub struct KeyMap {
     map: HashMap<KeyCombination, Action>,
+    overlays: BTreeMap<PaneCtx, HashMap<KeyCombination, Action>>,
 }
 
 impl Default for KeyMap {
@@ -185,53 +292,167 @@ impl Default for KeyMap {
         bind(key!('/'), Action::OpenSearch);
         bind(key!(':'), Action::OpenPalette);
         bind(key!(f), Action::Jump);
+        // `Save` is global: `w` writes the current request (never auto-saved).
+        bind(key!(w), Action::Save);
         // `SwitchProfile` has no default key binding: it lives in the command
         // palette ("switch profile"). Overlay-level modes (search/palette/jump)
         // still take routing precedence over it.
-        Self { map }
+
+        let mut overlays: BTreeMap<PaneCtx, HashMap<KeyCombination, Action>> = BTreeMap::new();
+        let mut overlay = |ctx: PaneCtx, combo: KeyCombination, action: Action| {
+            overlays
+                .entry(ctx)
+                .or_default()
+                .insert(combo.normalized(), action);
+        };
+        // Explorer CRUD.
+        overlay(PaneCtx::Explorer, key!(n), Action::NewEndpoint);
+        overlay(PaneCtx::Explorer, key!(shift - n), Action::NewCollection);
+        overlay(PaneCtx::Explorer, key!(r), Action::Rename);
+        overlay(PaneCtx::Explorer, key!(d), Action::Delete);
+        // URL bar: edit + method switch.
+        overlay(PaneCtx::UrlBar, key!(i), Action::EditUrl);
+        overlay(PaneCtx::UrlBar, key!(enter), Action::EditUrl);
+        overlay(PaneCtx::UrlBar, key!(m), Action::MethodCycle);
+        overlay(PaneCtx::UrlBar, key!(shift - m), Action::MethodMenu);
+        // Request pane: tab switching + row editing. `1`–`4` shadow the global
+        // pane-focus digits here (recorded in DECISIONS.md); pane focus stays
+        // reachable via Tab/Shift-Tab and jump-mode.
+        overlay(PaneCtx::Request, key!(']'), Action::TabNext);
+        overlay(PaneCtx::Request, key!('['), Action::TabPrev);
+        overlay(PaneCtx::Request, key!('1'), Action::Tab1);
+        overlay(PaneCtx::Request, key!('2'), Action::Tab2);
+        overlay(PaneCtx::Request, key!('3'), Action::Tab3);
+        overlay(PaneCtx::Request, key!('4'), Action::Tab4);
+        overlay(PaneCtx::Request, key!(a), Action::RowAdd);
+        overlay(PaneCtx::Request, key!(d), Action::RowDelete);
+        overlay(PaneCtx::Request, key!(space), Action::RowToggle);
+        overlay(PaneCtx::Request, key!(i), Action::RowEdit);
+
+        Self { map, overlays }
     }
 }
 
 impl KeyMap {
-    /// Builds the default map with config `keys` overrides layered on top.
+    /// Builds the default map with global `[keys]` overrides layered on top.
     ///
     /// Unknown key combinations or action names are a hard error — a silently
     /// dropped binding is worse than a startup failure the user can fix.
     pub fn with_overrides(overrides: &BTreeMap<String, String>) -> Result<Self> {
+        Self::with_all_overrides(overrides, &BTreeMap::new())
+    }
+
+    /// Builds the default map with global `[keys]` overrides *and* per-pane
+    /// overlay overrides (`[keys.explorer]`, `[keys.urlbar]`, `[keys.request]`,
+    /// `[keys.response]`) layered on top. An unknown overlay-table name, key
+    /// combination, or action name is a hard error (fail-loud parsing).
+    pub fn with_all_overrides(
+        global: &BTreeMap<String, String>,
+        overlays: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<Self> {
         let mut keymap = Self::default();
-        for (combo_str, action_str) in overrides {
-            let combo = KeyCombination::from_str(combo_str)
-                .map_err(|err| eyre!("bad key combination {combo_str:?} in [keys]: {err}"))?;
-            let action = Action::from_str(action_str)
-                .map_err(|err| eyre!("bad action for key {combo_str:?} in [keys]: {err}"))?;
+        for (combo_str, action_str) in global {
+            let (combo, action) = parse_binding(combo_str, action_str, "[keys]")?;
             keymap.map.insert(combo.normalized(), action);
+        }
+        for (table, bindings) in overlays {
+            let ctx = PaneCtx::all()
+                .into_iter()
+                .find(|c| c.config_name() == table)
+                .ok_or_else(|| {
+                    eyre!(
+                        "unknown keymap table [keys.{table}] (expected one of: \
+                         explorer, urlbar, request, response)"
+                    )
+                })?;
+            for (combo_str, action_str) in bindings {
+                let label = format!("[keys.{table}]");
+                let (combo, action) = parse_binding(combo_str, action_str, &label)?;
+                keymap
+                    .overlays
+                    .entry(ctx)
+                    .or_default()
+                    .insert(combo.normalized(), action);
+            }
         }
         Ok(keymap)
     }
 
-    /// Looks up the action bound to a key event, if any.
+    /// Looks up the action bound to a key event in the *global* map only.
     pub fn lookup(&self, key: KeyEvent) -> Option<Action> {
         self.map.get(&KeyCombination::from(key)).copied()
     }
 
-    /// Every `(key combination, action)` binding, unordered. Callers that need a
-    /// stable order (e.g. the `keymaps` subcommand) sort the result.
+    /// Looks up the action bound to a key event, consulting `ctx`'s overlay first
+    /// and falling back to the global map. This is the precedence that lets `1`–`4`
+    /// mean tab-jump inside the Request pane but pane-focus globally.
+    pub fn lookup_ctx(&self, key: KeyEvent, ctx: PaneCtx) -> Option<Action> {
+        let combo = KeyCombination::from(key);
+        self.overlays
+            .get(&ctx)
+            .and_then(|overlay| overlay.get(&combo))
+            .or_else(|| self.map.get(&combo))
+            .copied()
+    }
+
+    /// Every `(key combination, action)` binding in the *global* map, unordered.
+    /// Callers that need a stable order (e.g. the `keymaps` subcommand) sort the
+    /// result.
     pub fn iter(&self) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
         self.map.iter().map(|(combo, action)| (*combo, *action))
     }
 
-    /// All combinations bound to `action`, as their canonical display strings,
-    /// sorted for determinism.
-    pub fn combos_for(&self, action: Action) -> Vec<String> {
-        let mut combos: Vec<String> = self
-            .map
-            .iter()
-            .filter(|(_, bound)| **bound == action)
-            .map(|(combo, _)| combo.to_string())
-            .collect();
-        combos.sort();
-        combos
+    /// Every `(key combination, action)` binding in `ctx`'s overlay, unordered.
+    pub fn iter_overlay(
+        &self,
+        ctx: PaneCtx,
+    ) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
+        self.overlays
+            .get(&ctx)
+            .into_iter()
+            .flat_map(|overlay| overlay.iter().map(|(combo, action)| (*combo, *action)))
     }
+
+    /// All global combinations bound to `action`, as their canonical display
+    /// strings, sorted for determinism.
+    pub fn combos_for(&self, action: Action) -> Vec<String> {
+        sorted_combos(self.map.iter(), action)
+    }
+
+    /// All combinations bound to `action` in `ctx`'s overlay, sorted.
+    pub fn overlay_combos_for(&self, ctx: PaneCtx, action: Action) -> Vec<String> {
+        match self.overlays.get(&ctx) {
+            Some(overlay) => sorted_combos(overlay.iter(), action),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Parses a `"combo" = "action"` config pair, tagging errors with `where_` (the
+/// config table name).
+fn parse_binding(
+    combo_str: &str,
+    action_str: &str,
+    where_: &str,
+) -> Result<(KeyCombination, Action)> {
+    let combo = KeyCombination::from_str(combo_str)
+        .map_err(|err| eyre!("bad key combination {combo_str:?} in {where_}: {err}"))?;
+    let action = Action::from_str(action_str)
+        .map_err(|err| eyre!("bad action for key {combo_str:?} in {where_}: {err}"))?;
+    Ok((combo, action))
+}
+
+/// Collects and sorts the display strings of the combinations bound to `action`.
+fn sorted_combos<'a>(
+    bindings: impl Iterator<Item = (&'a KeyCombination, &'a Action)>,
+    action: Action,
+) -> Vec<String> {
+    let mut combos: Vec<String> = bindings
+        .filter(|(_, bound)| **bound == action)
+        .map(|(combo, _)| combo.to_string())
+        .collect();
+    combos.sort();
+    combos
 }
 
 /// Fuzzy matcher over a list of display strings, wrapping `nucleo-matcher`
@@ -396,6 +617,111 @@ mod tests {
         assert_eq!(combos, sorted, "combos_for must be sorted");
         // SwitchProfile has no default binding.
         assert!(keymap.combos_for(Action::SwitchProfile).is_empty());
+    }
+
+    #[test]
+    fn overlay_lookup_precedence() {
+        let keymap = KeyMap::default();
+        // `1` globally focuses the explorer; inside the Request overlay it is Tab1.
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Char('1'), KeyModifiers::NONE)),
+            Some(Action::FocusExplorer)
+        );
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('1'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::Tab1)
+        );
+        // A key not in the overlay falls through to the global map.
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('j'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::Down)
+        );
+        // `d` in the Explorer overlay is Delete; in Request it is RowDelete.
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('d'), KeyModifiers::NONE),
+                PaneCtx::Explorer
+            ),
+            Some(Action::Delete)
+        );
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('d'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::RowDelete)
+        );
+        // The UrlBar overlay: `m` cycles method, `i` edits URL.
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('m'), KeyModifiers::NONE),
+                PaneCtx::UrlBar
+            ),
+            Some(Action::MethodCycle)
+        );
+    }
+
+    #[test]
+    fn overlay_override_parses_and_wins() {
+        let overlays = BTreeMap::from([(
+            "request".to_string(),
+            BTreeMap::from([("x".to_string(), "tab-next".to_string())]),
+        )]);
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('x'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::TabNext)
+        );
+        // Default overlay bindings survive.
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('1'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::Tab1)
+        );
+    }
+
+    #[test]
+    fn unknown_overlay_table_errors() {
+        let overlays = BTreeMap::from([(
+            "bogus".to_string(),
+            BTreeMap::from([("x".to_string(), "tab-next".to_string())]),
+        )]);
+        let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
+        assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn bad_overlay_action_errors() {
+        let overlays = BTreeMap::from([(
+            "request".to_string(),
+            BTreeMap::from([("x".to_string(), "explode".to_string())]),
+        )]);
+        let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
+        assert!(err.to_string().contains("explode"), "{err}");
+    }
+
+    #[test]
+    fn overlay_combos_and_iter_cover_bindings() {
+        let keymap = KeyMap::default();
+        assert_eq!(
+            keymap.overlay_combos_for(PaneCtx::Request, Action::Tab1),
+            vec!["1"]
+        );
+        let request: Vec<_> = keymap.iter_overlay(PaneCtx::Request).collect();
+        assert!(request.iter().any(|(_, a)| *a == Action::TabNext));
+        // Save is a global binding, not an overlay one.
+        assert_eq!(keymap.combos_for(Action::Save), vec!["w"]);
     }
 
     #[test]

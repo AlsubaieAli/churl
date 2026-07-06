@@ -3,13 +3,13 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▾ private                 ││GET  https://api.test/report  auth:basic  {{1}} │
-│>   Private report          │└────────────────────────────────────────────────┘
+│  ▾ api                     ││GET  https://api.test/search                    │
+│>   Search                  │└────────────────────────────────────────────────┘
 │                            │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃ Params(0)   Headers(0)   Auth(1)   Body        ┃
-│                            │┃> kind: Basic  (enter to change)                ┃
-│                            │┃  username: alice                               ┃
-│                            │┃  password: {{password}}                        ┃
+│                            │┃ Params(2)   Headers(0)   Auth   Body           ┃
+│                            │┃> ✓ q = rust                                    ┃
+│                            │┃  ✗ page = 1                                    ┃
+│                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
@@ -17,7 +17,7 @@ expression: snapshot(&mut app)
 │                            │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 │                            │┌ Response ──────────────────────────────────────┐
 │                            ││no response yet                                 │
-│                            ││GET https://api.test/report                     │
+│                            ││GET https://api.test/search                     │
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
 │                            ││                                                │

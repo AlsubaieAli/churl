@@ -6,14 +6,14 @@ expression: snapshot(&mut app)
 ┃  ▸ orders                  ┃│POST  https://api.test/users                    │
 ┃  ▾ users                   ┃└────────────────────────────────────────────────┘
 ┃    List users              ┃┌ Request ───────────────────────────────────────┐
-┃>   Create user             ┃│POST https://api.test/users                     │
-┃    Get user                ┃│headers:                                        │
-┃                            ┃│  Content-Type: application/json                │
-┃                            ┃│body:                                           │
-┃                            ┃│{"name": "Ada"}                                 │
+┃>   Create user             ┃│ Params(0)   Headers(1)   Auth   Body           │
+┃    Get user                ┃│  (no params — a to add)                        │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│  Normal                                        │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
- EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · w save · f jump · / s

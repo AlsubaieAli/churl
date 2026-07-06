@@ -73,34 +73,33 @@ async fn main() -> Result<()> {
 /// plain aligned text, sorted by action config-name, one line per action:
 /// `action-name    combo[, combo…]    (default | overridden)`.
 fn run_keymaps() -> Result<()> {
-    use churl::tui::events::{Action, KeyMap};
+    use churl::tui::events::{Action, KeyMap, PaneCtx};
 
     let config = churl_core::config::load_global_config()?;
-    let effective = KeyMap::with_overrides(&config.keys)?;
+    let effective = KeyMap::with_all_overrides(&config.keys, &config.key_overlays)?;
     let default = KeyMap::default();
 
     let mut actions: Vec<Action> = Action::all().collect();
     actions.sort_by_key(|a| a.name());
-
-    // Column widths.
     let name_w = actions.iter().map(|a| a.name().len()).max().unwrap_or(0);
-    let combos_of = |map: &KeyMap, action: Action| {
-        let combos = map.combos_for(action);
+
+    let fmt_combos = |combos: Vec<String>| {
         if combos.is_empty() {
             "(unbound)".to_owned()
         } else {
             combos.join(", ")
         }
     };
+
+    // Global bindings first: every action (unbound ones included), unindented so
+    // each line starts with the action name.
     let combo_w = actions
         .iter()
-        .map(|a| combos_of(&effective, *a).len())
+        .map(|a| fmt_combos(effective.combos_for(*a)).len())
         .max()
         .unwrap_or(0);
-
-    for action in actions {
-        let combos = combos_of(&effective, action);
-        let origin = if effective.combos_for(action) == default.combos_for(action) {
+    for action in &actions {
+        let origin = if effective.combos_for(*action) == default.combos_for(*action) {
             "default"
         } else {
             "overridden"
@@ -108,8 +107,37 @@ fn run_keymaps() -> Result<()> {
         println!(
             "{name:<name_w$}  {combos:<combo_w$}  ({origin})  {label}",
             name = action.name(),
+            combos = fmt_combos(effective.combos_for(*action)),
             label = action.label(),
         );
+    }
+
+    // Per-pane overlays under their headers.
+    for ctx in PaneCtx::all() {
+        let overlay: Vec<_> = actions
+            .iter()
+            .filter(|a| !effective.overlay_combos_for(ctx, **a).is_empty())
+            .collect();
+        if overlay.is_empty() {
+            continue;
+        }
+        println!("\n{}", ctx.header());
+        for action in overlay {
+            let combos = effective.overlay_combos_for(ctx, *action);
+            let origin = if effective.overlay_combos_for(ctx, *action)
+                == default.overlay_combos_for(ctx, *action)
+            {
+                "default"
+            } else {
+                "overridden"
+            };
+            println!(
+                "  {name:<name_w$}  {combos:<combo_w$}  ({origin})  {label}",
+                name = action.name(),
+                combos = fmt_combos(combos),
+                label = action.label(),
+            );
+        }
     }
     Ok(())
 }

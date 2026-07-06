@@ -4,7 +4,7 @@
 //! are parsed lazily on first expand, keeping the cold-start budget intact.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use churl_core::model::Endpoint;
 use churl_core::persistence::{Collection, OpenWorkspace, PersistenceError, load_collection_meta};
@@ -321,6 +321,127 @@ impl ExplorerState {
             }
         }
         Ok(out)
+    }
+
+    // ---- M6.6 CRUD support ----
+
+    /// Rebuilds the collection list from `workspace` while preserving the current
+    /// cursor (clamped) and re-expanding collections that were expanded before.
+    /// Endpoint caches are dropped (re-parsed lazily on next expand) so on-disk
+    /// changes are picked up.
+    pub fn reload(&mut self, workspace: Option<&OpenWorkspace>) -> Result<(), PersistenceError> {
+        let expanded_names: HashSet<String> = self
+            .expanded
+            .iter()
+            .filter_map(|&ci| self.collections.get(ci).map(|n| n.collection.name.clone()))
+            .collect();
+        let cursor = self.cursor;
+        let rebuilt = Self::new(workspace)?;
+        self.collections = rebuilt.collections;
+        self.expanded.clear();
+        // Re-expand collections whose names survived.
+        for (ci, node) in self.collections.iter_mut().enumerate() {
+            if expanded_names.contains(&node.collection.name) {
+                node.load()?;
+                self.expanded.insert(ci);
+            }
+        }
+        self.cursor = cursor;
+        self.clamp_cursor();
+        Ok(())
+    }
+
+    /// The kind of the currently-selected row, if any.
+    pub fn selected_kind(&self) -> Option<RowKind> {
+        self.current_row().map(|row| row.kind)
+    }
+
+    /// The display name of the currently-selected row, if any.
+    pub fn selected_name(&self) -> Option<String> {
+        self.current_row().map(|row| row.name)
+    }
+
+    /// The directory of the collection relevant to the selection: the selected
+    /// collection itself, or the collection owning the selected endpoint.
+    pub fn selected_collection_dir(&self) -> Option<PathBuf> {
+        let row = self.current_row()?;
+        self.collections
+            .get(row.collection)
+            .map(|n| n.collection.path.clone())
+    }
+
+    /// The file path of the selected endpoint, if an endpoint row is selected.
+    pub fn selected_endpoint_file(&self) -> Option<PathBuf> {
+        let row = self.current_row()?;
+        if row.kind != RowKind::Endpoint {
+            return None;
+        }
+        let node = self.collections.get(row.collection)?;
+        node.endpoints
+            .as_ref()?
+            .get(row.endpoint?)
+            .map(|(path, _)| path.clone())
+    }
+
+    /// The index of the collection whose directory contains `file`, if any.
+    /// Used to remap a loaded endpoint's collection index after a tree reload
+    /// (name-sorted collections shift indices when siblings appear/vanish).
+    pub fn collection_index_for_file(&self, file: &Path) -> Option<usize> {
+        let parent = file.parent()?;
+        self.collections
+            .iter()
+            .position(|n| n.collection.path == parent)
+    }
+
+    /// Whether the cursor is on an endpoint row backed by a *different* file than
+    /// `current` (the loaded endpoint). A collection row or the same endpoint
+    /// returns `false`.
+    pub fn cursor_is_other_endpoint(&self, current: Option<&SelectedEndpoint>) -> bool {
+        let Some(file) = self.selected_endpoint_file() else {
+            return false;
+        };
+        match current {
+            Some(selected) => selected.file != file,
+            None => true,
+        }
+    }
+
+    /// Replaces the cached copy of the endpoint at `path` with `endpoint` (after a
+    /// save, so the tree name stays in sync). A no-op if the file isn't loaded.
+    pub fn update_endpoint(&mut self, path: &Path, endpoint: Endpoint) {
+        for node in &mut self.collections {
+            if let Some(endpoints) = node.endpoints.as_mut()
+                && let Some(slot) = endpoints.iter_mut().find(|(p, _)| p == path)
+            {
+                slot.1 = endpoint;
+                return;
+            }
+        }
+    }
+
+    /// Expands the collection containing `file`, moves the cursor onto that row,
+    /// and returns the endpoint for loading. Used after create/rename.
+    pub fn select_file(
+        &mut self,
+        file: &Path,
+    ) -> Result<Option<SelectedEndpoint>, PersistenceError> {
+        // Find (and lazily load) the collection + endpoint index for `file`.
+        let mut target: Option<(usize, usize)> = None;
+        for (ci, node) in self.collections.iter_mut().enumerate() {
+            let dir = node.collection.path.clone();
+            if file.parent() != Some(dir.as_path()) {
+                continue;
+            }
+            let endpoints = node.load()?;
+            if let Some(ei) = endpoints.iter().position(|(p, _)| p == file) {
+                target = Some((ci, ei));
+                break;
+            }
+        }
+        let Some((ci, ei)) = target else {
+            return Ok(None);
+        };
+        self.jump_to(ci, ei)
     }
 
     /// Expands `collection` and moves the cursor onto its `endpoint`-th child,

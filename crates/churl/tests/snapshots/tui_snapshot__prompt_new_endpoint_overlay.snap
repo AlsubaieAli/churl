@@ -2,20 +2,20 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┌ Explorer [a] ──────────────┐┌ URL [s] ───────────────────────────────────────┐
-│g ▸ orders                  ││no endpoint selected                            │
-│h ▾ users                   │└────────────────────────────────────────────────┘
-│j   List users              │┌ Request [d] ───────────────────────────────────┐
-│k   Create user             ││                                                │
-│l   Get user                ││no endpoint selected                            │
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│  ▸ orders                  ││no endpoint selected                            │
+│> ▸ users                   │└────────────────────────────────────────────────┘
+│                            │┌ Request ───────────────────────────────────────┐
+│                            ││                                                │
+│                            ││no endpoint selected                            │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            │└────────────────────────────────────────────────┘
-│                            │┌ Response [f] ──────────────────────────────────┐
+│              ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
+│              ┃> Update user█                                  ┃              │
+│              ┃                                                ┃──────────────┘
+│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
 │                            ││no response yet                                 │
 │                            ││                                                │
 │                            ││no endpoint selected                            │
