@@ -32,13 +32,17 @@ use reqwest::Client;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
+use churl_core::config::UrlEditMode;
+
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
+use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView};
 use super::components::{
-    explorer, method_menu, palette, picker, prompt, request, response, statusline, urlbar,
+    explorer, help, message, method_menu, palette, picker, prompt, request, response, statusline,
+    urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -186,25 +190,13 @@ pub enum AppMsg {
     },
 }
 
-/// A transient status-line message that auto-expires after ~4 s.
-struct TransientStatus {
-    message: String,
-    set_at: Instant,
-}
-
-impl TransientStatus {
-    const EXPIRE_SECS: u64 = 4;
-
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            set_at: Instant::now(),
-        }
-    }
-
-    fn is_expired(&self) -> bool {
-        self.set_at.elapsed().as_secs() >= Self::EXPIRE_SECS
-    }
+/// Which pane is zoomed (the other collapses to a stub). See deliverable 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomPane {
+    /// Request pane zoomed; Response collapses to its stats line.
+    Request,
+    /// Response pane zoomed; Request collapses to its tab bar.
+    Response,
 }
 
 /// Bookkeeping for the single in-flight request.
@@ -276,8 +268,10 @@ pub struct App {
     highlight_cache: HashMap<u64, Vec<Line<'static>>>,
     /// History store; `None` when disabled (open failed or no data dir).
     history: Option<HistoryStore>,
-    /// Transient status-line message (send hints, history/errors); auto-expires.
-    status: Option<TransientStatus>,
+    /// Transient action/status message shown in the dedicated row above the
+    /// statusline (send hints, history/errors, merges, CRUD results); auto-expires
+    /// after `Message::EXPIRE_SECS`.
+    message: Option<Message>,
     /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
     /// animation in the response pane. `pub` so snapshot tests can set it.
     pub tick_count: u64,
@@ -297,6 +291,23 @@ pub struct App {
     /// [`ConfirmPurpose::DiscardChanges`] overlay; resolved by `s`/`d`, dropped
     /// by `Esc`.
     pending_load: Option<PendingLoad>,
+    /// Which pane is zoomed (M6.7 deliverable 4), or `None` for the normal split.
+    zoom: Option<ZoomPane>,
+    /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
+    explorer_hidden: bool,
+    /// True while in pending-leader state (the which-key popup is shown).
+    pending_leader: bool,
+    /// Whether the `?` help overlay is open.
+    help_open: bool,
+    /// Scroll offset of the help overlay.
+    help_scroll: usize,
+    /// The edtui popup URL editor (`e` on the URL bar / `url_edit = "popup"`),
+    /// present while the popup is open.
+    url_popup: Option<EditorState>,
+    /// edtui event handler for the URL popup.
+    url_popup_events: EditorEventHandler,
+    /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
+    url_edit_mode: UrlEditMode,
 }
 
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
@@ -360,7 +371,7 @@ impl App {
             highlight_tx: None,
             highlight_cache: HashMap::new(),
             history: None,
-            status: None,
+            message: None,
             tick_count: 0,
             tabs: RequestTabs::default(),
             loaded_snapshot: None,
@@ -368,6 +379,14 @@ impl App {
             prompt_editor: LineEditor::default(),
             auth_picker: false,
             pending_load: None,
+            zoom: None,
+            explorer_hidden: false,
+            pending_leader: false,
+            help_open: false,
+            help_scroll: 0,
+            url_popup: None,
+            url_popup_events: EditorEventHandler::default(),
+            url_edit_mode: UrlEditMode::Inline,
         })
     }
 
@@ -425,6 +444,16 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Sets a transient message in the dedicated message row (auto-expires).
+    fn notify(&mut self, text: impl Into<String>) {
+        self.message = Some(Message::new(text));
+    }
+
+    /// Sets what `i`/`Enter` on the URL bar opens (inline vs popup).
+    pub fn set_url_edit_mode(&mut self, mode: UrlEditMode) {
+        self.url_edit_mode = mode;
+    }
+
     /// The workspace-level `[vars]`, empty when there is no workspace.
     fn workspace_vars(&self) -> BTreeMap<String, String> {
         self.workspace
@@ -462,11 +491,11 @@ impl App {
             Some(path) => match HistoryStore::open(&path) {
                 Ok(store) => self.history = Some(store),
                 Err(err) => {
-                    self.status = Some(TransientStatus::new(format!("history disabled: {err}")));
+                    self.message = Some(Message::new(format!("history disabled: {err}")));
                 }
             },
             None => {
-                self.status = Some(TransientStatus::new("history disabled: no data directory"));
+                self.message = Some(Message::new("history disabled: no data directory"));
             }
         }
         Ok(())
@@ -492,8 +521,8 @@ impl App {
                 _ = tick.tick() => {
                     self.tick_count = self.tick_count.wrapping_add(1);
                     // Expire transient status messages after ~4 s.
-                    if self.status.as_ref().is_some_and(|s| s.is_expired()) {
-                        self.status = None;
+                    if self.message.as_ref().is_some_and(|s| s.is_expired()) {
+                        self.message = None;
                     }
                 }
                 msg = self.rx.recv() => {
@@ -508,6 +537,17 @@ impl App {
 
     /// Routes one key event (see the module docs for the precedence rules).
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Modal, keyboard-owning overlays introduced in M6.7 take precedence over
+        // everything (help / URL popup / pending-leader).
+        if self.help_open {
+            return self.handle_help_key(key);
+        }
+        if self.url_popup.is_some() {
+            return self.handle_url_popup_key(key);
+        }
+        if self.pending_leader {
+            return self.handle_leader_key(key);
+        }
         match self.mode {
             Mode::Search | Mode::Palette => self.handle_overlay_key(key),
             Mode::Jump => self.handle_jump_key(key),
@@ -551,7 +591,14 @@ impl App {
             self.editor_events.on_key_event(key, &mut self.editor);
             return Ok(());
         }
-        // 4. Keymap: the focused pane's overlay wins over the global map.
+        // 4. Leader key: outside every text-edit context (guarded above), Space
+        //    enters pending-leader state and shows the which-key popup. Inside an
+        //    edit, control never reaches here — Space types a space.
+        if self.keymap.is_leader(key) {
+            self.pending_leader = true;
+            return Ok(());
+        }
+        // 5. Keymap: the focused pane's overlay wins over the global map.
         if let Some(action) = self.keymap.lookup_ctx(key, self.focus.ctx()) {
             self.dispatch(action, Some(key))
         } else if self.focus == Pane::Request && self.tabs.active == RequestTab::Body {
@@ -577,6 +624,68 @@ impl App {
         }
     }
 
+    /// Handles one key in pending-leader state: a bound continuation dispatches
+    /// its action (and dismisses the popup); any unbound key or Esc dismisses.
+    fn handle_leader_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.pending_leader = false;
+        if key.code == KeyCode::Esc {
+            return Ok(());
+        }
+        if let Some(action) = self.keymap.leader_lookup(key) {
+            return self.dispatch(action, Some(key));
+        }
+        // Unbound continuation: dismiss silently (already done).
+        Ok(())
+    }
+
+    /// Handles one key while the `?` help overlay is open: `?`/Esc/`q` close;
+    /// `j`/`k`/arrows scroll.
+    fn handle_help_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.help_open = false;
+                self.help_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handles one key in the URL vim-popup editor (deliverable 7). Enter commits
+    /// (running the param merge), Esc in Normal mode cancels; everything else goes
+    /// to edtui. The single-logical-line constraint drops any Enter that edtui
+    /// would turn into a newline — Enter is always the commit key here.
+    fn handle_url_popup_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Enter commits regardless of edtui mode (single logical line — no newline).
+        if key.code == KeyCode::Enter {
+            if let Some(editor) = self.url_popup.take() {
+                let text: String = editor.lines.clone().into();
+                // Collapse any stray newlines to enforce a single logical line.
+                let text = text.replace(['\n', '\r'], "");
+                self.commit_url(text);
+            }
+            return Ok(());
+        }
+        // Esc in Normal mode cancels; in Insert mode edtui uses it to leave insert.
+        if key.code == KeyCode::Esc
+            && self
+                .url_popup
+                .as_ref()
+                .is_some_and(|e| e.mode == EditorMode::Normal)
+        {
+            self.url_popup = None;
+            return Ok(());
+        }
+        if let Some(editor) = self.url_popup.as_mut() {
+            self.url_popup_events.on_key_event(key, editor);
+        }
+        Ok(())
+    }
+
     /// Executes an action. `key` carries the originating key event so that
     /// navigation actions can fall through to edtui when the request pane is
     /// focused (palette-run actions have no key).
@@ -595,12 +704,17 @@ impl App {
                     self.should_quit = true;
                 }
             }
-            Action::FocusNext => self.focus = self.focus.next(),
-            Action::FocusPrev => self.focus = self.focus.prev(),
-            Action::FocusExplorer => self.focus = Pane::Explorer,
-            Action::FocusUrlBar => self.focus = Pane::UrlBar,
-            Action::FocusRequest => self.focus = Pane::Request,
-            Action::FocusResponse => self.focus = Pane::Response,
+            Action::FocusNext => self.set_focus(self.focus.next()),
+            Action::FocusPrev => self.set_focus(self.focus.prev()),
+            Action::FocusExplorer => self.set_focus(Pane::Explorer),
+            Action::FocusUrlBar => self.set_focus(Pane::UrlBar),
+            Action::FocusRequest => self.set_focus(Pane::Request),
+            Action::FocusResponse => self.set_focus(Pane::Response),
+            Action::ToggleExplorer => self.toggle_explorer(),
+            Action::Zoom => self.toggle_zoom(),
+            Action::Help => self.help_open = true,
+            Action::Leader => self.pending_leader = true,
+            Action::EditUrlPopup => self.begin_url_popup(),
             Action::OpenSearch => self.open_search()?,
             Action::OpenPalette => self.open_palette(),
             Action::Jump => self.open_jump(),
@@ -780,15 +894,11 @@ impl App {
     /// request is already in flight or no endpoint is selected.
     fn send_request(&mut self) {
         if self.in_flight.is_some() {
-            self.status = Some(TransientStatus::new(
-                "request already in flight — ctrl-c to cancel",
-            ));
+            self.message = Some(Message::new("request already in flight — ctrl-c to cancel"));
             return;
         }
         let Some(selected) = self.selected.clone() else {
-            self.status = Some(TransientStatus::new(
-                "no endpoint selected — nothing to send",
-            ));
+            self.message = Some(Message::new("no endpoint selected — nothing to send"));
             return;
         };
         // No client means runtime-free construction (snapshot tests); do nothing.
@@ -847,20 +957,20 @@ impl App {
         self.response = ResponseState::InFlight { started };
         self.response_scroll = 0;
         self.highlight_cache.clear();
-        self.status = None;
+        self.message = None;
     }
 
     /// Cancels the in-flight request: aborts the task, records a history row with
     /// no status, and moves the pane to the cancelled state.
     fn cancel_request(&mut self) {
         let Some(in_flight) = self.in_flight.take() else {
-            self.status = Some(TransientStatus::new("no request in flight"));
+            self.message = Some(Message::new("no request in flight"));
             return;
         };
         in_flight.handle.abort();
         self.write_history(&in_flight.meta, None, None);
         self.response = ResponseState::Cancelled;
-        self.status = Some(TransientStatus::new("request cancelled"));
+        self.message = Some(Message::new("request cancelled"));
     }
 
     /// The workspace-relative path of a selected endpoint's file, if inside the
@@ -973,7 +1083,7 @@ impl App {
             endpoint_path: meta.endpoint_path.clone(),
         };
         if let Some(Err(err)) = self.history.as_ref().map(|store| store.insert(&entry)) {
-            self.status = Some(TransientStatus::new(format!("history write failed: {err}")));
+            self.message = Some(Message::new(format!("history write failed: {err}")));
         }
     }
 
@@ -1158,15 +1268,89 @@ impl App {
 
     // ---- URL bar editing + method switching ----
 
-    /// Begins inline URL editing (seeds the LineEditor with the current URL).
-    /// A no-op when no endpoint is loaded.
+    /// Begins URL editing via `i`/`Enter`: opens the inline editor or the popup
+    /// per `url_edit_mode` (deliverable 7). A no-op when no endpoint is loaded.
     fn begin_url_edit(&mut self) {
+        match self.url_edit_mode {
+            UrlEditMode::Inline => self.begin_url_edit_inline(),
+            UrlEditMode::Popup => self.begin_url_popup(),
+        }
+    }
+
+    /// Opens the inline URL editor (seeds the LineEditor with the current URL).
+    fn begin_url_edit_inline(&mut self) {
         let Some(url) = self.live_request().map(|r| r.url.clone()) else {
-            self.status = Some(TransientStatus::new("no endpoint selected"));
+            self.notify("no endpoint selected");
             return;
         };
-        self.focus = Pane::UrlBar;
+        self.set_focus(Pane::UrlBar);
         self.url_editor = Some(LineEditor::new(&url));
+    }
+
+    /// Opens the centered vim-popup URL editor (`e`, or `url_edit = "popup"`).
+    fn begin_url_popup(&mut self) {
+        let Some(url) = self.live_request().map(|r| r.url.clone()) else {
+            self.notify("no endpoint selected");
+            return;
+        };
+        self.set_focus(Pane::UrlBar);
+        self.url_editor = None;
+        self.url_popup = Some(EditorState::new(Lines::from(url.as_str())));
+    }
+
+    /// Sets focus, honouring the M6.7 collapse/hide invariants: a collapsed pane
+    /// (zoom) cannot hold focus — targeting it auto-unzooms first — and focusing
+    /// the explorer auto-reopens it when hidden.
+    fn set_focus(&mut self, pane: Pane) {
+        if pane == Pane::Explorer && self.explorer_hidden {
+            self.explorer_hidden = false;
+        }
+        // A collapsed (non-zoomed) pane cannot hold focus: auto-unzoom.
+        match (self.zoom, pane) {
+            (Some(ZoomPane::Request), Pane::Response) => self.zoom = None,
+            (Some(ZoomPane::Response), Pane::Request) => self.zoom = None,
+            _ => {}
+        }
+        self.focus = pane;
+    }
+
+    /// `<leader>e`: toggles the explorer sidebar. Hiding it while it is focused
+    /// moves focus to the URL bar (a hidden pane cannot hold focus).
+    fn toggle_explorer(&mut self) {
+        self.explorer_hidden = !self.explorer_hidden;
+        if self.explorer_hidden && self.focus == Pane::Explorer {
+            self.focus = Pane::UrlBar;
+        }
+    }
+
+    /// `z`: zooms the focused Request/Response pane (collapsing the other), or
+    /// restores the split if already zoomed. No-op from other panes.
+    fn toggle_zoom(&mut self) {
+        let target = match self.focus {
+            Pane::Request => ZoomPane::Request,
+            Pane::Response => ZoomPane::Response,
+            _ => return,
+        };
+        self.zoom = if self.zoom == Some(target) {
+            None
+        } else {
+            Some(target)
+        };
+    }
+
+    /// Commits a new URL (from the inline editor or the popup): strips the query
+    /// string, merges it into the Params tab (deliverable 3), and sets the base
+    /// URL. Reports the merge and marks dirty. A no-op when nothing is loaded.
+    fn commit_url(&mut self, url: String) {
+        let (base, pairs) = split_query(&url);
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        selected.endpoint.request.url = base;
+        let report = merge_query_params(&mut selected.endpoint.request.params, &pairs);
+        if let Some(report) = report {
+            self.notify(format!("params: {report}"));
+        }
     }
 
     /// Handles one key while editing the URL inline: Enter commits, Esc reverts,
@@ -1174,10 +1358,9 @@ impl App {
     fn handle_url_edit_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Enter => {
-                if let Some(editor) = self.url_editor.take()
-                    && let Some(selected) = self.selected.as_mut()
-                {
-                    selected.endpoint.request.url = editor.text();
+                if let Some(editor) = self.url_editor.take() {
+                    // Commit runs the URL→Params query merge (deliverable 3).
+                    self.commit_url(editor.text());
                 }
             }
             KeyCode::Esc => {
@@ -1198,14 +1381,14 @@ impl App {
             let m = selected.endpoint.request.method;
             selected.endpoint.request.method = m.cycle();
         } else {
-            self.status = Some(TransientStatus::new("no endpoint selected"));
+            self.message = Some(Message::new("no endpoint selected"));
         }
     }
 
     /// Opens the one-key method-picker menu (focuses the URL bar).
     fn open_method_menu(&mut self) {
         if self.selected.is_none() {
-            self.status = Some(TransientStatus::new("no endpoint selected"));
+            self.message = Some(Message::new("no endpoint selected"));
             return;
         }
         self.focus = Pane::UrlBar;
@@ -1556,7 +1739,7 @@ impl App {
     fn save_request(&mut self) {
         self.sync_body_into_selected();
         let Some(selected) = self.selected.as_ref() else {
-            self.status = Some(TransientStatus::new("no endpoint to save"));
+            self.message = Some(Message::new("no endpoint to save"));
             return;
         };
         let path = selected.file.clone();
@@ -1565,16 +1748,16 @@ impl App {
             Ok(()) => {
                 self.loaded_snapshot = Some(endpoint.clone());
                 self.refresh_explorer_endpoint(&path, endpoint.clone());
-                self.status = Some(TransientStatus::new(format!("Saved {}", endpoint.name)));
+                self.message = Some(Message::new(format!("Saved {}", endpoint.name)));
             }
             Err(PersistenceError::SecretsInAuth { names }) => {
-                self.status = Some(TransientStatus::new(format!(
+                self.message = Some(Message::new(format!(
                     "not saved: secret auth values ({}) — use {{{{var}}}}",
                     names.join(", ")
                 )));
             }
             Err(err) => {
-                self.status = Some(TransientStatus::new(format!("save failed: {err}")));
+                self.message = Some(Message::new(format!("save failed: {err}")));
             }
         }
     }
@@ -1590,7 +1773,7 @@ impl App {
     /// `n`: prompt for a new endpoint name (under the selected collection).
     fn begin_new_endpoint(&mut self) {
         if self.explorer.selected_collection_dir().is_none() {
-            self.status = Some(TransientStatus::new("select a collection first"));
+            self.message = Some(Message::new("select a collection first"));
             return;
         }
         self.open_prompt(PromptPurpose::NewEndpoint, "");
@@ -1599,7 +1782,7 @@ impl App {
     /// `N`: prompt for a new collection name.
     fn begin_new_collection(&mut self) {
         if self.workspace.is_none() {
-            self.status = Some(TransientStatus::new("no workspace open"));
+            self.message = Some(Message::new("no workspace open"));
             return;
         }
         self.open_prompt(PromptPurpose::NewCollection, "");
@@ -1608,7 +1791,7 @@ impl App {
     /// `r`: prompt to rename the selected endpoint or collection.
     fn begin_rename(&mut self) {
         let Some(name) = self.explorer.selected_name() else {
-            self.status = Some(TransientStatus::new("nothing selected to rename"));
+            self.message = Some(Message::new("nothing selected to rename"));
             return;
         };
         self.open_prompt(PromptPurpose::Rename, &name);
@@ -1625,7 +1808,7 @@ impl App {
                 self.open_prompt(PromptPurpose::DeleteCollectionConfirm, "");
             }
             None => {
-                self.status = Some(TransientStatus::new("nothing selected to delete"));
+                self.message = Some(Message::new("nothing selected to delete"));
             }
         }
     }
@@ -1662,7 +1845,7 @@ impl App {
                 match persistence::create_endpoint(&dir, &text) {
                     Ok(path) => {
                         self.reload_explorer()?;
-                        self.status = Some(TransientStatus::new(format!("created {text}")));
+                        self.message = Some(Message::new(format!("created {text}")));
                         // Guarded: loading the new endpoint must not silently
                         // discard dirty edits on the currently-loaded one.
                         self.guarded_load(PendingLoad::File(path))?;
@@ -1677,7 +1860,7 @@ impl App {
                 match persistence::create_collection(&root, &text) {
                     Ok(_) => {
                         self.reload_explorer()?;
-                        self.status = Some(TransientStatus::new(format!("created {text}")));
+                        self.message = Some(Message::new(format!("created {text}")));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -1692,7 +1875,7 @@ impl App {
                     return Ok(());
                 };
                 if text != name {
-                    self.status = Some(TransientStatus::new("name mismatch — not deleted"));
+                    self.message = Some(Message::new("name mismatch — not deleted"));
                     return Ok(());
                 }
                 match persistence::delete_collection(&dir) {
@@ -1700,7 +1883,7 @@ impl App {
                         // reload_explorer's remap clears a selection whose file
                         // vanished with the collection.
                         self.reload_explorer()?;
-                        self.status = Some(TransientStatus::new(format!("deleted {name}")));
+                        self.message = Some(Message::new(format!("deleted {name}")));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -1742,7 +1925,7 @@ impl App {
                             // silently discard dirty edits on the loaded one.
                             self.guarded_load(PendingLoad::File(new_path))?;
                         }
-                        self.status = Some(TransientStatus::new(format!("renamed to {new_name}")));
+                        self.message = Some(Message::new(format!("renamed to {new_name}")));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -1763,7 +1946,7 @@ impl App {
                             selected.file = new_dir.join(rest);
                         }
                         self.reload_explorer()?;
-                        self.status = Some(TransientStatus::new(format!("renamed to {new_name}")));
+                        self.message = Some(Message::new(format!("renamed to {new_name}")));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -1785,7 +1968,7 @@ impl App {
                                 // reload_explorer's remap clears a selection
                                 // whose file vanished.
                                 self.reload_explorer()?;
-                                self.status = Some(TransientStatus::new("deleted endpoint"));
+                                self.message = Some(Message::new("deleted endpoint"));
                             }
                             Err(err) => self.crud_error(err),
                         }
@@ -1830,7 +2013,7 @@ impl App {
 
     /// Surfaces a CRUD [`PersistenceError`] on the statusline (fail-loud).
     fn crud_error(&mut self, err: PersistenceError) {
-        self.status = Some(TransientStatus::new(format!("error: {err}")));
+        self.message = Some(Message::new(format!("error: {err}")));
     }
 
     /// Rebuilds the explorer tree from disk, preserving expansion + cursor as best
@@ -1935,6 +2118,119 @@ impl App {
     }
 }
 
+/// Splits a URL into its base (everything before `?`) and the decoded
+/// `(name, value)` query pairs. A pair with no `=` yields an empty value; a
+/// trailing/empty segment is skipped. A URL without `?` yields an empty pair list.
+fn split_query(url: &str) -> (String, Vec<(String, String)>) {
+    let Some((base, query)) = url.split_once('?') else {
+        return (url.to_owned(), Vec::new());
+    };
+    let pairs = query
+        .split('&')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| match seg.split_once('=') {
+            Some((name, value)) => (percent_decode(name), percent_decode(value)),
+            None => (percent_decode(seg), String::new()),
+        })
+        .collect();
+    (base.to_owned(), pairs)
+}
+
+/// Minimal `application/x-www-form-urlencoded` decoding: `+` → space and `%XX`
+/// hex escapes; invalid escapes are passed through verbatim.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Merges committed URL query `pairs` into the request `params` per the M6.7
+/// deliverable-3 policy, returning a human-readable report (`"A updated, B added"`)
+/// or `None` when nothing changed:
+/// - (a) exact `name=value` row exists → ensure enabled (no duplicate);
+/// - (b) name exists with a different value → the first such row gets the new
+///   value + enabled;
+/// - (c) name absent → append an enabled row;
+/// - (d) duplicate names within the URL map positionally onto existing rows of
+///   that name (extras appended), preserving multi-value params.
+fn merge_query_params(params: &mut Vec<Param>, pairs: &[(String, String)]) -> Option<String> {
+    let mut added: Vec<String> = Vec::new();
+    let mut updated: Vec<String> = Vec::new();
+    // Track how many rows of each name we have already claimed positionally, so
+    // `?tag=a&tag=b` maps onto the 1st then 2nd existing `tag` row (rule d).
+    let mut claimed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for (name, value) in pairs {
+        // (a) an exact name+value row already exists → ensure enabled.
+        if let Some(row) = params
+            .iter_mut()
+            .find(|p| &p.name == name && &p.value == value)
+        {
+            if !row.enabled {
+                row.enabled = true;
+                updated.push(name.clone());
+            }
+            // Count this exact row as claimed for positional mapping.
+            *claimed.entry(name.clone()).or_insert(0) += 1;
+            continue;
+        }
+        // (b)/(d): find the Nth existing row of this name not yet claimed.
+        let skip = *claimed.get(name).unwrap_or(&0);
+        let target = params.iter_mut().filter(|p| &p.name == name).nth(skip);
+        if let Some(row) = target {
+            row.value = value.clone();
+            row.enabled = true;
+            updated.push(name.clone());
+            *claimed.entry(name.clone()).or_insert(0) += 1;
+        } else {
+            // (c) name absent (or all rows of it claimed → extra) → append.
+            params.push(Param {
+                name: name.clone(),
+                value: value.clone(),
+                enabled: true,
+            });
+            added.push(name.clone());
+            *claimed.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+
+    if added.is_empty() && updated.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !updated.is_empty() {
+        parts.push(format!("{} updated", updated.join(", ")));
+    }
+    if !added.is_empty() {
+        parts.push(format!("{} added", added.join(", ")));
+    }
+    Some(parts.join(", "))
+}
+
 /// The number of editable rows on the Auth tab for a given auth (row 0 is always
 /// the kind row).
 fn auth_field_count(auth: Option<&Auth>) -> usize {
@@ -1990,17 +2286,45 @@ fn toggle_auth_placement(auth: Option<&mut Auth>, row: usize) {
 ///
 /// Pure (no I/O) and deterministic — `TestBackend` snapshots stay stable.
 pub fn render(frame: &mut Frame, app: &mut App) {
-    let [main, status] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+    // The dedicated message row (deliverable 9) sits directly above the
+    // statusline and only occupies a row while a message is live — so the
+    // statusline never moves and its content is never covered.
+    let message_text = app.message.as_ref().map(|m| m.text.clone());
+    let (main, msg_area, status) = if message_text.is_some() {
+        let [main, msg, status] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+        (main, Some(msg), status)
+    } else {
+        let [main, status] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+        (main, None, status)
+    };
     // Two-column layout: Explorer left, column B right. The explorer is a
     // *narrow* column (owner prompt): fixed 30 cols — Min(24)+Fill would grow
     // the explorer to half the screen (ratatui distributes excess into Min).
-    let [explorer_area, right_area] =
-        Layout::horizontal([Constraint::Length(30), Constraint::Fill(1)]).areas(main);
-    // Column B split into three rows: URL bar (3 lines) / Request (50%) / Response (50%).
+    // When hidden (deliverable 5) the right column takes the full width.
+    let (explorer_area, right_area) = if app.explorer_hidden {
+        (None, main)
+    } else {
+        let [explorer_area, right_area] =
+            Layout::horizontal([Constraint::Length(30), Constraint::Fill(1)]).areas(main);
+        (Some(explorer_area), right_area)
+    };
+    // Column B split into three rows: URL bar (3 lines) / Request / Response.
+    // Zoom (deliverable 4) collapses the unfocused pane to a stub row.
     let remaining = right_area.height.saturating_sub(urlbar::HEIGHT);
-    let req_height = remaining / 2;
-    let resp_height = remaining - req_height;
+    let (req_height, resp_height) = match app.zoom {
+        Some(ZoomPane::Request) => (remaining.saturating_sub(1), 1),
+        Some(ZoomPane::Response) => (1, remaining.saturating_sub(1)),
+        None => {
+            let req = remaining / 2;
+            (req, remaining - req)
+        }
+    };
     let [urlbar_area, request_area, response_area] = Layout::vertical([
         Constraint::Length(urlbar::HEIGHT),
         Constraint::Length(req_height),
@@ -2011,15 +2335,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let has_ws = app.workspace.is_some();
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
     let theme = app.theme.clone();
-    explorer::render(
-        frame,
-        explorer_area,
-        &mut app.explorer,
-        explorer_focused,
-        has_ws,
-        &theme,
-        app.jump.as_ref(),
-    );
+    if let Some(explorer_area) = explorer_area {
+        explorer::render(
+            frame,
+            explorer_area,
+            &mut app.explorer,
+            explorer_focused,
+            has_ws,
+            &theme,
+            app.jump.as_ref(),
+        );
+    }
     let dirty = app.is_dirty();
     let selected_request = app
         .selected
@@ -2031,7 +2357,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         urlbar::UrlBarCtx {
             request: selected_request,
             focused: app.focus == Pane::UrlBar && app.mode == Mode::Normal,
-            editor: app.url_editor.as_ref(),
+            editor: app.url_editor.as_mut(),
             dirty,
             jump_label: app
                 .jump
@@ -2046,7 +2372,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         request::RenderCtx {
             request: selected_request,
             editor: &mut app.editor,
-            tabs: &app.tabs,
+            tabs: &mut app.tabs,
             focused: app.focus == Pane::Request && app.mode == Mode::Normal,
             theme: &theme,
             jump: app.jump.as_ref(),
@@ -2074,9 +2400,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
         let _ = tx.send(job);
     }
-    // While a request is in flight the statusline derives "sending…" from state —
-    // not from the transient `status` field — so it appears/disappears instantly.
-    let in_flight_msg = app.in_flight.as_ref().map(|_| "sending… (ctrl-c cancels)");
+    // The statusline (deliverable 9) keeps *only* persistent state: focus,
+    // endpoint/workspace, profile, dirty, and the in-flight spinner. Transient
+    // messages live in the dedicated row below. The in-flight spinner still
+    // derives from state so it appears/disappears instantly.
+    let in_flight = app.in_flight.is_some();
     statusline::render(
         frame,
         status,
@@ -2084,10 +2412,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             focus: app.focus.name(),
             workspace: app.workspace.as_ref().map(|ws| ws.manifest().name.as_str()),
             profile: app.active_profile.as_deref(),
-            message: in_flight_msg.or_else(|| app.status.as_ref().map(|s| s.message.as_str())),
+            dirty,
+            in_flight,
+            tick_count: app.tick_count,
             theme: &theme,
         },
     );
+    // The dedicated message row, only when a message is live.
+    if let (Some(area), Some(text)) = (msg_area, &message_text) {
+        message::render(frame, area, text, &theme);
+    }
 
     if let Some(picker_state) = &app.picker {
         picker::render(frame, main, picker_state, &theme);
@@ -2116,6 +2450,83 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             prompt::render_confirm(frame, main, title, question, hint, &theme);
         }
         _ => {}
+    }
+
+    // The URL vim-popup editor (deliverable 7) renders over the main area.
+    if let Some(editor) = app.url_popup.as_mut() {
+        urlbar::render_popup(frame, main, editor, &theme);
+    }
+
+    // The which-key leader popup (deliverable 1).
+    if app.pending_leader {
+        let entries: Vec<(String, String)> = {
+            let mut actions: Vec<Action> =
+                app.keymap.iter_leader().map(|(_, action)| action).collect();
+            actions.sort_by_key(|a| a.name());
+            actions.dedup();
+            actions
+                .into_iter()
+                .map(|a| {
+                    (
+                        app.keymap.leader_combos_for(a).join("/"),
+                        a.label().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        leader_popup::render(frame, main, &entries, &theme);
+    }
+
+    // The `?` help overlay (deliverable 8), rendered from the live keymap.
+    if app.help_open {
+        let total = help::render(frame, main, &app.keymap, app.help_scroll, &theme);
+        app.help_scroll = app.help_scroll.min(total.saturating_sub(1));
+    }
+}
+
+/// The which-key leader popup: a small floating panel listing the bound
+/// continuations while in pending-leader state.
+mod leader_popup {
+    use ratatui::Frame;
+    use ratatui::layout::{Constraint, Flex, Layout, Rect};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+
+    use crate::tui::theme::Theme;
+
+    /// Renders the popup with `(keys, label)` continuation entries.
+    pub fn render(frame: &mut Frame, area: Rect, entries: &[(String, String)], theme: &Theme) {
+        let width = entries
+            .iter()
+            .map(|(k, l)| k.len() + l.len() + 5)
+            .max()
+            .unwrap_or(20)
+            .clamp(20, 50) as u16;
+        let height = entries.len() as u16 + 2;
+        let [modal] = Layout::horizontal([Constraint::Length(width)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [modal] = Layout::vertical([Constraint::Length(height)])
+            .flex(Flex::End)
+            .areas(modal);
+        frame.render_widget(Clear, modal);
+        let block = Block::bordered()
+            .border_type(BorderType::Thick)
+            .border_style(theme.border_focused)
+            .title(" leader ")
+            .title_style(theme.title);
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+        let lines: Vec<Line> = entries
+            .iter()
+            .map(|(keys, label)| {
+                Line::from(vec![
+                    Span::styled(format!(" {keys} "), theme.jump_label),
+                    Span::raw(format!(" {label}")),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 }
 
@@ -2213,7 +2624,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(
-            app.status.as_ref().map(|s| s.message.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("no endpoint selected — nothing to send")
         );
         assert_eq!(String::from(app.editor.lines.clone()), "");
@@ -2261,7 +2672,7 @@ mod tests {
         }
         assert_eq!(String::from(app.editor.lines.clone()), "sc");
         assert!(!app.should_quit);
-        assert!(app.status.is_none());
+        assert!(app.message.is_none());
     }
 
     /// The interception resolves through the keymap: a remapped send key with
@@ -2274,7 +2685,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(
-            app.status.as_ref().map(|s| s.message.as_str()),
+            app.message.as_ref().map(|m| m.text.as_str()),
             Some("no endpoint selected — nothing to send")
         );
         assert_eq!(String::from(app.editor.lines.clone()), "");
@@ -2508,32 +2919,371 @@ mod tests {
         assert!(app.profile_choices.is_empty());
     }
 
-    /// `TransientStatus` expires after EXPIRE_SECS; a backdated `set_at` triggers it.
+    /// A newer message replaces the current one in the dedicated message row.
     #[test]
-    fn status_expires_after_4s() {
-        // A fresh message is not expired.
-        let fresh = TransientStatus::new("hello");
-        assert!(!fresh.is_expired(), "brand-new message must not be expired");
-
-        // A message whose set_at is backdated past the threshold is expired.
-        let old = TransientStatus {
-            message: "stale".to_owned(),
-            set_at: Instant::now() - Duration::from_secs(TransientStatus::EXPIRE_SECS + 1),
-        };
-        assert!(
-            old.is_expired(),
-            "message older than EXPIRE_SECS must be expired"
+    fn newer_message_replaces_current() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.notify("first");
+        assert_eq!(app.message.as_ref().map(|m| m.text.as_str()), Some("first"));
+        app.notify("second");
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("second"),
+            "newer message must replace the current one"
         );
     }
 
-    /// While in_flight is Some, the render-time derived message is "sending…"
-    /// regardless of the transient status field.
+    // ---- M6.7: leader state machine ----
+
+    fn press(app: &mut App, c: char) {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    /// Space enters pending-leader; a bound continuation dispatches and dismisses.
     #[test]
-    fn in_flight_statusline_message_derives_from_state() {
-        let app = App::new(None, KeyMap::default()).unwrap();
-        // No in_flight → no derived message.
-        let msg: Option<&str> = app.in_flight.as_ref().map(|_| "sending… (ctrl-c cancels)");
-        assert!(msg.is_none());
+    fn leader_pending_then_dispatch() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        press(&mut app, ' ');
+        assert!(app.pending_leader, "space enters pending-leader");
+        // `<leader>q` quits.
+        press(&mut app, 'q');
+        assert!(!app.pending_leader, "dispatch dismisses the popup");
+        assert!(app.should_quit);
+    }
+
+    /// An unbound continuation dismisses the popup with no action; Esc too.
+    #[test]
+    fn leader_unbound_and_esc_dismiss() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        press(&mut app, ' ');
+        press(&mut app, 'x'); // unbound
+        assert!(!app.pending_leader);
+        assert!(!app.should_quit);
+
+        press(&mut app, ' ');
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.pending_leader, "esc dismisses");
+    }
+
+    /// `<leader>e` toggles the explorer sidebar.
+    #[test]
+    fn leader_e_toggles_explorer() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        assert!(!app.explorer_hidden);
+        press(&mut app, ' ');
+        press(&mut app, 'e');
+        assert!(app.explorer_hidden);
+        assert!(!app.pending_leader);
+    }
+
+    /// Leader is inert during text edits: Space types a space in the URL editor,
+    /// never entering pending-leader.
+    #[test]
+    fn leader_inert_during_url_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        app.load_endpoint(selected);
+        app.begin_url_edit_inline();
+        assert!(app.url_editor.is_some());
+        press(&mut app, ' ');
+        assert!(
+            !app.pending_leader,
+            "space must not enter leader during edit"
+        );
+        assert!(
+            app.url_editor.as_ref().unwrap().text().contains(' '),
+            "space types a space in the editor"
+        );
+    }
+
+    /// Leader is inert in edtui insert mode on the Body tab.
+    #[test]
+    fn leader_inert_in_edtui_insert() {
+        let mut app = insert_mode_app(KeyMap::default());
+        press(&mut app, ' ');
+        assert!(!app.pending_leader);
+        assert_eq!(String::from(app.editor.lines.clone()), " ");
+    }
+
+    // ---- M6.7: digit binds only act in Request ----
+
+    /// Global digits do nothing (no pane focus); inside Request they jump tabs.
+    #[test]
+    fn digit_focus_removed_at_app_level() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Response;
+        press(&mut app, '1'); // was FocusExplorer
+        assert_eq!(app.focus, Pane::Response, "digit must not change focus");
+        // In the Request pane, 1–4 jump tabs.
+        app.focus = Pane::Request;
+        press(&mut app, '2');
+        assert_eq!(app.tabs.active, RequestTab::Headers);
+    }
+
+    // ---- M6.7: URL→Params merge policy ----
+
+    fn params(pairs: &[(&str, &str, bool)]) -> Vec<Param> {
+        pairs
+            .iter()
+            .map(|(n, v, e)| Param {
+                name: (*n).to_owned(),
+                value: (*v).to_owned(),
+                enabled: *e,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_rule_a_exact_match_ensures_enabled() {
+        // Exact name+value exists but disabled → enabled, no duplicate.
+        let mut p = params(&[("a", "1", false)]);
+        let report = merge_query_params(&mut p, &[("a".into(), "1".into())]);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].enabled);
+        assert_eq!(report.as_deref(), Some("a updated"));
+        // Already enabled + exact → no change, no report.
+        let mut p = params(&[("a", "1", true)]);
+        assert!(merge_query_params(&mut p, &[("a".into(), "1".into())]).is_none());
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn merge_rule_b_updates_first_row_of_name() {
+        let mut p = params(&[("a", "old", false)]);
+        let report = merge_query_params(&mut p, &[("a".into(), "new".into())]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].value, "new");
+        assert!(p[0].enabled);
+        assert_eq!(report.as_deref(), Some("a updated"));
+    }
+
+    #[test]
+    fn merge_rule_c_appends_absent() {
+        let mut p = params(&[("a", "1", true)]);
+        let report = merge_query_params(&mut p, &[("b".into(), "2".into())]);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].name, "b");
+        assert!(p[1].enabled);
+        assert_eq!(report.as_deref(), Some("b added"));
+    }
+
+    #[test]
+    fn merge_rule_d_duplicate_names_positional() {
+        // Two existing `tag` rows; `?tag=x&tag=y` maps positionally.
+        let mut p = params(&[("tag", "a", true), ("tag", "b", true)]);
+        merge_query_params(
+            &mut p,
+            &[("tag".into(), "x".into()), ("tag".into(), "y".into())],
+        );
+        assert_eq!(p.len(), 2, "no new rows — positional map");
+        assert_eq!(p[0].value, "x");
+        assert_eq!(p[1].value, "y");
+        // A third duplicate appends (extra).
+        let mut p = params(&[("tag", "a", true)]);
+        merge_query_params(
+            &mut p,
+            &[("tag".into(), "x".into()), ("tag".into(), "y".into())],
+        );
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].value, "x");
+        assert_eq!(p[1].value, "y");
+    }
+
+    #[test]
+    fn split_query_strips_and_decodes() {
+        let (base, pairs) = split_query("https://x/y?a=1&b=hello%20world&c");
+        assert_eq!(base, "https://x/y");
+        assert_eq!(
+            pairs,
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "hello world".to_owned()),
+                ("c".to_owned(), String::new()),
+            ]
+        );
+        // No query → empty pairs, url unchanged.
+        let (base, pairs) = split_query("https://x/y");
+        assert_eq!(base, "https://x/y");
+        assert!(pairs.is_empty());
+    }
+
+    /// Committing a URL edit strips the query, merges into params, reports the
+    /// merge, and marks the request dirty.
+    #[test]
+    fn commit_url_merges_and_marks_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        app.load_endpoint(selected);
+        assert!(!app.is_dirty());
+        app.commit_url("https://api.test/users?page=2&sort=name".to_owned());
+        let req = app.live_request().unwrap();
+        assert_eq!(req.url, "https://api.test/users", "query stripped from URL");
+        assert_eq!(req.params.len(), 2);
+        assert!(req.params.iter().all(|p| p.enabled));
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|m| m.text.contains("added")),
+            "statusline reports the merge"
+        );
+        assert!(app.is_dirty(), "commit marks the request dirty");
+    }
+
+    // ---- M6.7: zoom state machine ----
+
+    #[test]
+    fn zoom_toggles_and_restores() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Request;
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, Some(ZoomPane::Request));
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, None, "z again restores the split");
+        // From Response.
+        app.focus = Pane::Response;
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, Some(ZoomPane::Response));
+        // No-op from the Explorer/UrlBar.
+        app.zoom = None;
+        app.focus = Pane::Explorer;
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, None);
+    }
+
+    /// Focusing the collapsed pane auto-unzooms first (a collapsed pane cannot
+    /// hold focus).
+    #[test]
+    fn focus_collapsed_pane_auto_unzooms() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Request;
+        app.dispatch(Action::Zoom, None).unwrap(); // Response collapsed
+        assert_eq!(app.zoom, Some(ZoomPane::Request));
+        app.dispatch(Action::FocusResponse, None).unwrap();
+        assert_eq!(app.zoom, None, "focusing the collapsed pane unzooms");
+        assert_eq!(app.focus, Pane::Response);
+    }
+
+    // ---- M6.7: explorer toggle + auto-reopen ----
+
+    #[test]
+    fn explorer_toggle_and_auto_reopen() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Request;
+        app.dispatch(Action::ToggleExplorer, None).unwrap();
+        assert!(app.explorer_hidden);
+        // Focusing the explorer auto-reopens it.
+        app.dispatch(Action::FocusExplorer, None).unwrap();
+        assert!(!app.explorer_hidden, "focus explorer must auto-reopen");
+        assert_eq!(app.focus, Pane::Explorer);
+        // Hiding while focused moves focus off the explorer.
+        app.dispatch(Action::ToggleExplorer, None).unwrap();
+        assert!(app.explorer_hidden);
+        assert_ne!(app.focus, Pane::Explorer, "hidden pane cannot hold focus");
+    }
+
+    /// Tab cycling onto the hidden explorer auto-reopens it.
+    #[test]
+    fn tab_onto_hidden_explorer_reopens() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.explorer_hidden = true;
+        app.focus = Pane::Response; // next() → Explorer
+        app.dispatch(Action::FocusNext, None).unwrap();
+        assert_eq!(app.focus, Pane::Explorer);
+        assert!(!app.explorer_hidden, "tab onto explorer reopens it");
+    }
+
+    // ---- M6.7: URL popup editor ----
+
+    fn app_with_endpoint(dir: &Path) -> App {
+        let mut app = workspace_fixture(dir);
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        app.load_endpoint(selected);
+        app
+    }
+
+    #[test]
+    fn url_popup_commit_runs_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_popup();
+        assert!(app.url_popup.is_some());
+        // Replace the buffer and commit.
+        app.url_popup = Some(EditorState::new(Lines::from("https://api.test/x?q=1")));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.url_popup.is_none(), "enter commits + closes");
+        let req = app.live_request().unwrap();
+        assert_eq!(req.url, "https://api.test/x");
+        assert!(req.params.iter().any(|p| p.name == "q" && p.enabled));
+    }
+
+    #[test]
+    fn url_popup_esc_cancels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        let before = app.live_request().unwrap().url.clone();
+        app.begin_url_popup();
+        // In Normal mode, Esc cancels (edtui popups open in Normal mode).
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.url_popup.is_none());
+        assert_eq!(app.live_request().unwrap().url, before, "url unchanged");
+    }
+
+    #[test]
+    fn url_popup_single_line_constraint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_popup();
+        // A buffer that somehow holds two lines collapses to one on commit.
+        app.url_popup = Some(EditorState::new(Lines::from("https://a/b\nc")));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.live_request().unwrap().url, "https://a/bc");
+    }
+
+    #[test]
+    fn url_edit_mode_selects_inline_vs_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        // Default (inline): begin_url_edit opens the inline editor.
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_edit();
+        assert!(app.url_editor.is_some());
+        assert!(app.url_popup.is_none());
+        // Popup mode: begin_url_edit opens the popup.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir2.path());
+        app.set_url_edit_mode(UrlEditMode::Popup);
+        app.begin_url_edit();
+        assert!(app.url_popup.is_some());
+        assert!(app.url_editor.is_none());
+    }
+
+    // ---- M6.7: help overlay ----
+
+    #[test]
+    fn help_opens_and_closes() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.dispatch(Action::Help, None).unwrap();
+        assert!(app.help_open);
+        // `j`/`k` scroll; `?` closes.
+        press(&mut app, 'j');
+        assert_eq!(app.help_scroll, 1);
+        press(&mut app, 'k');
+        assert_eq!(app.help_scroll, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.help_open);
     }
 
     /// The profile picker marks the active profile with ● and (none) with ●

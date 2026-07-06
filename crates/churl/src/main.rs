@@ -139,6 +139,30 @@ fn run_keymaps() -> Result<()> {
             );
         }
     }
+
+    // Leader continuations under their own header.
+    let leader: Vec<_> = actions
+        .iter()
+        .filter(|a| !effective.leader_combos_for(**a).is_empty())
+        .collect();
+    if !leader.is_empty() {
+        println!("\nLeader");
+        for action in leader {
+            let combos = effective.leader_combos_for(*action);
+            let origin =
+                if effective.leader_combos_for(*action) == default.leader_combos_for(*action) {
+                    "default"
+                } else {
+                    "overridden"
+                };
+            println!(
+                "  {name:<name_w$}  {combos:<combo_w$}  ({origin})  {label}",
+                name = action.name(),
+                combos = fmt_combos(combos),
+                label = action.label(),
+            );
+        }
+    }
     Ok(())
 }
 

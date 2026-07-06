@@ -97,6 +97,16 @@ pub enum Action {
     Rename,
     /// Delete the selected endpoint or collection (with a confirm).
     Delete,
+    /// Toggle the explorer sidebar (hide / reopen).
+    ToggleExplorer,
+    /// Zoom the focused pane (Request/Response), collapsing the other.
+    Zoom,
+    /// Open the `?` help overlay (effective keymap).
+    Help,
+    /// Enter pending-leader state (the which-key popup).
+    Leader,
+    /// Open the URL vim-popup editor (`e` on the URL bar).
+    EditUrlPopup,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -145,6 +155,15 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::NewCollection, "new-collection", "new collection"),
     (Action::Rename, "rename", "rename"),
     (Action::Delete, "delete", "delete"),
+    (
+        Action::ToggleExplorer,
+        "toggle-explorer",
+        "toggle explorer sidebar",
+    ),
+    (Action::Zoom, "zoom", "zoom pane"),
+    (Action::Help, "help", "help overlay"),
+    (Action::Leader, "leader", "leader menu"),
+    (Action::EditUrlPopup, "edit-url-popup", "edit URL (popup)"),
 ];
 
 impl Action {
@@ -257,6 +276,12 @@ impl PaneCtx {
 pub struct KeyMap {
     map: HashMap<KeyCombination, Action>,
     overlays: BTreeMap<PaneCtx, HashMap<KeyCombination, Action>>,
+    /// The leader key: pressing it (outside text edits) enters pending-leader
+    /// state and shows the which-key popup. Remappable via `leader_key` config.
+    leader: KeyCombination,
+    /// Leader continuations: the second key of a `<leader>x` chord → action.
+    /// Populated from the built-in leader map + the `[keys.leader]` sub-table.
+    leader_map: HashMap<KeyCombination, Action>,
 }
 
 impl Default for KeyMap {
@@ -274,9 +299,9 @@ impl Default for KeyMap {
             KeyCombination::new(KeyCode::BackTab, KeyModifiers::SHIFT),
             Action::FocusPrev,
         );
-        bind(key!('1'), Action::FocusExplorer);
-        bind(key!('2'), Action::FocusRequest);
-        bind(key!('3'), Action::FocusResponse);
+        // Global `1`/`2`/`3` pane-focus binds were removed in M6.7 (DECISIONS.md):
+        // navigation is Tab/Shift-Tab + `f` jump-mode only; `1`–`4` are Request-tab
+        // jumps only. Pane focus stays fully reachable without digit keys.
         bind(key!(k), Action::Up);
         bind(key!(j), Action::Down);
         bind(key!(enter), Action::Select);
@@ -294,6 +319,9 @@ impl Default for KeyMap {
         bind(key!(f), Action::Jump);
         // `Save` is global: `w` writes the current request (never auto-saved).
         bind(key!(w), Action::Save);
+        // `?` opens the help overlay; `z` zooms the focused pane.
+        bind(key!('?'), Action::Help);
+        bind(key!(z), Action::Zoom);
         // `SwitchProfile` has no default key binding: it lives in the command
         // palette ("switch profile"). Overlay-level modes (search/palette/jump)
         // still take routing precedence over it.
@@ -326,10 +354,30 @@ impl Default for KeyMap {
         overlay(PaneCtx::Request, key!('4'), Action::Tab4);
         overlay(PaneCtx::Request, key!(a), Action::RowAdd);
         overlay(PaneCtx::Request, key!(d), Action::RowDelete);
-        overlay(PaneCtx::Request, key!(space), Action::RowToggle);
+        // Space is the global leader from M6.7; the Request row-toggle rebinds to
+        // `t` so Space stays free everywhere (DECISIONS.md).
+        overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
+        // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
+        overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
 
-        Self { map, overlays }
+        // The leader chord: Space, then a continuation key.
+        let mut leader_map = HashMap::new();
+        let mut leader_bind = |combo: KeyCombination, action: Action| {
+            leader_map.insert(combo.normalized(), action);
+        };
+        leader_bind(key!(e), Action::ToggleExplorer);
+        leader_bind(key!(s), Action::Send);
+        leader_bind(key!(c), Action::Cancel);
+        leader_bind(key!(p), Action::SwitchProfile);
+        leader_bind(key!(q), Action::Quit);
+
+        Self {
+            map,
+            overlays,
+            leader: key!(space).normalized(),
+            leader_map,
+        }
     }
 }
 
@@ -340,6 +388,41 @@ impl KeyMap {
     /// dropped binding is worse than a startup failure the user can fix.
     pub fn with_overrides(overrides: &BTreeMap<String, String>) -> Result<Self> {
         Self::with_all_overrides(overrides, &BTreeMap::new())
+    }
+
+    /// The leader key combination (Space by default; remappable via `leader_key`).
+    pub fn leader(&self) -> KeyCombination {
+        self.leader
+    }
+
+    /// Whether `key` is the leader key.
+    pub fn is_leader(&self, key: KeyEvent) -> bool {
+        KeyCombination::from(key) == self.leader
+    }
+
+    /// Looks up a leader continuation (the second key of a `<leader>x` chord).
+    pub fn leader_lookup(&self, key: KeyEvent) -> Option<Action> {
+        self.leader_map.get(&KeyCombination::from(key)).copied()
+    }
+
+    /// Every `(key combination, action)` binding in the leader map, unordered.
+    pub fn iter_leader(&self) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
+        self.leader_map
+            .iter()
+            .map(|(combo, action)| (*combo, *action))
+    }
+
+    /// All leader continuations bound to `action`, sorted.
+    pub fn leader_combos_for(&self, action: Action) -> Vec<String> {
+        sorted_combos(self.leader_map.iter(), action)
+    }
+
+    /// Overrides the leader key, re-normalizing. Fails loudly on a bad combo.
+    pub fn set_leader(&mut self, combo_str: &str) -> Result<()> {
+        let combo = KeyCombination::from_str(combo_str)
+            .map_err(|err| eyre!("bad leader_key {combo_str:?}: {err}"))?;
+        self.leader = combo.normalized();
+        Ok(())
     }
 
     /// Builds the default map with global `[keys]` overrides *and* per-pane
@@ -356,13 +439,21 @@ impl KeyMap {
             keymap.map.insert(combo.normalized(), action);
         }
         for (table, bindings) in overlays {
+            // `[keys.leader]` is not a pane overlay: it holds leader continuations.
+            if table == "leader" {
+                for (combo_str, action_str) in bindings {
+                    let (combo, action) = parse_binding(combo_str, action_str, "[keys.leader]")?;
+                    keymap.leader_map.insert(combo.normalized(), action);
+                }
+                continue;
+            }
             let ctx = PaneCtx::all()
                 .into_iter()
                 .find(|c| c.config_name() == table)
                 .ok_or_else(|| {
                     eyre!(
                         "unknown keymap table [keys.{table}] (expected one of: \
-                         explorer, urlbar, request, response)"
+                         explorer, urlbar, request, response, leader)"
                     )
                 })?;
             for (combo_str, action_str) in bindings {
@@ -622,10 +713,11 @@ mod tests {
     #[test]
     fn overlay_lookup_precedence() {
         let keymap = KeyMap::default();
-        // `1` globally focuses the explorer; inside the Request overlay it is Tab1.
+        // `1` has no global binding (M6.7 removed pane-focus digits); inside the
+        // Request overlay it is Tab1.
         assert_eq!(
             keymap.lookup(press(KeyCode::Char('1'), KeyModifiers::NONE)),
-            Some(Action::FocusExplorer)
+            None
         );
         assert_eq!(
             keymap.lookup_ctx(
@@ -722,6 +814,100 @@ mod tests {
         assert!(request.iter().any(|(_, a)| *a == Action::TabNext));
         // Save is a global binding, not an overlay one.
         assert_eq!(keymap.combos_for(Action::Save), vec!["w"]);
+    }
+
+    #[test]
+    fn digit_binds_only_act_in_request() {
+        let keymap = KeyMap::default();
+        // No global digit binds (1–4) after M6.7.
+        for d in ['1', '2', '3', '4'] {
+            assert_eq!(
+                keymap.lookup(press(KeyCode::Char(d), KeyModifiers::NONE)),
+                None,
+                "'{d}' must have no global binding"
+            );
+        }
+        // 1–4 still act as tab jumps inside the Request overlay.
+        for (d, action) in [
+            ('1', Action::Tab1),
+            ('2', Action::Tab2),
+            ('3', Action::Tab3),
+            ('4', Action::Tab4),
+        ] {
+            assert_eq!(
+                keymap.lookup_ctx(
+                    press(KeyCode::Char(d), KeyModifiers::NONE),
+                    PaneCtx::Request
+                ),
+                Some(action)
+            );
+            // And no other pane overlay binds them.
+            for ctx in [PaneCtx::Explorer, PaneCtx::UrlBar, PaneCtx::Response] {
+                assert_eq!(
+                    keymap.lookup_ctx(press(KeyCode::Char(d), KeyModifiers::NONE), ctx),
+                    None,
+                    "'{d}' must be inert in {ctx:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_leader_map() {
+        let keymap = KeyMap::default();
+        assert_eq!(keymap.leader(), key!(space).normalized());
+        assert!(keymap.is_leader(press(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert_eq!(
+            keymap.leader_lookup(press(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(Action::ToggleExplorer)
+        );
+        assert_eq!(
+            keymap.leader_lookup(press(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Action::Quit)
+        );
+        // An unbound continuation returns None (the popup dismisses).
+        assert_eq!(
+            keymap.leader_lookup(press(KeyCode::Char('x'), KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[test]
+    fn leader_table_parses_and_overrides() {
+        let overlays = BTreeMap::from([(
+            "leader".to_string(),
+            BTreeMap::from([("x".to_string(), "save".to_string())]),
+        )]);
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        assert_eq!(
+            keymap.leader_lookup(press(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(Action::Save)
+        );
+        // Default leader continuations survive.
+        assert_eq!(
+            keymap.leader_lookup(press(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Action::Quit)
+        );
+        assert_eq!(keymap.leader_combos_for(Action::Save), vec!["x"]);
+    }
+
+    #[test]
+    fn bad_leader_table_action_errors() {
+        let overlays = BTreeMap::from([(
+            "leader".to_string(),
+            BTreeMap::from([("x".to_string(), "explode".to_string())]),
+        )]);
+        let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
+        assert!(err.to_string().contains("explode"), "{err}");
+    }
+
+    #[test]
+    fn set_leader_remaps() {
+        let mut keymap = KeyMap::default();
+        keymap.set_leader("ctrl-b").unwrap();
+        assert!(keymap.is_leader(press(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+        assert!(!keymap.is_leader(press(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(keymap.set_leader("ctrl-").is_err());
     }
 
     #[test]

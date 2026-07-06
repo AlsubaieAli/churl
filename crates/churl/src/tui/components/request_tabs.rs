@@ -86,6 +86,10 @@ pub struct RequestTabs {
     pub auth_sel: usize,
     /// An in-progress row field edit, if any.
     pub editing: Option<FieldEdit>,
+    /// Vertical scroll offset (first visible row index) for the active row-list
+    /// tab, kept so the selection stays in the viewport when the list is taller
+    /// than the pane (mirrors the explorer's `scroll_to_fit`).
+    pub row_scroll: usize,
 }
 
 impl Default for RequestTabs {
@@ -96,6 +100,7 @@ impl Default for RequestTabs {
             headers_sel: 0,
             auth_sel: 0,
             editing: None,
+            row_scroll: 0,
         }
     }
 }
@@ -162,6 +167,26 @@ impl RequestTabs {
         let sel = self.selection().min(max);
         self.set_selection(sel);
     }
+
+    /// Adjusts `row_scroll` so the active tab's selection stays within a
+    /// `height`-row viewport over `row_count` rows, and returns the offset.
+    /// Mirrors `ExplorerState::scroll_to_fit`. Called by the renderer with the
+    /// content pane's inner height.
+    pub fn scroll_to_fit(&mut self, row_count: usize, height: usize) -> usize {
+        if height == 0 {
+            self.row_scroll = 0;
+            return 0;
+        }
+        let sel = self.selection();
+        if sel < self.row_scroll {
+            self.row_scroll = sel;
+        } else if sel >= self.row_scroll + height {
+            self.row_scroll = sel + 1 - height;
+        }
+        let max_scroll = row_count.saturating_sub(height);
+        self.row_scroll = self.row_scroll.min(max_scroll);
+        self.row_scroll
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +251,32 @@ mod tests {
         // Empty list clamps to 0.
         tabs.clamp(0);
         assert_eq!(tabs.params_sel, 0);
+    }
+
+    #[test]
+    fn row_scroll_keeps_selection_in_view() {
+        let mut tabs = RequestTabs::default();
+        // 10 rows, 3-high viewport. Selection at top → no scroll.
+        assert_eq!(tabs.scroll_to_fit(10, 3), 0);
+        // Move the selection to row 5: viewport must scroll to include it.
+        for _ in 0..5 {
+            tabs.move_down(10);
+        }
+        let off = tabs.scroll_to_fit(10, 3);
+        assert!(off <= 5 && 5 < off + 3, "row 5 must be visible: off={off}");
+        // Move back to top: scroll returns to 0.
+        for _ in 0..10 {
+            tabs.move_up();
+        }
+        assert_eq!(tabs.scroll_to_fit(10, 3), 0);
+        // Never scrolls past the last screenful.
+        for _ in 0..10 {
+            tabs.move_down(10);
+        }
+        let off = tabs.scroll_to_fit(10, 3);
+        assert_eq!(off, 7, "max scroll = row_count - height");
+        // Zero height resets.
+        assert_eq!(tabs.scroll_to_fit(10, 0), 0);
     }
 
     #[test]

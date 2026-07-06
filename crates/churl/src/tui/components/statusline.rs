@@ -1,4 +1,7 @@
-//! One-line status bar: focused pane, workspace name, active profile, key hints.
+//! One-line status bar: persistent state only — focused pane, workspace/endpoint,
+//! active profile, dirty marker, and the in-flight spinner. Transient action
+//! messages live in the dedicated message row above (M6.7 deliverable 9), never
+//! here, so the two components stay decoupled.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,7 +10,10 @@ use ratatui::widgets::Paragraph;
 
 use crate::tui::theme::Theme;
 
-/// What [`render`] needs to draw the status bar.
+/// Spinner frames for the in-flight indicator (advanced by the 250 ms tick).
+const SPINNER: [char; 4] = ['⠋', '⠙', '⠹', '⠸'];
+
+/// What [`render`] needs to draw the status bar — persistent state only.
 pub struct StatusCtx<'a> {
     /// Focused pane name.
     pub focus: &'a str,
@@ -15,32 +21,34 @@ pub struct StatusCtx<'a> {
     pub workspace: Option<&'a str>,
     /// Active profile name, if one is set.
     pub profile: Option<&'a str>,
-    /// Transient message (send hints, history/errors), replacing the key hints.
-    pub message: Option<&'a str>,
+    /// Whether the loaded endpoint has unsaved changes.
+    pub dirty: bool,
+    /// Whether a request is in flight (drives the spinner).
+    pub in_flight: bool,
+    /// Monotonic tick counter (drives the spinner frame).
+    pub tick_count: u64,
     /// The colour theme.
     pub theme: &'a Theme,
 }
 
-/// Renders the status bar. A transient `message` replaces the key hints when
-/// present; the active profile is shown (when set) after the workspace name.
+/// Renders the status bar: focus · workspace · profile · dirty · in-flight
+/// spinner (or the key hints when idle).
 pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
     let workspace = ctx.workspace.unwrap_or("no workspace");
     let profile = match ctx.profile {
         Some(name) => format!(" · profile {name}"),
         None => String::new(),
     };
-    let (line, style) = match ctx.message {
-        Some(message) => (
-            format!(" {} · {workspace}{profile} · {message}", ctx.focus),
-            ctx.theme.statusline,
-        ),
-        None => (
-            format!(
-                " {} · {workspace}{profile} · j/k move · enter select · ctrl-s send · w save · f jump · / search · : palette · q quit",
-                ctx.focus
-            ),
-            ctx.theme.statusline,
-        ),
+    let dirty = if ctx.dirty { " · ●" } else { "" };
+    let tail = if ctx.in_flight {
+        let frame_char = SPINNER[(ctx.tick_count as usize) % SPINNER.len()];
+        format!(" · {frame_char} sending… (ctrl-c cancels)")
+    } else {
+        " · ? help · space leader · / search · : palette".to_owned()
     };
-    frame.render_widget(Paragraph::new(Line::from(line)).style(style), area);
+    let line = format!(" {} · {workspace}{profile}{dirty}{tail}", ctx.focus);
+    frame.render_widget(
+        Paragraph::new(Line::from(line)).style(ctx.theme.statusline),
+        area,
+    );
 }
