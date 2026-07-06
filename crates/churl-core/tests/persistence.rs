@@ -6,13 +6,13 @@ use std::fs;
 use std::path::Path;
 
 use churl_core::model::{
-    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Method, Param, Profile, Request,
-    Workspace,
+    ApiKeyPlacement, Auth, Body, BodyKind, CollectionMeta, Endpoint, Header, Method, Param,
+    Profile, Request, Workspace,
 };
 use churl_core::persistence::endpoint_to_toml;
 use churl_core::persistence::{
-    Collection, OpenWorkspace, PersistenceError, load_endpoint, load_workspace_manifest,
-    save_endpoint, save_workspace_manifest,
+    Collection, OpenWorkspace, PersistenceError, load_collection_meta, load_endpoint,
+    load_workspace_manifest, save_collection_meta, save_endpoint, save_workspace_manifest,
 };
 
 /// Comment-bearing endpoint fixtures: (name, contents, every comment that must survive).
@@ -241,6 +241,7 @@ fn endpoint_to_toml_refuses_literal_secret_auth() {
 fn demo_workspace() -> Workspace {
     Workspace {
         name: "demo".into(),
+        vars: BTreeMap::new(),
         profiles: vec![
             Profile {
                 name: "dev".into(),
@@ -370,4 +371,99 @@ fn malformed_endpoint_error_names_the_file() {
         err.to_string().contains("broken.toml"),
         "error must carry the offending path: {err}"
     );
+}
+
+#[test]
+fn workspace_vars_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::from([
+            (
+                "base_url".to_string(),
+                "https://api.example.com".to_string(),
+            ),
+            ("api_version".to_string(), "v2".to_string()),
+        ]),
+        profiles: Vec::new(),
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(text.contains("[vars]"), "{text}");
+    assert!(
+        text.contains(r#"base_url = "https://api.example.com""#),
+        "{text}"
+    );
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(back, ws);
+}
+
+#[test]
+fn workspace_vars_secret_literal_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::from([("api_token".to_string(), "leaked".to_string())]),
+        profiles: Vec::new(),
+    };
+    let err = save_workspace_manifest(dir.path(), &ws).unwrap_err();
+    assert!(
+        matches!(err, PersistenceError::SecretsInManifest { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("vars.api_token"), "{err}");
+    // Nothing was written.
+    assert!(!dir.path().join("churl.toml").exists());
+}
+
+#[test]
+fn collection_meta_round_trip_preserves_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("users");
+    fs::create_dir(&coll).unwrap();
+    fs::write(
+        coll.join("folder.toml"),
+        include_str!("fixtures/folder.toml"),
+    )
+    .unwrap();
+
+    let meta = load_collection_meta(&coll).unwrap();
+    assert_eq!(
+        meta.vars.get("base_path").map(String::as_str),
+        Some("/v1/users")
+    );
+    assert_eq!(meta.vars.get("page_size").map(String::as_str), Some("50"));
+
+    // A no-op save preserves every comment byte-for-byte.
+    save_collection_meta(&coll, &meta).unwrap();
+    let text = fs::read_to_string(coll.join("folder.toml")).unwrap();
+    for comment in [
+        "# Collection-level defaults for the users collection.",
+        "# shared prefix",
+        "# default pagination",
+    ] {
+        assert!(text.contains(comment), "comment lost: {comment}\n{text}");
+    }
+}
+
+#[test]
+fn missing_folder_toml_yields_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = load_collection_meta(dir.path()).unwrap();
+    assert_eq!(meta, CollectionMeta::default());
+    assert!(meta.vars.is_empty());
+}
+
+#[test]
+fn collection_meta_secret_literal_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = CollectionMeta {
+        vars: BTreeMap::from([("secret_key".to_string(), "abc".to_string())]),
+    };
+    let err = save_collection_meta(dir.path(), &meta).unwrap_err();
+    assert!(
+        matches!(err, PersistenceError::SecretsInCollection { .. }),
+        "{err}"
+    );
+    assert!(!dir.path().join("folder.toml").exists());
 }

@@ -18,6 +18,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
 use crate::tui::highlight::{HighlightJob, SyntaxToken};
+use crate::tui::theme::Theme;
 
 /// Immutable metadata about a request that produced (or failed to produce) a
 /// response. Captured at send time so history and the error view need nothing
@@ -160,6 +161,10 @@ pub struct RenderCtx<'a> {
     pub scroll: usize,
     /// The viewport-hash → highlighted-lines cache.
     pub cache: &'a HashMap<u64, Vec<Line<'static>>>,
+    /// The colour theme.
+    pub theme: &'a Theme,
+    /// The jump-mode label for this pane, when jump-mode is active and it fit.
+    pub jump_label: Option<char>,
 }
 
 /// The result of a response-pane render: a highlight job to enqueue (on a cache
@@ -177,13 +182,20 @@ pub struct RenderOutcome {
 /// caller decides whether a highlight worker exists (none under `TestBackend`,
 /// so snapshots deterministically show plain text).
 pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
+    let (border_type, border_style) = if ctx.focused {
+        (BorderType::Thick, ctx.theme.border_focused)
+    } else {
+        (BorderType::Plain, ctx.theme.border_unfocused)
+    };
+    let title = match ctx.jump_label {
+        Some(label) => format!(" Response [{label}] "),
+        None => " Response ".to_owned(),
+    };
     let block = Block::bordered()
-        .border_type(if ctx.focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .title(" Response ");
+        .border_type(border_type)
+        .border_style(border_style)
+        .title(title)
+        .title_style(ctx.theme.title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -237,7 +249,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
         }
         ResponseState::Done { view } => {
             frame.render_widget(
-                Paragraph::new(Line::from(status_summary(view))),
+                Paragraph::new(Line::from(status_summary(view)).style(ctx.theme.response_status)),
                 status_area,
             );
             let total = view.line_count();

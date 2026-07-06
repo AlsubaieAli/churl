@@ -36,9 +36,21 @@ pub enum ConfigError {
 /// Global churl configuration. Every field is optional; a missing file means defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// Name of the colour theme to use; `None` means the built-in default.
+    /// Name of the colour theme to use; `None` means the built-in default
+    /// (`"dark"` | `"light"`). The TUI layer parses it and rejects unknown names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// Per-slot colour overrides under a `[theme_colors]` table: slot name →
+    /// colour (named ANSI or `#rrggbb` hex). Core carries only strings; the TUI
+    /// layer parses them over the selected built-in and fails loudly on an
+    /// unknown slot or bad colour (see the TUI `Theme`).
+    ///
+    /// The table is `[theme_colors]` rather than `[theme.colors]`: `theme` is a
+    /// scalar key (`theme = "dark"`), so a `[theme.colors]` sub-table would
+    /// collide with it in TOML. (Deviation from the M6 design, recorded in
+    /// DECISIONS.md.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub theme_colors: BTreeMap<String, String>,
     /// Keybinding overrides under a flat `[keys]` table: key-combination string →
     /// action name (e.g. `"ctrl-p" = "open-palette"`). Core carries only strings;
     /// the TUI layer parses combinations and action names and rejects unknown
@@ -165,21 +177,41 @@ pub fn auth_secret_violations(endpoint: &crate::model::Endpoint) -> Vec<String> 
     violations
 }
 
-/// Finds profile variables in `ws` whose name looks secret ([`looks_like_secret_name`])
-/// and whose value is a literal rather than a `{{...}}` template placeholder.
+/// Returns the secret-named literal variables in a flat `name → value` map,
+/// prefixing each offending name with `prefix` (e.g. `"vars"` or a profile name).
+/// A `{{...}}` placeholder value is never a violation.
+fn secret_var_violations<'a>(
+    prefix: &str,
+    vars: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Vec<String> {
+    vars.into_iter()
+        .filter(|(name, value)| looks_like_secret_name(name) && !is_template_placeholder(value))
+        .map(|(name, _)| format!("{prefix}.{name}"))
+        .collect()
+}
+
+/// Finds secret-looking literal variables anywhere in a workspace manifest: the
+/// workspace-level `[vars]` table (prefixed `"vars"`) and every profile's vars
+/// (prefixed by the profile name). A value that is a `{{...}}` template
+/// placeholder ([`is_template_placeholder`]) is never a violation.
 ///
-/// Returns `"<profile>.<var>"` strings; an empty vec means the workspace is clean.
-/// Secrets belong in the process environment, never in synced workspace files.
+/// Returns `"vars.<var>"` / `"<profile>.<var>"` strings; an empty vec means the
+/// workspace is clean. Secrets belong in the process environment, never in synced
+/// workspace files. Loads never refuse — only churl-initiated writes are gated
+/// (see [`crate::persistence::save_workspace_manifest`]).
 pub fn secret_violations(ws: &Workspace) -> Vec<String> {
-    let mut violations = Vec::new();
+    let mut violations = secret_var_violations("vars", &ws.vars);
     for profile in &ws.profiles {
-        for (name, value) in &profile.vars {
-            if looks_like_secret_name(name) && !is_template_placeholder(value) {
-                violations.push(format!("{}.{}", profile.name, name));
-            }
-        }
+        violations.extend(secret_var_violations(&profile.name, &profile.vars));
     }
     violations
+}
+
+/// Finds secret-looking literal variables in a collection's `folder.toml`
+/// `[vars]` table (prefixed `"vars"`). Mirrors [`secret_violations`] for the
+/// collection scope; gates [`crate::persistence::save_collection_meta`].
+pub fn collection_secret_violations(meta: &crate::model::CollectionMeta) -> Vec<String> {
+    secret_var_violations("vars", &meta.vars)
 }
 
 #[cfg(test)]
@@ -219,6 +251,27 @@ mod tests {
             Some("open-palette")
         );
         assert_eq!(config.keys.get("q").map(String::as_str), Some("quit"));
+    }
+
+    #[test]
+    fn config_parses_theme_colors_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "theme = \"light\"\n[theme_colors]\ntitle = \"red\"\nselection = \"#112233\"\n",
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("light"));
+        assert_eq!(
+            config.theme_colors.get("title").map(String::as_str),
+            Some("red")
+        );
+        assert_eq!(
+            config.theme_colors.get("selection").map(String::as_str),
+            Some("#112233")
+        );
     }
 
     #[test]
@@ -358,6 +411,11 @@ mod tests {
     fn secret_violations_flags_literals_but_not_placeholders() {
         let ws = Workspace {
             name: "demo".into(),
+            vars: BTreeMap::from([
+                // workspace-level secret literal → flagged under "vars".
+                ("workspace_secret".to_string(), "leaked".to_string()),
+                ("base_url".to_string(), "https://example.com".to_string()),
+            ]),
             profiles: vec![Profile {
                 name: "prod".into(),
                 vars: BTreeMap::from([
@@ -367,6 +425,29 @@ mod tests {
                 ]),
             }],
         };
-        assert_eq!(secret_violations(&ws), vec!["prod.api_token".to_string()]);
+        assert_eq!(
+            secret_violations(&ws),
+            vec![
+                "vars.workspace_secret".to_string(),
+                "prod.api_token".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collection_secret_violations_flags_literals_but_not_placeholders() {
+        use crate::model::CollectionMeta;
+        let meta = CollectionMeta {
+            vars: BTreeMap::from([
+                ("api_key".to_string(), "abc123".to_string()),
+                ("token".to_string(), "{{TOKEN}}".to_string()),
+                ("base_path".to_string(), "/v1".to_string()),
+            ]),
+        };
+        assert_eq!(
+            collection_secret_violations(&meta),
+            vec!["vars.api_key".to_string()]
+        );
+        assert!(collection_secret_violations(&CollectionMeta::default()).is_empty());
     }
 }

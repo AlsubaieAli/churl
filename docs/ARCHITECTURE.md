@@ -24,12 +24,13 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 
 | Module | Responsibility |
 |---|---|
-| `main` | `Cli` (clap derive); `Command` variants (`import` since M4: curl → endpoint TOML on stdout, or `--out` file via persistence; warnings on stderr, errors exit non-zero); `#[tokio::main]`; color-eyre hook installation |
-| `tui` | Terminal init/restore; `run()` entry point (config → keymap → workspace → `App`) |
-| `tui::app` | `App` state (`Pane` focus, `Mode` overlays, `AppMsg`); key routing; `tokio::select!` loop; top-level `render` |
-| `tui::events` | `Action` enum + crokey `KeyMap` (defaults + `[keys]` config overrides); `FuzzyFinder` (nucleo-matcher) |
-| `tui::highlight` | Off-thread syntect worker: a dedicated `std::thread` owns the `SyntaxSet`/theme (lazy-loaded on first job), receives `HighlightJob`s over `std::sync::mpsc`, returns `AppMsg::Highlighted`. `SyntaxToken` (json/xml/html/plain) derives from the response `Content-Type` |
-| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset), `request` (edtui body editor), `response` (virtualised viewer: line-offset index + `ResponseState`/`ResponseView`), `picker` (generic fuzzy overlay), `search`, `palette`, `statusline` |
+| `main` | `Cli` (clap derive); global `--var key=value` (repeatable) + `--profile` args; `Command` variants (`import` since M4; `keymaps` since M6: prints the effective keymap sorted by action name, `(default \| overridden)`); `#[tokio::main]`; color-eyre hook installation |
+| `tui` | Terminal init/restore; `run(cli_vars, profile)` entry point (config → keymap → theme → workspace → `App::with_config`; unknown profile / bad theme error before the alternate screen) |
+| `tui::app` | `App` state (`Pane` focus, `Mode` overlays incl. `Jump`, `AppMsg`, active profile, cli vars, `Theme`); key routing; send-time `{{var}}` resolution (`build_resolver` → `Resolver::substitute_request` on the cloned request only); `tokio::select!` loop; top-level `render` (threads `&Theme`) |
+| `tui::events` | `Action` enum (+ `Jump`, `SwitchProfile`) + crokey `KeyMap` (defaults + `[keys]` config overrides; `KeyMap::iter`/`combos_for` for the `keymaps` subcommand); `FuzzyFinder` (nucleo-matcher) |
+| `tui::theme` | `Theme` (named style slots) parsed from core config strings, mirroring `[keys]`: built-in `dark`/`light` + `[theme_colors]` per-slot overrides (named ANSI or `#rrggbb`); fails loudly on unknown built-in/slot/colour. Core stays TUI-free (carries strings only) |
+| `tui::highlight` | Off-thread syntect worker: a dedicated `std::thread` owns the `SyntaxSet`/theme (lazy-loaded on first job), receives `HighlightJob`s over `std::sync::mpsc`, returns `AppMsg::Highlighted`. Embedded theme follows the UI theme (Nord dark / InspiredGithub light). `SyntaxToken` (json/xml/html/plain) derives from the response `Content-Type` |
+| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset, cached `folder.toml` vars), `request` (edtui body editor), `response` (virtualised viewer: line-offset index + `ResponseState`/`ResponseView`), `picker` (generic fuzzy overlay), `search`, `palette`, `jump` (label assignment for jump-mode), `statusline` |
 
 ### Event / render loop (M2+)
 
@@ -47,6 +48,7 @@ Since M3 `AppMsg` also carries `Response { generation, outcome, meta }` (a stale
 
 Key routing precedence (per key event, in `Mode::Normal` the crokey map is authoritative):
 
+0. Jump-mode (`f` by default) is an overlay-level mode alongside search/palette: it consumes every key — a label char focuses that pane / selects that explorer row, `Esc` (or the Jump key again) cancels, everything else is ignored.
 1. An open overlay (search `/`, palette `:`) consumes everything — `Esc` closes, `Enter` accepts, `Up`/`Down`/`Ctrl-n`/`Ctrl-p` move, other chars edit the query.
 2. Request pane focused with edtui in a non-Normal mode (insert/visual/…): all keys go to edtui — except a CONTROL-modified key that the keymap resolves to `Send` or `Quit` (Ctrl-S / Ctrl-C by default), which is dispatched instead. The single documented exception (M4, DECISIONS.md): both are non-text keys, and the keymap lookup honours user remaps.
 3. Otherwise: crokey `KeyMap` lookup first; unmapped keys fall through to edtui when the request pane is focused. Navigation actions (`j`/`k`/`h`/`l`/`g`/`G`/`Enter`) forward their original key event to edtui when the request pane has focus, so vim motions keep working there.
@@ -86,6 +88,38 @@ password = "{{password}}"
 ```
 
 Saves are format-preserving: comments and ordering in hand-edited files survive a churl round-trip (see DECISIONS.md for merge semantics and edge cases).
+
+Workspace `churl.toml` and collection `folder.toml` (M6):
+
+```toml
+# churl.toml
+name = "my-api"
+
+[vars]                        # workspace-level template defaults (no secrets)
+base_url = "https://api.example.com"
+
+[[profiles]]                  # per-environment; profile vars beat collection vars
+name = "prod"
+[profiles.vars]
+host = "prod.example.com"
+
+# <collection>/folder.toml
+[vars]                        # collection-level defaults, environment-independent
+page_size = "50"
+```
+
+Global config `~/.config/churl/config.toml` (M6 adds theming):
+
+```toml
+theme = "dark"                # built-in: "dark" (default) | "light"
+
+[theme_colors]                # per-slot overrides (named ANSI or #rrggbb)
+title = "cyan"                # unknown slot / bad colour = loud startup error
+jump_label = "#ffcc00"        # (table is [theme_colors], not [theme.colors] — see DECISIONS.md)
+
+[keys]                        # action remaps: "combination" = "action-name"
+"ctrl-p" = "open-palette"
+```
 
 High-churn state (history, cookies, cached responses) lives in:
 ```

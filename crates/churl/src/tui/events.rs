@@ -55,6 +55,10 @@ pub enum Action {
     OpenSearch,
     /// Open the command palette overlay.
     OpenPalette,
+    /// Enter jump-mode: label-driven pane/row navigation.
+    Jump,
+    /// Switch the active variable profile (palette-only; opens the profile picker).
+    SwitchProfile,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -82,6 +86,8 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Cancel, "cancel", "cancel request"),
     (Action::OpenSearch, "open-search", "search endpoints"),
     (Action::OpenPalette, "open-palette", "command palette"),
+    (Action::Jump, "jump", "jump to pane / row"),
+    (Action::SwitchProfile, "switch-profile", "switch profile"),
 ];
 
 impl Action {
@@ -178,6 +184,10 @@ impl Default for KeyMap {
         // in-flight request, and the command palette exposes `cancel request`.
         bind(key!('/'), Action::OpenSearch);
         bind(key!(':'), Action::OpenPalette);
+        bind(key!(f), Action::Jump);
+        // `SwitchProfile` has no default key binding: it lives in the command
+        // palette ("switch profile"). Overlay-level modes (search/palette/jump)
+        // still take routing precedence over it.
         Self { map }
     }
 }
@@ -202,6 +212,25 @@ impl KeyMap {
     /// Looks up the action bound to a key event, if any.
     pub fn lookup(&self, key: KeyEvent) -> Option<Action> {
         self.map.get(&KeyCombination::from(key)).copied()
+    }
+
+    /// Every `(key combination, action)` binding, unordered. Callers that need a
+    /// stable order (e.g. the `keymaps` subcommand) sort the result.
+    pub fn iter(&self) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
+        self.map.iter().map(|(combo, action)| (*combo, *action))
+    }
+
+    /// All combinations bound to `action`, as their canonical display strings,
+    /// sorted for determinism.
+    pub fn combos_for(&self, action: Action) -> Vec<String> {
+        let mut combos: Vec<String> = self
+            .map
+            .iter()
+            .filter(|(_, bound)| **bound == action)
+            .map(|(combo, _)| combo.to_string())
+            .collect();
+        combos.sort();
+        combos
     }
 }
 
@@ -338,6 +367,35 @@ mod tests {
         for action in Action::all() {
             assert_eq!(action.name().parse::<Action>().unwrap(), action);
         }
+    }
+
+    #[test]
+    fn iter_covers_every_default_binding() {
+        let keymap = KeyMap::default();
+        let bindings: Vec<_> = keymap.iter().collect();
+        // Every binding round-trips through lookup.
+        for (combo, action) in &bindings {
+            assert_eq!(keymap.lookup((*combo).into()), Some(*action));
+        }
+        // `f` is bound to Jump by default.
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Some(Action::Jump)
+        );
+        assert!(bindings.iter().any(|(_, a)| *a == Action::Jump));
+    }
+
+    #[test]
+    fn combos_for_returns_sorted_bindings() {
+        let keymap = KeyMap::default();
+        // Quit is bound to both `q` and `ctrl-c`.
+        let combos = keymap.combos_for(Action::Quit);
+        assert_eq!(combos.len(), 2);
+        let mut sorted = combos.clone();
+        sorted.sort();
+        assert_eq!(combos, sorted, "combos_for must be sorted");
+        // SwitchProfile has no default binding.
+        assert!(keymap.combos_for(Action::SwitchProfile).is_empty());
     }
 
     #[test]

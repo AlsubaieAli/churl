@@ -1,0 +1,5 @@
+# Collection-level defaults for the users collection.
+# These vars are environment-independent (no per-collection profiles).
+[vars]
+base_path = "/v1/users"   # shared prefix
+page_size = "50"          # default pagination

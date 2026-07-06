@@ -10,7 +10,7 @@
 | M3 | Request execution + response render | **done** |
 | M4 | curl import / export + M3 follow-ups | **done** |
 | M5 | Auth | **done** |
-| M6 | Themes + keymaps + jump-mode + templating | planned |
+| M6 | Themes + keymaps + jump-mode + templating | **done** |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
@@ -197,6 +197,18 @@
 - Variable scopes (owner decision 2026-07-06): workspace-level `[vars]` in `churl.toml` (shared defaults) + named profiles in `churl.toml` (per-environment; profile beats collection so switching dev→prod always takes effect) + collection-level flat `[vars]` table in the collection's `folder.toml` (the manifest filename reserved since M1 — `persistence::FOLDER_FILENAME`; environment-independent collection defaults, no per-collection profiles). All three scopes ship in M6; `folder.toml` gets the same format-preserving merge writes + secrets name-marker enforcement as `churl.toml`
 - `--var key=value` CLI flag
 - Tests: template substitution unit tests incl. full five-scope precedence chain; `folder.toml` round-trip + secrets refusal; keymap round-trip
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (194 tests) all green; `cargo run -p churl -- --version` works; `cargo run -p churl -- keymaps` prints the effective map. New tests (39): `template.rs` unit suite (five-scope precedence each-beats-below, env last, unresolved/malformed left verbatim, multiple occurrences, inner-whitespace trim, `substitute_request` hits url/header-value/param-value/body/all auth kinds and *not* names); config (`theme_colors` parse, workspace-`vars`/collection secret-violation flagging); persistence integration (`workspace [vars]` round-trip + secret refusal, `folder.toml` comment-preserving round-trip, missing-`folder.toml` ⇒ default, collection secret refusal); theme (`resolve` built-in selection, named + hex overrides win, unknown built-in/slot/colour errors); jump (`JumpState` label assignment — panes first, rows follow, alphabet exhaustion — plus app-level routing: pane-label focus, row-label focus+select, `Esc` cancels, unknown char ignored); events (`iter`/`combos_for` coverage, `f`→Jump default); app (`with_config` unknown-profile error, resolver profile-beats-workspace, profile-picker sets active); CLI integration (`keymaps` default map + one overridden binding, `--var` bad-format error, `--profile` unknown-name error); jump-overlay insta snapshot (labels visible in the `TestBackend` text).
+
+**Notes**:
+- `Resolver` is the single `{{var}}` seam (`churl-core::template`): an ordered `Vec<Scope>` + `std::env::var` fallback; `substitute_request` runs in the TUI at send time on the cloned request only (`execute()`/`export_curl` stay substitution-free; resolved values never touch disk). Unresolved/malformed placeholders stay verbatim (M5's rule).
+- Precedence: cli `--var` → active profile → collection `folder.toml` vars → workspace `[vars]` → env. `CollectionMeta` (in `folder.toml`) reuses the format-preserving `save_value` merge; secrets enforcement now covers workspace `[vars]` (prefixed `vars.`) and collection vars, alongside profiles and auth.
+- Theme mirrors `[keys]`: core carries strings, the TUI `Theme` (in the `churl` crate) parses built-in `dark`/`light` + `[theme_colors]` slot overrides and fails loudly. Dark is the default and keeps every text snapshot byte-identical except the statusline hint (which gained `f jump`). Syntect follows the theme (Nord / InspiredGithub).
+- Jump-mode is routing precedence slot 0 (overlay-level, `f` default); it labels panes then explorer rows *starting at the scroll offset* (main-session review fix: labelling from row 0 let offscreen rows eat the alphabet in a scrolled tree while the viewport went unlabelled), capping at the label alphabet. An assigned label wins over "Jump key again cancels" (the default `f` also labels the first row; `Esc` always cancels). `SwitchProfile` is palette-only.
+
+**Deviations from the pinned design**:
+- **`[theme_colors]` table, not `[theme.colors]`**: `theme` is a scalar config key (`theme = "dark"`), so a `[theme.colors]` sub-table collides with it in TOML. Used a flat top-level `[theme_colors]` table instead — same slot names and semantics.
+- **`resolve` returns `Option<String>`, not `Option<&str>`**: the design's `resolve(&self) -> Option<&str>` can't borrow from the `std::env::var` fallback (it returns an owned `String`). Returning `Option<String>` keeps the env fallback live (never snapshotted) at the cost of a clone per scoped hit — negligible at send-time volume.
 
 **Open questions**:
 - ~~Variable scoping (owner question 2026-07-05): base URLs are meant to be profile vars (`url = "{{base_url}}/users"`, per-profile values). Does M6 also need a collection-level var scope (collection defaults overriding workspace profiles) in the precedence chain, or do profiles suffice? Decide before M6 starts.~~ **Resolved 2026-07-06 (owner)**: three scopes — workspace vars + profiles + collection-level flat overrides; profile wins over collection; full system incl. collection `folder.toml` vars lands in M6 (see deliverables + DECISIONS entry).

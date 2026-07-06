@@ -10,6 +10,9 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
+use super::jump::JumpState;
+use crate::tui::theme::Theme;
+
 /// Renders the request pane. The metadata part is read-only in M2; the body is
 /// a full vim-modal edtui editor.
 pub fn render(
@@ -18,14 +21,23 @@ pub fn render(
     request: Option<&Request>,
     editor: &mut EditorState,
     focused: bool,
+    theme: &Theme,
+    jump: Option<&JumpState>,
 ) {
+    let (border_type, border_style) = if focused {
+        (BorderType::Thick, theme.border_focused)
+    } else {
+        (BorderType::Plain, theme.border_unfocused)
+    };
+    let title = match jump.and_then(|j| j.label_for_pane(super::super::app::Pane::Request)) {
+        Some(label) => format!(" Request [{label}] "),
+        None => " Request ".to_owned(),
+    };
     let block = Block::bordered()
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .title(" Request ");
+        .border_type(border_type)
+        .border_style(border_style)
+        .title(title)
+        .title_style(theme.title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -5,12 +5,16 @@ pub mod app;
 pub mod components;
 pub mod events;
 pub mod highlight;
+pub mod theme;
+
+use std::collections::BTreeMap;
 
 use color_eyre::Result;
 use ratatui::DefaultTerminal;
 
 use app::App;
 use events::KeyMap;
+use theme::Theme;
 
 /// Initialise the terminal (raw mode + alternate screen, via `ratatui::init`).
 pub fn init() -> DefaultTerminal {
@@ -22,14 +26,16 @@ pub fn restore() {
     ratatui::restore();
 }
 
-/// Builds the [`App`] (workspace from cwd, keymap from global config) and runs
-/// it until quit. Config errors surface before the alternate screen is entered.
-pub async fn run() -> Result<()> {
+/// Builds the [`App`] (workspace from cwd, keymap + theme from global config,
+/// CLI `--var`/`--profile` overrides) and runs it until quit. Config, theme, and
+/// unknown-profile errors all surface before the alternate screen is entered.
+pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) -> Result<()> {
     let config = churl_core::config::load_global_config()?;
     let keymap = KeyMap::with_overrides(&config.keys)?;
+    let theme = Theme::resolve(config.theme.as_deref(), &config.theme_colors)?;
     let cwd = std::env::current_dir()?;
     let workspace = app::open_workspace(&cwd)?;
-    let mut app = App::new(workspace, keymap)?;
+    let mut app = App::with_config(workspace, keymap, theme, cli_vars, profile)?;
     app.install_runtime(&config)?;
 
     let mut terminal = init();

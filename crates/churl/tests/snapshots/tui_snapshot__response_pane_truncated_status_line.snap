@@ -25,4 +25,4 @@ expression: "lines.join(\"\\n\")"
 │                                           ││                                                                      │┃                                                             ┃
 │                                           ││                                                                      │┃                                                             ┃
 └───────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
- RESPONSE · demo · j/k move · enter select · ctrl-s send · / search · : palette · q quit
+ RESPONSE · demo · j/k move · enter select · ctrl-s send · f jump · / search · : palette · q quit
