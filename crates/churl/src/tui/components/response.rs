@@ -189,21 +189,44 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     } else {
         (BorderType::Plain, ctx.theme.border_unfocused)
     };
-    let title = match ctx.jump_label {
+    let left_title = match ctx.jump_label {
         Some(label) => format!(" Response [{label}] "),
         None => " Response ".to_owned(),
     };
-    let block = Block::bordered()
+
+    // For Done state, embed the stats as a right-aligned block title.
+    let stats_title: Option<String> = if let ResponseState::Done { view } = ctx.state {
+        Some(status_summary(view))
+    } else {
+        None
+    };
+
+    let mut block = Block::bordered()
         .border_type(border_type)
         .border_style(border_style)
-        .title(title)
+        .title(left_title)
         .title_style(ctx.theme.title);
+    if let Some(ref stats) = stats_title {
+        block = block.title(Line::from(format!(" {stats} ")).right_aligned());
+    }
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [status_area, body_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
-    let viewport_height = body_area.height as usize;
+    // For Done state, use the full inner area as body (no status_area split).
+    // For non-Done states, keep the status_area split for status messages.
+    let (viewport_height, body_area_opt, status_area_opt) = if stats_title.is_some() {
+        // Done: full inner area is body
+        (inner.height as usize, Some(inner), None)
+    } else {
+        let [status_area, body_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+        (
+            body_area.height as usize,
+            Some(body_area),
+            Some(status_area),
+        )
+    };
 
     let mut outcome = RenderOutcome {
         job: None,
@@ -213,6 +236,8 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
 
     match ctx.state {
         ResponseState::Idle => {
+            let status_area = status_area_opt.unwrap();
+            let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("no response yet")), status_area);
             let body = match ctx.request {
                 Some(request) => vec![
@@ -225,6 +250,8 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             frame.render_widget(Paragraph::new(body), body_area);
         }
         ResponseState::InFlight { started } => {
+            let status_area = status_area_opt.unwrap();
+            let body_area = body_area_opt.unwrap();
             let elapsed = started.elapsed().as_millis();
             let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
             let spinner = spinner_chars[(ctx.tick_count as usize) % spinner_chars.len()];
@@ -240,10 +267,14 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             );
         }
         ResponseState::Cancelled => {
+            let status_area = status_area_opt.unwrap();
+            let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("cancelled")), status_area);
             frame.render_widget(Paragraph::new(Line::from("request cancelled")), body_area);
         }
         ResponseState::Failed { error, .. } => {
+            let status_area = status_area_opt.unwrap();
+            let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("request failed")), status_area);
             frame.render_widget(
                 Paragraph::new(vec![Line::from("error:"), Line::from(error.clone())])
@@ -252,10 +283,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             );
         }
         ResponseState::Done { view } => {
-            frame.render_widget(
-                Paragraph::new(Line::from(status_summary(view)).style(ctx.theme.response_status)),
-                status_area,
-            );
+            let body_area = body_area_opt.unwrap();
             let total = view.line_count();
             let scroll = clamp_scroll(ctx.scroll, total, viewport_height);
             let end = (scroll + viewport_height).min(total);
@@ -279,6 +307,19 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     }
 
     outcome
+}
+
+/// A one-line summary of the response state for the collapsed (1-row) zoom stub.
+/// Shown in the request pane's collapsed area when the response pane is zoomed.
+pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static> {
+    let text = match state {
+        ResponseState::Idle => "no response yet".to_owned(),
+        ResponseState::InFlight { .. } => "sending…".to_owned(),
+        ResponseState::Cancelled => "cancelled".to_owned(),
+        ResponseState::Failed { .. } => "request failed".to_owned(),
+        ResponseState::Done { view } => status_summary(view),
+    };
+    Line::from(text)
 }
 
 /// The one-line status summary for a completed response (e.g.

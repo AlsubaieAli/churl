@@ -1072,3 +1072,94 @@ fn url_commit_explode_toml_round_trip() {
     );
     assert!(!req.url.contains('?'));
 }
+
+// ---- M6.7 review round 2: zoom collapsed summaries (Finding #3) ----
+
+/// When Request is zoomed, the collapsed response area shows a one-line summary.
+#[test]
+fn zoom_request_collapsed_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::Request;
+    // Zoom the request pane — response collapses to its summary.
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// When Response is zoomed, the collapsed request area shows the tab bar.
+#[test]
+fn zoom_response_collapsed_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    // Put the response into a Done state so the summary is meaningful.
+    app.response = ResponseState::Done {
+        view: ResponseView::build(&json_response("{}"), 1),
+    };
+    app.focus = Pane::Response;
+    // Zoom the response pane — request collapses to its tab bar.
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+// ---- M6.7 review round 2: dirty markers (Finding #5 refinement) ----
+
+/// While the loaded endpoint is dirty, its explorer row carries an accent `●`
+/// suffix (matched by file path) and the statusline says `● unsaved · w save`;
+/// saving with `w` clears both.
+#[test]
+fn explorer_row_dirty_marker_clears_on_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    // Make it dirty via a URL edit.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "X");
+    press(&mut app, KeyCode::Enter);
+    let dirty_rendered = snapshot(&mut app);
+    assert!(
+        dirty_rendered.contains("List users ●"),
+        "loaded endpoint's explorer row must carry the dirty ● suffix:\n{dirty_rendered}"
+    );
+    assert!(
+        dirty_rendered.contains("● unsaved · w save"),
+        "statusline must carry the explicit unsaved marker:\n{dirty_rendered}"
+    );
+    insta::assert_snapshot!(dirty_rendered);
+
+    // Save clears every dirty marker.
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+    let saved_rendered = snapshot(&mut app);
+    assert!(
+        !saved_rendered.contains("List users ●"),
+        "explorer dirty ● must clear after save:\n{saved_rendered}"
+    );
+    assert!(
+        !saved_rendered.contains("● unsaved"),
+        "statusline unsaved marker must clear after save:\n{saved_rendered}"
+    );
+}
+
+// ---- M6.7 review round 2: numbered tab titles (Finding #9) ----
+
+/// When the Request pane is focused, tab titles are prefixed with their 1-based
+/// jump digit: `(1) Params(n)  (2) Headers(n)  (3) Auth  (4) Body`.
+#[test]
+fn request_tab_bar_shows_digit_prefixes_when_focused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::Request;
+    let rendered = snapshot(&mut app);
+    // The focused Request pane tab bar must show digit prefixes.
+    assert!(
+        rendered.contains("(1)") || rendered.contains("1)"),
+        "focused tab bar must show digit prefix for tab 1: {rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}

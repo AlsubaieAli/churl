@@ -35,6 +35,9 @@ pub struct Theme {
     pub response_status: Style,
     /// A jump-mode label character.
     pub jump_label: Style,
+    /// Emphasis accent for steady state markers (the unsaved `●` in the
+    /// statusline / URL bar / explorer row).
+    pub accent: Style,
 }
 
 impl Theme {
@@ -55,6 +58,7 @@ impl Theme {
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
+            accent: Style::default().fg(Color::Yellow),
         }
     }
 
@@ -75,6 +79,7 @@ impl Theme {
                 .fg(Color::White)
                 .bg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
+            accent: Style::default().fg(Color::Magenta),
         }
     }
 
@@ -118,6 +123,7 @@ impl Theme {
             "auth_mask" => &mut self.auth_mask,
             "response_status" => &mut self.response_status,
             "jump_label" => &mut self.jump_label,
+            "accent" => &mut self.accent,
             _ => return None,
         })
     }

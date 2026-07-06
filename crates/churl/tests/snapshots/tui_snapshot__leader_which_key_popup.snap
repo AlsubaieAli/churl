@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 993
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -19,11 +18,11 @@ expression: snapshot(&mut app)
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
 ┃                            ┃│                                                │
-┃                         ┏ leader ━━━━━━━━━━━━━━━━━━━┓                        │
-┃                         ┃ c  cancel request         ┃                        │
-┃                         ┃ q  quit                   ┃                        │
-┃                         ┃ s  send request           ┃                        │
-┃                         ┃ p  switch profile         ┃                        │
-┃                         ┃ e  toggle explorer sidebar┃                        │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────────────────────┘
+┃                            ┃│no endpoint selected┏ leader ━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│                    ┃ c  cancel request         ┃
+┃                            ┃│                    ┃ q  quit                   ┃
+┃                            ┃│                    ┃ s  send request           ┃
+┃                            ┃│                    ┃ p  switch profile         ┃
+┃                            ┃│                    ┃ e  toggle explorer sidebar┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

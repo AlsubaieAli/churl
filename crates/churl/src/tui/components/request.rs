@@ -72,7 +72,10 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
     // Tab bar on top, content below.
     let [tabbar_area, content_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
-    frame.render_widget(Paragraph::new(tab_bar(request, tabs, theme)), tabbar_area);
+    frame.render_widget(
+        Paragraph::new(tab_bar(request, tabs, theme, focused)),
+        tabbar_area,
+    );
 
     let height = content_area.height as usize;
     match tabs.active {
@@ -108,22 +111,55 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
     }
 }
 
+/// A one-line summary of the request pane for the collapsed (1-row) zoom stub.
+/// Shown in the response pane's collapsed area when the request pane is zoomed.
+pub fn collapsed_summary(
+    request: Option<&Request>,
+    tabs: &RequestTabs,
+    theme: &Theme,
+) -> Line<'static> {
+    if request.is_none() {
+        return Line::from("no endpoint selected");
+    }
+    // Render the tab bar without digit prefixes (collapsed = not focused)
+    tab_bar_line(request, tabs, theme, false)
+}
+
 /// The tab-bar line with the active tab highlighted and per-tab row counts.
-fn tab_bar<'a>(request: &Request, tabs: &RequestTabs, theme: &Theme) -> Line<'a> {
-    let counts = |tab: RequestTab| match tab {
-        RequestTab::Params => Some(request.params.len()),
-        RequestTab::Headers => Some(request.headers.len()),
-        RequestTab::Auth => request.auth.as_ref().map(|_| 1),
-        RequestTab::Body => None,
+/// When `focused` is true, each tab is prefixed with its 1-based digit.
+fn tab_bar<'a>(request: &Request, tabs: &RequestTabs, theme: &Theme, focused: bool) -> Line<'a> {
+    tab_bar_line(Some(request), tabs, theme, focused)
+}
+
+fn tab_bar_line(
+    request: Option<&Request>,
+    tabs: &RequestTabs,
+    theme: &Theme,
+    focused: bool,
+) -> Line<'static> {
+    let counts = |tab: RequestTab| match (request, tab) {
+        (Some(req), RequestTab::Params) => Some(req.params.len()),
+        (Some(req), RequestTab::Headers) => Some(req.headers.len()),
+        (Some(req), RequestTab::Auth) => req.auth.as_ref().map(|_| 1),
+        _ => None,
     };
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in RequestTab::ALL.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw(" "));
         }
-        let label = match counts(*tab) {
-            Some(n) => format!(" {}({n}) ", tab.label()),
-            None => format!(" {} ", tab.label()),
+        let tab_label = tab.label();
+        let label = if focused {
+            // Prefix with 1-based digit when focused (tab-jump keys are live)
+            match counts(*tab) {
+                Some(n) => format!(" ({}) {tab_label}({n}) ", i + 1),
+                None => format!(" ({}) {tab_label} ", i + 1),
+            }
+        } else {
+            match counts(*tab) {
+                Some(n) => format!(" {tab_label}({n}) "),
+                None => format!(" {tab_label} "),
+            }
         };
         let style = if *tab == tabs.active {
             theme.selection

@@ -333,6 +333,29 @@
 
 **Open questions**: none — design fixed with the owner 2026-07-06 (this conversation supersedes the M7 "full-screen response toggle (`F` key)" line, which is replaced by the mutual-zoom design here).
 
+**Review round 2 (owner drive-test 2026-07-07, findings #1–#7; #8 deferred to M7 with a milestone entry)**:
+1. **Which-key popup anchors bottom-right**, not bottom-center — directly above the message/status rows, right-aligned to the terminal edge.
+2. **Query-param hygiene on URL commit**: names/values are whitespace-trimmed before the merge; decoding stays single-pass (never double-decode already-decoded text); *send-time composition must percent-encode* params properly (verify the `http.rs` path — if query assembly is manual string concat, encode there; if it goes through reqwest's `.query()`, confirm and add a test with a space + `&` in a param value proving the wire URL is correctly encoded).
+3. **Zoom stubs were built as bare 1-row borders — deviation from the pinned design (deliverable 4) that review round 1 missed**: a collapsed pane must render its promised one-line summary as *content*, not a border fragment. Collapsed Request = its tab bar line (`Params(n) Headers(n) Auth Body`); collapsed Response = its stats line (`status · time · size · N hdrs`, or `no response yet`). No full block chrome in the 1-row state.
+4. **Help overlay half-page scroll**: `d`/`u` (and `Ctrl-d`/`Ctrl-u`) scroll the help overlay half a page down/up, consistent with the response viewer.
+5. **Unsaved-changes indicator made explicit** (owner refinement 2026-07-07): the bare statusline `●` reads as decoration. Three steady, consistent markers while dirty (no flashing — steady accent over animation): (a) statusline becomes verbal — `● unsaved · w save`, theme-accented; (b) the URL-bar `●` indicator gets the same accent colour instead of default fg; (c) the loaded endpoint's row in the explorer tree gains an accent `●` suffix (the editor modified-file convention) that clears on save/discard.
+6. **Help overlay styling**: dim the shortcut-key column's background (subtle/dimmed key style instead of a loud highlight block).
+7. **Response stats move to the top-right corner** of the Response pane (right-aligned block title), not top-left.
+8. *Deferred with a milestone entry (never a bare "later")*: response-pane copy-to-clipboard + richer navigation — added to M7 deliverables.
+9. **Numbered tab titles while Request is focused** (owner mid-flight addition): tab titles render their jump digit as a prefix — `(1) Params (n) · (2) Headers (n) · (3) Auth · (4) Body` — when the Request pane is focused (where `1`–`4` are live); unfocused, titles stay clean. Self-documents the tab-jump keys in place.
+
+**Review round 2 outcomes (agent build, 2026-07-07)**:
+- **#1 done**: `Flex::End` for horizontal layout in `leader_popup::render` — popup now anchors bottom-right.
+- **#2 done**: `split_query` trims whitespace from name/value before `percent_decode`; `http.rs` already uses reqwest `.query()` (reqwest handles encoding); added wiremock test `param_with_space_and_ampersand_is_encoded_correctly_on_wire` + unit test `split_query_trims_whitespace`.
+- **#3 done**: `request::collapsed_summary` and `response::collapsed_summary` added; render in app.rs detects zoom state and renders the collapsed summary `Paragraph` instead of the full pane for the non-zoomed pane. Snapshot tests `zoom_request_collapsed_summary` and `zoom_response_collapsed_summary` added.
+- **#4 done**: `help_viewport_height: usize` field on `App` (default 10); `help::render` now returns `RenderOutcome { total, viewport_height }` and the render call stores the height. `handle_help_key` handles `KeyCode::Char('d')` and `'u'` for half-page scroll (Ctrl-d/Ctrl-u handled by the same code path since both yield same char code).
+- **#5 done (incl. owner refinement)**: new `accent` theme slot (dark: yellow, light: magenta; overridable via `[theme_colors]` like every slot). (a) Statusline unsaved marker is a theme-accented `Span` — `· ● unsaved · w save` — not plain string concat. (b) URL-bar `●` dirty dot split out of the dim indicator string into its own accent-styled span (auth/placeholder indicators stay dim). (c) The loaded endpoint's explorer row gains an accent ` ●` suffix while dirty, matched by **file path** (`ExplorerState::row_endpoint_file`, never by index) via a new `dirty_file: Option<&Path>` render param threaded from app.rs; clears on save/discard. Test `explorer_row_dirty_marker_clears_on_save` asserts all three markers while dirty (snapshot) and their absence after `w` save; `url_bar_dirty_dot` snapshot re-accepted with the explorer marker + verbal statusline.
+- **#6 done**: `help_lines` changed to `Style::default().add_modifier(Modifier::DIM)` for the key column instead of `theme.jump_label`.
+- **#7 done**: `response::render` embeds stats as a right-aligned block title (`Line::from(...).right_aligned()`) for the Done state; Done state uses the full inner area as body (no status_area split). Non-Done states keep the existing status_area layout.
+- **#9 done**: `tab_bar` / `tab_bar_line` in `request.rs` accept a `focused: bool` parameter; when focused, tabs are prefixed with `(N)`. `collapsed_summary` always passes `focused=false`. Snapshot test `request_tab_bar_shows_digit_prefixes_when_focused` added; existing unfocused snapshots stayed byte-identical.
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` — **307 tests** (up from 301 baseline), all green.
+
 **Next**: M7
 
 ---
@@ -347,6 +370,7 @@
 - **Response headers view**: toggle between body and full headers in the response pane (closes the M3 open question; count-only until then)
 - **Wrap toggle** in the response viewer (closes the M3 horizontal-scroll open question — wrap chosen over horizontal scroll)
 - **Response body search** (owner request 2026-07-05): `/`-style incremental search within the response viewer with match navigation — the explorer `/` fuzzy search never covered response bodies, and search beats folding for large payloads
+- **Response copy + richer navigation** (owner request 2026-07-07, deferred from the M6.7 review round 2): copy response body (and selected line/section) to the system clipboard; extend response-pane navigation (word/line motions, jump to top/bottom already exist — evaluate what's missing against real use)
 - Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
@@ -406,6 +430,7 @@ Not yet scheduled into milestones; each becomes an M9+ milestone (or folds into 
 - ~~Cookies / sessions~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 - ~~Proxy configuration + per-request TLS-skip~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 - **Multipart (`-F`) bodies** (approved, owner decision 2026-07-06 — resolves the M4 open question): multipart/form-data as a model feature — multi-part body (fields + file refs), TUI body-type editing, reqwest multipart execution, `-F` import/export remap replacing the hard `Unsupported` error. Slot after M8.
+- **Nested folders inside collections** (owner question 2026-07-07 — surfaced as requirements-drop #4: promised in the kickoff prompt *and* M2's deliverable line "collection → folder → endpoint navigation", deferred in M2's notes "until persistence grows folders", never rescheduled): folder = subdirectory inside a collection dir (each with its own `folder.toml` vars, extending the resolver chain one level), lazy loading, explorer tree gains the folder level, CRUD (create/rename/delete folder), `seq` ordering within folders. Recommended slot: first post-release, ahead of or with M8 (model surgery — keep it out of the M7 release run). Owner to confirm placement.
 
 ### Deferred nits (from M2/M3 reviews)
 

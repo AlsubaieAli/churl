@@ -102,7 +102,10 @@ fn help_lines<'a>(sections: &[HelpSection], theme: &Theme) -> Vec<Line<'a>> {
         }
         for (keys, label) in &section.entries {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {keys:<key_w$}"), theme.jump_label),
+                Span::styled(
+                    format!("  {keys:<key_w$}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
                 Span::raw(format!("  {label}")),
             ]));
         }
@@ -111,15 +114,23 @@ fn help_lines<'a>(sections: &[HelpSection], theme: &Theme) -> Vec<Line<'a>> {
     lines
 }
 
+/// Result of a help overlay render.
+pub struct RenderOutcome {
+    /// Total number of content lines.
+    pub total: usize,
+    /// Height of the inner viewport in rows.
+    pub viewport_height: usize,
+}
+
 /// Renders the help overlay over `area`, scrolled by `scroll` lines. Returns the
-/// number of content lines (so the caller can clamp scroll).
+/// total content line count and the inner viewport height (for half-page scrolling).
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     keymap: &KeyMap,
     scroll: usize,
     theme: &Theme,
-) -> usize {
+) -> RenderOutcome {
     let sections = sections(keymap);
     let lines = help_lines(&sections, theme);
     let total = lines.len();
@@ -138,11 +149,15 @@ pub fn render(
         .title(" Help — keys (?/esc/q to close) ")
         .title_style(theme.title);
     let inner = block.inner(modal);
+    let viewport_height = inner.height as usize;
     frame.render_widget(block, modal);
 
     let scroll = scroll.min(total.saturating_sub(1)) as u16;
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
-    total
+    RenderOutcome {
+        total,
+        viewport_height,
+    }
 }
 
 #[cfg(test)]

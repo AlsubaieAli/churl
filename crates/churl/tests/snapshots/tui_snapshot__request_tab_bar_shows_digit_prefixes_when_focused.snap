@@ -1,23 +1,23 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snapshot(&mut app)
+expression: rendered
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▸ orders                  ││POST  https://api.test/users                    │
+│  ▸ orders                  ││GET  https://api.test/users                     │
 │  ▾ users                   │└────────────────────────────────────────────────┘
-│    List users              │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│>   Create user             │┃ (1) Params(0)   (2) Headers(1)   (3) Auth   (4)┃
-│    Get user                │┃{"name": "Ada"}                                 ┃
+│>   List users              │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│    Create user             │┃ (1) Params(0)   (2) Headers(0)   (3) Auth   (4)┃
+│    Get user                │┃  (no params — a to add)                        ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
-│                            │┃  Normal                                        ┃
+│                            │┃                                                ┃
 │                            │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 │                            │┌ Response ──────────────────────────────────────┐
 │                            ││no response yet                                 │
-│                            ││POST https://api.test/users                     │
+│                            ││GET https://api.test/users                      │
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
 │                            ││                                                │

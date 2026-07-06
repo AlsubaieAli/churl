@@ -123,11 +123,9 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
     };
 
     // Build indicator spans (right-aligned, space-separated). The unsaved dot
-    // sits first so it stays visible when the bar is narrow.
+    // sits first so it stays visible when the bar is narrow; it carries the
+    // theme accent (same steady accent as the statusline unsaved marker).
     let mut indicators: Vec<String> = Vec::new();
-    if ctx.dirty {
-        indicators.push("●".to_owned());
-    }
     if let Some(auth) = &request.auth {
         indicators.push(auth_indicator(auth).to_owned());
     }
@@ -135,10 +133,13 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
     if n > 0 {
         indicators.push(format!("{{{{{n}}}}}"));
     }
-    let indicator_str = if indicators.is_empty() {
-        String::new()
-    } else {
-        indicators.join("  ")
+    let rest_str = indicators.join("  ");
+    // Total display width: the accent dot (+ 2-space gap when both present) +
+    // the dim rest.
+    let indicator_str = match (ctx.dirty, rest_str.is_empty()) {
+        (true, true) => "●".to_owned(),
+        (true, false) => format!("●  {rest_str}"),
+        (false, _) => rest_str.clone(),
     };
 
     // Split the inner area into left (method+url) and right (indicators) first,
@@ -193,16 +194,21 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(method_line), left_area);
     if let Some(right_area) = right_area {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                indicator_str,
-                Style::default().fg(theme
-                    .border_unfocused
-                    .fg
-                    .unwrap_or(ratatui::style::Color::DarkGray)),
-            )])),
-            right_area,
-        );
+        let dim = Style::default().fg(theme
+            .border_unfocused
+            .fg
+            .unwrap_or(ratatui::style::Color::DarkGray));
+        let mut spans: Vec<Span> = Vec::new();
+        if ctx.dirty {
+            spans.push(Span::styled("●", theme.accent));
+            if !rest_str.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+        }
+        if !rest_str.is_empty() {
+            spans.push(Span::styled(rest_str, dim));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), right_area);
     }
 }
 
