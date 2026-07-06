@@ -3,21 +3,21 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▾ private                 ││GET  https://api.test/report  auth:basic  {{1}} │
-│>   Private report          │└────────────────────────────────────────────────┘
-│                            │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃ Params(0)   Headers(0)   Auth(1)   Body        ┃
-│                            │┃> kind: Basic  (enter to change)                ┃
-│                            │┃  username: alice                               ┃
-│                            │┃  password: {{password}}                        ┃
+│  ▸ orders                  ││POST  https://api.test/users                    │
+│  ▾ users                   │└────────────────────────────────────────────────┘
+│    List users              │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│>   Create user             │┃ Params(0)   Headers(1)   Auth   Body           ┃
+│    Get user                │┃{"name": "Ada"}                                 ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃  Normal                                        ┃
 │                            │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 │                            │┌ Response ──────────────────────────────────────┐
 │                            ││no response yet                                 │
-│                            ││GET https://api.test/report                     │
+│                            ││POST https://api.test/users                     │
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
 │                            ││                                                │

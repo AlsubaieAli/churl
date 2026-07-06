@@ -11,8 +11,10 @@ use churl_core::model::{
 };
 use churl_core::persistence::endpoint_to_toml;
 use churl_core::persistence::{
-    Collection, OpenWorkspace, PersistenceError, load_collection_meta, load_endpoint,
-    load_workspace_manifest, save_collection_meta, save_endpoint, save_workspace_manifest,
+    Collection, OpenWorkspace, PersistenceError, create_collection, create_endpoint,
+    delete_collection, delete_endpoint, load_collection_meta, load_endpoint,
+    load_workspace_manifest, rename_collection, rename_endpoint, save_collection_meta,
+    save_endpoint, save_workspace_manifest,
 };
 
 /// Comment-bearing endpoint fixtures: (name, contents, every comment that must survive).
@@ -466,4 +468,183 @@ fn collection_meta_secret_literal_refused() {
         "{err}"
     );
     assert!(!dir.path().join("folder.toml").exists());
+}
+
+// ---- M6.6 CRUD seams ----
+
+#[test]
+fn create_endpoint_slug_seq_and_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("users");
+    fs::create_dir(&coll).unwrap();
+    // Seed two endpoints with seqs 0 and 4 so the next is 5 (plain +1 over max).
+    fs::write(
+        coll.join("list.toml"),
+        "seq = 0\nname = \"List\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://a\"\n",
+    )
+    .unwrap();
+    fs::write(
+        coll.join("get.toml"),
+        "seq = 4\nname = \"Get\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://b\"\n",
+    )
+    .unwrap();
+
+    let path = create_endpoint(&coll, "Create User!").unwrap();
+    // Slug: non-alphanumeric runs collapse to '-', trailing trimmed.
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "create-user.toml"
+    );
+    let ep = load_endpoint(&path).unwrap();
+    assert_eq!(ep.seq, 5, "seq is max(0,4)+1");
+    assert_eq!(ep.name, "Create User!");
+    assert_eq!(ep.request.method, Method::Get);
+    assert_eq!(ep.request.url, "");
+    assert!(ep.request.headers.is_empty());
+    assert!(ep.request.auth.is_none());
+}
+
+#[test]
+fn create_endpoint_empty_collection_starts_at_seq_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("empty");
+    fs::create_dir(&coll).unwrap();
+    let path = create_endpoint(&coll, "First").unwrap();
+    assert_eq!(load_endpoint(&path).unwrap().seq, 0);
+}
+
+#[test]
+fn create_endpoint_slug_collision_suffixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let a = create_endpoint(&coll, "Ping").unwrap();
+    let b = create_endpoint(&coll, "Ping").unwrap();
+    assert_eq!(a.file_name().unwrap().to_str().unwrap(), "ping.toml");
+    assert_eq!(b.file_name().unwrap().to_str().unwrap(), "ping-2.toml");
+    // Two distinct files, distinct seqs.
+    assert_ne!(a, b);
+}
+
+#[test]
+fn create_endpoint_empty_name_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let err = create_endpoint(&coll, "   ").unwrap_err();
+    assert!(matches!(err, PersistenceError::EmptyName), "{err}");
+}
+
+#[test]
+fn rename_endpoint_updates_name_and_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let path = create_endpoint(&coll, "Old Name").unwrap();
+    assert_eq!(path.file_name().unwrap().to_str().unwrap(), "old-name.toml");
+
+    let new_path = rename_endpoint(&path, "Brand New").unwrap();
+    assert_eq!(
+        new_path.file_name().unwrap().to_str().unwrap(),
+        "brand-new.toml"
+    );
+    assert!(!path.exists(), "old file gone");
+    assert_eq!(load_endpoint(&new_path).unwrap().name, "Brand New");
+}
+
+#[test]
+fn rename_endpoint_refuses_literal_secret_and_leaves_file() {
+    // A hand-written file may carry a literal secret; renaming it saves (which
+    // runs the secrets gate) and must fail before any move.
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let path = coll.join("leaky.toml");
+    fs::write(
+        &path,
+        concat!(
+            "seq = 0\nname = \"Leaky\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://a\"\n\n[request.auth]\ntype = \"bearer\"\n",
+            "token = \"ghp_literal_secret\"\n",
+        ),
+    )
+    .unwrap();
+    let err = rename_endpoint(&path, "New Name").unwrap_err();
+    assert!(
+        matches!(err, PersistenceError::SecretsInAuth { .. }),
+        "{err}"
+    );
+    assert!(path.exists(), "original file must survive a refused rename");
+    assert!(!coll.join("new-name.toml").exists());
+}
+
+#[test]
+fn delete_endpoint_removes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let path = create_endpoint(&coll, "Doomed").unwrap();
+    assert!(path.exists());
+    delete_endpoint(&path).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn create_collection_makes_dir_without_folder_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "My Orders").unwrap();
+    assert_eq!(coll.file_name().unwrap().to_str().unwrap(), "my-orders");
+    assert!(coll.is_dir());
+    assert!(
+        !coll.join("folder.toml").exists(),
+        "folder.toml stays lazy until vars exist"
+    );
+}
+
+#[test]
+fn create_collection_refuses_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    create_collection(dir.path(), "orders").unwrap();
+    let err = create_collection(dir.path(), "orders").unwrap_err();
+    assert!(
+        matches!(err, PersistenceError::AlreadyExists { .. }),
+        "{err}"
+    );
+}
+
+#[test]
+fn rename_collection_moves_dir_with_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "old").unwrap();
+    let ep = create_endpoint(&coll, "Ping").unwrap();
+    assert!(ep.exists());
+
+    let new_coll = rename_collection(&coll, "New Coll").unwrap();
+    assert_eq!(new_coll.file_name().unwrap().to_str().unwrap(), "new-coll");
+    assert!(!coll.exists());
+    assert!(new_coll.join("ping.toml").exists(), "contents moved along");
+}
+
+#[test]
+fn delete_collection_removes_dir_recursively() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "doomed").unwrap();
+    create_endpoint(&coll, "Ping").unwrap();
+    delete_collection(&coll).unwrap();
+    assert!(!coll.exists());
+}
+
+#[test]
+fn rename_endpoint_same_slug_keeps_filename() {
+    // "Get Users" -> "get users": name changes, slug doesn't. The file must
+    // stay put — not gain a spurious -2 collision suffix from its own path.
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    let path = create_endpoint(&coll, "Get Users").unwrap();
+
+    let new_path = rename_endpoint(&path, "get users").unwrap();
+    assert_eq!(new_path, path, "same slug must not move the file");
+    assert!(!coll.join("get-users-2.toml").exists());
+    assert_eq!(load_endpoint(&new_path).unwrap().name, "get users");
 }

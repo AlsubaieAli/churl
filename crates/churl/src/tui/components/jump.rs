@@ -37,6 +37,7 @@ impl JumpState {
     pub fn new(first_row: usize, row_count: usize) -> Self {
         let mut targets = vec![
             JumpTarget::Pane(Pane::Explorer),
+            JumpTarget::Pane(Pane::UrlBar),
             JumpTarget::Pane(Pane::Request),
             JumpTarget::Pane(Pane::Response),
         ];
@@ -75,26 +76,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panes_get_the_first_three_labels() {
+    fn panes_get_the_first_four_labels() {
         let state = JumpState::new(0, 0);
-        assert_eq!(state.labels.len(), 3);
+        assert_eq!(state.labels.len(), 4);
         assert_eq!(state.label_for_pane(Pane::Explorer), Some('a'));
-        assert_eq!(state.label_for_pane(Pane::Request), Some('s'));
-        assert_eq!(state.label_for_pane(Pane::Response), Some('d'));
+        assert_eq!(state.label_for_pane(Pane::UrlBar), Some('s'));
+        assert_eq!(state.label_for_pane(Pane::Request), Some('d'));
+        assert_eq!(state.label_for_pane(Pane::Response), Some('f'));
     }
 
     #[test]
     fn rows_follow_the_panes() {
         let state = JumpState::new(0, 2);
-        assert_eq!(state.labels.len(), 5);
-        assert_eq!(state.label_for_row(0), Some('f'));
-        assert_eq!(state.label_for_row(1), Some('g'));
+        assert_eq!(state.labels.len(), 6);
+        // Four panes take a/s/d/f, so rows start at 'g'.
+        assert_eq!(state.label_for_row(0), Some('g'));
+        assert_eq!(state.label_for_row(1), Some('h'));
         // A label resolves back to its target.
         assert_eq!(
             state.target_for('a'),
             Some(JumpTarget::Pane(Pane::Explorer))
         );
-        assert_eq!(state.target_for('f'), Some(JumpTarget::Row(0)));
+        assert_eq!(state.target_for('g'), Some(JumpTarget::Row(0)));
         // An unassigned char resolves to nothing.
         assert_eq!(state.target_for('Z'), None);
     }
@@ -105,9 +108,10 @@ mod tests {
         // the offscreen rows at the top.
         let state = JumpState::new(5, 10);
         assert_eq!(state.label_for_row(4), None);
-        assert_eq!(state.label_for_row(5), Some('f'));
-        assert_eq!(state.label_for_row(9), Some('k'));
-        assert_eq!(state.target_for('f'), Some(JumpTarget::Row(5)));
+        // Four panes take a/s/d/f, so the first labelled row is 'g'.
+        assert_eq!(state.label_for_row(5), Some('g'));
+        assert_eq!(state.label_for_row(9), Some('l'));
+        assert_eq!(state.target_for('g'), Some(JumpTarget::Row(5)));
     }
 
     #[test]
@@ -115,8 +119,8 @@ mod tests {
         // More rows than the alphabet: only LABELS.len() targets get labels.
         let state = JumpState::new(0, 100);
         assert_eq!(state.labels.len(), LABELS.len());
-        // The last labelled row is at index LABELS.len() - 3 - 1 (3 panes first).
-        let last_row = LABELS.len() - 3 - 1;
+        // The last labelled row is at index LABELS.len() - 4 - 1 (4 panes first).
+        let last_row = LABELS.len() - 4 - 1;
         assert!(state.label_for_row(last_row).is_some());
         assert!(state.label_for_row(last_row + 1).is_none());
     }

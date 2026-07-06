@@ -18,6 +18,25 @@ pub enum Method {
     Options,
 }
 
+impl Method {
+    /// Every method, in cycle order (GET→POST→PUT→PATCH→DELETE→HEAD→OPTIONS).
+    pub const ALL: [Method; 7] = [
+        Method::Get,
+        Method::Post,
+        Method::Put,
+        Method::Patch,
+        Method::Delete,
+        Method::Head,
+        Method::Options,
+    ];
+
+    /// The next method in cycle order, wrapping OPTIONS→GET.
+    pub fn cycle(self) -> Self {
+        let idx = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
 impl std::fmt::Display for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -304,6 +323,19 @@ mod tests {
                 .unwrap_or_else(|_| panic!("failed to parse back: {displayed}"));
             assert_eq!(method, parsed, "round-trip failed for {method}");
         }
+    }
+
+    #[test]
+    fn method_cycle_wraps() {
+        assert_eq!(Method::Get.cycle(), Method::Post);
+        assert_eq!(Method::Post.cycle(), Method::Put);
+        assert_eq!(Method::Options.cycle(), Method::Get);
+        // Cycling through all seven returns to the start.
+        let mut m = Method::Get;
+        for _ in 0..7 {
+            m = m.cycle();
+        }
+        assert_eq!(m, Method::Get);
     }
 
     #[test]

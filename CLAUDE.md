@@ -42,7 +42,9 @@ crates/
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection;
-                           #   CollectionMeta (folder.toml [vars]) load/save (M6)
+                           #   CollectionMeta (folder.toml [vars]) load/save (M6); CRUD seams (M6.6):
+                           #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
+                           #   secrets refusal on every save path)
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
                            #   substitute / substitute_request (M6)
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
@@ -67,13 +69,18 @@ crates/
       main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps) | TUI; #[tokio::main]
       tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
-        app.rs             # App state, Pane/Mode (incl. Jump)/AppMsg, key routing, tokio::select! loop, render;
-                           #   send-time {{var}} resolution, profile switching, Theme; send/cancel, history, highlight cache
-        events.rs          # Action enum (+Jump/SwitchProfile), crokey KeyMap (+config overrides, iter/combos_for),
-                           #   nucleo-matcher FuzzyFinder
+        app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm)/AppMsg,
+                           #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
+                           #   lookup_ctx; in-app CRUD via core seams; tokio::select! loop, render; send-time {{var}}
+                           #   resolution, profile switching, Theme; send/cancel, history, highlight cache
+        events.rs          # Action enum (+Jump/SwitchProfile + M6.6 urlbar/tab/row/CRUD/save actions), crokey KeyMap
+                           #   with per-pane overlays (PaneCtx, lookup_ctx, [keys.<pane>] config), nucleo-matcher FuzzyFinder
         theme.rs           # Theme (named style slots) parsed from core strings; dark/light built-ins + [theme_colors]
         highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, theme-aware, returns Highlighted
-        components/        # explorer, request (edtui), response (virtualised viewer), picker, search, palette, jump, statusline
+        components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
+                           #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
+                           #   response (virtualised viewer), picker, method_menu, prompt (CRUD prompt + confirm overlays),
+                           #   search, palette (curated command allowlist), jump, statusline
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary

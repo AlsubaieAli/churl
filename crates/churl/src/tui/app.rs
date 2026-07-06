@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use churl_core::config::Config;
 use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
 use churl_core::http::ExecuteOptions;
-use churl_core::model::{Body, BodyKind, Response};
-use churl_core::persistence::{OpenWorkspace, PersistenceError};
+use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Response};
+use churl_core::persistence::{self, OpenWorkspace, PersistenceError};
 use churl_core::template::{Resolver, Scope};
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -32,11 +32,15 @@ use reqwest::Client;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-use super::components::explorer::{ExplorerState, SelectedEndpoint};
+use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
+use super::components::line_editor::LineEditor;
+use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView};
-use super::components::{explorer, palette, picker, request, response, statusline, urlbar};
-use super::events::{Action, FuzzyFinder, KeyMap};
+use super::components::{
+    explorer, method_menu, palette, picker, prompt, request, response, statusline, urlbar,
+};
+use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
 
@@ -45,6 +49,8 @@ use super::theme::Theme;
 pub enum Pane {
     /// The workspace tree on the left.
     Explorer,
+    /// The focusable URL bar above the request editor.
+    UrlBar,
     /// The request editor in the centre.
     Request,
     /// The response viewer on the right.
@@ -52,23 +58,36 @@ pub enum Pane {
 }
 
 impl Pane {
+    /// Tab cycle order: Explorer → UrlBar → Request → Response → Explorer.
     fn next(self) -> Self {
         match self {
-            Pane::Explorer => Pane::Request,
+            Pane::Explorer => Pane::UrlBar,
+            Pane::UrlBar => Pane::Request,
             Pane::Request => Pane::Response,
             Pane::Response => Pane::Explorer,
         }
     }
 
     fn prev(self) -> Self {
-        self.next().next()
+        self.next().next().next()
     }
 
     fn name(self) -> &'static str {
         match self {
             Pane::Explorer => "EXPLORER",
+            Pane::UrlBar => "URL",
             Pane::Request => "REQUEST",
             Pane::Response => "RESPONSE",
+        }
+    }
+
+    /// The keymap overlay context for this pane.
+    fn ctx(self) -> PaneCtx {
+        match self {
+            Pane::Explorer => PaneCtx::Explorer,
+            Pane::UrlBar => PaneCtx::UrlBar,
+            Pane::Request => PaneCtx::Request,
+            Pane::Response => PaneCtx::Response,
         }
     }
 }
@@ -85,6 +104,59 @@ pub enum Mode {
     Palette,
     /// Jump-mode: label-driven pane/row navigation overlay.
     Jump,
+    /// The method-picker menu is open (URL bar `M`).
+    MethodMenu,
+    /// A text-input prompt overlay is open (CRUD naming / typed confirm).
+    Prompt(PromptPurpose),
+    /// A y/n confirmation overlay is open.
+    Confirm(ConfirmPurpose),
+}
+
+/// What a [`Mode::Prompt`] is collecting text for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptPurpose {
+    /// Name for a new endpoint in the selected collection.
+    NewEndpoint,
+    /// Name for a new collection.
+    NewCollection,
+    /// New name for the selected endpoint or collection.
+    Rename,
+    /// Typed-name confirmation to delete the selected collection.
+    DeleteCollectionConfirm,
+}
+
+impl PromptPurpose {
+    /// The overlay title for this prompt.
+    fn title(self) -> &'static str {
+        match self {
+            PromptPurpose::NewEndpoint => "New endpoint",
+            PromptPurpose::NewCollection => "New collection",
+            PromptPurpose::Rename => "Rename",
+            PromptPurpose::DeleteCollectionConfirm => "Delete collection",
+        }
+    }
+}
+
+/// What a [`Mode::Confirm`] is a y/n gate for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmPurpose {
+    /// Delete the selected endpoint.
+    DeleteEndpoint,
+    /// Discard unsaved changes before switching endpoints. The pending target
+    /// lives in `App::pending_load` (it can carry a path, so it is not part of
+    /// this `Copy` enum).
+    DiscardChanges,
+}
+
+/// A deferred endpoint load awaiting the discard-changes confirm. Every path
+/// that replaces the loaded endpoint resolves to one of these targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingLoad {
+    /// Select the explorer row at this index (explorer Enter / jump-mode; the
+    /// cursor is already on the row when the guard fires).
+    Row(usize),
+    /// Load the endpoint at this file path (search overlay / CRUD reselect).
+    File(std::path::PathBuf),
 }
 
 /// Messages delivered to the event loop over the app channel. No longer `Copy`
@@ -209,6 +281,22 @@ pub struct App {
     /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
     /// animation in the response pane. `pub` so snapshot tests can set it.
     pub tick_count: u64,
+    /// Request-pane tab state (active tab + per-tab selection + field edit).
+    pub tabs: RequestTabs,
+    /// The pristine endpoint as loaded, cloned at load time. Dirty state is
+    /// *derived* by comparing it against the live request (incl. the edtui body)
+    /// — no flag bookkeeping. `None` when nothing is loaded.
+    loaded_snapshot: Option<Endpoint>,
+    /// The inline URL-bar editor while editing the URL; `None` otherwise.
+    pub url_editor: Option<LineEditor>,
+    /// The text prompt's line editor while a [`Mode::Prompt`] overlay is open.
+    pub prompt_editor: LineEditor,
+    /// True while the open picker is the auth-kind picker (vs search/palette/profile).
+    auth_picker: bool,
+    /// The endpoint-switch target deferred behind an open
+    /// [`ConfirmPurpose::DiscardChanges`] overlay; resolved by `s`/`d`, dropped
+    /// by `Esc`.
+    pending_load: Option<PendingLoad>,
 }
 
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
@@ -274,6 +362,12 @@ impl App {
             history: None,
             status: None,
             tick_count: 0,
+            tabs: RequestTabs::default(),
+            loaded_snapshot: None,
+            url_editor: None,
+            prompt_editor: LineEditor::default(),
+            auth_picker: false,
+            pending_load: None,
         })
     }
 
@@ -416,37 +510,70 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.mode {
             Mode::Search | Mode::Palette => self.handle_overlay_key(key),
-            Mode::Jump => {
-                self.handle_jump_key(key);
+            Mode::Jump => self.handle_jump_key(key),
+            Mode::MethodMenu => {
+                self.handle_method_menu_key(key);
                 Ok(())
             }
-            Mode::Normal => {
-                if self.focus == Pane::Request && self.editor.mode != EditorMode::Normal {
-                    // The single exception to "edtui owns non-Normal modes"
-                    // (DECISIONS.md): a CONTROL-modified key that the keymap
-                    // resolves to Send or Quit is dispatched instead of being
-                    // handed to edtui, so Ctrl-S sends and Ctrl-C cancels/quits
-                    // straight from insert mode. Resolving through the keymap
-                    // honours user remaps; requiring CONTROL guarantees no
-                    // text-input key is ever stolen.
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && let Some(action @ (Action::Send | Action::Quit)) =
-                            self.keymap.lookup(key)
-                    {
-                        return self.dispatch(action, Some(key));
-                    }
-                    self.editor_events.on_key_event(key, &mut self.editor);
-                    return Ok(());
-                }
-                if let Some(action) = self.keymap.lookup(key) {
-                    self.dispatch(action, Some(key))
-                } else if self.focus == Pane::Request {
-                    self.editor_events.on_key_event(key, &mut self.editor);
-                    Ok(())
-                } else {
-                    Ok(())
-                }
+            Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
+            Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
+            Mode::Normal => self.handle_normal_key(key),
+        }
+    }
+
+    /// Key routing in [`Mode::Normal`]: inline editors (URL bar / request row edit)
+    /// intercept first (with the Ctrl-S/Ctrl-C exception), then the focused pane's
+    /// keymap overlay + global map, then edtui fall-through for the Request pane.
+    fn handle_normal_key(&mut self, key: KeyEvent) -> Result<()> {
+        // 1. Inline URL editing: the LineEditor owns keys, except the documented
+        //    Ctrl-S/Ctrl-C interception (Send/Quit reach through).
+        if self.url_editor.is_some() {
+            if let Some(action) = self.control_intercept(key) {
+                return self.dispatch(action, Some(key));
             }
+            return self.handle_url_edit_key(key);
+        }
+        // 2. Inline request-row field editing (same interception rule).
+        if self.focus == Pane::Request && self.tabs.editing.is_some() {
+            if let Some(action) = self.control_intercept(key) {
+                return self.dispatch(action, Some(key));
+            }
+            return self.handle_field_edit_key(key);
+        }
+        // 3. edtui insert/visual mode on the Body tab (M4 interception exception).
+        if self.focus == Pane::Request
+            && self.tabs.active == RequestTab::Body
+            && self.editor.mode != EditorMode::Normal
+        {
+            if let Some(action) = self.control_intercept(key) {
+                return self.dispatch(action, Some(key));
+            }
+            self.editor_events.on_key_event(key, &mut self.editor);
+            return Ok(());
+        }
+        // 4. Keymap: the focused pane's overlay wins over the global map.
+        if let Some(action) = self.keymap.lookup_ctx(key, self.focus.ctx()) {
+            self.dispatch(action, Some(key))
+        } else if self.focus == Pane::Request && self.tabs.active == RequestTab::Body {
+            // Unmapped key on the Body tab falls through to edtui.
+            self.editor_events.on_key_event(key, &mut self.editor);
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The Ctrl-S/Ctrl-C interception used while an inline editor holds the
+    /// keyboard: a CONTROL-modified key the keymap resolves to Send or Quit is
+    /// dispatched instead of reaching the editor (DECISIONS.md — those keys are
+    /// not text input, and resolving through the keymap honours user remaps).
+    fn control_intercept(&self, key: KeyEvent) -> Option<Action> {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        match self.keymap.lookup(key) {
+            Some(action @ (Action::Send | Action::Quit)) => Some(action),
+            _ => None,
         }
     }
 
@@ -471,6 +598,7 @@ impl App {
             Action::FocusNext => self.focus = self.focus.next(),
             Action::FocusPrev => self.focus = self.focus.prev(),
             Action::FocusExplorer => self.focus = Pane::Explorer,
+            Action::FocusUrlBar => self.focus = Pane::UrlBar,
             Action::FocusRequest => self.focus = Pane::Request,
             Action::FocusResponse => self.focus = Pane::Response,
             Action::OpenSearch => self.open_search()?,
@@ -479,6 +607,33 @@ impl App {
             Action::SwitchProfile => self.open_profile_picker(),
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
+            Action::Save => self.save_request(),
+            Action::EditUrl => self.begin_url_edit(),
+            Action::MethodCycle => self.cycle_method(),
+            Action::MethodMenu => self.open_method_menu(),
+            Action::TabNext => self.tabs.tab_next(),
+            Action::TabPrev => self.tabs.tab_prev(),
+            Action::Tab1 => self.tabs.tab_jump(0),
+            Action::Tab2 => self.tabs.tab_jump(1),
+            Action::Tab3 => self.tabs.tab_jump(2),
+            Action::Tab4 => self.tabs.tab_jump(3),
+            // On the Body tab there are no rows: the originating key (i/a/d/…)
+            // belongs to edtui, same as the motion keys in `request_nav`.
+            Action::RowAdd | Action::RowDelete | Action::RowToggle | Action::RowEdit
+                if self.focus == Pane::Request && self.tabs.active == RequestTab::Body =>
+            {
+                if let Some(key) = key {
+                    self.editor_events.on_key_event(key, &mut self.editor);
+                }
+            }
+            Action::RowAdd => self.row_add(),
+            Action::RowDelete => self.row_delete(),
+            Action::RowToggle => self.row_toggle(),
+            Action::RowEdit => self.row_edit(),
+            Action::NewEndpoint => self.begin_new_endpoint(),
+            Action::NewCollection => self.begin_new_collection(),
+            Action::Rename => self.begin_rename(),
+            Action::Delete => self.begin_delete(),
             Action::HalfPageDown | Action::HalfPageUp => {
                 if self.focus == Pane::Response {
                     self.response_half_page(matches!(action, Action::HalfPageDown));
@@ -492,16 +647,32 @@ impl App {
             | Action::Top
             | Action::Bottom => match self.focus {
                 Pane::Explorer => self.explorer_action(action)?,
-                Pane::Request => {
-                    // Same keys are edtui's normal-mode motions: forward them.
-                    if let Some(key) = key {
-                        self.editor_events.on_key_event(key, &mut self.editor);
-                    }
-                }
+                Pane::UrlBar => {}
+                Pane::Request => self.request_nav(action, key),
                 Pane::Response => self.response_scroll(action),
             },
         }
         Ok(())
+    }
+
+    /// Navigation within the Request pane. On the Body tab the motion keys forward
+    /// to edtui; on the row-list tabs `j`/`k` move the selection, `Enter` edits.
+    fn request_nav(&mut self, action: Action, key: Option<KeyEvent>) {
+        if self.tabs.active == RequestTab::Body {
+            if let Some(key) = key {
+                self.editor_events.on_key_event(key, &mut self.editor);
+            }
+            return;
+        }
+        match action {
+            Action::Up => self.tabs.move_up(),
+            Action::Down => {
+                let n = self.active_tab_row_count();
+                self.tabs.move_down(n);
+            }
+            Action::Select => self.row_edit(),
+            _ => {}
+        }
     }
 
     fn explorer_action(&mut self, action: Action) -> Result<()> {
@@ -513,17 +684,19 @@ impl App {
             Action::Collapse => self.explorer.collapse(),
             Action::Expand => self.explorer.expand()?,
             Action::Select => {
-                if let Some(selected) = self.explorer.select()? {
-                    self.load_endpoint(selected);
-                }
+                // Guarded seam: switching to a *different* endpoint while dirty
+                // prompts to save/discard first. A collection toggle (select()
+                // → None) or reselecting the same endpoint is not guarded.
+                self.guarded_load(PendingLoad::Row(self.explorer.cursor))?;
             }
             _ => unreachable!("only navigation actions reach explorer_action"),
         }
         Ok(())
     }
 
-    /// Loads an endpoint into the request pane: body into the edtui buffer,
-    /// metadata for read-only display.
+    /// Loads an endpoint into the request pane: body into the edtui buffer, the
+    /// request itself into the live `selected` slot, and a pristine clone into
+    /// `loaded_snapshot` for dirty derivation. Resets tab state.
     fn load_endpoint(&mut self, selected: SelectedEndpoint) {
         let body = selected
             .endpoint
@@ -533,7 +706,72 @@ impl App {
             .map(|body| body.content.as_str())
             .unwrap_or("");
         self.editor = EditorState::new(Lines::from(body));
+        self.loaded_snapshot = Some(selected.endpoint.clone());
         self.selected = Some(selected);
+        self.tabs = RequestTabs::default();
+        self.url_editor = None;
+    }
+
+    /// The live request currently loaded (with any in-memory edits), or `None`.
+    fn live_request(&self) -> Option<&churl_core::model::Request> {
+        self.selected.as_ref().map(|s| &s.endpoint.request)
+    }
+
+    /// Mirrors the current edtui body text into the live request's `body` so the
+    /// live endpoint reflects unsaved body edits (for dirty derivation and save).
+    /// A body that becomes empty drops the `Body` entirely.
+    fn sync_body_into_selected(&mut self) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let text = String::from(self.editor.lines.clone());
+        match selected.endpoint.request.body.as_mut() {
+            Some(body) => {
+                if text.is_empty() {
+                    selected.endpoint.request.body = None;
+                } else {
+                    body.content = text;
+                }
+            }
+            None if !text.is_empty() => {
+                selected.endpoint.request.body = Some(Body {
+                    kind: BodyKind::Text,
+                    content: text,
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// Whether the live endpoint (incl. the edtui body) differs from the pristine
+    /// snapshot. Derived — no dirty flag to keep in sync.
+    fn is_dirty(&self) -> bool {
+        let Some(snapshot) = &self.loaded_snapshot else {
+            return false;
+        };
+        let Some(selected) = &self.selected else {
+            return false;
+        };
+        // Compare with the live body folded in (without mutating self).
+        let mut live = selected.endpoint.clone();
+        let text = String::from(self.editor.lines.clone());
+        match live.request.body.as_mut() {
+            Some(body) => {
+                if text.is_empty() {
+                    live.request.body = None;
+                } else {
+                    body.content = text;
+                }
+            }
+            None if !text.is_empty() => {
+                live.request.body = Some(Body {
+                    kind: BodyKind::Text,
+                    content: text,
+                });
+            }
+            None => {}
+        }
+        &live != snapshot
     }
 
     /// Sends the selected endpoint's request with the live edtui body text.
@@ -774,15 +1012,15 @@ impl App {
     /// Handles one key in jump-mode: a label char jumps (and cancels the mode);
     /// `Esc` or the Jump key again cancels; everything else is ignored (jump-mode
     /// consumes all keys).
-    fn handle_jump_key(&mut self, key: KeyEvent) {
+    fn handle_jump_key(&mut self, key: KeyEvent) -> Result<()> {
         // Esc always cancels.
         if key.code == KeyCode::Esc {
             self.close_jump();
-            return;
+            return Ok(());
         }
         let Some(jump) = &self.jump else {
             self.close_jump();
-            return;
+            return Ok(());
         };
         // An assigned label wins first — the default Jump key `f` also labels the
         // first explorer row, so a label lookup must take precedence over the
@@ -796,19 +1034,19 @@ impl App {
                 JumpTarget::Row(row) => {
                     self.focus = Pane::Explorer;
                     self.explorer.cursor = row;
-                    // An endpoint row also selects it (same as Enter).
-                    if let Ok(Some(selected)) = self.explorer.select() {
-                        self.load_endpoint(selected);
-                    }
+                    // An endpoint row also selects it (same as Enter) — through
+                    // the guarded seam so dirty edits are never lost silently.
+                    self.guarded_load(PendingLoad::Row(row))?;
                 }
             }
-            return;
+            return Ok(());
         }
         // Pressing the Jump key again cancels (when it labels no target).
         if self.keymap.lookup(key) == Some(Action::Jump) {
             self.close_jump();
         }
         // Any other non-label key is ignored; jump-mode stays open.
+        Ok(())
     }
 
     /// Opens the profile picker over the workspace's profile names plus a
@@ -845,6 +1083,7 @@ impl App {
     fn close_overlay(&mut self) {
         self.picker = None;
         self.profile_choices.clear();
+        self.auth_picker = false;
         self.mode = Mode::Normal;
     }
 
@@ -871,18 +1110,26 @@ impl App {
     fn accept_overlay(&mut self) -> Result<()> {
         let mode = self.mode;
         let current = self.picker.as_ref().and_then(picker::PickerState::current);
-        // Capture the profile choices before close_overlay() clears them.
+        // Capture the profile choices + auth-picker flag before close_overlay().
         let profile_choices = std::mem::take(&mut self.profile_choices);
+        let auth_picker = self.auth_picker;
         self.close_overlay();
         let Some(index) = current else {
             return Ok(());
         };
+        if auth_picker {
+            self.set_auth_kind(index);
+            return Ok(());
+        }
         match mode {
             Mode::Search => {
                 if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
                     self.focus = Pane::Explorer;
+                    // jump_to only navigates (expand + cursor); the load itself
+                    // goes through the guarded seam so dirty edits are never
+                    // lost silently.
                     if let Some(selected) = self.explorer.jump_to(collection, endpoint)? {
-                        self.load_endpoint(selected);
+                        self.guarded_load(PendingLoad::File(selected.file.clone()))?;
                     }
                 }
             }
@@ -897,7 +1144,7 @@ impl App {
                     self.dispatch(action, None)?;
                 }
             }
-            Mode::Jump | Mode::Normal => {}
+            _ => {}
         }
         Ok(())
     }
@@ -907,6 +1154,831 @@ impl App {
     /// single source of truth (M6.5 dedup fix).
     fn set_profile(&mut self, profile: Option<String>) {
         self.active_profile = profile;
+    }
+
+    // ---- URL bar editing + method switching ----
+
+    /// Begins inline URL editing (seeds the LineEditor with the current URL).
+    /// A no-op when no endpoint is loaded.
+    fn begin_url_edit(&mut self) {
+        let Some(url) = self.live_request().map(|r| r.url.clone()) else {
+            self.status = Some(TransientStatus::new("no endpoint selected"));
+            return;
+        };
+        self.focus = Pane::UrlBar;
+        self.url_editor = Some(LineEditor::new(&url));
+    }
+
+    /// Handles one key while editing the URL inline: Enter commits, Esc reverts,
+    /// everything else goes to the LineEditor.
+    fn handle_url_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(editor) = self.url_editor.take()
+                    && let Some(selected) = self.selected.as_mut()
+                {
+                    selected.endpoint.request.url = editor.text();
+                }
+            }
+            KeyCode::Esc => {
+                self.url_editor = None; // revert (discard the editor's text)
+            }
+            _ => {
+                if let Some(editor) = self.url_editor.as_mut() {
+                    editor.handle_key(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cycles the loaded request's method (GET→POST→…→GET).
+    fn cycle_method(&mut self) {
+        if let Some(selected) = self.selected.as_mut() {
+            let m = selected.endpoint.request.method;
+            selected.endpoint.request.method = m.cycle();
+        } else {
+            self.status = Some(TransientStatus::new("no endpoint selected"));
+        }
+    }
+
+    /// Opens the one-key method-picker menu (focuses the URL bar).
+    fn open_method_menu(&mut self) {
+        if self.selected.is_none() {
+            self.status = Some(TransientStatus::new("no endpoint selected"));
+            return;
+        }
+        self.focus = Pane::UrlBar;
+        self.mode = Mode::MethodMenu;
+    }
+
+    /// Handles one key in the method menu: a label sets the method, Esc cancels.
+    fn handle_method_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if let KeyCode::Char(c) = key.code
+            && let Some(method) = method_menu::method_for(c)
+            && let Some(selected) = self.selected.as_mut()
+        {
+            selected.endpoint.request.method = method;
+            self.mode = Mode::Normal;
+        }
+        // Any other key is ignored; the menu stays open.
+    }
+
+    // ---- Request-tab rows ----
+
+    /// The number of rows on the active tab of the live request.
+    fn active_tab_row_count(&self) -> usize {
+        let Some(request) = self.live_request() else {
+            return 0;
+        };
+        match self.tabs.active {
+            RequestTab::Params => request.params.len(),
+            RequestTab::Headers => request.headers.len(),
+            RequestTab::Auth => auth_field_count(request.auth.as_ref()),
+            RequestTab::Body => 0,
+        }
+    }
+
+    /// `a`: add a row on the Params/Headers tab and immediately edit its name.
+    fn row_add(&mut self) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let request = &mut selected.endpoint.request;
+        let new_row = match self.tabs.active {
+            RequestTab::Params => {
+                request.params.push(Param {
+                    name: String::new(),
+                    value: String::new(),
+                    enabled: true,
+                });
+                request.params.len() - 1
+            }
+            RequestTab::Headers => {
+                request.headers.push(Header {
+                    name: String::new(),
+                    value: String::new(),
+                    enabled: true,
+                });
+                request.headers.len() - 1
+            }
+            // Auth/Body have no add-row.
+            _ => return,
+        };
+        self.tabs.clamp(self.active_tab_row_count());
+        // Select and begin editing the new row's name field.
+        match self.tabs.active {
+            RequestTab::Params => self.tabs.params_sel = new_row,
+            RequestTab::Headers => self.tabs.headers_sel = new_row,
+            _ => {}
+        }
+        self.tabs.editing = Some(FieldEdit {
+            row: new_row,
+            field: EditField::Name,
+            editor: LineEditor::new(""),
+        });
+    }
+
+    /// `d`: delete the selected row on the Params/Headers tab (no confirm).
+    fn row_delete(&mut self) {
+        let sel = self.tabs.selection();
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let request = &mut selected.endpoint.request;
+        match self.tabs.active {
+            RequestTab::Params if sel < request.params.len() => {
+                request.params.remove(sel);
+            }
+            RequestTab::Headers if sel < request.headers.len() => {
+                request.headers.remove(sel);
+            }
+            _ => return,
+        }
+        let n = self.active_tab_row_count();
+        self.tabs.clamp(n);
+    }
+
+    /// `Space`: toggle the selected row's `enabled` flag (Params/Headers), or the
+    /// ApiKey placement on the Auth tab's placement row.
+    fn row_toggle(&mut self) {
+        let sel = self.tabs.selection();
+        let active = self.tabs.active;
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let request = &mut selected.endpoint.request;
+        match active {
+            RequestTab::Params => {
+                if let Some(param) = request.params.get_mut(sel) {
+                    param.enabled = !param.enabled;
+                }
+            }
+            RequestTab::Headers => {
+                if let Some(header) = request.headers.get_mut(sel) {
+                    header.enabled = !header.enabled;
+                }
+            }
+            RequestTab::Auth => toggle_auth_placement(request.auth.as_mut(), sel),
+            RequestTab::Body => {}
+        }
+    }
+
+    /// `Enter`/`i`: edit the selected row. On the Auth kind row, opens the auth
+    /// kind picker instead.
+    fn row_edit(&mut self) {
+        let sel = self.tabs.selection();
+        let active = self.tabs.active;
+        // The Auth-tab kind row (row 0) opens the kind picker.
+        if active == RequestTab::Auth && sel == 0 {
+            self.open_auth_kind_picker();
+            return;
+        }
+        // The ApiKey placement row (row 3) toggles on Enter, same as Space (the
+        // pinned design: "placement row toggles header/query with Space/Enter").
+        if active == RequestTab::Auth && sel == 3 {
+            self.row_toggle();
+            return;
+        }
+        // Auth fields have fixed labels — edit the single value directly (no
+        // name→value advance). Param/Header rows start on the name field.
+        let start_field = if active == RequestTab::Auth {
+            EditField::Value
+        } else {
+            EditField::Name
+        };
+        let Some(text) = self.current_field_text(active, sel, start_field) else {
+            return;
+        };
+        self.tabs.editing = Some(FieldEdit {
+            row: sel,
+            field: start_field,
+            editor: LineEditor::new(&text),
+        });
+    }
+
+    /// The current text of a given row/field on `tab`, or `None` when out of range
+    /// or not editable.
+    fn current_field_text(&self, tab: RequestTab, row: usize, field: EditField) -> Option<String> {
+        let request = self.live_request()?;
+        let (name, value) = match tab {
+            RequestTab::Params => {
+                let p = request.params.get(row)?;
+                (p.name.clone(), p.value.clone())
+            }
+            RequestTab::Headers => {
+                let h = request.headers.get(row)?;
+                (h.name.clone(), h.value.clone())
+            }
+            RequestTab::Auth => return auth_field_text(request.auth.as_ref(), row),
+            RequestTab::Body => return None,
+        };
+        Some(match field {
+            EditField::Name => name,
+            EditField::Value => value,
+        })
+    }
+
+    /// Handles one key during an in-progress row field edit. Tab/Enter advance
+    /// name→value (or commit the row on the value field); Esc cancels.
+    fn handle_field_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel the field edit; a freshly-added row that was never
+                // committed (name and value both still empty) is removed, or
+                // `a` + Esc would leave a nameless ghost row that serializes.
+                if let Some(edit) = self.tabs.editing.take() {
+                    self.discard_row_if_empty(edit.row);
+                }
+            }
+            KeyCode::Tab => self.field_edit_advance(false),
+            KeyCode::Enter => self.field_edit_advance(true),
+            _ => {
+                if let Some(edit) = self.tabs.editing.as_mut() {
+                    edit.editor.handle_key(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a Params/Headers row whose stored name *and* value are both
+    /// empty — the ghost a cancelled `a`(dd) would otherwise leave behind (it is
+    /// nameless, enabled, and would serialize on save).
+    fn discard_row_if_empty(&mut self, row: usize) {
+        let active = self.tabs.active;
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let request = &mut selected.endpoint.request;
+        let removed = match active {
+            RequestTab::Params
+                if request
+                    .params
+                    .get(row)
+                    .is_some_and(|p| p.name.is_empty() && p.value.is_empty()) =>
+            {
+                request.params.remove(row);
+                true
+            }
+            RequestTab::Headers
+                if request
+                    .headers
+                    .get(row)
+                    .is_some_and(|h| h.name.is_empty() && h.value.is_empty()) =>
+            {
+                request.headers.remove(row);
+                true
+            }
+            _ => false,
+        };
+        if removed {
+            let n = self.active_tab_row_count();
+            self.tabs.clamp(n);
+        }
+    }
+
+    /// Commits the current field edit into the live request. `commit_row` closes
+    /// the edit after the value field; otherwise name→value advances.
+    fn field_edit_advance(&mut self, commit_row: bool) {
+        let Some(edit) = self.tabs.editing.take() else {
+            return;
+        };
+        let text = edit.editor.text();
+        self.write_field(self.tabs.active, edit.row, edit.field, text);
+        match edit.field {
+            EditField::Name => {
+                // Advance to the value field, seeded with its current text.
+                let value = self
+                    .current_field_text(self.tabs.active, edit.row, EditField::Value)
+                    .unwrap_or_default();
+                self.tabs.editing = Some(FieldEdit {
+                    row: edit.row,
+                    field: EditField::Value,
+                    editor: LineEditor::new(&value),
+                });
+            }
+            EditField::Value => {
+                if !commit_row {
+                    // Tab from value wraps back to name.
+                    let name = self
+                        .current_field_text(self.tabs.active, edit.row, EditField::Name)
+                        .unwrap_or_default();
+                    self.tabs.editing = Some(FieldEdit {
+                        row: edit.row,
+                        field: EditField::Name,
+                        editor: LineEditor::new(&name),
+                    });
+                }
+                // Enter on value: editing already taken → committed.
+            }
+        }
+    }
+
+    /// Writes an edited field back into the live request.
+    fn write_field(&mut self, tab: RequestTab, row: usize, field: EditField, text: String) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let request = &mut selected.endpoint.request;
+        match tab {
+            RequestTab::Params => {
+                if let Some(p) = request.params.get_mut(row) {
+                    match field {
+                        EditField::Name => p.name = text,
+                        EditField::Value => p.value = text,
+                    }
+                }
+            }
+            RequestTab::Headers => {
+                if let Some(h) = request.headers.get_mut(row) {
+                    match field {
+                        EditField::Name => h.name = text,
+                        EditField::Value => h.value = text,
+                    }
+                }
+            }
+            RequestTab::Auth => write_auth_field(request.auth.as_mut(), row, field, text),
+            RequestTab::Body => {}
+        }
+    }
+
+    /// Opens the auth-kind picker (None / Basic / Bearer / ApiKey).
+    fn open_auth_kind_picker(&mut self) {
+        if self.selected.is_none() {
+            return;
+        }
+        let labels = vec![
+            "None".to_owned(),
+            "Basic".to_owned(),
+            "Bearer".to_owned(),
+            "ApiKey".to_owned(),
+        ];
+        self.picker = Some(picker::PickerState::new(" Auth kind ", labels));
+        self.auth_picker = true;
+        self.mode = Mode::Palette;
+    }
+
+    /// Applies an auth-kind picker choice, swapping in default-empty fields.
+    fn set_auth_kind(&mut self, index: usize) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let auth = &mut selected.endpoint.request.auth;
+        *auth = match index {
+            0 => None,
+            1 => Some(Auth::Basic {
+                username: String::new(),
+                password: String::new(),
+            }),
+            2 => Some(Auth::Bearer {
+                token: String::new(),
+            }),
+            3 => Some(Auth::ApiKey {
+                name: String::new(),
+                value: String::new(),
+                placement: ApiKeyPlacement::Header,
+            }),
+            _ => return,
+        };
+        self.tabs.auth_sel = 0;
+    }
+
+    // ---- Save ----
+
+    /// `w`: save the live request to disk (format-preserving). Refreshes the
+    /// snapshot on success; a secrets refusal surfaces on the statusline and the
+    /// request stays dirty.
+    fn save_request(&mut self) {
+        self.sync_body_into_selected();
+        let Some(selected) = self.selected.as_ref() else {
+            self.status = Some(TransientStatus::new("no endpoint to save"));
+            return;
+        };
+        let path = selected.file.clone();
+        let endpoint = selected.endpoint.clone();
+        match persistence::save_endpoint(&path, &endpoint) {
+            Ok(()) => {
+                self.loaded_snapshot = Some(endpoint.clone());
+                self.refresh_explorer_endpoint(&path, endpoint.clone());
+                self.status = Some(TransientStatus::new(format!("Saved {}", endpoint.name)));
+            }
+            Err(PersistenceError::SecretsInAuth { names }) => {
+                self.status = Some(TransientStatus::new(format!(
+                    "not saved: secret auth values ({}) — use {{{{var}}}}",
+                    names.join(", ")
+                )));
+            }
+            Err(err) => {
+                self.status = Some(TransientStatus::new(format!("save failed: {err}")));
+            }
+        }
+    }
+
+    /// Updates the explorer's cached copy of an endpoint after a save so the tree
+    /// name and any re-selection stay consistent.
+    fn refresh_explorer_endpoint(&mut self, path: &Path, endpoint: Endpoint) {
+        self.explorer.update_endpoint(path, endpoint);
+    }
+
+    // ---- CRUD (explorer) ----
+
+    /// `n`: prompt for a new endpoint name (under the selected collection).
+    fn begin_new_endpoint(&mut self) {
+        if self.explorer.selected_collection_dir().is_none() {
+            self.status = Some(TransientStatus::new("select a collection first"));
+            return;
+        }
+        self.open_prompt(PromptPurpose::NewEndpoint, "");
+    }
+
+    /// `N`: prompt for a new collection name.
+    fn begin_new_collection(&mut self) {
+        if self.workspace.is_none() {
+            self.status = Some(TransientStatus::new("no workspace open"));
+            return;
+        }
+        self.open_prompt(PromptPurpose::NewCollection, "");
+    }
+
+    /// `r`: prompt to rename the selected endpoint or collection.
+    fn begin_rename(&mut self) {
+        let Some(name) = self.explorer.selected_name() else {
+            self.status = Some(TransientStatus::new("nothing selected to rename"));
+            return;
+        };
+        self.open_prompt(PromptPurpose::Rename, &name);
+    }
+
+    /// `d`: delete the selected item — y/n for an endpoint, typed name for a
+    /// collection (risk-proportional friction).
+    fn begin_delete(&mut self) {
+        match self.explorer.selected_kind() {
+            Some(RowKind::Endpoint) => {
+                self.mode = Mode::Confirm(ConfirmPurpose::DeleteEndpoint);
+            }
+            Some(RowKind::Collection) => {
+                self.open_prompt(PromptPurpose::DeleteCollectionConfirm, "");
+            }
+            None => {
+                self.status = Some(TransientStatus::new("nothing selected to delete"));
+            }
+        }
+    }
+
+    /// Opens a text prompt seeded with `seed`.
+    fn open_prompt(&mut self, purpose: PromptPurpose, seed: &str) {
+        self.prompt_editor = LineEditor::new(seed);
+        self.mode = Mode::Prompt(purpose);
+    }
+
+    /// Handles one key in a text-prompt overlay.
+    fn handle_prompt_key(&mut self, key: KeyEvent, purpose: PromptPurpose) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let text = self.prompt_editor.text();
+                self.mode = Mode::Normal;
+                self.commit_prompt(purpose, text)?;
+            }
+            _ => {
+                self.prompt_editor.handle_key(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Commits a text prompt: performs the CRUD op via the core seams.
+    fn commit_prompt(&mut self, purpose: PromptPurpose, text: String) -> Result<()> {
+        match purpose {
+            PromptPurpose::NewEndpoint => {
+                let Some(dir) = self.explorer.selected_collection_dir() else {
+                    return Ok(());
+                };
+                match persistence::create_endpoint(&dir, &text) {
+                    Ok(path) => {
+                        self.reload_explorer()?;
+                        self.status = Some(TransientStatus::new(format!("created {text}")));
+                        // Guarded: loading the new endpoint must not silently
+                        // discard dirty edits on the currently-loaded one.
+                        self.guarded_load(PendingLoad::File(path))?;
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            PromptPurpose::NewCollection => {
+                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                    return Ok(());
+                };
+                match persistence::create_collection(&root, &text) {
+                    Ok(_) => {
+                        self.reload_explorer()?;
+                        self.status = Some(TransientStatus::new(format!("created {text}")));
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            PromptPurpose::Rename => self.commit_rename(text)?,
+            PromptPurpose::DeleteCollectionConfirm => {
+                let Some((dir, name)) = self
+                    .explorer
+                    .selected_collection_dir()
+                    .zip(self.explorer.selected_name())
+                else {
+                    return Ok(());
+                };
+                if text != name {
+                    self.status = Some(TransientStatus::new("name mismatch — not deleted"));
+                    return Ok(());
+                }
+                match persistence::delete_collection(&dir) {
+                    Ok(()) => {
+                        // reload_explorer's remap clears a selection whose file
+                        // vanished with the collection.
+                        self.reload_explorer()?;
+                        self.status = Some(TransientStatus::new(format!("deleted {name}")));
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Renames the selected endpoint or collection to `new_name`.
+    fn commit_rename(&mut self, new_name: String) -> Result<()> {
+        match self.explorer.selected_kind() {
+            Some(RowKind::Endpoint) => {
+                let Some(path) = self.explorer.selected_endpoint_file() else {
+                    return Ok(());
+                };
+                match persistence::rename_endpoint(&path, &new_name) {
+                    Ok(new_path) => {
+                        let renamed_loaded = self.selected.as_ref().is_some_and(|s| s.file == path);
+                        if renamed_loaded {
+                            // Renaming the *loaded* endpoint: update its file
+                            // path + name in place so unsaved edits survive —
+                            // no reload of the request pane. Repoint before the
+                            // reload so remap-by-path sees the live file.
+                            let trimmed = new_name.trim().to_owned();
+                            if let Some(selected) = self.selected.as_mut() {
+                                selected.file = new_path.clone();
+                                selected.endpoint.name = trimmed.clone();
+                            }
+                            if let Some(snapshot) = self.loaded_snapshot.as_mut() {
+                                snapshot.name = trimmed;
+                            }
+                            self.reload_explorer()?;
+                            // Move the cursor onto the renamed row without
+                            // touching the request pane.
+                            self.explorer.select_file(&new_path)?;
+                        } else {
+                            self.reload_explorer()?;
+                            // Guarded: selecting the renamed endpoint must not
+                            // silently discard dirty edits on the loaded one.
+                            self.guarded_load(PendingLoad::File(new_path))?;
+                        }
+                        self.status = Some(TransientStatus::new(format!("renamed to {new_name}")));
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            Some(RowKind::Collection) => {
+                let Some(dir) = self.explorer.selected_collection_dir() else {
+                    return Ok(());
+                };
+                match persistence::rename_collection(&dir, &new_name) {
+                    Ok(new_dir) => {
+                        // The loaded endpoint may live inside the renamed
+                        // collection: repoint its file into the new directory
+                        // *before* the reload, or remap-by-path would see a
+                        // vanished file (and the next save would fail NotFound).
+                        if let Some(selected) = self.selected.as_mut()
+                            && let Ok(rest) = selected.file.strip_prefix(&dir)
+                        {
+                            selected.file = new_dir.join(rest);
+                        }
+                        self.reload_explorer()?;
+                        self.status = Some(TransientStatus::new(format!("renamed to {new_name}")));
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Handles one key in a y/n confirmation overlay.
+    fn handle_confirm_key(&mut self, key: KeyEvent, purpose: ConfirmPurpose) -> Result<()> {
+        match purpose {
+            ConfirmPurpose::DeleteEndpoint => match key.code {
+                KeyCode::Char('y') => {
+                    self.mode = Mode::Normal;
+                    if let Some(path) = self.explorer.selected_endpoint_file() {
+                        match persistence::delete_endpoint(&path) {
+                            Ok(()) => {
+                                // reload_explorer's remap clears a selection
+                                // whose file vanished.
+                                self.reload_explorer()?;
+                                self.status = Some(TransientStatus::new("deleted endpoint"));
+                            }
+                            Err(err) => self.crud_error(err),
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Normal,
+                _ => {}
+            },
+            ConfirmPurpose::DiscardChanges => match key.code {
+                KeyCode::Char('s') => {
+                    self.mode = Mode::Normal;
+                    self.save_request();
+                    // Only switch when the save actually took: a refused save
+                    // (e.g. literal secret auth) leaves the request dirty and
+                    // the error on the statusline — switching anyway would
+                    // destroy the unsaved edits it just refused to write.
+                    if !self.is_dirty() {
+                        if let Some(target) = self.pending_load.take() {
+                            self.perform_load(target)?;
+                        }
+                    } else {
+                        self.pending_load = None; // stay put, error visible
+                    }
+                }
+                KeyCode::Char('d') => {
+                    self.mode = Mode::Normal;
+                    // Discard: drop the snapshot so the switch is not re-guarded.
+                    self.loaded_snapshot = None;
+                    if let Some(target) = self.pending_load.take() {
+                        self.perform_load(target)?;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    self.pending_load = None;
+                }
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    /// Surfaces a CRUD [`PersistenceError`] on the statusline (fail-loud).
+    fn crud_error(&mut self, err: PersistenceError) {
+        self.status = Some(TransientStatus::new(format!("error: {err}")));
+    }
+
+    /// Rebuilds the explorer tree from disk, preserving expansion + cursor as best
+    /// it can (cursor clamps to the new row count), then re-derives the loaded
+    /// endpoint's indices from its file path (see [`App::remap_selected`]).
+    fn reload_explorer(&mut self) -> Result<()> {
+        self.explorer.reload(self.workspace.as_ref())?;
+        self.remap_selected();
+        Ok(())
+    }
+
+    /// Re-derives the loaded endpoint's explorer indices from its file path
+    /// after a tree reload. Collections are name-sorted, so creating, renaming,
+    /// or deleting *another* collection shifts indices — a stale
+    /// `selected.collection` would silently read the wrong collection's
+    /// `folder.toml` vars at send time. A vanished file clears the selection
+    /// (the post-delete case).
+    fn remap_selected(&mut self) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        if !selected.file.exists() {
+            self.selected = None;
+            self.loaded_snapshot = None;
+            self.editor = EditorState::default();
+            return;
+        }
+        if let Some(ci) = self.explorer.collection_index_for_file(&selected.file) {
+            selected.collection = ci;
+        }
+    }
+
+    /// Moves the explorer cursor onto the endpoint at `file` (expanding its
+    /// collection) and loads it into the request pane.
+    fn select_endpoint_file(&mut self, file: &Path) -> Result<()> {
+        if let Some(selected) = self.explorer.select_file(file)? {
+            self.load_endpoint(selected);
+        }
+        Ok(())
+    }
+
+    /// The single guarded endpoint-switch seam: every path that replaces the
+    /// loaded endpoint (explorer Enter, jump-mode row, search overlay, CRUD
+    /// reselect) goes through here. When the loaded endpoint has unsaved changes
+    /// and the target is a *different* endpoint, the load is deferred behind a
+    /// [`ConfirmPurpose::DiscardChanges`] overlay with the target parked in
+    /// `pending_load`; otherwise it loads immediately.
+    fn guarded_load(&mut self, target: PendingLoad) -> Result<()> {
+        if self.is_dirty() {
+            if self.target_is_other(&target) {
+                self.pending_load = Some(target);
+                self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
+                return Ok(());
+            }
+            // Reselecting the loaded endpoint while dirty must not silently
+            // revert it from disk — keep the in-memory edits. (Collection rows
+            // fall through: toggling expansion needs no guard.)
+            if self.target_is_same_endpoint(&target) {
+                return Ok(());
+            }
+        }
+        self.perform_load(target)
+    }
+
+    /// Whether `target` refers to the endpoint that is already loaded.
+    fn target_is_same_endpoint(&self, target: &PendingLoad) -> bool {
+        let Some(selected) = self.selected.as_ref() else {
+            return false;
+        };
+        match target {
+            PendingLoad::Row(_) => self
+                .explorer
+                .selected_endpoint_file()
+                .is_some_and(|file| file == selected.file),
+            PendingLoad::File(file) => *file == selected.file,
+        }
+    }
+
+    /// Whether `target` refers to a different endpoint than the loaded one. A
+    /// collection row is never "other" (toggling needs no guard).
+    fn target_is_other(&self, target: &PendingLoad) -> bool {
+        match target {
+            PendingLoad::Row(_) => self
+                .explorer
+                .cursor_is_other_endpoint(self.selected.as_ref()),
+            PendingLoad::File(file) => self.selected.as_ref().is_none_or(|s| &s.file != file),
+        }
+    }
+
+    /// Performs a (possibly previously deferred) endpoint load.
+    fn perform_load(&mut self, target: PendingLoad) -> Result<()> {
+        match target {
+            PendingLoad::Row(row) => {
+                self.explorer.cursor = row;
+                if let Some(selected) = self.explorer.select()? {
+                    self.load_endpoint(selected);
+                }
+            }
+            PendingLoad::File(file) => self.select_endpoint_file(&file)?,
+        }
+        Ok(())
+    }
+}
+
+/// The number of editable rows on the Auth tab for a given auth (row 0 is always
+/// the kind row).
+fn auth_field_count(auth: Option<&Auth>) -> usize {
+    match auth {
+        None => 1,                      // kind row only
+        Some(Auth::Basic { .. }) => 3,  // kind + username + password
+        Some(Auth::Bearer { .. }) => 2, // kind + token
+        Some(Auth::ApiKey { .. }) => 4, // kind + name + value + placement
+    }
+}
+
+/// The text of an Auth-tab row's value field (row 0 is the kind row, not text).
+fn auth_field_text(auth: Option<&Auth>, row: usize) -> Option<String> {
+    match (auth, row) {
+        (Some(Auth::Basic { username, .. }), 1) => Some(username.clone()),
+        (Some(Auth::Basic { password, .. }), 2) => Some(password.clone()),
+        (Some(Auth::Bearer { token }), 1) => Some(token.clone()),
+        (Some(Auth::ApiKey { name, .. }), 1) => Some(name.clone()),
+        (Some(Auth::ApiKey { value, .. }), 2) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Writes an edited Auth-tab field back (both name+value edits land in the value
+/// column here — auth fields have fixed labels, so `field` is ignored and the
+/// text always replaces the row's single editable value).
+fn write_auth_field(auth: Option<&mut Auth>, row: usize, _field: EditField, text: String) {
+    match (auth, row) {
+        (Some(Auth::Basic { username, .. }), 1) => *username = text,
+        (Some(Auth::Basic { password, .. }), 2) => *password = text,
+        (Some(Auth::Bearer { token }), 1) => *token = text,
+        (Some(Auth::ApiKey { name, .. }), 1) => *name = text,
+        (Some(Auth::ApiKey { value, .. }), 2) => *value = text,
+        _ => {}
+    }
+}
+
+/// Toggles the ApiKey placement on the Auth tab's placement row (row 3).
+fn toggle_auth_placement(auth: Option<&mut Auth>, row: usize) {
+    if let (Some(Auth::ApiKey { placement, .. }), 3) = (auth, row) {
+        *placement = match placement {
+            ApiKeyPlacement::Header => ApiKeyPlacement::Query,
+            ApiKeyPlacement::Query => ApiKeyPlacement::Header,
+        };
     }
 }
 
@@ -948,19 +2020,37 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &theme,
         app.jump.as_ref(),
     );
+    let dirty = app.is_dirty();
     let selected_request = app
         .selected
         .as_ref()
         .map(|selected| &selected.endpoint.request);
-    urlbar::render(frame, urlbar_area, selected_request, &theme);
+    urlbar::render(
+        frame,
+        urlbar_area,
+        urlbar::UrlBarCtx {
+            request: selected_request,
+            focused: app.focus == Pane::UrlBar && app.mode == Mode::Normal,
+            editor: app.url_editor.as_ref(),
+            dirty,
+            jump_label: app
+                .jump
+                .as_ref()
+                .and_then(|j| j.label_for_pane(Pane::UrlBar)),
+        },
+        &theme,
+    );
     request::render(
         frame,
         request_area,
-        selected_request,
-        &mut app.editor,
-        app.focus == Pane::Request && app.mode == Mode::Normal,
-        &theme,
-        app.jump.as_ref(),
+        request::RenderCtx {
+            request: selected_request,
+            editor: &mut app.editor,
+            tabs: &app.tabs,
+            focused: app.focus == Pane::Request && app.mode == Mode::Normal,
+            theme: &theme,
+            jump: app.jump.as_ref(),
+        },
     );
     let outcome = response::render(
         frame,
@@ -1001,6 +2091,55 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if let Some(picker_state) = &app.picker {
         picker::render(frame, main, picker_state, &theme);
+    }
+
+    // CRUD / method overlays render over the whole main area.
+    match app.mode {
+        Mode::MethodMenu => {
+            if let Some(request) = selected_request {
+                method_menu::render(frame, main, request.method, &theme);
+            }
+        }
+        Mode::Prompt(purpose) => {
+            let hint = prompt_hint(app, purpose);
+            prompt::render_prompt(
+                frame,
+                main,
+                purpose.title(),
+                &app.prompt_editor,
+                hint.as_deref(),
+                &theme,
+            );
+        }
+        Mode::Confirm(purpose) => {
+            let (title, question, hint) = confirm_text(purpose);
+            prompt::render_confirm(frame, main, title, question, hint, &theme);
+        }
+        _ => {}
+    }
+}
+
+/// The dim hint line under a prompt (the collection name to type for a
+/// typed-confirm delete; none otherwise).
+fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
+    match purpose {
+        PromptPurpose::DeleteCollectionConfirm => app
+            .explorer
+            .selected_name()
+            .map(|name| format!("type \"{name}\" to confirm")),
+        _ => None,
+    }
+}
+
+/// The (title, question, key-hint) for a confirmation overlay.
+fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'static str) {
+    match purpose {
+        ConfirmPurpose::DeleteEndpoint => ("Delete endpoint", "Delete this endpoint?", "[y/n]"),
+        ConfirmPurpose::DiscardChanges => (
+            "Unsaved changes",
+            "Save changes before switching?",
+            "s save · d discard · esc stay",
+        ),
     }
 }
 
@@ -1056,10 +2195,12 @@ mod tests {
         assert!(app.in_flight.is_none());
     }
 
-    /// Puts a fresh app in insert mode on the request pane.
+    /// Puts a fresh app in insert mode on the request pane's Body tab (where the
+    /// edtui editor lives).
     fn insert_mode_app(keymap: KeyMap) -> App {
         let mut app = App::new(None, keymap).unwrap();
         app.focus = Pane::Request;
+        app.tabs.active = RequestTab::Body;
         app.editor.mode = EditorMode::Insert;
         app
     }
@@ -1165,8 +2306,9 @@ mod tests {
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
         assert!(app.jump.is_some());
-        // 'd' is the Response pane label (a/s/d for the three panes).
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        // 'f' is the Response pane label (a/s/d/f for the four panes:
+        // Explorer/UrlBar/Request/Response).
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.jump.is_none());
@@ -1183,8 +2325,8 @@ mod tests {
         assert_eq!(app.explorer.rows().len(), 2);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
-        // Rows follow the three pane labels a/s/d → row 0 is 'f', row 1 is 'g'.
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+        // Rows follow the four pane labels a/s/d/f → row 0 is 'g', row 1 is 'h'.
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.focus, Pane::Explorer);
@@ -1194,23 +2336,21 @@ mod tests {
         assert_eq!(app.selected.as_ref().unwrap().endpoint.name, "Get user");
     }
 
-    /// The default Jump key `f` also labels the first explorer row: the label
-    /// wins over the "Jump key again cancels" rule so that target stays reachable.
+    /// The default Jump key `f` also labels the Response pane (4th pane): the
+    /// label wins over the "Jump key again cancels" rule so that pane stays
+    /// reachable by pressing `f` twice.
     #[test]
-    fn jump_f_selects_first_row_not_cancel() {
+    fn jump_f_focuses_response_not_cancel() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = workspace_fixture(dir.path());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
-        // Row 0 is the "users" collection row → its label is `f`; pressing it
-        // focuses the explorer and toggles (expands) that collection.
+        // 'f' labels the Response pane; pressing it focuses Response, not cancels.
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal, "f must act as a label, not cancel");
-        assert_eq!(app.focus, Pane::Explorer);
-        assert_eq!(app.explorer.cursor, 0);
-        assert_eq!(app.explorer.rows().len(), 2, "collection expanded");
+        assert_eq!(app.focus, Pane::Response);
     }
 
     /// Esc cancels jump-mode without focusing anything.
@@ -1279,6 +2419,75 @@ mod tests {
         app.set_profile(Some("prod".to_owned()));
         let resolver = app.build_resolver(&selected);
         assert_eq!(resolver.substitute("{{host}}"), "prod.test");
+    }
+
+    /// Regression (M6.6 review #1): on the Body tab in edtui Normal mode, the
+    /// row-editing keys (`i` insert, `a` append) must reach edtui instead of
+    /// being eaten by the Request overlay's RowEdit/RowAdd — there are no rows
+    /// on the Body tab.
+    #[test]
+    fn body_tab_row_keys_reach_edtui() {
+        for c in ['i', 'a'] {
+            let mut app = App::new(None, KeyMap::default()).unwrap();
+            app.focus = Pane::Request;
+            app.tabs.active = RequestTab::Body;
+            assert_eq!(app.editor.mode, EditorMode::Normal);
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                app.editor.mode,
+                EditorMode::Insert,
+                "'{c}' on the Body tab must enter edtui insert mode"
+            );
+            assert!(
+                app.tabs.editing.is_none(),
+                "no row edit must start for '{c}'"
+            );
+        }
+    }
+
+    /// Regression (M6.6 review #4): after an explorer reload shifts the
+    /// name-sorted collection indices (a new collection sorting first), the
+    /// loaded endpoint's collection index is remapped from its file path, so
+    /// the send-time resolver still reads the *right* collection's
+    /// `folder.toml` vars.
+    #[test]
+    fn reload_remaps_selected_collection_index_for_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        // One collection "bbb" with folder.toml vars + an endpoint.
+        let bbb = dir.path().join("bbb");
+        std::fs::create_dir(&bbb).unwrap();
+        std::fs::write(bbb.join("folder.toml"), "[vars]\nwho = \"bbb-vars\"\n").unwrap();
+        std::fs::write(
+            bbb.join("get.toml"),
+            "seq = 0\nname = \"Get\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://{{who}}/x\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        app.load_endpoint(selected);
+        assert_eq!(app.selected.as_ref().unwrap().collection, 0);
+
+        // Create a collection that sorts *before* "bbb" and reload: "bbb" is
+        // now index 1; the stale index 0 would read "aaa"'s (empty) vars.
+        churl_core::persistence::create_collection(dir.path(), "aaa").unwrap();
+        app.reload_explorer().unwrap();
+        assert_eq!(
+            app.selected.as_ref().unwrap().collection,
+            1,
+            "collection index must be remapped from the file path"
+        );
+        let selected = app.selected.clone().unwrap();
+        let resolver = app.build_resolver(&selected);
+        assert_eq!(
+            resolver.substitute("{{who}}"),
+            "bbb-vars",
+            "resolver must read the loaded endpoint's own collection vars"
+        );
     }
 
     /// The profile picker sets (and clears) the active profile.

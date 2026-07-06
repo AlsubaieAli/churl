@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · w save · f jump · / s

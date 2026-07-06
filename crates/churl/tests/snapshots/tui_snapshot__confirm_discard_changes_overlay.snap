@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│  ▸ orders                  ││GET  https://api.test/usersX                ●   │
+│  ▾ users                   │└────────────────────────────────────────────────┘
+│    List users              │┌ Request ───────────────────────────────────────┐
+│>   Create user             ││ Params(0)   Headers(0)   Auth   Body           │
+│    Get user                ││  (no params — a to add)                        │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│              ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
+│              ┃Save changes before switching?                  ┃              │
+│              ┃s save · d discard · esc stay                   ┃──────────────┘
+│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
+│                            ││no response yet                                 │
+│                            ││GET https://api.test/usersX                     │
+│                            ││                                                │
+│                            ││press ctrl-s to send                            │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · j/k move · enter select · ctrl-s send · w save · f jump · / s

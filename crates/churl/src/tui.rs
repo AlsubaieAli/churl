@@ -31,7 +31,7 @@ pub fn restore() {
 /// unknown-profile errors all surface before the alternate screen is entered.
 pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) -> Result<()> {
     let config = churl_core::config::load_global_config()?;
-    let keymap = KeyMap::with_overrides(&config.keys)?;
+    let keymap = KeyMap::with_all_overrides(&config.keys, &config.key_overlays)?;
     let theme = Theme::resolve(config.theme.as_deref(), &config.theme_colors)?;
     let cwd = std::env::current_dir()?;
     let workspace = app::open_workspace(&cwd)?;

@@ -36,7 +36,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
         ),
         None => (
             format!(
-                " {} · {workspace}{profile} · j/k move · enter select · ctrl-s send · f jump · / search · : palette · q quit",
+                " {} · {workspace}{profile} · j/k move · enter select · ctrl-s send · w save · f jump · / search · : palette · q quit",
                 ctx.focus
             ),
             ctx.theme.statusline,

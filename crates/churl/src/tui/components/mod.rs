@@ -4,9 +4,13 @@
 
 pub mod explorer;
 pub mod jump;
+pub mod line_editor;
+pub mod method_menu;
 pub mod palette;
 pub mod picker;
+pub mod prompt;
 pub mod request;
+pub mod request_tabs;
 pub mod response;
 pub mod search;
 pub mod statusline;

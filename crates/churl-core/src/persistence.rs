@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
 use crate::config::{auth_secret_violations, collection_secret_violations, secret_violations};
-use crate::model::{CollectionMeta, Endpoint, Workspace};
+use crate::model::{CollectionMeta, Endpoint, Method, Request, Workspace};
 
 /// Filename of the workspace manifest inside a workspace root.
 pub const MANIFEST_FILENAME: &str = "churl.toml";
@@ -91,6 +91,15 @@ pub enum PersistenceError {
         /// Offending fields as `"auth.<field>"` strings.
         names: Vec<String>,
     },
+    /// A CRUD operation was given an empty (or whitespace-only) name.
+    #[error("name must not be empty")]
+    EmptyName,
+    /// A CRUD create/rename target already exists on disk (refuse to clobber).
+    #[error("already exists: {path}")]
+    AlreadyExists {
+        /// The path that already exists.
+        path: PathBuf,
+    },
 }
 
 /// Gate on [`crate::config::auth_secret_violations`] shared by every
@@ -134,6 +143,192 @@ pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, PersistenceError> {
         })?;
     normalize_table(doc.as_table_mut());
     Ok(doc.to_string())
+}
+
+/// Derives a filesystem slug (kebab-case, lowercase, ASCII) from an endpoint or
+/// collection name. Runs of non-alphanumeric characters collapse to a single `-`;
+/// leading/trailing `-` are trimmed. An empty result falls back to `"unnamed"`.
+fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Picks an unused `<slug>.toml` path inside `dir`, appending `-2`, `-3`, … on
+/// collision (matching the corpus convention of plain suffixes).
+fn unique_endpoint_path(dir: &Path, slug: &str) -> PathBuf {
+    let first = dir.join(format!("{slug}.toml"));
+    if !first.exists() {
+        return first;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = dir.join(format!("{slug}-{n}.toml"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// The next `seq` for a new endpoint in `dir`: one past the maximum existing
+/// endpoint `seq` (plain +1 — the corpus uses no fixed step), or `0` when the
+/// collection is empty. Unreadable/malformed files are ignored here (an empty
+/// collection and a broken one both start at `0`; broken files surface on load).
+fn next_seq(dir: &Path) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut max: Option<u32> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|e| e.to_str()) != Some("toml")
+            || path.file_name().and_then(|n| n.to_str()) == Some(FOLDER_FILENAME)
+        {
+            continue;
+        }
+        if let Ok(ep) = load_endpoint(&path) {
+            max = Some(max.map_or(ep.seq, |m| m.max(ep.seq)));
+        }
+    }
+    max.map_or(0, |m| m + 1)
+}
+
+/// Creates a new endpoint file in the collection directory `dir` with a default
+/// GET request and an empty URL. The filename is a slug of `name`
+/// (collision-suffixed); `seq` is auto-assigned to one past the collection's
+/// current maximum (see [`next_seq`]). Returns the created file's path.
+///
+/// An empty name is [`PersistenceError::EmptyName`]. The default endpoint carries
+/// no auth, so the secrets gate is never hit here.
+pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
+    if name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let path = unique_endpoint_path(dir, &slugify(name));
+    let endpoint = Endpoint {
+        seq: next_seq(dir),
+        name: name.trim().to_owned(),
+        request: Request {
+            method: Method::Get,
+            url: String::new(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+        },
+    };
+    save_endpoint(&path, &endpoint)?;
+    Ok(path)
+}
+
+/// Renames the endpoint at `path`: updates its `name` (via the format-preserving
+/// merge save) *and* renames the file to a fresh slug of `new_name` in the same
+/// directory. Both changes happen or neither — the file is written under the old
+/// path first, then moved, so a secrets refusal aborts before any move. Returns
+/// the new file path.
+///
+/// An empty `new_name` is [`PersistenceError::EmptyName`]; a slug collision with a
+/// different existing file is [`PersistenceError::AlreadyExists`].
+pub fn rename_endpoint(path: &Path, new_name: &str) -> Result<PathBuf, PersistenceError> {
+    if new_name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let mut endpoint = load_endpoint(path)?;
+    endpoint.name = new_name.trim().to_owned();
+    // Write the name change first (this also runs the secrets gate).
+    save_endpoint(path, &endpoint)?;
+
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let slug = slugify(new_name);
+    // An unchanged slug keeps the file where it is — its own path must not
+    // count as a collision.
+    if dir.join(format!("{slug}.toml")) == path {
+        return Ok(path.to_owned());
+    }
+    let new_path = unique_endpoint_path(dir, &slug);
+    std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
+        path: new_path.clone(),
+        source,
+    })?;
+    Ok(new_path)
+}
+
+/// Deletes the endpoint file at `path`.
+pub fn delete_endpoint(path: &Path) -> Result<(), PersistenceError> {
+    std::fs::remove_file(path).map_err(|source| PersistenceError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Creates a new collection directory named `name` (slugified) under `root`. No
+/// `folder.toml` is written — that stays lazy until the collection gains vars
+/// (matching [`load_collection_meta`]'s missing-is-empty behaviour). Returns the
+/// created directory path.
+///
+/// An empty name is [`PersistenceError::EmptyName`]; an existing directory is
+/// [`PersistenceError::AlreadyExists`].
+pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
+    if name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let dir = root.join(slugify(name));
+    if dir.exists() {
+        return Err(PersistenceError::AlreadyExists { path: dir });
+    }
+    std::fs::create_dir(&dir).map_err(|source| PersistenceError::Write {
+        path: dir.clone(),
+        source,
+    })?;
+    Ok(dir)
+}
+
+/// Renames the collection directory `dir` to a fresh slug of `new_name` in the
+/// same parent. Returns the new directory path.
+///
+/// An empty name is [`PersistenceError::EmptyName`]; an existing target directory
+/// is [`PersistenceError::AlreadyExists`].
+pub fn rename_collection(dir: &Path, new_name: &str) -> Result<PathBuf, PersistenceError> {
+    if new_name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    let new_dir = parent.join(slugify(new_name));
+    if new_dir == dir {
+        return Ok(new_dir);
+    }
+    if new_dir.exists() {
+        return Err(PersistenceError::AlreadyExists { path: new_dir });
+    }
+    std::fs::rename(dir, &new_dir).map_err(|source| PersistenceError::Write {
+        path: new_dir.clone(),
+        source,
+    })?;
+    Ok(new_dir)
+}
+
+/// Deletes the collection directory `dir` and everything inside it.
+pub fn delete_collection(dir: &Path) -> Result<(), PersistenceError> {
+    std::fs::remove_dir_all(dir).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })
 }
 
 /// Loads the workspace manifest (`churl.toml`) from the workspace root directory.

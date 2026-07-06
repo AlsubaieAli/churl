@@ -12,7 +12,7 @@
 | M5 | Auth | **done** |
 | M6 | Themes + keymaps + jump-mode + templating | **done** |
 | M6.5 | UX review round 1 (owner drive-test fixes) | **done** |
-| M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | planned |
+| M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | **done** |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
@@ -263,8 +263,39 @@
 - Tests: tab state machine, URL-bar edit round-trip, CRUD persistence integration, snapshots per tab
 
 **Open questions** (for the M6.6 design session):
-- Keybinding scheme for tab switching and row editing (vim-ish `[`/`]`? number keys?) — decide against the keymap table, everything remappable
-- Delete confirmation UX (typed confirm vs y/n)
+- ~~Keybinding scheme for tab switching and row editing~~ **Resolved**: `[`/`]` cycle + `1`–`4` direct jump (Request overlay); rows `j`/`k`/`a`/`d`/`Space`/`Enter`/`i`. All remappable.
+- ~~Delete confirmation UX~~ **Resolved**: `y/n` for endpoints, typed collection name for collections (risk-proportional).
+
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (246 tests, from the 199 baseline) all green; `cargo run -p churl -- --version` works; `churl keymaps` prints the global map plus per-pane overlay sections. New tests (47): churl-core CRUD persistence (`create_endpoint` slug/seq/empty-collection/collision/empty-name, `rename_endpoint` file+name atomicity + secrets-refusal-leaves-file, `delete_endpoint`, `create_collection` dir-without-folder-toml + refuse-existing, `rename_collection` moves contents, `delete_collection` recursive); `Method::cycle` wrap; config `[keys.*]` overlay split; `KeyMap` overlay precedence + override parse + unknown-table/action errors + overlay iter/combos; `LineEditor` (insert/backspace/delete/motion/unicode/control-keys); `RequestTabs` state machine (cycle, direct jump, per-tab selection persistence, clamp, edit-cancel-on-switch); `method_menu` label resolution; palette curated-allowlist guard + every-entry-dispatches; TUI integration (URL edit→commit→save writes file, row add+toggle serialization with `enabled = false`, discard-changes switches without persisting); snapshots (URL bar focused / editing / dirty-dot; Params/Headers/Body/Auth tabs; method menu; new-endpoint prompt; delete + discard confirms; curated palette). Existing layout/jump snapshots updated for the tab bar, focusable URL bar, four-pane jump labels, and the `w save` statusline hint.
+
+**Notes**:
+- **Contextual keymaps**: `KeyMap` gains per-pane overlays (`PaneCtx ∈ {Explorer, UrlBar, Request, Response}`); `lookup_ctx(key, ctx)` = overlay-then-global. `handle_key` routes through the focused pane's `ctx()`. Config `[keys.<pane>]` sub-tables parse fail-loud; `churl keymaps` groups overlays under headers. See DECISIONS.
+- **Focusable URL bar**: `Pane::UrlBar` joins the Tab cycle (`Explorer→UrlBar→Request→Response`) and jump-mode (now 4 pane labels `a/s/d/f`, rows from `g`). `i`/`Enter` edit the URL inline via `LineEditor` (Enter commits, Esc reverts); `m` cycles method, `M` (shift-m) opens a one-key method menu (`g`et `p`ost `u`t… ). Indicators (`●` dirty dot, `auth:<kind>`, `{{n}}`) are right-aligned and recompute from the live request.
+- **Request tabs** (`RequestTabs` state on `App`, `RequestTab ∈ {Params, Headers, Auth, Body}`): tab bar with active highlight + row counts; `]`/`[` cycle, `1`–`4` jump. Params/Headers are row-list editors (`j`/`k` move, `a` add+edit, `d` delete, `Space` toggle `enabled`, `Enter`/`i` edit; name→value field edit via `LineEditor`, Tab/Enter advance, Esc cancels). Auth tab: kind row opens the None/Basic/Bearer/ApiKey picker (default-empty fields on switch); field rows edit like params; ApiKey `placement` toggles with `Space` or `Enter`; literal secret values render masked (`*****`), the save-time refusal surfaces on the statusline. Body is the unchanged edtui editor (M4 Ctrl-S/Ctrl-C interception stands, now gated on the Body tab being active). Send/save read the live in-memory request.
+- **In-app CRUD** through new `churl-core::persistence` seams (see DECISIONS): Explorer overlay `n` new endpoint / `N` new collection / `r` rename / `d` delete. Prompts (`Mode::Prompt`) and confirms (`Mode::Confirm`) are new overlay modes; after any op the explorer reloads (preserving expansion + cursor) and selects the created/renamed item.
+- **Dirty tracking + explicit save**: derived by comparing the live request (incl. body) against `loaded_snapshot`; never auto-written. `w` (or the palette "save request") saves format-preserving, refreshes the snapshot, and reports "Saved <name>". Switching endpoints while dirty raises the discard-changes confirm.
+- **Curated command palette** (owner mid-flight addition, §6b): explicit context-free allowlist replacing `Action::all()`; new Actions never auto-appear. CRUD/send from the palette act on the explorer selection or surface a statusline error.
+
+**Keystroke-count audit** (owner north star: common loops in 3–4 keystrokes):
+- *Jump to bar → tweak URL → send*: `f` (jump) + `s` (UrlBar label) + `i` (edit) + …type… + `Enter` (commit) + `Ctrl-S` (send) = **4 control keystrokes** counting the edit itself as free (f, s, i, Enter with Ctrl-S) — within budget. From an already-focused bar it is `i` + Enter + Ctrl-S.
+- *Switch method → resend*: `f` + `s` (jump to bar) + `m` (cycle) + `Ctrl-S` (send) = **4**. Via the menu: `f`, `s`, `M`, label, `Ctrl-S` = 5 (the menu trades one keystroke for a direct pick rather than repeated cycling).
+- Both loops meet the 3–4 target; the bar being in the Tab cycle also gives a no-jump path (Tab×N + i/m) for keyboards without the jump key.
+
+**Deviations from the pinned design**:
+- **Auth field edits are single-field, not name→value**: auth rows have fixed labels (username/password/token/name/value/placement), so `row_edit` on an Auth row edits the one value directly (seeded on `EditField::Value`, committed on Enter) rather than the name→value two-step used for Params/Headers rows. The design described the two-step generically; applying it to fixed-label auth fields would let the user "edit" an immutable label. No behavioural loss — every auth value is still editable; kind/placement change via the picker/`Space`.
+- **`Config` `[keys]` split via an untagged `KeyEntry` enum + post-load partition**, rather than a custom `Deserialize`. serde cannot write two struct fields from one table, so the raw `[keys]` table deserializes into `raw_keys: BTreeMap<String, KeyEntry>` (`KeyEntry = Action(String) | Overlay(map)`) and `split_key_overlays` partitions it into `keys` + `key_overlays` in `load_config`. Same observable config surface; keeps the flat `keys` map for existing callers.
+- **Initial build also violated the design in two places the review caught** (fixed in the review round below): Enter on the ApiKey placement row was a silent no-op (design: Space *and* Enter toggle — now both do), and the DiscardChanges guard only covered the explorer-Enter path (design intent: never lose edits silently — see the guarded-seam fix).
+
+**Review round (2026-07-06, findings #1–#9 fixed; #10 deferred)**:
+- **#1 Body-tab routing**: `i`/`a`/`d`/`Space` on the Body tab forward to edtui instead of being eaten by the Request overlay's Row* actions (there are no rows on the Body tab). Regression test `body_tab_row_keys_reach_edtui`.
+- **#2/#7 Data loss — unguarded switch paths**: the search overlay, jump-mode row labels, and CRUD reselects (new endpoint, rename) bypassed the discard-changes guard and silently discarded dirty edits. All endpoint-switch paths now funnel through one `guarded_load(PendingLoad::{Row,File})` seam; the pending target parks on `App::pending_load` behind `Confirm(DiscardChanges)` (payload-free now). See DECISIONS. Renaming the *loaded* endpoint updates file+name in place — edits survive their own rename with no confirm.
+- **#3 Data loss — save-then-switch on a failed save**: `s` now switches only when the save actually took; a secrets refusal keeps the user on the dirty endpoint with the error visible.
+- **#4/#5 Stale indices after explorer reload**: `reload_explorer` remaps `selected`'s collection index from its file path (name-sorted siblings shift indices — the resolver read the *wrong* collection's `folder.toml` vars) and clears a vanished selection; collection rename repoints the loaded endpoint's file into the new directory (next save no longer fails NotFound). See DECISIONS.
+- **#6 Placement row**: Enter toggles header/query, same as Space (per the pinned design).
+- **#8 Ghost rows**: Esc on a field edit of a freshly-added, still-empty row removes the row (it would otherwise serialize nameless).
+- **#9 Vacuous tests strengthened**: `every_palette_command_dispatches` asserts a concrete non-no-op effect per command (statusline error / focus change / picker / quit); `discard_changes_switches_endpoint` asserts the endpoint actually switched.
+- **#10 Deferred to M7** (owner-north-star triage): no horizontal scroll in URL-bar/prompt inline editing (typing blind past the right edge) and no vertical scroll in row lists — carried in M7's scope.
+- New tests (9): `body_tab_row_keys_reach_edtui`, `reload_remaps_selected_collection_index_for_resolver`, `search_switch_while_dirty_is_guarded`, `jump_switch_while_dirty_guards_and_saves`, `save_failure_blocks_discard_changes_switch`, `rename_collection_repoints_loaded_endpoint_file`, `placement_row_enter_toggles`, `new_endpoint_while_dirty_is_guarded`, `ghost_row_removed_on_escape` — total now 256 (incl. the main session's `rename_endpoint_same_slug_keeps_filename`).
 
 **Next**: M7
 
@@ -282,6 +313,7 @@
 - **Wrap toggle** in the response viewer (closes the M3 horizontal-scroll open question — wrap chosen over horizontal scroll)
 - **Response body search** (owner request 2026-07-05): `/`-style incremental search within the response viewer with match navigation — the explorer `/` fuzzy search never covered response bodies, and search beats folding for large payloads
 - Highlight micro-nits from the M3 review: skip re-enqueueing a highlight job already in flight for the same viewport hash; strip `\r` from CRLF bodies in the line index
+- **Inline-edit scrolling** (carried from the M6.6 review, finding #10): horizontal scroll in the URL-bar/prompt `LineEditor` renders (text longer than the pane currently types blind past the right edge — keep the cursor in view) and vertical scroll in the request-pane row lists (Params/Headers taller than the pane run off-screen; mirror the explorer's `scroll_to_fit`)
 - README: install, quickstart, feature matrix, screenshot
 - `cargo publish` dry-run passes for both crates
 - GitHub release action (tag-triggered), building per-platform binaries: macOS arm64 + x86_64, Linux x86_64 **musl static** + aarch64, Windows x86_64 (owner requirement 2026-07-06: installable without Rust — rustls + bundled SQLite already make the binary self-contained)
