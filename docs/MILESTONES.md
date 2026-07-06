@@ -149,7 +149,7 @@
 - Insert-mode Ctrl-S/Ctrl-C interception resolves through the crokey keymap (not hardcoded key codes), so user remaps are honoured; only CONTROL-modified keys can be intercepted, so no text-input key is ever stolen.
 
 **Open questions**:
-- Multipart (`-F`) import: the data model has no multipart body. Reject-with-error is the M4 behaviour — should multipart become a model feature (own milestone or M7 backlog), or stay permanently unsupported? Owner call.
+- ~~Multipart (`-F`) import: the data model has no multipart body. Reject-with-error is the M4 behaviour — should multipart become a model feature (own milestone or M7 backlog), or stay permanently unsupported? Owner call.~~ **Resolved 2026-07-06 (owner)**: multipart becomes a model feature — approved into the post-release backlog (slot after M8); the hard `Unsupported` error stands until then.
 
 **Next**: M5
 
@@ -193,11 +193,13 @@
 - Theme system: built-in (dark/light), user-override via config
 - Keymap customisation: crokey map loaded from config; `churl keymaps` subcommand prints current map
 - Jump-mode: letter-labelled pane/element navigation (à la EasyMotion/Helix `gw`)
-- `churl-core::template`: `{{var}}` substitution with precedence chain; `--var key=value` CLI flag; named profiles in `churl.toml`. Substitution applies to URL, query params, headers, auth fields (first-class since M5), and body (owner request 2026-07-05)
-- Tests: template substitution unit tests; keymap round-trip
+- `churl-core::template`: `{{var}}` substitution through a single chain resolver — one function over an ordered scope list (the M9 plugin-guardrail seam). Precedence: CLI `--var` flag → active profile → collection vars → workspace vars → process env. Substitution applies to URL, query params, headers, auth fields (first-class since M5), and body (owner request 2026-07-05)
+- Variable scopes (owner decision 2026-07-06): workspace-level `[vars]` in `churl.toml` (shared defaults) + named profiles in `churl.toml` (per-environment; profile beats collection so switching dev→prod always takes effect) + collection-level flat `[vars]` table in the collection's `folder.toml` (the manifest filename reserved since M1 — `persistence::FOLDER_FILENAME`; environment-independent collection defaults, no per-collection profiles). All three scopes ship in M6; `folder.toml` gets the same format-preserving merge writes + secrets name-marker enforcement as `churl.toml`
+- `--var key=value` CLI flag
+- Tests: template substitution unit tests incl. full five-scope precedence chain; `folder.toml` round-trip + secrets refusal; keymap round-trip
 
 **Open questions**:
-- Variable scoping (owner question 2026-07-05): base URLs are meant to be profile vars (`url = "{{base_url}}/users"`, per-profile values). Does M6 also need a collection-level var scope (collection defaults overriding workspace profiles) in the precedence chain, or do profiles suffice? Decide before M6 starts.
+- ~~Variable scoping (owner question 2026-07-05): base URLs are meant to be profile vars (`url = "{{base_url}}/users"`, per-profile values). Does M6 also need a collection-level var scope (collection defaults overriding workspace profiles) in the precedence chain, or do profiles suffice? Decide before M6 starts.~~ **Resolved 2026-07-06 (owner)**: three scopes — workspace vars + profiles + collection-level flat overrides; profile wins over collection; full system incl. collection `folder.toml` vars lands in M6 (see deliverables + DECISIONS entry).
 
 **Next**: M7
 
@@ -270,6 +272,7 @@ Not yet scheduled into milestones; each becomes an M9+ milestone (or folds into 
 - **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
 - ~~Cookies / sessions~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 - ~~Proxy configuration + per-request TLS-skip~~ → **promoted to milestone M8** (owner decision 2026-07-05).
+- **Multipart (`-F`) bodies** (approved, owner decision 2026-07-06 — resolves the M4 open question): multipart/form-data as a model feature — multi-part body (fields + file refs), TUI body-type editing, reqwest multipart execution, `-F` import/export remap replacing the hard `Unsupported` error. Slot after M8.
 
 ### Deferred nits (from M2/M3 reviews)
 

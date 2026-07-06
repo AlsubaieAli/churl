@@ -11,7 +11,7 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
 | `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
 | `persistence` | TOML round-trip via `toml_edit` (format-preserving); lazy collection loading |
-| `template` | Hand-rolled `{{var}}` substitution; precedence: CLI flag → profile → process env |
+| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06) |
 | `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
 | `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
 | `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. Auth injected via `auth::apply_auth` (M5): header effects skipped when an enabled user header with the same name exists (the user's header wins), query effects appended after enabled params. No `{{var}}` templating (M6); URL/headers/body/auth used verbatim |
@@ -55,9 +55,9 @@ Key routing precedence (per key event, in `Mode::Normal` the crokey map is autho
 
 ```
 <workspace>/                    # a git repo the user owns
-  churl.toml                    # workspace metadata + profiles (no secrets)
+  churl.toml                    # workspace metadata + profiles + workspace [vars] (no secrets)
   <collection>/                 # a directory = a collection
-    folder.toml?                # optional scoped metadata
+    folder.toml?                # optional collection metadata + flat [vars] defaults (M6)
     <endpoint>.toml             # one file per endpoint; explicit `seq` for ordering
 ```
 
