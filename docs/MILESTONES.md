@@ -11,6 +11,8 @@
 | M4 | curl import / export + M3 follow-ups | **done** |
 | M5 | Auth | **done** |
 | M6 | Themes + keymaps + jump-mode + templating | **done** |
+| M6.5 | UX review round 1 (owner drive-test fixes) | in progress |
+| M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | planned |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
@@ -212,6 +214,40 @@
 
 **Open questions**:
 - ~~Variable scoping (owner question 2026-07-05): base URLs are meant to be profile vars (`url = "{{base_url}}/users"`, per-profile values). Does M6 also need a collection-level var scope (collection defaults overriding workspace profiles) in the precedence chain, or do profiles suffice? Decide before M6 starts.~~ **Resolved 2026-07-06 (owner)**: three scopes — workspace vars + profiles + collection-level flat overrides; profile wins over collection; full system incl. collection `folder.toml` vars lands in M6 (see deliverables + DECISIONS entry).
+
+**Next**: M7
+
+---
+
+## M6.5 — UX review round 1
+
+**Scope**: The quick-fix batch from the owner's first live drive-test (2026-07-06). Fractional number: M7–M9 references are baked into code comments and docs, so inserting milestones must not renumber them (decision recorded in DECISIONS.md).
+
+**Deliverables** (owner notes, verbatim intent):
+- **Layout**: two columns — Explorer (left) | column B stacked: Request (top) / Response (bottom) — more width for readability and editing
+- **Statusline reset**: transient status messages (send outcome, cancel, warnings) auto-expire back to the key-hint guide; they currently stick forever
+- **Profile message dedup**: switching profiles must not emit a status message duplicating the persistent `profile:` indicator (the indicator is the single source of truth)
+- **In-flight visibility**: while a request is in flight the statusline shows `sending… (ctrl-c cancels)` and the response pane's in-flight state is unmistakable (spinner/elapsed)
+- **Profile picker marks the active profile** (e.g. `●` prefix)
+
+**Next**: M6.6
+
+---
+
+## M6.6 — Request editing UX
+
+**Scope**: In-app request authoring — the gap called out by the owner's drive-test ("no way of creating/editing requests"). Was deferred in M2's notes ("full editing UX matures in later milestones") but never assigned a milestone — rescued from that limbo by the owner's 2026-07-06 review. Ships **before** the release milestone: 0.1 must be a client you can author requests in.
+
+**Deliverables** (design session first — Postman-familiar, terminal-native):
+- **URL bar**: input-field-like UI atop the Request pane — method chip prefix (cycle/select), editable URL, suffix indicators (auth kind, var placeholders present)
+- **Content tabs** in the Request pane: Params / Headers / Auth / Body, switchable (owner screenshots on file); each tab editable (add/remove/toggle rows; auth kind + fields; body via the existing edtui editor)
+- **In-app CRUD**: create endpoint (into a collection, `seq` auto-assigned), create collection, rename, delete (with confirm); all writes through the existing format-preserving persistence + secrets refusal
+- Save flow: explicit save action (statusline dirty indicator) — never auto-write on every keystroke
+- Tests: tab state machine, URL-bar edit round-trip, CRUD persistence integration, snapshots per tab
+
+**Open questions** (for the M6.6 design session):
+- Keybinding scheme for tab switching and row editing (vim-ish `[`/`]`? number keys?) — decide against the keymap table, everything remappable
+- Delete confirmation UX (typed confirm vs y/n)
 
 **Next**: M7
 
