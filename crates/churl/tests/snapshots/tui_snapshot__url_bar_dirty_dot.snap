@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 428
 expression: rendered
 ---
 ┌ Explorer ──────────────────┐┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -25,4 +26,4 @@ expression: rendered
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- URL · demo · j/k move · enter select · ctrl-s send · w save · f jump · / search
+ URL · demo · ● · ? help · space leader · / search · : palette

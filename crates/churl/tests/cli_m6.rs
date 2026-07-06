@@ -87,6 +87,58 @@ fn keymaps_marks_overridden_bindings() {
 }
 
 #[test]
+fn keymaps_prints_leader_section() {
+    // The default map prints a Leader section listing the built-in continuations.
+    let dir = tempfile::tempdir().unwrap();
+    let envs = planted_config(dir.path(), "");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_churl"));
+    cmd.arg("keymaps");
+    for (k, v) in &envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn churl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // A "Leader" header appears, with toggle-explorer bound to `e`.
+    let leader_idx = stdout
+        .find("\nLeader\n")
+        .unwrap_or_else(|| panic!("no Leader section:\n{stdout}"));
+    let after = &stdout[leader_idx..];
+    assert!(
+        after.contains("toggle-explorer"),
+        "leader lists toggle-explorer: {after}"
+    );
+}
+
+#[test]
+fn keymaps_marks_overridden_leader_binding() {
+    // A [keys.leader] override marks that action overridden in the Leader section.
+    let dir = tempfile::tempdir().unwrap();
+    let envs = planted_config(dir.path(), "[keys.leader]\nx = \"save\"\n");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_churl"));
+    cmd.arg("keymaps");
+    for (k, v) in &envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn churl");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let leader_idx = stdout.find("\nLeader\n").expect("Leader section");
+    let after = &stdout[leader_idx..];
+    // `save` now has a leader binding → the leader `save` line is overridden.
+    let save_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("save"))
+        .unwrap_or_else(|| panic!("no save line in leader:\n{after}"));
+    assert!(save_line.contains("(overridden)"), "{save_line}");
+    assert!(save_line.contains('x'), "{save_line}");
+}
+
+#[test]
 fn bad_var_format_is_hard_error() {
     // `--var` without `=` fails before launching the TUI.
     let dir = tempfile::tempdir().unwrap();

@@ -1,15 +1,14 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 92
+assertion_line: 1015
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
-┃  ▸ orders                  ┃│POST  https://api.test/users                    │
+┃  ▸ orders                  ┃│GET  https://api.test/users                     │
 ┃  ▾ users                   ┃└────────────────────────────────────────────────┘
-┃    List users              ┃┌ Request ───────────────────────────────────────┐
-┃>   Create user             ┃│ Params(0)   Headers(1)   Auth   Body           │
+┃>   List users              ┃┌ Request ───────────────────────────────────────┐
+┃    Create user             ┃│ Params(0)   Headers(0)   Auth   Body           │
 ┃    Get user                ┃│  (no params — a to add)                        │
-┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
@@ -18,7 +17,7 @@ expression: snapshot(&mut app)
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
-┃                            ┃│POST https://api.test/users                     │
+┃                            ┃│GET https://api.test/users                      │
 ┃                            ┃│                                                │
 ┃                            ┃│press ctrl-s to send                            │
 ┃                            ┃│                                                │
@@ -26,4 +25,5 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+ Saved List users                                                               
  EXPLORER · demo · ? help · space leader · / search · : palette

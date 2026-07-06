@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 481
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -25,4 +26,4 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- REQUEST · demo · j/k move · enter select · ctrl-s send · w save · f jump · / se
+ REQUEST · demo · ? help · space leader · / search · : palette

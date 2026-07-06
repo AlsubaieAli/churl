@@ -13,7 +13,7 @@
 | M6 | Themes + keymaps + jump-mode + templating | **done** |
 | M6.5 | UX review round 1 (owner drive-test fixes) | **done** |
 | M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | **done** |
-| M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | planned |
+| M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | **done** |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
@@ -322,7 +322,14 @@
 
 **Tests**: leader state machine (pending → dispatch/dismiss, inert during edits, which-key popup snapshot); keymap Leader-section parsing + `churl keymaps` output; digit-bind removal (1–4 only act in Request); URL-commit merge policy unit tests covering rules a–d + statusline message + dirty flag; TOML rewrite round-trip after explode; zoom state machine incl. focus-collapsed-pane auto-unzoom; explorer toggle incl. auto-reopen paths; LineEditor viewport (cursor kept in view, edge indicators, unicode widths); row-list vertical scroll; popup editor commit/cancel + single-line constraint + `url_edit` config; help overlay renders every bound action (guard test: no section missing) + snapshots per section; message row (appears above statusline, 6 s expiry via backdated set, replacement by newer message, statusline content untouched while a message is live) + snapshots with/without an active message.
 
-**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` green from the 256-test baseline; manual PTY drive-test of the two hot loops + zoom/toggle/help.
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` all green — **301 tests** (up from the 256 baseline).
+
+**Notes**:
+- **Digit-key root cause (deliverable 2)**: investigated before deleting the binds. There was **no dispatch bug** — `lookup_ctx` correctly consults the focused pane's overlay before the global map, and it worked for every overlay key. The owner's "digits mostly jump to Request" was the *dual meaning* itself: `1`–`3` were global pane-focus binds *and* `1`–`4` were Request-tab jumps in the Request overlay, so the behaviour flipped with focus with no visible cue. A dispatch bug would have affected other overlay keys (`]`/`[`/`a`/`d`), which behaved correctly — confirming the collision, not a bug, was the discoverability failure. Fix: dropped the global `1`/`2`/`3` binds entirely; `1`–`4` now act *only* as Request-overlay tab jumps. Pane focus is Tab/Shift-Tab + `f` jump-mode.
+- **Space→leader / row-toggle→`t`**: making Space the global leader required freeing it in the Request overlay, so row-toggle rebound to `t` (updated the row-toggle snapshot test accordingly).
+- **Statusline is now persistent-state-only**: transient messages moved to the dedicated row (deliverable 9); the statusline shows focus · workspace · profile · dirty ● · in-flight spinner (or the key hints when idle). Every existing pane snapshot's last row changed and was re-accepted.
+- **`unicode-width` added** (workspace dep) for the `LineEditor` viewport's cell-accurate cursor tracking; already transitively in-tree, so no new external crate.
+- **URL→Params merge** decodes `+`/`%XX` in query values with a minimal inline decoder (no new dep; core has an encoder but no decoder).
 
 **Open questions**: none — design fixed with the owner 2026-07-06 (this conversation supersedes the M7 "full-screen response toggle (`F` key)" line, which is replaced by the mutual-zoom design here).
 

@@ -345,6 +345,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "two-face",
+ "unicode-width",
 ]
 
 [[package]]

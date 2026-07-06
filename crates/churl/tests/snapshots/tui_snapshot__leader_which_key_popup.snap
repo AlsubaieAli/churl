@@ -1,14 +1,14 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 382
-expression: rendered
+assertion_line: 993
+expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
-┃  ▾ api                     ┃│GET  https://{{host}}/items   auth:basic  {{2}} │
-┃>   List items              ┃└────────────────────────────────────────────────┘
+┃> ▸ orders                  ┃│no endpoint selected                            │
+┃  ▸ users                   ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Request ───────────────────────────────────────┐
-┃                            ┃│ Params(0)   Headers(0)   Auth(1)   Body        │
-┃                            ┃│  (no params — a to add)                        │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
@@ -18,12 +18,12 @@ expression: rendered
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
-┃                            ┃│GET https://{{host}}/items                      │
 ┃                            ┃│                                                │
-┃                            ┃│press ctrl-s to send                            │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+┃                         ┏ leader ━━━━━━━━━━━━━━━━━━━┓                        │
+┃                         ┃ c  cancel request         ┃                        │
+┃                         ┃ q  quit                   ┃                        │
+┃                         ┃ s  send request           ┃                        │
+┃                         ┃ p  switch profile         ┃                        │
+┃                         ┃ e  toggle explorer sidebar┃                        │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

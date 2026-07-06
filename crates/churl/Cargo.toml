@@ -27,6 +27,7 @@ futures.workspace = true
 reqwest.workspace = true
 syntect.workspace = true
 two-face.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

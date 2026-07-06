@@ -31,6 +31,16 @@ pub enum ConfigError {
         /// Underlying TOML deserialization error.
         source: toml_edit::de::Error,
     },
+    /// A config value is outside its allowed set (e.g. `url_edit = "nope"`).
+    #[error("bad config value for {key}: {value:?} (expected {expected})")]
+    BadValue {
+        /// The offending config key.
+        key: String,
+        /// The value the user supplied.
+        value: String,
+        /// A human-readable description of the allowed values.
+        expected: &'static str,
+    },
 }
 
 /// Global churl configuration. Every field is optional; a missing file means defaults.
@@ -81,6 +91,27 @@ pub struct Config {
     /// ([`crate::http::DEFAULT_TIMEOUT`]). Resolved via [`Config::timeout`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// The leader key combination string (e.g. `"space"`, `"ctrl-b"`); `None`
+    /// means the built-in default (Space). The TUI layer parses it and fails
+    /// loudly on a bad combination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_key: Option<String>,
+    /// What the URL bar's `i`/`Enter` opens: `"inline"` (default) or `"popup"`.
+    /// `e` always opens the popup regardless. The TUI layer parses it via
+    /// [`Config::url_edit`] and fails loudly on an unknown value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_edit: Option<String>,
+}
+
+/// Where the URL bar's `i`/`Enter` opens the editor: inline in the bar, or in a
+/// centered vim popup. `e` on the bar always opens the popup regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UrlEditMode {
+    /// Edit the URL inline in the bar (the M6.6 behaviour).
+    #[default]
+    Inline,
+    /// Open the centered edtui vim popup.
+    Popup,
 }
 
 /// One entry in the raw `[keys]` TOML table: either a flat `combo = "action"`
@@ -124,6 +155,20 @@ impl Config {
         self.timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(crate::http::DEFAULT_TIMEOUT)
+    }
+
+    /// The resolved URL-edit mode. An unknown value is a hard error (fail loud,
+    /// like every other config knob).
+    pub fn url_edit(&self) -> Result<UrlEditMode, ConfigError> {
+        match self.url_edit.as_deref() {
+            None | Some("inline") => Ok(UrlEditMode::Inline),
+            Some("popup") => Ok(UrlEditMode::Popup),
+            Some(other) => Err(ConfigError::BadValue {
+                key: "url_edit".to_owned(),
+                value: other.to_owned(),
+                expected: "one of: inline, popup",
+            }),
+        }
     }
 }
 
@@ -392,6 +437,42 @@ mod tests {
         assert_eq!(config.max_body_bytes(), 10 * 1024 * 1024);
         assert_eq!(config.timeout(), crate::http::DEFAULT_TIMEOUT);
         assert_eq!(config.max_body_bytes(), crate::http::DEFAULT_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn config_url_edit_default_and_values() {
+        let config = Config::default();
+        assert_eq!(config.url_edit().unwrap(), UrlEditMode::Inline);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "url_edit = \"popup\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.url_edit().unwrap(), UrlEditMode::Popup);
+
+        std::fs::write(&path, "url_edit = \"inline\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.url_edit().unwrap(), UrlEditMode::Inline);
+    }
+
+    #[test]
+    fn config_url_edit_unknown_value_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "url_edit = \"nope\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        let err = config.url_edit().unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+        assert!(err.to_string().contains("url_edit"), "{err}");
+    }
+
+    #[test]
+    fn config_parses_leader_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "leader_key = \"ctrl-b\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.leader_key.as_deref(), Some("ctrl-b"));
     }
 
     #[test]

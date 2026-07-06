@@ -8,11 +8,12 @@
 //! [`LineEditor`]: crate::tui::components::line_editor::LineEditor
 
 use churl_core::model::{Auth, Request};
+use edtui::{EditorMode, EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget};
 
 use super::line_editor::LineEditor;
 use crate::tui::theme::Theme;
@@ -28,7 +29,7 @@ pub struct UrlBarCtx<'a> {
     /// Whether the URL bar pane is focused.
     pub focused: bool,
     /// The inline URL editor, present while editing.
-    pub editor: Option<&'a LineEditor>,
+    pub editor: Option<&'a mut LineEditor>,
     /// Whether the loaded endpoint has unsaved changes (drives the `●` dot).
     pub dirty: bool,
     /// Jump-mode label for the URL bar, if assigned.
@@ -140,43 +141,58 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
         indicators.join("  ")
     };
 
-    // When editing, render the method + the live editor text with a block cursor;
-    // otherwise the static URL.
-    let method_and_url = match ctx.editor {
-        Some(editor) => {
-            let text = editor.text();
-            let cursor = editor.cursor();
-            let chars: Vec<char> = text.chars().collect();
-            let mut url = String::new();
-            for (i, c) in chars.iter().enumerate() {
-                if i == cursor {
-                    url.push('█');
-                }
-                url.push(*c);
-            }
-            if cursor >= chars.len() {
-                url.push('█');
-            }
-            format!("{}  {}", request.method, url)
-        }
-        None => format!("{}  {}", request.method, request.url),
-    };
-
-    // Split the inner area into left (method+url) and right (indicators).
-    if indicator_str.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(method_and_url)), inner);
+    // Split the inner area into left (method+url) and right (indicators) first,
+    // so the inline editor's horizontal viewport can follow the cursor within the
+    // real available width (deliverable 6 — typing past the edge must not go blind).
+    let (left_area, right_area) = if indicator_str.is_empty() {
+        (inner, None)
     } else {
         let indicator_width = indicator_str.len() as u16;
-        // Reserve space for the indicator plus 1 space gap; clamp to inner width.
         let right_width = (indicator_width + 1).min(inner.width);
         let left_width = inner.width.saturating_sub(right_width);
-        let [left_area, right_area] = Layout::horizontal([
+        let [left, right] = Layout::horizontal([
             Constraint::Length(left_width),
             Constraint::Length(right_width),
         ])
         .areas(inner);
+        (left, Some(right))
+    };
 
-        frame.render_widget(Paragraph::new(Line::from(method_and_url)), left_area);
+    // When editing, render the method + the viewport-scrolled editor text with a
+    // block cursor and `…` edge indicators; otherwise the static URL.
+    let method_prefix = format!("{}  ", request.method);
+    let method_line = match ctx.editor {
+        Some(editor) => {
+            // Reserve the method prefix + a cell for each edge indicator.
+            let avail = (left_area.width as usize).saturating_sub(method_prefix.len() + 2);
+            let view = editor.view(avail.max(1));
+            let mut spans = vec![Span::raw(method_prefix)];
+            if view.clipped_left {
+                spans.push(Span::raw("…"));
+            }
+            // Draw the visible text with a block cursor at cursor_col (in chars).
+            let chars: Vec<char> = view.text.chars().collect();
+            let mut s = String::new();
+            for (col, c) in chars.iter().enumerate() {
+                if col == view.cursor_col {
+                    s.push('█');
+                }
+                s.push(*c);
+            }
+            if view.cursor_col >= chars.len() {
+                s.push('█');
+            }
+            spans.push(Span::raw(s));
+            if view.clipped_right {
+                spans.push(Span::raw("…"));
+            }
+            Line::from(spans)
+        }
+        None => Line::from(format!("{method_prefix}{}", request.url)),
+    };
+
+    frame.render_widget(Paragraph::new(method_line), left_area);
+    if let Some(right_area) = right_area {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 indicator_str,
@@ -188,6 +204,39 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
             right_area,
         );
     }
+}
+
+/// Renders the centered vim-popup URL editor (deliverable 7): an edtui editor
+/// seeded with the URL, with a NORMAL/INSERT mode indicator in the footer — the
+/// chrome the inline bar lacks. Enter commits, Esc (in normal mode) cancels.
+pub fn render_popup(frame: &mut Frame, area: Rect, editor: &mut EditorState, theme: &Theme) {
+    let [modal] = Layout::horizontal([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [modal] = Layout::vertical([Constraint::Length(4)])
+        .flex(Flex::Center)
+        .areas(modal);
+
+    frame.render_widget(Clear, modal);
+    let mode = match editor.mode {
+        EditorMode::Normal => "NORMAL",
+        EditorMode::Insert => "INSERT",
+        EditorMode::Visual => "VISUAL",
+        EditorMode::Search => "SEARCH",
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(theme.border_focused)
+        .title(" Edit URL ")
+        .title_style(theme.title)
+        .title_bottom(format!(" {mode} · enter commit · esc cancel "));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    let editor_theme = EditorTheme::default().base(Style::default());
+    EditorView::new(editor)
+        .theme(editor_theme)
+        .wrap(false)
+        .render(inner, frame.buffer_mut());
 }
 
 #[cfg(test)]

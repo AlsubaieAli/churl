@@ -21,8 +21,10 @@ pub struct RenderCtx<'a> {
     pub request: Option<&'a Request>,
     /// The edtui body editor (rendered on the Body tab).
     pub editor: &'a mut EditorState,
-    /// Tab state (active tab, per-tab selection, in-progress edit).
-    pub tabs: &'a RequestTabs,
+    /// Tab state (active tab, per-tab selection, in-progress edit). Mutable so the
+    /// row-list vertical scroll offset can be adjusted to keep the selection in
+    /// view (mirrors the explorer).
+    pub tabs: &'a mut RequestTabs,
     /// Whether the request pane is focused.
     pub focused: bool,
     /// The colour theme.
@@ -72,13 +74,24 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
     frame.render_widget(Paragraph::new(tab_bar(request, tabs, theme)), tabbar_area);
 
+    let height = content_area.height as usize;
     match tabs.active {
         RequestTab::Params => {
-            let rows = param_rows(&request.params, tabs, focused, theme);
+            let n = request.params.len();
+            let offset = tabs.scroll_to_fit(n, height);
+            let mut rows = param_rows(&request.params, tabs, focused, theme);
+            if offset < rows.len() {
+                rows.drain(..offset);
+            }
             frame.render_widget(Paragraph::new(rows), content_area);
         }
         RequestTab::Headers => {
-            let rows = header_rows(&request.headers, tabs, focused, theme);
+            let n = request.headers.len();
+            let offset = tabs.scroll_to_fit(n, height);
+            let mut rows = header_rows(&request.headers, tabs, focused, theme);
+            if offset < rows.len() {
+                rows.drain(..offset);
+            }
             frame.render_widget(Paragraph::new(rows), content_area);
         }
         RequestTab::Auth => {

@@ -9,6 +9,28 @@
 //! block cursor.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
+
+/// A horizontal viewport slice of a [`LineEditor`], computed to keep the cursor
+/// in view within a fixed display width. Rendered by the URL bar / prompts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorView {
+    /// The visible characters (a contiguous slice of the buffer).
+    pub text: String,
+    /// The cursor's column *within the visible slice* (display cells), always in
+    /// `0..=visible_width`.
+    pub cursor_col: usize,
+    /// Whether content is clipped to the left (render a `…` indicator).
+    pub clipped_left: bool,
+    /// Whether content is clipped to the right.
+    pub clipped_right: bool,
+}
+
+/// The display width of a char (0 for control chars, so they never desync the
+/// column math).
+fn char_width(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
 
 /// Single-line editable text with a cursor. Insert chars, backspace/delete, move
 /// the cursor (arrows, Home/End, Ctrl-A/Ctrl-E).
@@ -17,6 +39,9 @@ pub struct LineEditor {
     chars: Vec<char>,
     /// Cursor position as a char index in `0..=chars.len()`.
     cursor: usize,
+    /// The left edge of the horizontal viewport as a char index. Kept across
+    /// calls so the view is stable (adjusted by [`LineEditor::view`]).
+    scroll: usize,
 }
 
 impl LineEditor {
@@ -24,7 +49,69 @@ impl LineEditor {
     pub fn new(text: &str) -> Self {
         let chars: Vec<char> = text.chars().collect();
         let cursor = chars.len();
-        Self { chars, cursor }
+        Self {
+            chars,
+            cursor,
+            scroll: 0,
+        }
+    }
+
+    /// Computes the horizontal viewport for a display `width`, following the
+    /// cursor. Mutates the internal scroll offset so the view is stable across
+    /// calls but always keeps the cursor visible: if the cursor drifts off
+    /// either edge the window shifts to bring it back, with `…` edge indicators
+    /// when content is clipped. `width` counts display cells; the returned slice
+    /// leaves room for the edge indicators.
+    pub fn view(&mut self, width: usize) -> EditorView {
+        if width == 0 {
+            return EditorView {
+                text: String::new(),
+                cursor_col: 0,
+                clipped_left: false,
+                clipped_right: false,
+            };
+        }
+        // Scroll left if the cursor moved before the window.
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
+        // Scroll right until the cursor's cell fits inside `width` from `scroll`.
+        // Cell width from `scroll` to (and including a caret cell at) `cursor`.
+        loop {
+            let used: usize = self.chars[self.scroll..self.cursor]
+                .iter()
+                .map(|c| char_width(*c))
+                .sum::<usize>()
+                + 1; // reserve one cell for the block cursor
+            if used <= width || self.scroll >= self.cursor {
+                break;
+            }
+            self.scroll += 1;
+        }
+        // Collect visible chars from `scroll` up to `width` cells.
+        let mut text = String::new();
+        let mut cells = 0usize;
+        let mut end = self.scroll;
+        while end < self.chars.len() {
+            let w = char_width(self.chars[end]);
+            if cells + w > width {
+                break;
+            }
+            text.push(self.chars[end]);
+            cells += w;
+            end += 1;
+        }
+        // Cursor column within the visible slice (display cells).
+        let cursor_col: usize = self.chars[self.scroll..self.cursor.min(end)]
+            .iter()
+            .map(|c| char_width(*c))
+            .sum();
+        EditorView {
+            text,
+            cursor_col,
+            clipped_left: self.scroll > 0,
+            clipped_right: end < self.chars.len(),
+        }
     }
 
     /// The current text.
@@ -147,6 +234,53 @@ mod tests {
         assert!(ed.handle_key(key(KeyCode::Char('é'))));
         assert!(ed.handle_key(key(KeyCode::Char('日'))));
         assert_eq!(ed.text(), "café日");
+    }
+
+    #[test]
+    fn viewport_short_text_fits_no_clip() {
+        let mut ed = LineEditor::new("abc");
+        let view = ed.view(10);
+        assert_eq!(view.text, "abc");
+        assert_eq!(view.cursor_col, 3);
+        assert!(!view.clipped_left);
+        assert!(!view.clipped_right);
+    }
+
+    #[test]
+    fn viewport_follows_cursor_right() {
+        // 20-char string, cursor at end, width 5 → window shows the tail.
+        let mut ed = LineEditor::new("0123456789abcdefghij");
+        let view = ed.view(5);
+        assert!(view.clipped_left, "left edge must show clip when scrolled");
+        assert!(!view.clipped_right, "cursor at end → nothing clipped right");
+        // Cursor stays within the visible width.
+        assert!(view.cursor_col <= 5);
+    }
+
+    #[test]
+    fn viewport_follows_cursor_left() {
+        let mut ed = LineEditor::new("0123456789abcdefghij");
+        ed.view(5); // scroll to the right first
+        for _ in 0..20 {
+            ed.handle_key(key(KeyCode::Left));
+        }
+        let view = ed.view(5);
+        assert_eq!(view.cursor_col, 0);
+        assert!(!view.clipped_left, "cursor at start → nothing clipped left");
+        assert!(view.clipped_right, "long tail must clip right");
+        assert!(view.text.starts_with('0'));
+    }
+
+    #[test]
+    fn viewport_unicode_widths() {
+        // Wide (2-cell) CJK chars: width 4 fits two of them.
+        let mut ed = LineEditor::new("日本語");
+        ed.handle_key(key(KeyCode::Home));
+        let view = ed.view(4);
+        // Two wide chars = 4 cells; the third clips.
+        assert_eq!(view.text, "日本");
+        assert!(view.clipped_right);
+        assert_eq!(view.cursor_col, 0);
     }
 
     #[test]

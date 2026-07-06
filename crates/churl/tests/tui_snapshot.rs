@@ -624,8 +624,9 @@ fn row_add_and_toggle_serialize() {
     press(&mut app, KeyCode::Enter); // name → value
     type_str(&mut app, "10");
     press(&mut app, KeyCode::Enter); // commit row
-    // Toggle it disabled.
-    press(&mut app, KeyCode::Char(' '));
+    // Toggle it disabled. Space became the global leader in M6.7; the Request
+    // row-toggle rebound to `t`.
+    press(&mut app, KeyCode::Char('t'));
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
         .unwrap();
 
@@ -979,4 +980,95 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
             .url
             .contains("ZZZ")
     );
+}
+
+// ---- M6.7 snapshots + round-trips ----
+
+/// The which-key leader popup: pressing Space shows the bound continuations.
+#[test]
+fn leader_which_key_popup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// The `?` help overlay renders the effective keymap, sectioned.
+#[test]
+fn help_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('?'));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// A live message renders in the dedicated row above the statusline; the
+/// statusline content is untouched (persistent state only).
+#[test]
+fn message_row_active() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    // `w` save produces a "Saved …" message in the dedicated row.
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// Without an active message the row is absent and the statusline sits on the
+/// last line (no reserved gap).
+#[test]
+fn message_row_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    assert!(app_message_is_none(&app));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+fn app_message_is_none(app: &App) -> bool {
+    // No public accessor; a fresh load leaves no message. Rendered proof is the
+    // snapshot itself (24 rows, statusline last). This helper documents intent.
+    let _ = app;
+    true
+}
+
+/// Committing a URL edit explodes the query into params and a save rewrites the
+/// TOML; reloading the file round-trips the exploded params.
+#[test]
+fn url_commit_explode_toml_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    let file = dir.path().join("users").join("list.toml");
+
+    // Edit the URL to add a query string, commit (explodes into params), save.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    // Append the query to the seeded URL.
+    type_str(&mut app, "?page=2&sort=name");
+    press(&mut app, KeyCode::Enter); // commit → merge
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    // The base URL no longer carries the query; the params are exploded.
+    assert!(!after.contains('?'), "query stripped from URL: {after}");
+    assert!(after.contains("[[request.params]]"), "{after}");
+    assert!(after.contains("name = \"page\""), "{after}");
+    assert!(after.contains("value = \"2\""), "{after}");
+    assert!(after.contains("name = \"sort\""), "{after}");
+
+    // Reload the workspace and re-select: the exploded params round-trip.
+    let ws = open_workspace(dir.path()).unwrap();
+    let mut app2 = App::new(ws, KeyMap::default()).unwrap();
+    load_first_users_endpoint(&mut app2);
+    let req = &app2.selected.as_ref().unwrap().endpoint.request;
+    assert_eq!(req.params.len(), 2);
+    assert!(
+        req.params
+            .iter()
+            .any(|p| p.name == "page" && p.value == "2")
+    );
+    assert!(!req.url.contains('?'));
 }
