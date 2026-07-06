@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│  ▸ orders                  ││GET  https://api.test/users                     │
+│  ▾ users                   │└────────────────────────────────────────────────┘
+│>   List users              │ Params(0)   Headers(0)   Auth   Body             
+│    Create user             │┏ Response ━━━━━━ 200 OK · 142 ms · 2 B · 1 hdrs ┓
+│    Get user                │┃{}                                              ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
+└────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ RESPONSE · demo · ? help · space leader · / search · : palette

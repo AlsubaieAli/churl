@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::theme::Theme;
@@ -39,16 +39,21 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
         Some(name) => format!(" · profile {name}"),
         None => String::new(),
     };
-    let dirty = if ctx.dirty { " · ●" } else { "" };
     let tail = if ctx.in_flight {
         let frame_char = SPINNER[(ctx.tick_count as usize) % SPINNER.len()];
         format!(" · {frame_char} sending… (ctrl-c cancels)")
     } else {
         " · ? help · space leader · / search · : palette".to_owned()
     };
-    let line = format!(" {} · {workspace}{profile}{dirty}{tail}", ctx.focus);
+    // The unsaved marker is a theme-accented span (a steady visual accent, not
+    // decoration) between the persistent prefix and the tail.
+    let mut spans = vec![Span::raw(format!(" {} · {workspace}{profile}", ctx.focus))];
+    if ctx.dirty {
+        spans.push(Span::styled(" · ● unsaved · w save", ctx.theme.accent));
+    }
+    spans.push(Span::raw(tail));
     frame.render_widget(
-        Paragraph::new(Line::from(line)).style(ctx.theme.statusline),
+        Paragraph::new(Line::from(spans)).style(ctx.theme.statusline),
         area,
     );
 }

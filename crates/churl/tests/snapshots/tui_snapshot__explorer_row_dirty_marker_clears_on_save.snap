@@ -1,21 +1,21 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snapshot(&mut app)
+expression: dirty_rendered
 ---
-┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▸ orders                  ││GET  https://api.test/usersX                ●   │
-│  ▾ users                   │└────────────────────────────────────────────────┘
-│    List users ●            │┌ Request ───────────────────────────────────────┐
-│>   Create user             ││ Params(0)   Headers(0)   Auth   Body           │
+┌ Explorer ──────────────────┐┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  ▸ orders                  │┃GET  https://api.test/usersX                ●   ┃
+│  ▾ users                   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│>   List users ●            │┌ Request ───────────────────────────────────────┐
+│    Create user             ││ Params(0)   Headers(0)   Auth   Body           │
 │    Get user                ││  (no params — a to add)                        │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
-│              ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
-│              ┃Save changes before switching?                  ┃              │
-│              ┃s save · d discard · esc stay                   ┃──────────────┘
-│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
+│                            ││                                                │
+│                            ││                                                │
+│                            │└────────────────────────────────────────────────┘
+│                            │┌ Response ──────────────────────────────────────┐
 │                            ││no response yet                                 │
 │                            ││GET https://api.test/usersX                     │
 │                            ││                                                │
@@ -25,4 +25,4 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- EXPLORER · demo · ● unsaved · w save · ? help · space leader · / search · : pal
+ URL · demo · ● unsaved · w save · ? help · space leader · / search · : palette

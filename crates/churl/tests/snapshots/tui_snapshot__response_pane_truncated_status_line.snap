@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 258
 expression: "lines.join(\"\\n\")"
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -16,9 +15,9 @@ expression: "lines.join(\"\\n\")"
 │                            ││                                                                                                                                                    │
 │                            ││                                                                                                                                                    │
 │                            │└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-│                            │┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃200 OK · 142 ms · 10.0 MB · 1 hdrs · truncated at 10.0 MB                                                                                           ┃
+│                            │┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 200 OK · 142 ms · 10.0 MB · 1 hdrs · truncated at 10.0 MB ┓
 │                            │┃xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx┃
+│                            │┃                                                                                                                                                    ┃
 │                            │┃                                                                                                                                                    ┃
 │                            │┃                                                                                                                                                    ┃
 │                            │┃                                                                                                                                                    ┃

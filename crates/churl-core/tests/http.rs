@@ -301,6 +301,33 @@ async fn enabled_user_authorization_header_beats_auth() {
 }
 
 #[tokio::test]
+async fn param_with_space_and_ampersand_is_encoded_correctly_on_wire() {
+    // A param value containing a space and `&` must be percent-encoded so the
+    // wire URL is not ambiguous. wiremock's query_param matcher decodes before
+    // comparing, so a correct match proves the encoding was valid.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "hello world&more"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/search", server.uri()));
+    request.params = vec![Param {
+        name: "q".to_owned(),
+        value: "hello world&more".to_owned(),
+        enabled: true,
+    }];
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200, "space and & in param must be encoded");
+}
+
+#[tokio::test]
 async fn disabled_user_authorization_header_does_not_beat_auth() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

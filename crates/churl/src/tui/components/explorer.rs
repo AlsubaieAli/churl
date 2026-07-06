@@ -383,6 +383,17 @@ impl ExplorerState {
             .map(|(path, _)| path.clone())
     }
 
+    /// The file path backing `row`, for endpoint rows whose collection is
+    /// loaded. Used by [`render`] to match the loaded-and-dirty endpoint by
+    /// path (never by index — reloads shift indices).
+    pub fn row_endpoint_file(&self, row: &Row) -> Option<&Path> {
+        let node = self.collections.get(row.collection)?;
+        node.endpoints
+            .as_ref()?
+            .get(row.endpoint?)
+            .map(|(path, _)| path.as_path())
+    }
+
     /// The index of the collection whose directory contains `file`, if any.
     /// Used to remap a loaded endpoint's collection index after a tree reload
     /// (name-sorted collections shift indices when siblings appear/vanish).
@@ -471,6 +482,10 @@ impl ExplorerState {
 
 /// Renders the explorer pane. Pure: no I/O, deterministic for snapshots. Takes
 /// `&mut` because it updates the scroll offset to keep the cursor in view.
+/// `dirty_file` is the loaded endpoint's file while it has unsaved changes —
+/// its row gets an accent `●` suffix (the editor modified-file convention),
+/// matched by path, cleared on save/discard.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -479,6 +494,7 @@ pub fn render(
     has_ws: bool,
     theme: &Theme,
     jump: Option<&JumpState>,
+    dirty_file: Option<&Path>,
 ) {
     let (border_type, border_style) = if focused {
         (BorderType::Thick, theme.border_focused)
@@ -524,20 +540,33 @@ pub fn render(
                 RowKind::Endpoint => "",
             };
             let indent = "  ".repeat(row.depth);
+            // The loaded-and-dirty endpoint's row gets an accent ● suffix,
+            // matched by file path (indices shift across reloads).
+            let dirty_suffix = (row.kind == RowKind::Endpoint
+                && dirty_file.is_some()
+                && state.row_endpoint_file(row) == dirty_file)
+                .then(|| Span::styled(" ●", theme.accent));
             // In jump-mode, overlay the row's label at the start; otherwise the
             // usual cursor marker.
             match jump.and_then(|j| j.label_for_row(i)) {
-                Some(label) => Line::from(vec![
-                    Span::styled(label.to_string(), theme.jump_label),
-                    Span::raw(format!(" {indent}{marker}{}", row.name)),
-                ]),
+                Some(label) => {
+                    let mut spans = vec![
+                        Span::styled(label.to_string(), theme.jump_label),
+                        Span::raw(format!(" {indent}{marker}{}", row.name)),
+                    ];
+                    spans.extend(dirty_suffix);
+                    Line::from(spans)
+                }
                 None => {
                     let cursor = if i == state.cursor { "> " } else { "  " };
                     let text = format!("{cursor}{indent}{marker}{}", row.name);
+                    let mut spans = vec![Span::raw(text)];
+                    spans.extend(dirty_suffix);
+                    let line = Line::from(spans);
                     if i == state.cursor && focused {
-                        Line::from(text).style(theme.selection)
+                        line.style(theme.selection)
                     } else {
-                        Line::from(text)
+                        line
                     }
                 }
             }

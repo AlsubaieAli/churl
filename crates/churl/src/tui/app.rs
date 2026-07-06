@@ -27,6 +27,7 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -301,6 +302,8 @@ pub struct App {
     help_open: bool,
     /// Scroll offset of the help overlay.
     help_scroll: usize,
+    /// Last rendered inner height of the help overlay, for half-page scrolling.
+    help_viewport_height: usize,
     /// The edtui popup URL editor (`e` on the URL bar / `url_edit = "popup"`),
     /// present while the popup is open.
     url_popup: Option<EditorState>,
@@ -384,6 +387,7 @@ impl App {
             pending_leader: false,
             help_open: false,
             help_scroll: 0,
+            help_viewport_height: 10,
             url_popup: None,
             url_popup_events: EditorEventHandler::default(),
             url_edit_mode: UrlEditMode::Inline,
@@ -649,6 +653,14 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
             KeyCode::Char('k') | KeyCode::Up => {
                 self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('d') => {
+                let half = (self.help_viewport_height / 2).max(1);
+                self.help_scroll += half;
+            }
+            KeyCode::Char('u') => {
+                let half = (self.help_viewport_height / 2).max(1);
+                self.help_scroll = self.help_scroll.saturating_sub(half);
             }
             _ => {}
         }
@@ -2129,8 +2141,8 @@ fn split_query(url: &str) -> (String, Vec<(String, String)>) {
         .split('&')
         .filter(|seg| !seg.is_empty())
         .map(|seg| match seg.split_once('=') {
-            Some((name, value)) => (percent_decode(name), percent_decode(value)),
-            None => (percent_decode(seg), String::new()),
+            Some((name, value)) => (percent_decode(name.trim()), percent_decode(value.trim())),
+            None => (percent_decode(seg.trim()), String::new()),
         })
         .collect();
     (base.to_owned(), pairs)
@@ -2335,6 +2347,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let has_ws = app.workspace.is_some();
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
     let theme = app.theme.clone();
+    let dirty = app.is_dirty();
+    // The loaded endpoint's file while dirty — its explorer row gets the accent
+    // ● suffix (matched by path in the explorer render).
+    let dirty_file: Option<std::path::PathBuf> = dirty
+        .then(|| app.selected.as_ref().map(|s| s.file.clone()))
+        .flatten();
     if let Some(explorer_area) = explorer_area {
         explorer::render(
             frame,
@@ -2344,9 +2362,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             has_ws,
             &theme,
             app.jump.as_ref(),
+            dirty_file.as_deref(),
         );
     }
-    let dirty = app.is_dirty();
     let selected_request = app
         .selected
         .as_ref()
@@ -2366,39 +2384,88 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         },
         &theme,
     );
-    request::render(
-        frame,
-        request_area,
-        request::RenderCtx {
-            request: selected_request,
-            editor: &mut app.editor,
-            tabs: &mut app.tabs,
-            focused: app.focus == Pane::Request && app.mode == Mode::Normal,
-            theme: &theme,
-            jump: app.jump.as_ref(),
-        },
-    );
-    let outcome = response::render(
-        frame,
-        response_area,
-        response::RenderCtx {
-            state: &app.response,
-            request: selected_request,
-            focused: app.focus == Pane::Response && app.mode == Mode::Normal,
-            scroll: app.response_scroll,
-            cache: &app.highlight_cache,
-            theme: &theme,
-            jump_label: app
-                .jump
-                .as_ref()
-                .and_then(|j| j.label_for_pane(Pane::Response)),
-            tick_count: app.tick_count,
-        },
-    );
-    app.response_scroll = outcome.clamped_scroll;
-    app.response_viewport_height = outcome.viewport_height;
-    if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
-        let _ = tx.send(job);
+    match app.zoom {
+        Some(ZoomPane::Request) => {
+            // Request is zoomed: render it full-size, show collapsed summary for response.
+            request::render(
+                frame,
+                request_area,
+                request::RenderCtx {
+                    request: selected_request,
+                    editor: &mut app.editor,
+                    tabs: &mut app.tabs,
+                    focused: app.focus == Pane::Request && app.mode == Mode::Normal,
+                    theme: &theme,
+                    jump: app.jump.as_ref(),
+                },
+            );
+            let summary = response::collapsed_summary(&app.response, &theme);
+            frame.render_widget(Paragraph::new(summary), response_area);
+        }
+        Some(ZoomPane::Response) => {
+            // Response is zoomed: render it full-size, show collapsed summary for request.
+            let summary = request::collapsed_summary(selected_request, &app.tabs, &theme);
+            frame.render_widget(Paragraph::new(summary), request_area);
+            let outcome = response::render(
+                frame,
+                response_area,
+                response::RenderCtx {
+                    state: &app.response,
+                    request: selected_request,
+                    focused: app.focus == Pane::Response && app.mode == Mode::Normal,
+                    scroll: app.response_scroll,
+                    cache: &app.highlight_cache,
+                    theme: &theme,
+                    jump_label: app
+                        .jump
+                        .as_ref()
+                        .and_then(|j| j.label_for_pane(Pane::Response)),
+                    tick_count: app.tick_count,
+                },
+            );
+            app.response_scroll = outcome.clamped_scroll;
+            app.response_viewport_height = outcome.viewport_height;
+            if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
+                let _ = tx.send(job);
+            }
+        }
+        None => {
+            // Normal split: render both.
+            request::render(
+                frame,
+                request_area,
+                request::RenderCtx {
+                    request: selected_request,
+                    editor: &mut app.editor,
+                    tabs: &mut app.tabs,
+                    focused: app.focus == Pane::Request && app.mode == Mode::Normal,
+                    theme: &theme,
+                    jump: app.jump.as_ref(),
+                },
+            );
+            let outcome = response::render(
+                frame,
+                response_area,
+                response::RenderCtx {
+                    state: &app.response,
+                    request: selected_request,
+                    focused: app.focus == Pane::Response && app.mode == Mode::Normal,
+                    scroll: app.response_scroll,
+                    cache: &app.highlight_cache,
+                    theme: &theme,
+                    jump_label: app
+                        .jump
+                        .as_ref()
+                        .and_then(|j| j.label_for_pane(Pane::Response)),
+                    tick_count: app.tick_count,
+                },
+            );
+            app.response_scroll = outcome.clamped_scroll;
+            app.response_viewport_height = outcome.viewport_height;
+            if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
+                let _ = tx.send(job);
+            }
+        }
     }
     // The statusline (deliverable 9) keeps *only* persistent state: focus,
     // endpoint/workspace, profile, dirty, and the in-flight spinner. Transient
@@ -2479,8 +2546,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // The `?` help overlay (deliverable 8), rendered from the live keymap.
     if app.help_open {
-        let total = help::render(frame, main, &app.keymap, app.help_scroll, &theme);
-        app.help_scroll = app.help_scroll.min(total.saturating_sub(1));
+        let outcome = help::render(frame, main, &app.keymap, app.help_scroll, &theme);
+        app.help_scroll = app.help_scroll.min(outcome.total.saturating_sub(1));
+        app.help_viewport_height = outcome.viewport_height;
     }
 }
 
@@ -2504,7 +2572,7 @@ mod leader_popup {
             .clamp(20, 50) as u16;
         let height = entries.len() as u16 + 2;
         let [modal] = Layout::horizontal([Constraint::Length(width)])
-            .flex(Flex::Center)
+            .flex(Flex::End)
             .areas(area);
         let [modal] = Layout::vertical([Constraint::Length(height)])
             .flex(Flex::End)
@@ -3092,6 +3160,23 @@ mod tests {
         assert_eq!(p.len(), 2);
         assert_eq!(p[0].value, "x");
         assert_eq!(p[1].value, "y");
+    }
+
+    #[test]
+    fn split_query_trims_whitespace() {
+        // Names and values with leading/trailing whitespace (e.g. " name = value ")
+        // are trimmed before decode so the resulting params are clean.
+        let (_, pairs) = split_query("https://x/y? a = 1 & b = hello world ");
+        assert_eq!(
+            pairs,
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "hello world".to_owned()),
+            ]
+        );
+        // A key-only segment with surrounding spaces is also trimmed.
+        let (_, pairs) = split_query("https://x/y? flag ");
+        assert_eq!(pairs, vec![("flag".to_owned(), String::new())]);
     }
 
     #[test]

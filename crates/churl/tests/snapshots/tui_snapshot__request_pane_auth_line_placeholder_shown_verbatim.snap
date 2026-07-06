@@ -1,13 +1,12 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 156
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │  ▾ private                 ││GET  https://api.test/report  auth:basic  {{1}} │
 │>   Private report          │└────────────────────────────────────────────────┘
 │                            │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃ Params(0)   Headers(0)   Auth(1)   Body        ┃
+│                            │┃ (1) Params(0)   (2) Headers(0)   (3) Auth(1)   ┃
 │                            │┃> kind: Basic  (enter to change)                ┃
 │                            │┃  username: alice                               ┃
 │                            │┃  password: {{password}}                        ┃

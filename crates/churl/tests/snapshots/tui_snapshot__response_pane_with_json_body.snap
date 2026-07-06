@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 230
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -16,12 +15,12 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃200 OK · 142 ms · 30 B · 1 hdrs                 ┃
+│                            │┏ Response ━━━━━ 200 OK · 142 ms · 30 B · 1 hdrs ┓
 │                            │┃{                                               ┃
 │                            │┃  "id": 1,                                      ┃
 │                            │┃  "name": "Ada"                                 ┃
 │                            │┃}                                               ┃
+│                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
