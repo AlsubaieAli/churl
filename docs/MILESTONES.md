@@ -11,7 +11,7 @@
 | M4 | curl import / export + M3 follow-ups | **done** |
 | M5 | Auth | **done** |
 | M6 | Themes + keymaps + jump-mode + templating | **done** |
-| M6.5 | UX review round 1 (owner drive-test fixes) | in progress |
+| M6.5 | UX review round 1 (owner drive-test fixes) | **done** |
 | M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | planned |
 | M7 | Polish + perf + release | planned |
 | M8 | Cookies + proxy | planned |
@@ -230,6 +230,21 @@
 - **In-flight visibility**: while a request is in flight the statusline shows `sending… (ctrl-c cancels)` and the response pane's in-flight state is unmistakable (spinner/elapsed)
 - **Profile picker marks the active profile** (e.g. `●` prefix)
 
+**Verified by**: `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` (199 tests) all green; `cargo run -p churl -- --version` works. New tests (5): `status_expires_after_4s` (backdated struct construction to test expiry), `in_flight_statusline_message_derives_from_state` (render-time derivation), `profile_picker_marks_active` (● markers and filtering), `placeholder_count_in_url` (urlbar unit), `url_bar_shows_indicators_for_auth_and_placeholders` (snapshot with auth + placeholder indicators).
+
+**Notes**:
+- Column B is three rows: URL bar (3 lines, display-only in M6.5), Request (50% of remaining), Response (50% of remaining). The URL bar renders `METHOD  url` + right-aligned `auth:<kind>` and `{{N}}` placeholder-count indicators. Not focusable/editable — M6.6 adds that. New component: `tui::components::urlbar`.
+- `status: Option<String>` changed to `status: Option<TransientStatus>` — a private struct holding the message and `set_at: Instant`. Expiry checked on the 250 ms tick. Tests backdate using direct struct construction (private struct, same module).
+- In-flight statusline message is derived from `app.in_flight.is_some()` at render time, not stored as a `TransientStatus` — appears/disappears atomically with the send/response.
+- Spinner frame derived from `app.tick_count % 8` (braille characters `⠋⠙⠹⠸⠼⠴⠦⠧`). Tests use `tick_count = 0` implicitly (default) for deterministic first frame `⠋`.
+- Profile picker active marker is display-only (in labels only, not in `profile_choices`). Nucleo fuzzy-matching on `"● dev"` still matches the query `"dev"` because the marker is a prefix — no stripping needed.
+- All layout snapshots updated: three-row column B visible at 80×24 (URL bar / Request / Response).
+
+**Deviations from the pinned design**:
+- None. Every fix implemented exactly as specified (including the mid-session §1 update to the three-row layout).
+
+- Main-session review fix: the explorer column is `Length(30)`, not `Min(24)`+`Fill` — ratatui distributes excess into `Min`, which grew the explorer to half the screen; the owner prompt says *narrow* column.
+
 **Next**: M6.6
 
 ---
@@ -238,8 +253,10 @@
 
 **Scope**: In-app request authoring — the gap called out by the owner's drive-test ("no way of creating/editing requests"). Was deferred in M2's notes ("full editing UX matures in later milestones") but never assigned a milestone — rescued from that limbo by the owner's 2026-07-06 review. Ships **before** the release milestone: 0.1 must be a client you can author requests in.
 
+**UX north star (owner, 2026-07-06)**: ease of use and quick actions are what make churl better — judge every design decision by keystroke count for the common loops. Target: *jump to bar → tweak URL → send* and *switch method → resend* each in 3–4 keystrokes.
+
 **Deliverables** (design session first — Postman-familiar, terminal-native):
-- **URL bar**: input-field-like UI atop the Request pane — method chip prefix (cycle/select), editable URL, suffix indicators (auth kind, var placeholders present)
+- **URL bar becomes first-class focusable** (owner requirement 2026-07-06): joins the Tab cycle and jump-mode labels; when focused, type to edit the URL inline and switch the method with a single quick action (cycle key or one-keystroke menu — decide in the design session against real keybinding ergonomics). The M6.5 display-only bar (`tui::components::urlbar`) is the base; indicators (auth kind, `{{n}}`, unsaved dot once CRUD lands) stay right-aligned
 - **Content tabs** in the Request pane: Params / Headers / Auth / Body, switchable (owner screenshots on file); each tab editable (add/remove/toggle rows; auth kind + fields; body via the existing edtui editor)
 - **In-app CRUD**: create endpoint (into a collection, `seq` auto-assigned), create collection, rename, delete (with confirm); all writes through the existing format-preserving persistence + secrets refusal
 - Save flow: explicit save action (statusline dirty indicator) — never auto-write on every keystroke

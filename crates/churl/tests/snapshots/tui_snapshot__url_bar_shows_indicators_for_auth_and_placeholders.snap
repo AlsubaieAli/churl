@@ -1,12 +1,12 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snapshot(&mut app)
+expression: rendered
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
-┃  ▾ private                 ┃│GET  https://api.test/report  auth:basic  {{1}} │
-┃>   Private report          ┃└────────────────────────────────────────────────┘
+┃  ▾ api                     ┃│GET  https://{{host}}/items   auth:basic  {{2}} │
+┃>   List items              ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Request ───────────────────────────────────────┐
-┃                            ┃│GET https://api.test/report                     │
+┃                            ┃│GET https://{{host}}/items                      │
 ┃                            ┃│auth: basic alice · password {{password}}       │
 ┃                            ┃│body:                                           │
 ┃                            ┃│                                                │
@@ -17,7 +17,7 @@ expression: snapshot(&mut app)
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
-┃                            ┃│GET https://api.test/report                     │
+┃                            ┃│GET https://{{host}}/items                      │
 ┃                            ┃│                                                │
 ┃                            ┃│press ctrl-s to send                            │
 ┃                            ┃│                                                │

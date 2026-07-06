@@ -2,27 +2,27 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┏ Explorer ━━━━━━━━━━━━┓┌ Request ─────────────────┐┌ Response ────────────────┐
-┃                      ┃│                          ││no response yet           │
-┃no workspace          ┃│no endpoint selected      ││                          │
-┃                      ┃│                          ││no endpoint selected      │
-┃run churl in a directo┃│                          ││                          │
-┃containing churl.toml ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┃                      ┃│                          ││                          │
-┗━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
+┃                            ┃│no endpoint selected                            │
+┃no workspace                ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Request ───────────────────────────────────────┐
+┃run churl in a directory    ┃│                                                │
+┃containing churl.toml       ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
  EXPLORER · no workspace · j/k move · enter select · ctrl-s send · f jump · / se

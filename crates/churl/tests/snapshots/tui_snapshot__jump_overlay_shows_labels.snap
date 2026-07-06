@@ -1,29 +1,28 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 127
 expression: snapshot(&mut app)
 ---
-┌ Explorer [a] ────────┐┌ Request [s] ─────────────┐┌ Response [d] ────────────┐
-│f ▸ orders            ││                          ││no response yet           │
-│g ▾ users             ││no endpoint selected      ││                          │
-│h   List users        ││                          ││no endpoint selected      │
-│j   Create user       ││                          ││                          │
-│k   Get user          ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-│                      ││                          ││                          │
-└──────────────────────┘└──────────────────────────┘└──────────────────────────┘
+┌ Explorer [a] ──────────────┐┌ URL ───────────────────────────────────────────┐
+│f ▸ orders                  ││no endpoint selected                            │
+│g ▾ users                   │└────────────────────────────────────────────────┘
+│h   List users              │┌ Request [s] ───────────────────────────────────┐
+│j   Create user             ││                                                │
+│k   Get user                ││no endpoint selected                            │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            │└────────────────────────────────────────────────┘
+│                            │┌ Response [d] ──────────────────────────────────┐
+│                            ││no response yet                                 │
+│                            ││                                                │
+│                            ││no endpoint selected                            │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · j/k move · enter select · ctrl-s send · f jump · / search · :

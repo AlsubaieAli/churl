@@ -336,3 +336,39 @@ fn explorer_scrolls_to_keep_selection_visible() {
         .unwrap();
     insta::assert_snapshot!(snapshot(&mut app));
 }
+
+/// The URL bar shows `METHOD  url` + right-aligned indicators when an endpoint
+/// with auth and `{{var}}` placeholders is selected.
+#[test]
+fn url_bar_shows_indicators_for_auth_and_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("api");
+    std::fs::create_dir(&coll).unwrap();
+    // Endpoint with basic auth ({{password}} placeholder) and a URL placeholder.
+    std::fs::write(
+        coll.join("list.toml"),
+        concat!(
+            "seq = 0\nname = \"List items\"\n\n[request]\nmethod = \"GET\"\n",
+            "url = \"https://{{host}}/items\"\n\n[request.auth]\ntype = \"basic\"\n",
+            "username = \"alice\"\npassword = \"{{password}}\"\n",
+        ),
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter); // expand "api"
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // select "List items"
+    // URL bar must show: method+url prefix on the left, auth:basic indicator on the right.
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("GET  https://"),
+        "URL bar must show GET + URL prefix: {rendered}"
+    );
+    assert!(
+        rendered.contains("auth:basic"),
+        "URL bar must show auth indicator: {rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
