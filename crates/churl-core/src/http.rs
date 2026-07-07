@@ -62,11 +62,15 @@ pub enum HttpError {
 }
 
 /// Builds the shared [`reqwest::Client`]: rustls TLS, the given per-request
-/// timeout ([`DEFAULT_TIMEOUT`] when nothing is configured), and reqwest's
-/// default redirect policy (follow up to 10 hops).
+/// timeout ([`DEFAULT_TIMEOUT`] when nothing is configured), reqwest's
+/// default redirect policy (follow up to 10 hops), and a default
+/// `User-Agent: churl/<version>` — some services reject UA-less requests
+/// outright (e.g. httpbingo.org answers 402). An enabled user header named
+/// `User-Agent` still wins per-request, like any other header.
 pub fn build_client(timeout: Duration) -> Result<reqwest::Client, HttpError> {
     reqwest::Client::builder()
         .tls_backend_rustls()
+        .user_agent(concat!("churl/", env!("CARGO_PKG_VERSION")))
         .timeout(timeout)
         .build()
         .map_err(HttpError::Request)

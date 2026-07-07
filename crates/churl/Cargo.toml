@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "A fast terminal API client — craft, send, and inspect HTTP requests"
+keywords = ["http", "tui", "api-client", "curl", "terminal"]
+categories = ["command-line-utilities"]
+readme = "../../README.md"
 
 [[bin]]
 name = "churl"
@@ -14,7 +18,7 @@ name = "churl"
 path = "src/lib.rs"
 
 [dependencies]
-churl-core = { path = "../churl-core" }
+churl-core = { path = "../churl-core", version = "0.1.0" }
 base64.workspace = true
 clap.workspace = true
 color-eyre.workspace = true

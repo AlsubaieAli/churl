@@ -66,7 +66,8 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps) | TUI; #[tokio::main]
+      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps, tutorial) | TUI; #[tokio::main]
+      tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
       tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
         app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm)/AppMsg,
@@ -86,11 +87,16 @@ crates/
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary
+      cli_m6.rs            # M6 CLI integration tests (keymaps, --var, --profile)
+      cli_tutorial.rs      # `churl tutorial` integration tests: scaffold, refuse-overwrite, workspace load
 docs/
   ARCHITECTURE.md
   DECISIONS.md
   MILESTONES.md
+README.md                  # install, quickstart, feature matrix, screenshot placeholder, license
+install.sh                 # curl|sh installer: OS+arch detection, sha256 verify, ~/.local/bin, --dry-run
 .github/workflows/ci.yml
+.github/workflows/release.yml  # tag-triggered; taiki-e/upload-rust-binary-action; 5 targets + sha256
 ```
 
 ## Conventions

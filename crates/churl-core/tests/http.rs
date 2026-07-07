@@ -497,3 +497,50 @@ async fn small_body_under_default_cap_is_unchanged() {
     assert!(!response.truncated);
     assert_eq!(response.body, b"tiny");
 }
+
+#[tokio::test]
+async fn default_user_agent_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ua"))
+        .and(header(
+            "user-agent",
+            concat!("churl/", env!("CARGO_PKG_VERSION")),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(
+        &client,
+        &get(format!("{}/ua", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, 200, "default User-Agent header not sent");
+}
+
+#[tokio::test]
+async fn enabled_user_agent_header_overrides_default() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ua"))
+        .and(header("user-agent", "custom-agent/9"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let mut request = get(format!("{}/ua", server.uri()));
+    request.headers.push(Header {
+        name: "User-Agent".to_owned(),
+        value: "custom-agent/9".to_owned(),
+        enabled: true,
+    });
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200, "user User-Agent header did not win");
+}

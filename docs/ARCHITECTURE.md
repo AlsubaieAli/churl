@@ -155,3 +155,25 @@ Render-side caches (line-offset index, wrap layout, viewport-only syntect highli
 | Syntax highlighting | < 23 ms per viewport | `syntect` + `two-face` colours, off-thread, cached by viewport hash |
 
 No HTTP-semantic caching by design — churl is a development tool; stale responses are a footgun. History covers recall.
+
+## Tutorial scaffold (`churl tutorial`)
+
+`crates/churl/src/tutorial.rs` — the `Tutorial` subcommand scaffolds a demo workspace so a first-time user can send a request in under a minute.
+
+The scaffold writes through the real `churl-core::persistence` seams — no hand-written TOML strings for endpoint or folder files:
+
+1. `save_workspace_manifest(root, &ws)` — writes `churl.toml` with `name`, `vars` (`base_url`), and a `dev` profile.
+2. `create_collection(root, "examples")` — creates the collection directory.
+3. `save_collection_meta(coll_dir, &Default::default())` — writes `examples/folder.toml` (empty vars).
+4. Three `create_endpoint(coll_dir, name)` + `save_endpoint(path, &ep)` calls — writes the endpoints through the format-preserving merge serializer.
+
+Endpoints target [httpbingo.org](https://httpbingo.org): Get Anything (GET `/anything?name=churl`), Post JSON (POST `/post` with JSON body), Bearer Auth (GET `/bearer` with `{{token}}` placeholder auth). The scaffold refuses a non-empty directory.
+
+## Release pipeline
+
+Tag-triggered GitHub Actions workflow (`.github/workflows/release.yml`):
+- `taiki-e/upload-rust-binary-action@v1` — cross-compiles, strips, archives, and uploads per-target binaries with SHA-256 checksums.
+- Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` (static), `aarch64-unknown-linux-musl` (static), `x86_64-pc-windows-msvc`.
+- musl static targets are viable because the HTTP stack is rustls (pure Rust TLS) and SQLite is bundled — no system-lib dep.
+
+`install.sh` (repo root, POSIX sh) — the `curl|sh` installer: detects OS/arch → release target triple, downloads the `.tar.gz` + `.sha256` from GitHub Releases, verifies checksum, extracts to `~/.local/bin`. Options: `--to DIR`, `--force`, `--dry-run`.
