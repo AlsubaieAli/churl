@@ -75,6 +75,29 @@ git tag v0.2.0-beta.1 && git push origin v0.2.0-beta.1
 installer, and plain `cargo install churl` keep serving stable. Publish a beta
 to crates.io only if testers need `cargo install --version`.
 
+### Forcing a release (installer / infra changes)
+
+release-plz versions the **crate** — it hashes what `cargo publish` ships. A
+change to `install.sh` or the workflows doesn't touch the crate, so release-plz
+correctly won't cut a release for it. But the installer reaches users through
+**GitHub release assets**, which *do* need a new release to update. That gap is
+filled by the **Force release** workflow (`force-release.yml`):
+
+- **Automatically**: a push to master that changes only `install.sh` (no crate
+  source) force-cuts a **patch** release — installer fixes ship themselves.
+- **Manually**: Actions tab → **Force release** → Run workflow, choosing
+  `patch`/`minor`/`major` and a changelog line. Use this for any on-demand
+  release (e.g. re-releasing after a release-infra fix).
+
+It bumps the workspace version + changelog and commits to master; from there the
+normal pipeline takes over (release-plz publishes + tags → `release.yml` builds
+binaries, uploads the installer, smoke-tests it, and finalizes). Everything runs
+on CI — releases never depend on uploading assets from a developer machine.
+
+If a PR changes `install.sh` **and** crate code together, release-plz handles it
+as a normal crate release and the new installer rides along — the force path
+stays out of the way.
+
 ### Dev builds
 
 Need a binary from an unreleased branch? Comment `/build` on the PR
@@ -89,7 +112,8 @@ binaries appear as workflow artifacts with 14-day retention.
 | `.github/workflows/pr-label.yml` | Auto-labels PRs from the title type |
 | `release-plz.toml` | Version/changelog/tag policy (single release train) |
 | `.github/workflows/release-plz.yml` | Release PR + crates.io publish + tag push |
-| `.github/workflows/release.yml` | Binaries + GitHub release on `v*` tags |
+| `.github/workflows/release.yml` | Binaries + GitHub release on `v*` tags; installer smoke-test gate |
+| `.github/workflows/force-release.yml` | Cuts a release for installer/infra changes release-plz skips |
 | `.github/workflows/dev-build.yml` | Tester binaries from any ref |
 | `install.sh` | End-user installer (attached to every release) |
 
