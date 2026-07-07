@@ -19,7 +19,7 @@ expression: snapshot(&mut app)
 │              ┃  switch profile                                ┃              │
 │              ┃  toggle response headers view                  ┃              │
 │              ┃  toggle response wrap                          ┃              │
-│              ┃  focus explorer                                ┃              │
+│              ┃  import collection (JSON)                      ┃              │
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
 │                            ││                                                │
 │                            ││                                                │

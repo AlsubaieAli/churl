@@ -25,6 +25,29 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("switch profile", Action::SwitchProfile),
     ("toggle response headers view", Action::ToggleHeadersView),
     ("toggle response wrap", Action::ToggleWrap),
+    ("import collection (JSON)", Action::ImportCollection),
+    (
+        "export collection · Postman v2.1",
+        Action::ExportCollectionPostman,
+    ),
+    (
+        "export collection · churl JSON",
+        Action::ExportCollectionNative,
+    ),
+    (
+        "export workspace · Postman v2.1",
+        Action::ExportWorkspacePostman,
+    ),
+    (
+        "export workspace · churl JSON",
+        Action::ExportWorkspaceNative,
+    ),
+    ("paste curl as new endpoint", Action::PasteCurl),
+    ("copy request as curl", Action::CopyAsCurl),
+    (
+        "copy request as curl (resolved vars)",
+        Action::CopyAsCurlResolved,
+    ),
     ("focus explorer", Action::FocusExplorer),
     ("focus URL bar", Action::FocusUrlBar),
     ("focus request", Action::FocusRequest),

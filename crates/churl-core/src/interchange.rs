@@ -164,7 +164,9 @@ struct ImportCtx {
 /// pushing its `name` onto `folder_path`.
 fn walk_items(items: &[Value], folder_path: &mut Vec<String>, ctx: &mut ImportCtx) {
     for item in items {
-        let Some(obj) = item.as_object() else { continue };
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
         if let Some(sub) = obj.get("item").and_then(Value::as_array) {
             // Folder: recurse with the folder name pushed on.
             let folder_name = obj
@@ -182,10 +184,7 @@ fn walk_items(items: &[Value], folder_path: &mut Vec<String>, ctx: &mut ImportCt
             ctx.seq += 1;
             ctx.requests.push(ImportedRequest {
                 folder_path: folder_path.clone(),
-                endpoint: Endpoint {
-                    seq,
-                    ..endpoint
-                },
+                endpoint: Endpoint { seq, ..endpoint },
             });
         }
     }
@@ -198,7 +197,9 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
     if let Some(url) = request.as_str() {
         return Endpoint {
             seq: 0,
-            name: item_name.map(str::to_owned).unwrap_or_else(|| derive_name(url)),
+            name: item_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| derive_name(url)),
             request: Request {
                 method: Method::Get,
                 url: url.to_owned(),
@@ -275,7 +276,10 @@ fn map_headers(header: Option<&Value>) -> Vec<crate::model::Header> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
-            let disabled = obj.get("disabled").and_then(Value::as_bool).unwrap_or(false);
+            let disabled = obj
+                .get("disabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Some(crate::model::Header {
                 name,
                 value,
@@ -292,7 +296,11 @@ fn map_body(body: Option<&Value>, ctx: &mut ImportCtx) -> Option<Body> {
     let mode = obj.get("mode").and_then(Value::as_str)?;
     match mode {
         "raw" => {
-            let content = obj.get("raw").and_then(Value::as_str).unwrap_or("").to_owned();
+            let content = obj
+                .get("raw")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             let language = obj
                 .get("options")
                 .and_then(|o| o.get("raw"))
@@ -385,7 +393,10 @@ fn map_auth(auth: Option<&Value>, ctx: &mut ImportCtx) -> Option<Auth> {
 /// Reads a Postman auth kind's parameters, which v2.1 stores as an array of
 /// `{key, value, type}` objects under the kind name (e.g. `auth.basic[]`). Some
 /// exporters use an object instead — both are accepted.
-fn auth_params(auth: &Map<String, Value>, kind: &str) -> std::collections::BTreeMap<String, String> {
+fn auth_params(
+    auth: &Map<String, Value>,
+    kind: &str,
+) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     match auth.get(kind) {
         Some(Value::Array(arr)) => {
@@ -521,7 +532,9 @@ pub fn write_import(
 /// The `seq` assigned by [`crate::persistence::create_endpoint`] to a freshly
 /// created endpoint file (so a save preserves the collection ordering it chose).
 fn load_seq(path: &Path) -> u32 {
-    persistence::load_endpoint(path).map(|ep| ep.seq).unwrap_or(0)
+    persistence::load_endpoint(path)
+        .map(|ep| ep.seq)
+        .unwrap_or(0)
 }
 
 /// Returns the directory for the collection named `name`, creating it when
@@ -563,7 +576,11 @@ pub fn export_collection(
     endpoints: &[Endpoint],
     dialect: JsonDialect,
 ) -> Result<String, InterchangeError> {
-    export_collections(name, std::slice::from_ref(&(name.to_owned(), endpoints.to_vec())), dialect)
+    export_collections(
+        name,
+        std::slice::from_ref(&(name.to_owned(), endpoints.to_vec())),
+        dialect,
+    )
 }
 
 /// Shared export core over `(collection name, endpoints)` groups.
@@ -615,11 +632,7 @@ fn native_value(name: &str, collections: &[(String, Vec<Endpoint>)]) -> Value {
 /// groups; a single collection's endpoints sit at the top level.
 fn postman_value(name: &str, collections: &[(String, Vec<Endpoint>)]) -> Value {
     let items: Vec<Value> = if collections.len() == 1 {
-        collections[0]
-            .1
-            .iter()
-            .map(postman_item)
-            .collect()
+        collections[0].1.iter().map(postman_item).collect()
     } else {
         collections
             .iter()
@@ -880,7 +893,14 @@ mod tests {
             })
         );
         // Every placeholder-ized secret raised a warning.
-        assert!(import.warnings.iter().filter(|w| w.contains("placeholder")).count() >= 3);
+        assert!(
+            import
+                .warnings
+                .iter()
+                .filter(|w| w.contains("placeholder"))
+                .count()
+                >= 3
+        );
     }
 
     #[test]
@@ -916,7 +936,10 @@ mod tests {
             "item": [ { "name": "r", "request": { "method": "GET", "url": { "raw": "https://{{host}}/x" } } } ]
         }"#;
         let import = import_postman_v21(json).unwrap();
-        assert_eq!(import.requests[0].endpoint.request.url, "https://{{host}}/x");
+        assert_eq!(
+            import.requests[0].endpoint.request.url,
+            "https://{{host}}/x"
+        );
     }
 
     #[test]

@@ -888,6 +888,19 @@ fn every_palette_command_dispatches() {
             Action::FocusRequest => assert_eq!(app.focus, Pane::Request),
             Action::FocusResponse => assert_eq!(app.focus, Pane::Response),
             Action::Quit => assert!(app.should_quit, "{label:?} must quit"),
+            // M7.1 interchange: with no workspace/collection/endpoint these
+            // surface a statusline guard (never a silent no-op).
+            Action::ImportCollection => expect_status(&mut app, "no workspace open"),
+            Action::ExportWorkspacePostman | Action::ExportWorkspaceNative => {
+                expect_status(&mut app, "no workspace open")
+            }
+            Action::ExportCollectionPostman | Action::ExportCollectionNative => {
+                expect_status(&mut app, "select a collection first")
+            }
+            Action::PasteCurl => expect_status(&mut app, "select a collection first"),
+            Action::CopyAsCurl | Action::CopyAsCurlResolved => {
+                expect_status(&mut app, "no endpoint selected")
+            }
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
