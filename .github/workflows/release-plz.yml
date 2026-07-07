@@ -14,6 +14,14 @@ permissions:
   contents: write
   pull-requests: write
 
+# Serialize entire runs: a burst of merges otherwise interleaves the
+# release job of one push with the release-pr job of the next, producing
+# stale release PRs (a run proposing a version that was published seconds
+# earlier — happened live with PR #7). Queued runs coalesce to the newest.
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
 jobs:
   release-plz-release:
     name: Publish + tag
@@ -24,6 +32,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          # Always operate on current master, not the (possibly stale) SHA
+          # that triggered this run — queued runs execute against fresh state.
+          ref: master
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -43,14 +54,14 @@ jobs:
     name: Open/update release PR
     runs-on: ubuntu-latest
     if: github.repository_owner == 'AlsubaieAli'
-    concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+          # Always operate on current master, not the (possibly stale) SHA
+          # that triggered this run — queued runs execute against fresh state.
+          ref: master
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
