@@ -118,8 +118,8 @@ fn palette_overlay() {
 #[test]
 fn jump_overlay_shows_labels() {
     // Expand a collection so visible rows get labels, then enter jump-mode: the
-    // pane titles carry `[a]`/`[s]`/`[d]` and the visible rows carry their labels
-    // at the start (all visible in the TestBackend text buffer).
+    // pane titles carry their mnemonics `[e]`/`[u]`/`[r]`/`[s]` and the visible
+    // rows carry row labels (all visible in the TestBackend text buffer).
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char('j')); // onto "users"
@@ -1040,10 +1040,10 @@ fn jump_switch_while_dirty_guards_and_saves() {
     press(&mut app, KeyCode::Char('i'));
     type_str(&mut app, "/active");
     press(&mut app, KeyCode::Enter);
-    // Jump to the "Create user" row: panes take a/s/d/f, rows g/h/j/k/… from
-    // row 0 → row 3 (Create user) is 'k'.
+    // Jump to the "Create user" row: panes hold the e/u/r/s mnemonics, rows
+    // take a/d/f/g/… from row 0 → row 3 (Create user) is 'g'.
     press(&mut app, KeyCode::Char('f'));
-    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char('g'));
     assert_eq!(
         app.mode,
         Mode::Confirm(ConfirmPurpose::DiscardChanges),
@@ -1304,6 +1304,24 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
+/// The URL vim-popup editor: edtui's status line shows the mode inside the
+/// popup; the footer carries only the commit/cancel hints, bottom-right
+/// (review round 3 — no duplicate mode indicator).
+#[test]
+fn url_popup_editor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app);
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('e'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        !rendered.contains("NORMAL \u{b7} enter commit"),
+        "footer must not duplicate the vim mode: {rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
 /// The `?` help overlay renders the effective keymap, sectioned.
 #[test]
 fn help_overlay() {
@@ -1459,7 +1477,7 @@ fn explorer_row_dirty_marker_clears_on_save() {
 // ---- M6.7 review round 2: numbered tab titles (Finding #9) ----
 
 /// When the Request pane is focused, tab titles are prefixed with their 1-based
-/// jump digit: `(1) Params(n)  (2) Headers(n)  (3) Auth  (4) Body`.
+/// jump digit: `[1] Params(n)  [2] Headers(n)  [3] Auth  [4] Body`.
 #[test]
 fn request_tab_bar_shows_digit_prefixes_when_focused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1469,8 +1487,8 @@ fn request_tab_bar_shows_digit_prefixes_when_focused() {
     let rendered = snapshot(&mut app);
     // The focused Request pane tab bar must show digit prefixes.
     assert!(
-        rendered.contains("(1)") || rendered.contains("1)"),
-        "focused tab bar must show digit prefix for tab 1: {rendered}"
+        rendered.contains("[1]"),
+        "focused tab bar must show [1] digit prefix for tab 1: {rendered}"
     );
     insta::assert_snapshot!(rendered);
 }

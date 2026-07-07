@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: rendered
+---
+┌ Explorer ──────────────────┐┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  ▸ orders                  │┃GET  https://api.test/users                     ┃
+│  ▾ users                   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│>   List users              │┌ Request ───────────────────────────────────────┐
+│    Create user             ││ Params(0)   Headers(0)   Auth   Body           │
+│    Get user                ││  (no params — a to add)                        │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│           ┏ Edit URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓           │
+│           ┃https://api.test/users                                ┃           │
+│           ┃  Normal                                              ┃───────────┘
+│           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━ enter commit · esc cancel ┛───────────┐
+│                            ││no response yet                                 │
+│                            ││GET https://api.test/users                      │
+│                            ││                                                │
+│                            ││press ctrl-s to send                            │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ URL · demo · ? help · space leader · / search · : palette

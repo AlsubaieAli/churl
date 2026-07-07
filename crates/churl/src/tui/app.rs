@@ -27,7 +27,7 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, Lines};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -1452,9 +1452,11 @@ impl App {
         {
             self.close_jump();
             match target {
-                JumpTarget::Pane(pane) => self.focus = pane,
+                // Through set_focus, not a raw assignment — jumping into a
+                // collapsed pane must auto-unzoom (the set_focus invariant).
+                JumpTarget::Pane(pane) => self.set_focus(pane),
                 JumpTarget::Row(row) => {
-                    self.focus = Pane::Explorer;
+                    self.set_focus(Pane::Explorer);
                     self.explorer.cursor = row;
                     // An endpoint row also selects it (same as Enter) — through
                     // the guarded seam so dirty edits are never lost silently.
@@ -2645,11 +2647,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         (Some(explorer_area), right_area)
     };
     // Column B split into three rows: URL bar (3 lines) / Request / Response.
-    // Zoom (deliverable 4) collapses the unfocused pane to a stub row.
+    // Zoom (deliverable 4) collapses the unfocused pane to a bordered stub
+    // (border top + summary line + border bottom) keeping its title and
+    // tab-bar/stats content visible.
+    const COLLAPSED_HEIGHT: u16 = 3;
     let remaining = right_area.height.saturating_sub(urlbar::HEIGHT);
     let (req_height, resp_height) = match app.zoom {
-        Some(ZoomPane::Request) => (remaining.saturating_sub(1), 1),
-        Some(ZoomPane::Response) => (1, remaining.saturating_sub(1)),
+        Some(ZoomPane::Request) => (remaining.saturating_sub(COLLAPSED_HEIGHT), COLLAPSED_HEIGHT),
+        Some(ZoomPane::Response) => (COLLAPSED_HEIGHT, remaining.saturating_sub(COLLAPSED_HEIGHT)),
         None => {
             let req = remaining / 2;
             (req, remaining - req)
@@ -2718,12 +2723,30 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 },
             );
             let summary = response::collapsed_summary(&app.response, &theme);
-            frame.render_widget(Paragraph::new(summary), response_area);
+            render_collapsed_stub(
+                frame,
+                response_area,
+                "Response",
+                app.jump
+                    .as_ref()
+                    .and_then(|j| j.label_for_pane(Pane::Response)),
+                summary,
+                &theme,
+            );
         }
         Some(ZoomPane::Response) => {
             // Response is zoomed: render it full-size, show collapsed summary for request.
             let summary = request::collapsed_summary(selected_request, &app.tabs, &theme);
-            frame.render_widget(Paragraph::new(summary), request_area);
+            render_collapsed_stub(
+                frame,
+                request_area,
+                "Request",
+                app.jump
+                    .as_ref()
+                    .and_then(|j| j.label_for_pane(Pane::Request)),
+                summary,
+                &theme,
+            );
             let outcome = response::render(
                 frame,
                 response_area,
@@ -2942,6 +2965,32 @@ mod leader_popup {
     }
 }
 
+/// Renders a collapsed zoom stub: the pane's unfocused border + title (with its
+/// jump label when jump-mode is active) around the one-line tab-bar/stats
+/// summary — the pane keeps its chrome when collapsed, it doesn't vanish into a
+/// bare text row.
+fn render_collapsed_stub(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    name: &str,
+    jump_label: Option<char>,
+    summary: Line<'static>,
+    theme: &crate::tui::theme::Theme,
+) {
+    let title = match jump_label {
+        Some(label) => format!(" {name} [{label}] "),
+        None => format!(" {name} "),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Plain)
+        .border_style(theme.border_unfocused)
+        .title(title)
+        .title_style(theme.title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(summary), inner);
+}
+
 /// The dim hint line under a prompt (the collection name to type for a
 /// typed-confirm delete; none otherwise).
 fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
@@ -3129,9 +3178,9 @@ mod tests {
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
         assert!(app.jump.is_some());
-        // 'f' is the Response pane label (a/s/d/f for the four panes:
+        // 's' is the Response pane mnemonic (e/u/r/s for
         // Explorer/UrlBar/Request/Response).
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.jump.is_none());
@@ -3148,8 +3197,8 @@ mod tests {
         assert_eq!(app.explorer.rows().len(), 2);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
-        // Rows follow the four pane labels a/s/d/f → row 0 is 'g', row 1 is 'h'.
-        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+        // Rows use the row alphabet (panes hold e/u/r/s) → row 0 is 'a', row 1 is 'd'.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.focus, Pane::Explorer);
@@ -3159,21 +3208,25 @@ mod tests {
         assert_eq!(app.selected.as_ref().unwrap().endpoint.name, "Get user");
     }
 
-    /// The default Jump key `f` also labels the Response pane (4th pane): the
-    /// label wins over the "Jump key again cancels" rule so that pane stays
+    /// The default Jump key `f` is also a row label (3rd row): when assigned,
+    /// the label wins over the "Jump key again cancels" rule so that row stays
     /// reachable by pressing `f` twice.
     #[test]
-    fn jump_f_focuses_response_not_cancel() {
+    fn jump_f_acts_as_row_label_not_cancel() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("zoo")).unwrap();
         let mut app = workspace_fixture(dir.path());
+        // Expand "users" → 3 visible rows (users, Get user, zoo) = labels a/d/f.
+        app.explorer.expand().unwrap();
+        assert_eq!(app.explorer.rows().len(), 3);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
-        // 'f' labels the Response pane; pressing it focuses Response, not cancels.
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal, "f must act as a label, not cancel");
-        assert_eq!(app.focus, Pane::Response);
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.explorer.cursor, 2);
     }
 
     /// Esc cancels jump-mode without focusing anything.
@@ -3598,6 +3651,28 @@ mod tests {
         app.dispatch(Action::FocusResponse, None).unwrap();
         assert_eq!(app.zoom, None, "focusing the collapsed pane unzooms");
         assert_eq!(app.focus, Pane::Response);
+    }
+
+    /// Jumping (jump-mode) into the collapsed pane auto-unzooms too — jump
+    /// dispatch must go through `set_focus`, not assign focus directly
+    /// (review round 3, finding #4).
+    #[test]
+    fn jump_into_collapsed_pane_auto_unzooms() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Response;
+        app.dispatch(Action::Zoom, None).unwrap(); // Request collapsed
+        assert_eq!(app.zoom, Some(ZoomPane::Response));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Jump);
+        // 'r' is the Request pane mnemonic.
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, Pane::Request);
+        assert_eq!(
+            app.zoom, None,
+            "jumping into the collapsed pane must unzoom"
+        );
     }
 
     // ---- M6.7: explorer toggle + auto-reopen ----

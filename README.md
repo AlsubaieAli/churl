@@ -2,7 +2,7 @@
 
 **A fast terminal API client — craft, send, and inspect HTTP requests from your terminal.**
 
-![CI](https://github.com/ali-subaie/churl/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/AlsubaieAli/churl/actions/workflows/ci.yml/badge.svg)
 
 <!-- TODO: add a crates.io badge once published -->
 
@@ -13,7 +13,7 @@
 ### curl | sh (macOS and Linux)
 
 ```sh
-curl -fsSL https://github.com/ali-subaie/churl/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install.sh | sh
 ```
 
 The script detects your OS and architecture, downloads the matching binary,
@@ -24,7 +24,7 @@ to preview the resolved URL without downloading.
 ### Prebuilt binaries
 
 Download the archive for your platform from the
-[latest release](https://github.com/ali-subaie/churl/releases/latest):
+[latest release](https://github.com/AlsubaieAli/churl/releases/latest):
 
 | Platform | Archive |
 |---|---|

@@ -6,7 +6,7 @@ expression: rendered
 │  ▸ orders                  ││GET  https://api.test/users                     │
 │  ▾ users                   │└────────────────────────────────────────────────┘
 │>   List users              │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│    Create user             │┃ (1) Params(0)   (2) Headers(0)   (3) Auth   (4)┃
+│    Create user             │┃ [1] Params(0)   [2] Headers(0)   [3] Auth   [4]┃
 │    Get user                │┃  (no params — a to add)                        ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃

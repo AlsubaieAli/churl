@@ -17,7 +17,7 @@ use crate::tui::theme::Theme;
 pub struct HelpSection {
     /// The section header (e.g. `"Global"`, `"Leader"`).
     pub header: String,
-    /// `(key combos, action label)` rows, sorted by action name.
+    /// `(key combos, action label)` rows, in ACTION_TABLE order.
     pub entries: Vec<(String, String)>,
 }
 
@@ -25,8 +25,10 @@ pub struct HelpSection {
 /// exactly one section; sections with no bindings are still emitted (with an
 /// empty entry list) so the guard test can assert none is missing.
 pub fn sections(keymap: &KeyMap) -> Vec<HelpSection> {
-    let mut actions: Vec<Action> = Action::all().collect();
-    actions.sort_by_key(|a| a.name());
+    // ACTION_TABLE order, not alphabetical — the table groups related actions
+    // (h/j/k/l movement together, g/G jumps together); sorting by config name
+    // scatters them (review round 3).
+    let actions: Vec<Action> = Action::all().collect();
 
     let mut out = Vec::new();
 

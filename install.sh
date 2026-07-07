@@ -1,7 +1,7 @@
 #!/bin/sh
 # churl installer — POSIX sh, no bashisms.
 # Usage:
-#   curl -fsSL https://github.com/ali-subaie/churl/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install.sh | sh
 #
 # Options:
 #   --to DIR      Install to DIR instead of ~/.local/bin
@@ -13,7 +13,7 @@
 
 set -eu
 
-REPO="ali-subaie/churl"
+REPO="AlsubaieAli/churl"
 BIN="churl"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 
