@@ -22,6 +22,14 @@ const MIGRATIONS: &[&str] = &[
         endpoint_path TEXT
     );
     CREATE INDEX idx_history_executed_at ON history(executed_at_ms DESC);",
+    // 2: recently-opened workspaces, for the quick-jump workspace picker (M7.2).
+    // Recency lives here (SQLite state), never in the workspace files themselves.
+    "CREATE TABLE workspaces (
+        id INTEGER PRIMARY KEY,
+        path TEXT UNIQUE NOT NULL,
+        last_opened_ms INTEGER NOT NULL
+    );
+    CREATE INDEX idx_workspaces_last_opened ON workspaces(last_opened_ms DESC);",
 ];
 
 /// Error opening or querying the history store.
@@ -186,6 +194,31 @@ impl HistoryStore {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    /// Records that the workspace at `path` was opened at `now_ms`, inserting a
+    /// new row or bumping the existing row's `last_opened_ms` (keyed on the
+    /// UNIQUE `path`). Callers should pass a canonical absolute path so the same
+    /// workspace is never duplicated under different relative spellings.
+    pub fn touch_workspace(&self, path: &str, now_ms: i64) -> Result<(), HistoryError> {
+        self.conn.execute(
+            "INSERT INTO workspaces (path, last_opened_ms)
+             VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET last_opened_ms = excluded.last_opened_ms",
+            rusqlite::params![path, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Returns up to `limit` workspace paths, most-recently-opened first.
+    pub fn recent_workspaces(&self, limit: usize) -> Result<Vec<String>, HistoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM workspaces
+             ORDER BY last_opened_ms DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +279,43 @@ mod tests {
         assert_eq!(got.status, None);
         assert_eq!(got.duration_ms, None);
         assert_eq!(got.endpoint_path, None);
+    }
+
+    #[test]
+    fn touch_workspace_inserts_and_recent_orders() {
+        let store = HistoryStore::in_memory().unwrap();
+        store.touch_workspace("/ws/a", 1_000).unwrap();
+        store.touch_workspace("/ws/b", 3_000).unwrap();
+        store.touch_workspace("/ws/c", 2_000).unwrap();
+
+        let recent = store.recent_workspaces(10).unwrap();
+        assert_eq!(recent, ["/ws/b", "/ws/c", "/ws/a"]);
+
+        // Limit is respected.
+        assert_eq!(store.recent_workspaces(2).unwrap(), ["/ws/b", "/ws/c"]);
+    }
+
+    #[test]
+    fn touch_workspace_upserts_without_duplicating() {
+        let store = HistoryStore::in_memory().unwrap();
+        store.touch_workspace("/ws/a", 1_000).unwrap();
+        store.touch_workspace("/ws/b", 2_000).unwrap();
+        // Re-touch `a` with a newer timestamp: no new row, and it becomes newest.
+        store.touch_workspace("/ws/a", 5_000).unwrap();
+
+        let recent = store.recent_workspaces(10).unwrap();
+        assert_eq!(recent, ["/ws/a", "/ws/b"], "no duplicate row; a is newest");
+
+        // The UNIQUE(path) constraint means exactly one row per path.
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspaces WHERE path = '/ws/a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
