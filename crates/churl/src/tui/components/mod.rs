@@ -18,3 +18,4 @@ pub mod response;
 pub mod search;
 pub mod statusline;
 pub mod urlbar;
+pub mod vim_ext;

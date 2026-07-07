@@ -83,7 +83,8 @@ crates/
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
                            #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy),
                            #   fold (JSON fold-region scanner), picker, method_menu, prompt (CRUD prompt + confirm overlays),
-                           #   search, palette (curated command allowlist), jump, statusline
+                           #   search, palette (curated command allowlist), jump, statusline,
+                           #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors)
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary
