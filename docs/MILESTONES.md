@@ -432,6 +432,20 @@ The response viewer gained a display pipeline and vim-like navigation. All keys 
 
 ---
 
+### Review round 4 (owner drive-test 2026-07-07 — vim motions in the edtui editors)
+
+Findings from driving the two edtui editors (URL vim-popup + Body tab), all on edtui 0.11.3:
+
+1. **Missing vim motions**: edtui does not implement `W`, `B`, `f<char>`, `F<char>`, `t<char>`, `T<char>`, and binds first-non-blank only as `_` (not `^`). These are now implemented churl-side in `components/vim_ext.rs` as Normal-mode cursor mutations on `EditorState`, applied uniformly to both edtui editors (an `f`/`F`/`t`/`T` pending-find state is held per-editor: `App.url_popup_vim` / `App.editor_vim`, reset when the popup opens / an endpoint loads). Cols are char positions (`Jagged<char>` is char-indexed) so unicode needs no byte math; cursor col stays clamped to the row's last char.
+2. **URL popup swallowed `/`-search** (real bug): `handle_url_popup_key` committed on *any* Enter regardless of edtui mode, so edtui's `/`-search (Enter = FindFirst → jump to match → Normal) could never run. The handler is now mode-aware: in `EditorMode::Search` everything (incl. Enter/Esc) goes to edtui (Enter executes the search, Esc cancels it, never commits); otherwise Enter commits as before, Esc-in-Normal cancels, and Normal-mode vim motions are consulted before edtui fall-through. Accepted edge: Enter while an `f`/`F`/`t`/`T` find is pending still commits.
+3. **Body tab**: in Request/Body/Normal, `vim_ext` is consulted before the leader and keymap steps, so `W`/`B`/`^`/`F`/`t`/`T` (all unbound today) work as motions and `f` becomes find-char *inside* the Body editor, shadowing the global Jump key there (M6.6 shadowing precedent; jump stays reachable from every other pane). Precedence matters: a pending find's next char must reach `vim_ext` even when it's Space (leader) or a mapped key. `w` (Save) and `/` (endpoint search) keep their Body-tab meaning — untouched.
+
+**Main-session review fixes (2 real edges the build missed)**: (a) modifier discipline — `Ctrl-f` matched `KeyCode::Char('f')` and armed a pending find, and a pending find resolved `Ctrl-s` as a search for `'s'` (swallowing Send on the Body tab); `vim_ext` now treats only bare/shifted chars as motion input, modified keys abort a pending find. (b) Popup Esc ordering — Esc while a find was pending closed the whole popup (discarding edits) because the Esc-cancel check preceded the `vim_ext` call; reordered so Esc aborts the pending find first (vim), a second Esc cancels.
+
+**Verified by**: `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo test --all` — **387 tests** (363 baseline + 17 `vim_ext` module units + 4 app-level + 3 review-fix regressions: modified-char discipline, shifted-char works, popup-Esc-aborts-find), all green; PTY drive of the real binary 9/9 (search Enter jumps with popup open, `^`+`f<c>` proven by marker insert, Esc abort vs cancel, Esc revert, Body-tab `f` without jump-mode, clean exit).
+
+---
+
 ## M8 — Cookies + proxy
 
 **Scope**: Session and network-environment support (promoted from the backlog, owner decision 2026-07-05 — first post-release milestone).

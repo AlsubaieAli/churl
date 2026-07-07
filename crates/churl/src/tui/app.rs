@@ -42,6 +42,7 @@ use super::components::line_editor::LineEditor;
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
+use super::components::vim_ext::{self, VimExt};
 use super::components::{
     explorer, help, message, method_menu, palette, picker, prompt, request, response, statusline,
     urlbar,
@@ -223,6 +224,8 @@ pub struct App {
     /// edtui state for the request body.
     pub editor: EditorState,
     editor_events: EditorEventHandler,
+    /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the Body editor.
+    editor_vim: VimExt,
     /// The endpoint currently loaded into the request pane.
     pub selected: Option<SelectedEndpoint>,
     /// Focused pane in [`Mode::Normal`].
@@ -328,6 +331,8 @@ pub struct App {
     url_popup: Option<EditorState>,
     /// edtui event handler for the URL popup.
     url_popup_events: EditorEventHandler,
+    /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the URL popup editor.
+    url_popup_vim: VimExt,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
 }
@@ -367,6 +372,7 @@ impl App {
             explorer,
             editor: EditorState::default(),
             editor_events: EditorEventHandler::default(),
+            editor_vim: VimExt::default(),
             selected: None,
             focus: Pane::Explorer,
             mode: Mode::Normal,
@@ -415,6 +421,7 @@ impl App {
             help_viewport_height: 10,
             url_popup: None,
             url_popup_events: EditorEventHandler::default(),
+            url_popup_vim: VimExt::default(),
             url_edit_mode: UrlEditMode::Inline,
         })
     }
@@ -631,6 +638,19 @@ impl App {
             self.editor_events.on_key_event(key, &mut self.editor);
             return Ok(());
         }
+        // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T)
+        //     win before leader/keymap. `f` becomes find-char inside the Body
+        //     editor, shadowing the global Jump key there (DECISIONS.md — M6.6
+        //     shadowing precedent); the others are unbound today so nothing is
+        //     lost. This precedes the leader/keymap steps so a pending find's
+        //     next char reaches vim_ext even when it's Space or a mapped key.
+        if self.focus == Pane::Request
+            && self.tabs.active == RequestTab::Body
+            && self.editor.mode == EditorMode::Normal
+            && vim_ext::handle_key(key, &mut self.editor, &mut self.editor_vim)
+        {
+            return Ok(());
+        }
         // 4. Leader key: outside every text-edit context (guarded above), Space
         //    enters pending-leader state and shows the which-key popup. Inside an
         //    edit, control never reaches here — Space types a space.
@@ -703,12 +723,28 @@ impl App {
         Ok(())
     }
 
-    /// Handles one key in the URL vim-popup editor (deliverable 7). Enter commits
-    /// (running the param merge), Esc in Normal mode cancels; everything else goes
-    /// to edtui. The single-logical-line constraint drops any Enter that edtui
-    /// would turn into a newline — Enter is always the commit key here.
+    /// Handles one key in the URL vim-popup editor. Mode-aware:
+    /// - In `EditorMode::Search`, everything (incl. Enter/Esc) goes to edtui so
+    ///   `/`-search executes: Enter runs FindFirst (jump to match → Normal), Esc
+    ///   cancels the search. Never commits from Search mode.
+    /// - Otherwise Enter commits (running the param merge; the single-logical-line
+    ///   constraint drops any Enter that edtui would turn into a newline); in
+    ///   Normal mode `vim_ext` motions (W/B/^/f/F/t/T) run next — before the
+    ///   Esc-cancel check, so Esc aborts a pending find instead of closing the
+    ///   popup; then Esc in Normal cancels; the rest falls through to edtui.
+    ///
+    /// Accepted edge: Enter while an f/F/t/T find is pending still commits (the
+    /// pending find is dropped with the popup).
     fn handle_url_popup_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Enter commits regardless of edtui mode (single logical line — no newline).
+        let mode = self.url_popup.as_ref().map(|e| e.mode);
+        // Search mode: pass everything to edtui — Enter/Esc drive the search.
+        if mode == Some(EditorMode::Search) {
+            if let Some(editor) = self.url_popup.as_mut() {
+                self.url_popup_events.on_key_event(key, editor);
+            }
+            return Ok(());
+        }
+        // Enter commits (single logical line — no newline).
         if key.code == KeyCode::Enter {
             if let Some(editor) = self.url_popup.take() {
                 let text: String = editor.lines.clone().into();
@@ -718,13 +754,17 @@ impl App {
             }
             return Ok(());
         }
-        // Esc in Normal mode cancels; in Insert mode edtui uses it to leave insert.
-        if key.code == KeyCode::Esc
-            && self
-                .url_popup
-                .as_ref()
-                .is_some_and(|e| e.mode == EditorMode::Normal)
+        // Normal mode: churl-side vim motions win before the Esc-cancel check —
+        // Esc while an f/F/t/T find is pending aborts the find (vim), it must
+        // not close the popup.
+        if mode == Some(EditorMode::Normal)
+            && let Some(editor) = self.url_popup.as_mut()
+            && vim_ext::handle_key(key, editor, &mut self.url_popup_vim)
         {
+            return Ok(());
+        }
+        // Esc in Normal mode cancels; in Insert mode edtui uses it to leave insert.
+        if key.code == KeyCode::Esc && mode == Some(EditorMode::Normal) {
             self.url_popup = None;
             return Ok(());
         }
@@ -877,6 +917,7 @@ impl App {
             .map(|body| body.content.as_str())
             .unwrap_or("");
         self.editor = EditorState::new(Lines::from(body));
+        self.editor_vim.reset();
         self.loaded_snapshot = Some(selected.endpoint.clone());
         self.selected = Some(selected);
         self.tabs = RequestTabs::default();
@@ -1610,6 +1651,7 @@ impl App {
         self.set_focus(Pane::UrlBar);
         self.url_editor = None;
         self.url_popup = Some(EditorState::new(Lines::from(url.as_str())));
+        self.url_popup_vim.reset();
     }
 
     /// Sets focus, honouring the M6.7 collapse/hide invariants: a collapsed pane
@@ -3754,6 +3796,111 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.live_request().unwrap().url, "https://a/bc");
+    }
+
+    /// `/`-search in the popup executes on Enter (jump to match → Normal), and
+    /// the popup stays open; a second Enter commits. Regression: `handle_url_popup_key`
+    /// used to commit on any Enter, so Search could never run.
+    #[test]
+    fn url_popup_search_executes_then_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_popup();
+        app.url_popup = Some(EditorState::new(Lines::from("https://api.test/find")));
+        // `/` enters Search; type "find"; Enter runs FindFirst → Normal.
+        for c in "/find".chars() {
+            press(&mut app, c);
+        }
+        assert_eq!(app.url_popup.as_ref().unwrap().mode, EditorMode::Search);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        let popup = app.url_popup.as_ref().expect("popup still open");
+        assert_eq!(popup.mode, EditorMode::Normal, "search left Search mode");
+        assert_eq!(popup.cursor.col, 17, "cursor jumped to the 'find' match");
+        // A second Enter (now in Normal) commits.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.url_popup.is_none(), "second enter commits");
+    }
+
+    /// The vim motion extensions move the popup cursor in Normal mode.
+    #[test]
+    fn url_popup_vim_motions_move_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_popup();
+        app.url_popup = Some(EditorState::new(Lines::from("foo bar baz")));
+        let cursor = |app: &App| app.url_popup.as_ref().unwrap().cursor.col;
+
+        press(&mut app, 'W'); // → start of "bar"
+        assert_eq!(cursor(&app), 4);
+        press(&mut app, 'B'); // → back to "foo"
+        assert_eq!(cursor(&app), 0);
+        press(&mut app, 'f'); // find-char forward…
+        press(&mut app, 'z');
+        assert_eq!(cursor(&app), 10); // the 'z' in "baz"
+        press(&mut app, 'F'); // find-char backward…
+        press(&mut app, 'o');
+        assert_eq!(cursor(&app), 2); // last 'o' before the cursor
+        press(&mut app, '^'); // first non-blank of the row
+        assert_eq!(cursor(&app), 0);
+    }
+
+    /// Esc while an f/F/t/T find is pending aborts the find (vim) — it must not
+    /// close the popup. A second Esc (no pending) cancels as usual.
+    #[test]
+    fn url_popup_esc_aborts_pending_find_not_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_endpoint(dir.path());
+        app.begin_url_popup();
+        app.url_popup = Some(EditorState::new(Lines::from("foo bar")));
+        press(&mut app, 'f'); // pending find…
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            app.url_popup.is_some(),
+            "esc aborted the find, not the popup"
+        );
+        // The find is gone: a char is typed-through to edtui, not a target.
+        press(&mut app, 'b');
+        assert_eq!(
+            app.url_popup.as_ref().unwrap().cursor.col,
+            0,
+            "aborted find must not resolve on the next char"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.url_popup.is_none(), "esc with no pending cancels");
+    }
+
+    /// Body tab in Normal mode: `W` moves the editor cursor, and `f`+char is
+    /// find-char inside the editor — it does NOT open jump-mode.
+    #[test]
+    fn body_tab_vim_motions_and_f_shadows_jump() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Request;
+        app.tabs.active = RequestTab::Body;
+        app.editor = EditorState::new(Lines::from("foo bar baz"));
+        app.editor.mode = EditorMode::Normal;
+
+        press(&mut app, 'W');
+        assert_eq!(app.editor.cursor.col, 4, "W moved the body cursor");
+
+        press(&mut app, 'f');
+        press(&mut app, 'z');
+        assert_eq!(app.editor.cursor.col, 10, "f<c> moved the body cursor");
+        assert!(app.jump.is_none(), "f shadowed jump inside the Body editor");
+        assert_eq!(app.editor.mode, EditorMode::Normal);
+    }
+
+    /// The `f` shadow is Body-scoped: from the Explorer pane `f` still enters
+    /// jump-mode (guard is per-pane/tab).
+    #[test]
+    fn f_from_explorer_still_enters_jump() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.focus = Pane::Explorer;
+        press(&mut app, 'f');
+        assert!(app.jump.is_some(), "jump-mode still reachable outside Body");
     }
 
     #[test]
