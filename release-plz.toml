@@ -1,0 +1,20 @@
+# Release automation config (https://release-plz.dev) — flow documented in CONTRIBUTING.md.
+#
+# One release train for the whole workspace: both crates inherit
+# workspace.package.version, so churl carries the tag and changelog while
+# churl-core is published silently alongside it (dependency order is automatic).
+
+[workspace]
+changelog_update = false
+git_tag_enable = false
+# GitHub releases (binaries + notes) are created by release.yml on tag push,
+# not by release-plz.
+git_release_enable = false
+pr_labels = ["release"]
+
+[[package]]
+name = "churl"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"

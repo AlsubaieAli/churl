@@ -30,9 +30,23 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-*) prerelease="--prerelease" ;;
           esac
+          # Notes come from the CHANGELOG.md section release-plz wrote for
+          # this version; manual tags without an entry (e.g. betas) fall
+          # back to GitHub's auto-generated notes.
+          version="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ] && grep -q "^## \[$version\]" CHANGELOG.md; then
+            awk -v ver="$version" '
+              index($0, "## [" ver "]") == 1 { on = 1; next }
+              on && /^## \[/ { exit }
+              on { print }
+            ' CHANGELOG.md > /tmp/notes.md
+            set -- --notes-file /tmp/notes.md
+          else
+            set -- --generate-notes
+          fi
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" $prerelease \
-              --title "$GITHUB_REF_NAME" --generate-notes
+              --title "$GITHUB_REF_NAME" "$@"
           gh release upload "$GITHUB_REF_NAME" install.sh --clobber
 
   build-release:
