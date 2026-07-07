@@ -378,6 +378,25 @@
 - **`curl | sh` installer** (owner request 2026-07-06): `install.sh` in the repo, served via the release — detects OS/arch, downloads the matching release binary, installs to `~/.local/bin` (prompting/`--to` for override). `cargo install churl` remains the Rust-user path
 - **`churl tutorial` onboarding** (owner request 2026-07-06): scaffolds a demo workspace (commented `churl.toml` with a profile + vars, one collection with `folder.toml`, an example endpoint against a public echo API) so a first-time user sends a request in under a minute; README quickstart mirrors it
 
+Delivered in two waves (committed separately): **wave 1** = response-viewer features (folding, headers, wrap, search, copy, richer nav, highlight micro-nits); **wave 2** = release infra (cargo metadata, README, tutorial, release workflow, installer, cold-start benchmark).
+
+### Wave 1 — response-viewer features (done)
+
+The response viewer gained a display pipeline and vim-like navigation. All keys live in the configurable `[keys.response]` overlay and appear in the `?` help overlay (the every-bound-action-appears guard test stays green).
+
+- **Display pipeline** (`components/response.rs`): logical lines (body or headers, CRLF-stripped) → fold filter (JSON-only) → wrap expansion (optional) → viewport slice. Cursor and scroll are display-row indices (post-fold, post-wrap); search matches are stored against logical lines and mapped through the pipeline. All pipeline stages are pure fns, snapshot-tested without a runtime.
+- **Cursor line** — `j`/`k` move a vim-like cursor (scroll follows to keep it in view); `g`/`G` first/last; `Ctrl-d`/`Ctrl-u` half-viewport. Cursor row uses `theme.selection` (no new slot).
+- **Headers view** — `h` (Response overlay, shadows global Collapse) toggles Body↔Headers, rendered through the same pipeline; stats title gains `· headers`. Closes the M3 count-only open question.
+- **Wrap toggle** — `W` soft-wraps at the pane width via a `unicode-width`-aware display-row index (rebuilt on toggle/resize/fold/mode change); stats title gains `· wrap`. Closes the M3 horizontal-scroll open question (wrap chosen over h-scroll). **Fallback taken**: wrapped mode renders unhighlighted plain text — slicing highlighted spans at wrap boundaries was deferred (see DECISIONS).
+- **JSON folding** — `o` folds/unfolds the innermost region at the cursor; `O` collapses all top-level regions or expands all. Regions scanned once per response by a string-aware scanner (`components/fold.rs`); a folded region renders `<opener> ⋯ N lines` (dim). Non-JSON responses no-op with a `folding: JSON responses only` notice.
+- **Body search** — `/` opens a literal, smart-case incremental search in the message-row position (shared `LineEditor`, new `Mode::BodySearch`; shadows global fuzzy `/`). `n`/`N` cycle matches (wrapping); each nav scrolls the match into view and **auto-unfolds** its region. Matches highlighted (current = reversed, others = dim+underline); feedback via `k/N matches` in the stats title while typing and `match k/N` in the message row on `n`/`N`. New response or view toggle clears the search.
+- **Copy via OSC 52** — `y` copies the current view's full text, `Y` the cursor's logical line; message row confirms `copied 4.1 KB` / `copied line`, with a `(truncated)` note for capped bodies and a `copied first 1.0 MB of 4.2 MB` note when the 1 MB OSC 52 payload cap kicks in. No native clipboard dep (`tui/clipboard.rs`).
+- **Highlight micro-nits** — duplicate-enqueue guard (`pending_highlight: Option<u64>` on `App`; a job whose hash is in flight is not re-sent, cleared when its result lands); CRLF `\r` stripped once where logical lines are materialised, so fold/wrap/search byte ranges stay consistent.
+
+**Verified by**: `cargo test --all` — 355 tests (307 baseline + 48), all green. `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -D warnings` clean. New coverage: fold scanner (nested/strings-with-braces/arrays/truncated-no-panic/mismatched-bracket-kinds), wrap index (unicode wide chars, exact-width lines), smart-case matcher (incl. per-char length-shifting case folds via an offset-mapping table), OSC 52 framing, CRLF line index; TestBackend snapshots for headers view, wrap on, folded `⋯ N lines`, cursor row, stats markers; behaviour tests for search nav/wrap/no-match/esc-clears/auto-unfold-while-typing, copy message row, view-toggle reset, headers-view fold notice, zoom stub unchanged.
+
+**Wave 1 known edges / weak spots**: the cursor-row *style* (`theme.selection`) is not asserted (symbol-only snapshots don't capture styles); syntax-highlighting under wrap is unhighlighted by design (fallback above); with wrap on, `n`/`N` scroll to the match's *logical-line start* row, not the exact wrapped sub-row containing the match (accepted).
+
 **Next**: ship 0.1, then M8
 
 ---

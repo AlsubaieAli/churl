@@ -2,6 +2,7 @@
 //! rendering live in [`app`], [`components`], and [`events`].
 
 pub mod app;
+pub mod clipboard;
 pub mod components;
 pub mod events;
 pub mod highlight;

@@ -107,6 +107,24 @@ pub enum Action {
     Leader,
     /// Open the URL vim-popup editor (`e` on the URL bar).
     EditUrlPopup,
+    /// Toggle the response pane between body and headers view.
+    ToggleHeadersView,
+    /// Toggle soft-wrap in the response viewer.
+    ToggleWrap,
+    /// Open incremental literal search over the response body.
+    OpenBodySearch,
+    /// Jump to the next response-search match.
+    SearchNext,
+    /// Jump to the previous response-search match.
+    SearchPrev,
+    /// Fold/unfold the JSON region at the response cursor.
+    ToggleFold,
+    /// Collapse all top-level JSON regions, or expand all.
+    ToggleAllFolds,
+    /// Copy the current response view's full text to the clipboard.
+    CopyResponse,
+    /// Copy the response cursor's logical line to the clipboard.
+    CopyLine,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -164,6 +182,27 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Help, "help", "help overlay"),
     (Action::Leader, "leader", "leader menu"),
     (Action::EditUrlPopup, "edit-url-popup", "edit URL (popup)"),
+    (
+        Action::ToggleHeadersView,
+        "toggle-headers-view",
+        "toggle response headers view",
+    ),
+    (Action::ToggleWrap, "toggle-wrap", "toggle response wrap"),
+    (
+        Action::OpenBodySearch,
+        "open-body-search",
+        "search response body",
+    ),
+    (Action::SearchNext, "search-next", "next match"),
+    (Action::SearchPrev, "search-prev", "previous match"),
+    (Action::ToggleFold, "toggle-fold", "toggle fold at cursor"),
+    (
+        Action::ToggleAllFolds,
+        "toggle-all-folds",
+        "toggle all folds",
+    ),
+    (Action::CopyResponse, "copy-response", "copy response"),
+    (Action::CopyLine, "copy-line", "copy line"),
 ];
 
 impl Action {
@@ -231,7 +270,7 @@ pub enum PaneCtx {
     UrlBar,
     /// The request pane (tab switching + row editing).
     Request,
-    /// The response pane (no overlay keys yet, but configurable).
+    /// The response pane (M7 viewer keys: headers/wrap/search/fold/copy).
     Response,
 }
 
@@ -360,6 +399,18 @@ impl Default for KeyMap {
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
         // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
         overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
+        // Response pane (M7): body/headers, wrap, search, match nav, folding,
+        // copy. `h` shadows the global Collapse and `/` shadows the global
+        // OpenSearch here (same precedent as Request-pane `1`–`4`; DECISIONS.md).
+        overlay(PaneCtx::Response, key!(h), Action::ToggleHeadersView);
+        overlay(PaneCtx::Response, key!(shift - w), Action::ToggleWrap);
+        overlay(PaneCtx::Response, key!('/'), Action::OpenBodySearch);
+        overlay(PaneCtx::Response, key!(n), Action::SearchNext);
+        overlay(PaneCtx::Response, key!(shift - n), Action::SearchPrev);
+        overlay(PaneCtx::Response, key!(o), Action::ToggleFold);
+        overlay(PaneCtx::Response, key!(shift - o), Action::ToggleAllFolds);
+        overlay(PaneCtx::Response, key!(y), Action::CopyResponse);
+        overlay(PaneCtx::Response, key!(shift - y), Action::CopyLine);
 
         // The leader chord: Space, then a continuation key.
         let mut leader_map = HashMap::new();

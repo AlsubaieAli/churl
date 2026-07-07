@@ -3,6 +3,7 @@
 //! `TestBackend` without a tokio runtime.
 
 pub mod explorer;
+pub mod fold;
 pub mod help;
 pub mod jump;
 pub mod line_editor;
