@@ -397,6 +397,26 @@ The response viewer gained a display pipeline and vim-like navigation. All keys 
 
 **Wave 1 known edges / weak spots**: the cursor-row *style* (`theme.selection`) is not asserted (symbol-only snapshots don't capture styles); syntax-highlighting under wrap is unhighlighted by design (fallback above); with wrap on, `n`/`N` scroll to the match's *logical-line start* row, not the exact wrapped sub-row containing the match (accepted).
 
+### Wave 2 — release infra (done)
+
+- **B1 Cargo metadata**: workspace `repository` → `https://github.com/ali-subaie/churl`; both crates gain `description`, `keywords` (5), `categories`; churl-core gets `readme = "README.md"`; churl gets `readme = "../../README.md"`; churl depends on churl-core with `version = "0.1.0"` in addition to path. License files `LICENSE-MIT` and `LICENSE-APACHE` added.
+- **B2 README.md**: repo root — hero one-liner, CI badge, Install (`curl|sh`, prebuilt binaries table, `cargo install`), Quickstart (mirrors `churl tutorial`), Feature matrix, Screenshot placeholder (`docs/screenshot.png` + TODO), Configuration pointer, License line.
+- **B3 `churl tutorial`**: `churl tutorial [--dir DIR]` — scaffolds `./churl-tutorial/` with `churl.toml` (workspace vars + `dev` profile, both pointing at `https://httpbingo.org`), `examples/` collection with `folder.toml`, and 3 endpoints (Get Anything, Post JSON, Bearer Auth with `{{token}}`). All files generated through real persistence seams — no hand-written TOML strings for endpoint or folder files. Refuses non-empty dir. Implemented in `crates/churl/src/tutorial.rs`; 3 CLI integration tests in `tests/cli_tutorial.rs`.
+- **B4 Release workflow** (`.github/workflows/release.yml`): tag-triggered (`v*`), `taiki-e/upload-rust-binary-action@v1`, 5-target matrix: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-pc-windows-msvc`; SHA-256 checksums attached. Uses dtolnay/rust-toolchain + Swatinem/rust-cache per-target.
+- **B5 `install.sh`**: POSIX sh, OS+arch detection → release target triple, `curl`/`wget` download, SHA-256 verification, extracts to `~/.local/bin` (`--to DIR` override, `--force`, `--dry-run`). Tested with `--dry-run` on darwin/arm64 → correctly resolves `aarch64-apple-darwin`. shellcheck + actionlint installed and run during the main-session review (see below).
+- **B6 Cold-start benchmark**: `cargo build --release && hyperfine --warmup 3 'target/release/churl --help'` → **6.3 ms ± 6.3 ms** on darwin/arm64 (well under the 100 ms budget). Clap startup + syntect lazy init keep startup near-zero; no action needed.
+
+**Main-session review round (2026-07-07)**:
+- `actionlint` (installed for the review) caught a real workflow bug: the `macos-13` runner label is retired on GitHub-hosted runners — the tag build would have failed. x86_64 darwin now cross-compiles on `macos-latest` (arm64) via `--target`, which the taiki-e action handles.
+- `shellcheck` now clean on `install.sh` (one intentional SC2016 literal-`$PATH` hint carries a disable directive).
+- Tutorial teachability fix: the `dev` profile originally overrode `base_url` with an *identical* value, demonstrating nothing. Now the workspace defines `greeting = "hello"`, the `dev` profile overrides it to `"hello-from-dev"`, and Get Anything sends `greeting={{greeting}}` — switching profiles visibly changes the echo. Integration test asserts both values.
+- **Default `User-Agent` added** (`churl/<version>` in `build_client`) — the live tutorial E2E got **402 from httpbingo.org** because reqwest sends no UA and the service rejects UA-less requests; curl parity confirmed the diagnosis. An enabled user `User-Agent` header still wins per-request. Two new wiremock tests (default sent, user override wins). Found only by live E2E — a real release blocker.
+- Live tutorial PTY E2E (7/7 checks): scaffold → open with `--profile dev` → profile indicator → select Get Anything → real send → **200 OK with `hello-from-dev` echoed on the wire** → clean exit.
+
+**Verified by**: `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo test --all` — **360 tests** (355 baseline + 3 tutorial integration + 2 user-agent wiremock), all green; `cargo publish --dry-run -p churl-core` passes; `cargo package -p churl --no-verify --list` — 70+ files, no fixture bloat; `install.sh --dry-run` on darwin/arm64 prints `aarch64-apple-darwin`; `cargo publish --dry-run -p churl` cannot pass until churl-core is published to crates.io (path+version dep resolves against the registry at verify time).
+
+**Limitation (verbatim)**: `cargo publish --dry-run -p churl` cannot pass until churl-core is published to crates.io — the path+version dep resolves against the registry at verify time, and churl-core is not yet on crates.io. `cargo package -p churl --no-verify --list` passes and the file list is sane. The full publish dry-run will pass once the owner runs `cargo publish -p churl-core` first.
+
 **Next**: ship 0.1, then M8
 
 ---

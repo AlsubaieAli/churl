@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
+mod tutorial;
+
 #[derive(Debug, Parser)]
 #[command(name = "churl", about = "Terminal HTTP client", version)]
 struct Cli {
@@ -34,6 +36,12 @@ enum Command {
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
+    /// Scaffold a demo workspace to get started quickly
+    Tutorial {
+        /// Directory to scaffold (default: ./churl-tutorial)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 /// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
@@ -58,6 +66,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Keymaps) => {
             run_keymaps()?;
+        }
+        Some(Command::Tutorial { dir }) => {
+            tutorial::run_tutorial(dir)?;
         }
         None => {
             let vars = parse_vars(&cli.vars)?;

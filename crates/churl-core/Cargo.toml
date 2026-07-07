@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core library for churl: HTTP request model, persistence, execution"
+keywords = ["http", "tui", "api-client", "curl", "terminal"]
+categories = ["command-line-utilities", "web-programming::http-client"]
+readme = "README.md"
 
 [dependencies]
 base64.workspace = true
