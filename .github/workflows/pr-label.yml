@@ -1,0 +1,51 @@
+name: PR labels
+
+# Applies labels from the conventional-commit PR title (see CONTRIBUTING.md):
+# the type maps to a label (feat → enhancement, fix → bug, …) and a `!`
+# breaking marker adds `breaking`. pull_request_target is used so labeling
+# works on fork PRs too (read-only pull_request tokens can't label); it is
+# safe here because the job never checks out or runs PR code.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    name: Label from title type
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply type label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Via env, never inline-interpolated into the script: PR titles
+          # are attacker-controlled input on public repos.
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          prefix="${TITLE%%:*}"     # "feat(scope)!" from "feat(scope)!: …"
+          type="${prefix%%(*}"      # drop "(scope)…"
+          type="${type%!}"          # drop breaking marker
+          case "$type" in
+            feat)     label="enhancement" ;;
+            fix)      label="bug" ;;
+            perf)     label="performance" ;;
+            refactor) label="refactor" ;;
+            docs)     label="documentation" ;;
+            test)     label="tests" ;;
+            build|ci) label="ci" ;;
+            chore)    label="chore" ;;
+            revert)   label="revert" ;;
+            *)
+              echo "title type '$type' has no label mapping, skipping"
+              exit 0
+              ;;
+          esac
+          case "$prefix" in
+            *!) label="$label,breaking" ;;
+          esac
+          echo "labeling PR #$PR: $label"
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$label"
