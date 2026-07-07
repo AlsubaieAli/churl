@@ -11,7 +11,7 @@
 //!    through to edtui when the request pane is focused.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,8 @@ pub enum Mode {
     Search,
     /// The command palette overlay is open.
     Palette,
+    /// The quick-jump workspace picker overlay is open (M7.2).
+    WorkspacePicker,
     /// Jump-mode: label-driven pane/row navigation overlay.
     Jump,
     /// The method-picker menu is open (URL bar `M`).
@@ -166,6 +168,9 @@ enum PendingLoad {
     Row(usize),
     /// Load the endpoint at this file path (search overlay / CRUD reselect).
     File(std::path::PathBuf),
+    /// Switch to the workspace rooted at this path (quick-jump workspace picker).
+    /// Always treated as "other" by the dirty guard.
+    Workspace(std::path::PathBuf),
 }
 
 /// Messages delivered to the event loop over the app channel. No longer `Copy`
@@ -239,6 +244,10 @@ pub struct App {
     /// Profile-name items behind an open profile picker (index-aligned;
     /// `None` marks the "(none)" entry). Non-empty only while switching profiles.
     profile_choices: Vec<Option<String>>,
+    /// Canonical workspace paths behind an open workspace picker (index-aligned
+    /// with the picker items). Non-empty only while `mode` is
+    /// [`Mode::WorkspacePicker`].
+    workspace_choices: Vec<PathBuf>,
     /// Active jump-mode state, when `mode` is [`Mode::Jump`].
     pub jump: Option<JumpState>,
     keymap: KeyMap,
@@ -346,6 +355,23 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The canonical (absolute, symlink-resolved) form of `path`, falling back to
+/// the path as-given when canonicalization fails (e.g. it no longer exists).
+/// Used so the same workspace is never stored under two different spellings.
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A workspace path shortened for display: `$HOME` collapses to `~`.
+fn display_workspace_path(path: &str) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = Path::new(path).strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.to_owned()
+}
+
 /// Opens the workspace at `dir`. A missing `churl.toml` yields `None` (empty
 /// state); a malformed one is a hard error.
 pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
@@ -380,6 +406,7 @@ impl App {
             search_targets: Vec::new(),
             palette_actions: Vec::new(),
             profile_choices: Vec::new(),
+            workspace_choices: Vec::new(),
             jump: None,
             keymap,
             theme: Theme::default(),
@@ -534,6 +561,13 @@ impl App {
                 self.message = Some(Message::new("history disabled: no data directory"));
             }
         }
+        // Seed workspace recency with the workspace we launched in, so it shows
+        // up in the quick-jump workspace picker. Best-effort: a write failure is
+        // non-fatal (the picker just won't list this one yet).
+        if let (Some(store), Some(ws)) = (self.history.as_ref(), self.workspace.as_ref()) {
+            let canonical = canonical_path(ws.root());
+            let _ = store.touch_workspace(&canonical.to_string_lossy(), now_ms());
+        }
         Ok(())
     }
 
@@ -592,7 +626,7 @@ impl App {
             return self.handle_leader_key(key);
         }
         match self.mode {
-            Mode::Search | Mode::Palette => self.handle_overlay_key(key),
+            Mode::Search | Mode::Palette | Mode::WorkspacePicker => self.handle_overlay_key(key),
             Mode::Jump => self.handle_jump_key(key),
             Mode::MethodMenu => {
                 self.handle_method_menu_key(key);
@@ -850,6 +884,9 @@ impl App {
             Action::ToggleAllFolds => self.response_toggle_all_folds(),
             Action::CopyResponse => self.response_copy_view(),
             Action::CopyLine => self.response_copy_line(),
+            // `<leader>f` reuses the endpoint-search overlay as the request picker.
+            Action::QuickJumpRequests => self.open_search()?,
+            Action::QuickJumpWorkspaces => self.open_workspace_picker(),
             Action::Up
             | Action::Down
             | Action::Select
@@ -1548,8 +1585,39 @@ impl App {
     fn close_overlay(&mut self) {
         self.picker = None;
         self.profile_choices.clear();
+        self.workspace_choices.clear();
         self.auth_picker = false;
         self.mode = Mode::Normal;
+    }
+
+    /// Opens the quick-jump workspace picker over the recently-opened workspaces
+    /// (recency from the SQLite state DB). With no history store or an empty
+    /// list, shows a message instead of an empty picker.
+    fn open_workspace_picker(&mut self) {
+        let Some(history) = self.history.as_ref() else {
+            self.notify("no recent workspaces");
+            return;
+        };
+        let recent = match history.recent_workspaces(20) {
+            Ok(recent) => recent,
+            Err(err) => {
+                self.notify(format!("workspace picker failed: {err}"));
+                return;
+            }
+        };
+        if recent.is_empty() {
+            self.notify("no recent workspaces");
+            return;
+        }
+        let mut items = Vec::with_capacity(recent.len());
+        let mut choices = Vec::with_capacity(recent.len());
+        for path in recent {
+            items.push(display_workspace_path(&path));
+            choices.push(PathBuf::from(path));
+        }
+        self.workspace_choices = choices;
+        self.picker = Some(picker::PickerState::new(" Switch workspace ", items));
+        self.mode = Mode::WorkspacePicker;
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1575,8 +1643,10 @@ impl App {
     fn accept_overlay(&mut self) -> Result<()> {
         let mode = self.mode;
         let current = self.picker.as_ref().and_then(picker::PickerState::current);
-        // Capture the profile choices + auth-picker flag before close_overlay().
+        // Capture the profile/workspace choices + auth-picker flag before
+        // close_overlay() clears them.
         let profile_choices = std::mem::take(&mut self.profile_choices);
+        let workspace_choices = std::mem::take(&mut self.workspace_choices);
         let auth_picker = self.auth_picker;
         self.close_overlay();
         let Some(index) = current else {
@@ -1607,6 +1677,13 @@ impl App {
                     }
                 } else if let Some(&action) = self.palette_actions.get(index) {
                     self.dispatch(action, None)?;
+                }
+            }
+            Mode::WorkspacePicker => {
+                // Route the switch through the dirty guard: a workspace target is
+                // always "other", so unsaved edits defer to the discard confirm.
+                if let Some(path) = workspace_choices.get(index).cloned() {
+                    self.guarded_load(PendingLoad::Workspace(path))?;
                 }
             }
             _ => {}
@@ -2445,6 +2522,8 @@ impl App {
                 .selected_endpoint_file()
                 .is_some_and(|file| file == selected.file),
             PendingLoad::File(file) => *file == selected.file,
+            // A workspace switch is never "the same endpoint".
+            PendingLoad::Workspace(_) => false,
         }
     }
 
@@ -2456,6 +2535,9 @@ impl App {
                 .explorer
                 .cursor_is_other_endpoint(self.selected.as_ref()),
             PendingLoad::File(file) => self.selected.as_ref().is_none_or(|s| &s.file != file),
+            // A workspace switch always replaces the loaded endpoint's context, so
+            // a dirty switch must defer to the discard-changes confirm.
+            PendingLoad::Workspace(_) => true,
         }
     }
 
@@ -2469,7 +2551,65 @@ impl App {
                 }
             }
             PendingLoad::File(file) => self.select_endpoint_file(&file)?,
+            PendingLoad::Workspace(path) => self.switch_workspace(path)?,
         }
+        Ok(())
+    }
+
+    /// Switches the whole app to the workspace rooted at `path` (quick-jump
+    /// workspace picker). Opens the new manifest, rebuilds the explorer, and
+    /// resets every endpoint/workspace-scoped field so nothing from the old
+    /// workspace leaks in. On a failed open, the current state is left intact and
+    /// the error is surfaced (fail loudly, never wipe on failure).
+    fn switch_workspace(&mut self, path: PathBuf) -> Result<()> {
+        let new_ws = match OpenWorkspace::open(&path) {
+            Ok(ws) => ws,
+            Err(err) => {
+                self.notify(format!("failed to open workspace: {err}"));
+                return Ok(());
+            }
+        };
+        let name = new_ws.manifest().name.clone();
+
+        // Abort any in-flight request from the old workspace (its response is no
+        // longer relevant); dropping the handle also drops the stale generation.
+        if let Some(in_flight) = self.in_flight.take() {
+            in_flight.handle.abort();
+        }
+
+        // Swap in the new workspace and rebuild the explorer against it.
+        self.workspace = Some(new_ws);
+        self.explorer.reload(self.workspace.as_ref())?;
+        self.explorer.cursor = 0;
+
+        // Reset all endpoint/workspace-scoped state.
+        self.selected = None;
+        self.loaded_snapshot = None; // clears derived dirty state
+        self.editor = EditorState::default();
+        self.editor_vim.reset();
+        self.tabs = RequestTabs::default();
+        self.url_editor = None;
+        self.url_popup = None;
+        // The active profile is defined per-workspace; a stale name could
+        // accidentally resolve against the new workspace's profiles.
+        self.active_profile = None;
+        self.response = ResponseState::Idle;
+        self.response_scroll = 0;
+        self.response_cursor = 0;
+        self.response_total_rows = 0;
+        self.pending_highlight = None;
+        self.highlight_cache.clear();
+        self.pending_load = None;
+        self.zoom = None;
+        // set_focus(Explorer) also un-hides the explorer if it was hidden.
+        self.set_focus(Pane::Explorer);
+
+        // Record the switch in the recency table (canonical path, deduped).
+        if let Some(store) = self.history.as_ref() {
+            let canonical = canonical_path(&path);
+            let _ = store.touch_workspace(&canonical.to_string_lossy(), now_ms());
+        }
+        self.notify(format!("switched to {name}"));
         Ok(())
     }
 }

@@ -125,6 +125,12 @@ pub enum Action {
     CopyResponse,
     /// Copy the response cursor's logical line to the clipboard.
     CopyLine,
+    /// Open the quick-jump request picker (fuzzy over all endpoints). Reuses the
+    /// endpoint-search overlay; bound to `<leader>f`.
+    QuickJumpRequests,
+    /// Open the quick-jump workspace picker (recently-opened workspaces). Bound
+    /// to `<leader>w`.
+    QuickJumpWorkspaces,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -205,6 +211,16 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     ),
     (Action::CopyResponse, "copy-response", "copy response"),
     (Action::CopyLine, "copy-line", "copy line"),
+    (
+        Action::QuickJumpRequests,
+        "quick-jump-requests",
+        "request picker",
+    ),
+    (
+        Action::QuickJumpWorkspaces,
+        "quick-jump-workspaces",
+        "workspace picker",
+    ),
 ];
 
 impl Action {
@@ -424,6 +440,10 @@ impl Default for KeyMap {
         leader_bind(key!(c), Action::Cancel);
         leader_bind(key!(p), Action::SwitchProfile);
         leader_bind(key!(q), Action::Quit);
+        // Quick-jump pickers (M7.2): `<leader>f` reuses the endpoint-search
+        // overlay; `<leader>w` opens the recent-workspace picker.
+        leader_bind(key!(f), Action::QuickJumpRequests);
+        leader_bind(key!(w), Action::QuickJumpWorkspaces);
 
         Self {
             map,
