@@ -1,0 +1,153 @@
+name: Force release
+
+# Cuts a release when release-plz won't — i.e. when nothing in the published
+# CRATE changed, but a user-facing release artifact (the installer) did.
+# release-plz versions the crate content and correctly skips installer-only
+# or workflow-only changes; this fills that gap. See CONTRIBUTING.md.
+#
+# Two entry points:
+#   - Manual: Actions tab → "Force release" → Run workflow (pick patch/minor/major).
+#   - Auto:   a push to master that changes install.sh (and nothing in the
+#             crate) force-cuts a patch release, so installer fixes ship
+#             themselves.
+#
+# Mechanism: bump the workspace version + changelog, commit to master. The
+# push drives release-plz (publish + tag) which drives release.yml (binaries,
+# installer upload, smoke-test, finalize). Everything runs on CI — no asset
+# uploads from a developer machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      reason:
+        description: Changelog line for this release
+        required: false
+        default: Forced release
+  push:
+    branches: [master]
+    paths:
+      - install.sh
+
+permissions:
+  contents: write
+
+concurrency:
+  group: force-release
+  cancel-in-progress: false
+
+jobs:
+  force-release:
+    name: Bump and release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'AlsubaieAli'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          # PAT so the bump push triggers release-plz (a GITHUB_TOKEN push
+          # would not fire downstream workflows).
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Decide whether to release
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          LEVEL_IN: ${{ inputs.level }}
+          REASON_IN: ${{ inputs.reason }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            {
+              echo "go=true"
+              echo "level=${LEVEL_IN:-patch}"
+              echo "reason=${REASON_IN:-Forced release}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Push event: only force for an installer-only change. If any crate
+          # source changed, release-plz owns the release and will carry the
+          # new install.sh along — forcing here would double up.
+          changed=$(git diff --name-only "$BEFORE" "$AFTER")
+          printf 'changed files:\n%s\n' "$changed"
+          noninfra=$(printf '%s\n' "$changed" \
+            | grep -vE '^(install\.sh|\.github/.*|docs/.*|README\.md|CONTRIBUTING\.md|release-plz\.toml)$' \
+            | grep -c .)
+          has_installer=$(printf '%s\n' "$changed" | grep -cx 'install.sh')
+          if [ "$noninfra" -gt 0 ] || [ "$has_installer" -eq 0 ]; then
+            echo "Not an installer-only change — release-plz owns this. Skipping."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "go=true"
+            echo "level=patch"
+            echo "reason=installer update"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-edit
+        if: steps.decide.outputs.go == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Bump version
+        if: steps.decide.outputs.go == 'true'
+        id: bump
+        env:
+          LEVEL: ${{ steps.decide.outputs.level }}
+        run: |
+          old=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          # Updates the workspace version, the inline churl-core dep pin, and
+          # the lockfile — all three references stay in sync.
+          cargo set-version --bump "$LEVEL"
+          new=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$new" = "$old" ]; then
+            echo "::error::version unchanged ($old) after bump — aborting"
+            exit 1
+          fi
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "Bumped $old -> $new"
+
+      - name: Update changelog
+        if: steps.decide.outputs.go == 'true'
+        env:
+          NEW: ${{ steps.bump.outputs.new }}
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          old_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -n "$old_tag" ]; then
+            git log --pretty='- %s' "${old_tag}..HEAD" \
+              | grep -vE '^- chore: release' > notes.txt || true
+          fi
+          [ -s notes.txt ] || printf -- '- %s\n' "$REASON" > notes.txt
+          today=$(date -u +%Y-%m-%d)
+          awk -v ver="$NEW" -v date="$today" -v notesfile=notes.txt '
+            /^## \[Unreleased\]/ {
+              print; print "";
+              print "## [" ver "] - " date; print "";
+              while ((getline line < notesfile) > 0) print line;
+              next
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.md.new && mv CHANGELOG.md.new CHANGELOG.md
+          rm -f notes.txt
+
+      - name: Commit and push
+        if: steps.decide.outputs.go == 'true'
+        env:
+          NEW: ${{ steps.bump.outputs.new }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock crates/churl/Cargo.toml CHANGELOG.md
+          git commit -m "chore: release v$NEW (forced)"
+          git push origin HEAD:master
+          echo "Pushed v$NEW. release-plz will publish + tag; release.yml then" \
+               "builds binaries, uploads the installer, smoke-tests it, and finalizes."
