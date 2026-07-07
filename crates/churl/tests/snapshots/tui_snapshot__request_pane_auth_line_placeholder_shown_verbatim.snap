@@ -6,7 +6,7 @@ expression: snapshot(&mut app)
 │  ▾ private                 ││GET  https://api.test/report  auth:basic  {{1}} │
 │>   Private report          │└────────────────────────────────────────────────┘
 │                            │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃ (1) Params(0)   (2) Headers(0)   (3) Auth(1)   ┃
+│                            │┃ [1] Params(0)   [2] Headers(0)   [3] Auth(1)   ┃
 │                            │┃> kind: Basic  (enter to change)                ┃
 │                            │┃  username: alice                               ┃
 │                            │┃  password: {{password}}                        ┃

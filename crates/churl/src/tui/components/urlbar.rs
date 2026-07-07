@@ -8,7 +8,7 @@
 //! [`LineEditor`]: crate::tui::components::line_editor::LineEditor
 
 use churl_core::model::{Auth, Request};
-use edtui::{EditorMode, EditorState, EditorTheme, EditorView};
+use edtui::{EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
@@ -213,8 +213,9 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
 }
 
 /// Renders the centered vim-popup URL editor (deliverable 7): an edtui editor
-/// seeded with the URL, with a NORMAL/INSERT mode indicator in the footer — the
-/// chrome the inline bar lacks. Enter commits, Esc (in normal mode) cancels.
+/// seeded with the URL. edtui's own status line shows the vim mode, so the
+/// footer carries only the commit/cancel hints, bottom-right (review round 3).
+/// Enter commits, Esc (in normal mode) cancels.
 pub fn render_popup(frame: &mut Frame, area: Rect, editor: &mut EditorState, theme: &Theme) {
     let [modal] = Layout::horizontal([Constraint::Percentage(70)])
         .flex(Flex::Center)
@@ -224,18 +225,12 @@ pub fn render_popup(frame: &mut Frame, area: Rect, editor: &mut EditorState, the
         .areas(modal);
 
     frame.render_widget(Clear, modal);
-    let mode = match editor.mode {
-        EditorMode::Normal => "NORMAL",
-        EditorMode::Insert => "INSERT",
-        EditorMode::Visual => "VISUAL",
-        EditorMode::Search => "SEARCH",
-    };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
         .title(" Edit URL ")
         .title_style(theme.title)
-        .title_bottom(format!(" {mode} · enter commit · esc cancel "));
+        .title_bottom(Line::from(" enter commit · esc cancel ").right_aligned());
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     let editor_theme = EditorTheme::default().base(Style::default());

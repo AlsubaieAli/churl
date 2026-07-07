@@ -1,16 +1,27 @@
 //! Jump-mode: single-char labels over jump targets (à la EasyMotion / Helix
-//! `gw`). Entering jump-mode assigns home-row-first labels to the three panes and
+//! `gw`). Entering jump-mode assigns mnemonic labels to the four panes
+//! (`e`xplorer, `u`rl bar, `r`equest, re`s`ponse) and home-row-first labels to
 //! each *visible* explorer row; pressing a label focuses that target (and, for an
 //! endpoint row, selects it — same as Enter). It is an overlay-level mode: it
 //! consumes every key (routing precedence slot 1, alongside Search/Palette).
 
 use super::super::app::Pane;
 
-/// The home-row-first label alphabet. Targets beyond its length are unlabelled
-/// (visible rows only, so the panes + a screenful of rows always fit).
+/// Fixed mnemonic labels for the panes: `e`xplorer, `u`rl bar, `r`equest,
+/// re`s`ponse (owner-chosen, review round 3).
+pub const PANE_LABELS: &[(char, Pane)] = &[
+    ('e', Pane::Explorer),
+    ('u', Pane::UrlBar),
+    ('r', Pane::Request),
+    ('s', Pane::Response),
+];
+
+/// The home-row-first row-label alphabet — the full alphabet minus the pane
+/// mnemonics. Targets beyond its length are unlabelled (visible rows only, so
+/// the panes + a screenful of rows always fit).
 pub const LABELS: &[char] = &[
-    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',
-    'z', 'x', 'c', 'v', 'b', 'n', 'm',
+    'a', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'q', 'w', 't', 'y', 'i', 'o', 'p', 'z', 'x', 'c', 'v',
+    'b', 'n', 'm',
 ];
 
 /// What a jump label points at.
@@ -30,21 +41,17 @@ pub struct JumpState {
 }
 
 impl JumpState {
-    /// Assigns labels to the three panes first, then to explorer rows starting
-    /// at `first_row` (the scroll offset, so labels land on the viewport rather
-    /// than offscreen rows at the top of a scrolled tree) up to `row_count`,
-    /// capping at the available label alphabet.
+    /// Assigns the fixed pane mnemonics, then row labels to explorer rows
+    /// starting at `first_row` (the scroll offset, so labels land on the
+    /// viewport rather than offscreen rows at the top of a scrolled tree) up to
+    /// `row_count`, capping at the available row-label alphabet.
     pub fn new(first_row: usize, row_count: usize) -> Self {
-        let mut targets = vec![
-            JumpTarget::Pane(Pane::Explorer),
-            JumpTarget::Pane(Pane::UrlBar),
-            JumpTarget::Pane(Pane::Request),
-            JumpTarget::Pane(Pane::Response),
-        ];
-        for row in first_row..row_count {
-            targets.push(JumpTarget::Row(row));
-        }
-        let labels = LABELS.iter().copied().zip(targets).collect();
+        let mut labels: Vec<(char, JumpTarget)> = PANE_LABELS
+            .iter()
+            .map(|&(c, pane)| (c, JumpTarget::Pane(pane)))
+            .collect();
+        let rows = (first_row..row_count).map(JumpTarget::Row);
+        labels.extend(LABELS.iter().copied().zip(rows));
         Self { labels }
     }
 
@@ -76,28 +83,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panes_get_the_first_four_labels() {
+    fn panes_get_mnemonic_labels() {
         let state = JumpState::new(0, 0);
         assert_eq!(state.labels.len(), 4);
-        assert_eq!(state.label_for_pane(Pane::Explorer), Some('a'));
-        assert_eq!(state.label_for_pane(Pane::UrlBar), Some('s'));
-        assert_eq!(state.label_for_pane(Pane::Request), Some('d'));
-        assert_eq!(state.label_for_pane(Pane::Response), Some('f'));
+        assert_eq!(state.label_for_pane(Pane::Explorer), Some('e'));
+        assert_eq!(state.label_for_pane(Pane::UrlBar), Some('u'));
+        assert_eq!(state.label_for_pane(Pane::Request), Some('r'));
+        assert_eq!(state.label_for_pane(Pane::Response), Some('s'));
+    }
+
+    #[test]
+    fn row_alphabet_excludes_pane_mnemonics() {
+        for (c, _) in PANE_LABELS {
+            assert!(
+                !LABELS.contains(c),
+                "{c:?} is both a pane mnemonic and a row label"
+            );
+        }
     }
 
     #[test]
     fn rows_follow_the_panes() {
         let state = JumpState::new(0, 2);
         assert_eq!(state.labels.len(), 6);
-        // Four panes take a/s/d/f, so rows start at 'g'.
-        assert_eq!(state.label_for_row(0), Some('g'));
-        assert_eq!(state.label_for_row(1), Some('h'));
+        // Rows use the row alphabet from its start.
+        assert_eq!(state.label_for_row(0), Some('a'));
+        assert_eq!(state.label_for_row(1), Some('d'));
         // A label resolves back to its target.
         assert_eq!(
-            state.target_for('a'),
+            state.target_for('e'),
             Some(JumpTarget::Pane(Pane::Explorer))
         );
-        assert_eq!(state.target_for('g'), Some(JumpTarget::Row(0)));
+        assert_eq!(state.target_for('a'), Some(JumpTarget::Row(0)));
         // An unassigned char resolves to nothing.
         assert_eq!(state.target_for('Z'), None);
     }
@@ -108,19 +125,17 @@ mod tests {
         // the offscreen rows at the top.
         let state = JumpState::new(5, 10);
         assert_eq!(state.label_for_row(4), None);
-        // Four panes take a/s/d/f, so the first labelled row is 'g'.
-        assert_eq!(state.label_for_row(5), Some('g'));
-        assert_eq!(state.label_for_row(9), Some('l'));
-        assert_eq!(state.target_for('g'), Some(JumpTarget::Row(5)));
+        assert_eq!(state.label_for_row(5), Some('a'));
+        assert_eq!(state.label_for_row(9), Some('h'));
+        assert_eq!(state.target_for('a'), Some(JumpTarget::Row(5)));
     }
 
     #[test]
     fn labels_are_exhausted_gracefully() {
-        // More rows than the alphabet: only LABELS.len() targets get labels.
+        // More rows than the alphabet: only the labelled targets are kept.
         let state = JumpState::new(0, 100);
-        assert_eq!(state.labels.len(), LABELS.len());
-        // The last labelled row is at index LABELS.len() - 4 - 1 (4 panes first).
-        let last_row = LABELS.len() - 4 - 1;
+        assert_eq!(state.labels.len(), PANE_LABELS.len() + LABELS.len());
+        let last_row = LABELS.len() - 1;
         assert!(state.label_for_row(last_row).is_some());
         assert!(state.label_for_row(last_row + 1).is_none());
     }

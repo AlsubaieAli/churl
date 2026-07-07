@@ -152,8 +152,8 @@ fn tab_bar_line(
         let label = if focused {
             // Prefix with 1-based digit when focused (tab-jump keys are live)
             match counts(*tab) {
-                Some(n) => format!(" ({}) {tab_label}({n}) ", i + 1),
-                None => format!(" ({}) {tab_label} ", i + 1),
+                Some(n) => format!(" [{}] {tab_label}({n}) ", i + 1),
+                None => format!(" [{}] {tab_label} ", i + 1),
             }
         } else {
             match counts(*tab) {

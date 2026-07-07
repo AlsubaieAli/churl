@@ -399,7 +399,7 @@ The response viewer gained a display pipeline and vim-like navigation. All keys 
 
 ### Wave 2 — release infra (done)
 
-- **B1 Cargo metadata**: workspace `repository` → `https://github.com/ali-subaie/churl`; both crates gain `description`, `keywords` (5), `categories`; churl-core gets `readme = "README.md"`; churl gets `readme = "../../README.md"`; churl depends on churl-core with `version = "0.1.0"` in addition to path. License files `LICENSE-MIT` and `LICENSE-APACHE` added.
+- **B1 Cargo metadata**: workspace `repository` → `https://github.com/AlsubaieAli/churl`; both crates gain `description`, `keywords` (5), `categories`; churl-core gets `readme = "README.md"`; churl gets `readme = "../../README.md"`; churl depends on churl-core with `version = "0.1.0"` in addition to path. License files `LICENSE-MIT` and `LICENSE-APACHE` added.
 - **B2 README.md**: repo root — hero one-liner, CI badge, Install (`curl|sh`, prebuilt binaries table, `cargo install`), Quickstart (mirrors `churl tutorial`), Feature matrix, Screenshot placeholder (`docs/screenshot.png` + TODO), Configuration pointer, License line.
 - **B3 `churl tutorial`**: `churl tutorial [--dir DIR]` — scaffolds `./churl-tutorial/` with `churl.toml` (workspace vars + `dev` profile, both pointing at `https://httpbingo.org`), `examples/` collection with `folder.toml`, and 3 endpoints (Get Anything, Post JSON, Bearer Auth with `{{token}}`). All files generated through real persistence seams — no hand-written TOML strings for endpoint or folder files. Refuses non-empty dir. Implemented in `crates/churl/src/tutorial.rs`; 3 CLI integration tests in `tests/cli_tutorial.rs`.
 - **B4 Release workflow** (`.github/workflows/release.yml`): tag-triggered (`v*`), `taiki-e/upload-rust-binary-action@v1`, 5-target matrix: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-pc-windows-msvc`; SHA-256 checksums attached. Uses dtolnay/rust-toolchain + Swatinem/rust-cache per-target.
@@ -416,6 +416,17 @@ The response viewer gained a display pipeline and vim-like navigation. All keys 
 **Verified by**: `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo test --all` — **360 tests** (355 baseline + 3 tutorial integration + 2 user-agent wiremock), all green; `cargo publish --dry-run -p churl-core` passes; `cargo package -p churl --no-verify --list` — 70+ files, no fixture bloat; `install.sh --dry-run` on darwin/arm64 prints `aarch64-apple-darwin`; `cargo publish --dry-run -p churl` cannot pass until churl-core is published to crates.io (path+version dep resolves against the registry at verify time).
 
 **Limitation (verbatim)**: `cargo publish --dry-run -p churl` cannot pass until churl-core is published to crates.io — the path+version dep resolves against the registry at verify time, and churl-core is not yet on crates.io. `cargo package -p churl --no-verify --list` passes and the file list is sane. The full publish dry-run will pass once the owner runs `cargo publish -p churl-core` first.
+
+### Review round 3 (owner drive-test 2026-07-07, pre-release — 6 findings, all fixed same-session)
+
+1. **Help overlay ordering**: entries were sorted alphabetically by config name, scattering related keys (`g`/`Shift-g` far apart, `h`/`j`/`k`/`l` split). Now renders in `ACTION_TABLE` order, and the table's movement block was reordered to vim `h/j/k/l`, then `Enter`, `g`/`G`, paging. (The table is also the palette order — the same grouping benefits both.)
+2. **Jump-mode pane labels made mnemonic** (owner choice; they were home-row-sequential `a/s/d/f`): `e`xplorer, `u`rl bar, `r`equest, re`s`ponse (`PANE_LABELS` in `jump.rs`); explorer rows use the home-row alphabet minus those four (guard test asserts disjointness).
+3. **Collapsed zoom stubs keep their pane chrome** (supersedes round 2's "no full block chrome in the 1-row state"): a collapsed pane is now a 3-row bordered stub — unfocused border + title (jump label included) around the tab-bar/stats summary line (`render_collapsed_stub` in app.rs).
+4. **Jump-mode bypassed the zoom invariant** (real bug): jump dispatch assigned `self.focus` directly, so jumping into the collapsed pane didn't auto-unzoom. Now routed through `set_focus` (which also auto-reopens a hidden explorer on `e`). Regression test `jump_into_collapsed_pane_auto_unzooms`.
+5. **Focused tab-title shortcut prefixes**: `(1) Params` → `[1] Params` (brackets read as keys; parens stay for row counts).
+6. **URL vim-popup footer**: hints moved to the popup's bottom-right and the `NORMAL ·` prefix dropped — edtui's own status line inside the popup already shows the mode; one mode indicator, not two. New snapshot `url_popup_editor` guards against the duplicate.
+
+**Verified by**: `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo test --all` — **363 tests** (360 baseline + jump-disjointness guard + popup snapshot; jump tests rewritten for the mnemonics), all green; PTY drive of the real binary (jump labels, zoom→jump auto-unzoom, popup footer). Repo URLs corrected `ali-subaie` → `AlsubaieAli` (actual GitHub account) across Cargo.toml, README, install.sh, core README.
 
 **Next**: ship 0.1, then M8
 

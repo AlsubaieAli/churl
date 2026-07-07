@@ -1,14 +1,13 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 128
 expression: snapshot(&mut app)
 ---
-┌ Explorer [a] ──────────────┐┌ URL [s] ───────────────────────────────────────┐
-│g ▸ orders                  ││no endpoint selected                            │
-│h ▾ users                   │└────────────────────────────────────────────────┘
-│j   List users              │┌ Request [d] ───────────────────────────────────┐
-│k   Create user             ││                                                │
-│l   Get user                ││no endpoint selected                            │
+┌ Explorer [e] ──────────────┐┌ URL [u] ───────────────────────────────────────┐
+│a ▸ orders                  ││no endpoint selected                            │
+│d ▾ users                   │└────────────────────────────────────────────────┘
+│f   List users              │┌ Request [r] ───────────────────────────────────┐
+│g   Create user             ││                                                │
+│h   Get user                ││no endpoint selected                            │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
@@ -16,7 +15,7 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┌ Response [f] ──────────────────────────────────┐
+│                            │┌ Response [s] ──────────────────────────────────┐
 │                            ││no response yet                                 │
 │                            ││                                                │
 │                            ││no endpoint selected                            │

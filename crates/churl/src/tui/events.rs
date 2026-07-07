@@ -135,11 +135,13 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::FocusExplorer, "focus-explorer", "focus explorer"),
     (Action::FocusRequest, "focus-request", "focus request"),
     (Action::FocusResponse, "focus-response", "focus response"),
-    (Action::Up, "up", "move up"),
-    (Action::Down, "down", "move down"),
-    (Action::Select, "select", "select / toggle"),
+    // Movement in vim h/j/k/l order (the help overlay renders this table's
+    // order verbatim), then g/G and paging together.
     (Action::Collapse, "collapse", "collapse / parent"),
+    (Action::Down, "down", "move down"),
+    (Action::Up, "up", "move up"),
     (Action::Expand, "expand", "expand / descend"),
+    (Action::Select, "select", "select / toggle"),
     (Action::Top, "top", "jump to top"),
     (Action::Bottom, "bottom", "jump to bottom"),
     (
