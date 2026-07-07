@@ -49,9 +49,34 @@ Each archive includes a `churl` binary and a `.sha256` checksum file.
 
 ### cargo install
 
+Builds from source (needs a Rust toolchain):
+
 ```sh
 cargo install churl
 ```
+
+### From git (bleeding edge)
+
+Builds the tip of `master` — unreleased features, no stability promises:
+
+```sh
+cargo install --git https://github.com/AlsubaieAli/churl churl
+```
+
+### Updating
+
+Updating uses the same command as installing — check what you're running
+with `churl --version`:
+
+| Installed via | Update with |
+|---|---|
+| curl \| sh | Re-run the installer with `--force` (always resolves the latest stable) |
+| Prebuilt binary | Download the newer archive and replace the binary |
+| `cargo install churl` | `cargo install churl` — cargo rebuilds when a newer version is published |
+| git | `cargo install --git … churl --force` (`--force` reinstalls even if the version number hasn't changed) |
+
+There's no self-update command yet (`churl update` is a roadmap candidate),
+and no package-manager distribution (Homebrew/AUR) so far.
 
 ### Beta releases
 
