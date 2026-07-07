@@ -29,6 +29,14 @@ INSTA_UPDATE=always cargo test --all
 cargo test --all
 ```
 
+## Code navigation (Serena)
+
+This repo is [Serena](https://github.com/oraios/serena)-enabled (`.serena/project.yml`,
+Rust via rust-analyzer). When the Serena MCP tools are available, prefer them for
+navigating the codebase — `find_symbol`, `find_referencing_symbols`,
+`get_symbols_overview` — over bulk file reads and grep. Setup is in
+CONTRIBUTING.md → "Semantic code navigation (Serena)".
+
 ## Workspace layout
 
 ```

@@ -126,3 +126,32 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 ```
+
+## Semantic code navigation (Serena)
+
+This repo is configured for [Serena](https://github.com/oraios/serena) — an MCP
+toolkit that gives coding agents LSP-backed **semantic** navigation
+(`find_symbol`, `find_referencing_symbols`, `get_symbols_overview`, symbolic
+edits) instead of grep-and-read-whole-files. rust-analyzer is the language
+server (auto-detected). The versioned config is `.serena/project.yml`; the symbol
+cache and local overrides (`.serena/cache/`, `.serena/project.local.yml`) are
+gitignored by `.serena/.gitignore`.
+
+It's optional — nothing in the build/test/release path depends on it. To enable
+it for Claude Code (per-user), from the repo root:
+
+```sh
+claude mcp add serena -- \
+  uvx --from git+https://github.com/oraios/serena \
+  serena start-mcp-server --context claude-code --project-from-cwd
+```
+
+Optionally pre-build the symbol index for faster first responses (writes to the
+gitignored cache):
+
+```sh
+uvx --from git+https://github.com/oraios/serena serena project index
+```
+
+Requires [`uv`](https://docs.astral.sh/uv/) and a Rust toolchain (rust-analyzer
+comes via `rustup component add rust-analyzer` if not already present).
