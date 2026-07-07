@@ -16,7 +16,7 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Every release starts as a prerelease: `releases/latest` ignores
       # prereleases, so the installer keeps serving the previous stable
@@ -72,7 +72,7 @@ jobs:
             target: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -100,7 +100,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Exercise the real end-to-end path against the just-built release
       # assets: download archive + checksum, verify, install, run. Catches

@@ -19,7 +19,7 @@ jobs:
     name: Check, lint, and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -44,13 +44,10 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
-    # audit-check reports findings by creating a check run; the default
-    # public-repo token is read-only, so grant it explicitly.
     permissions:
       contents: read
-      checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -58,7 +55,13 @@ jobs:
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Audit dependencies
-        uses: rustsec/audit-check@v2
+      # Run cargo-audit directly rather than rustsec/audit-check: that action
+      # has no Node.js 24 release (it targets the deprecated node20). Running
+      # the tool ourselves fails the job on advisories and needs no checks:write.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
