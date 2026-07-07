@@ -102,6 +102,10 @@ jobs:
       - name: Flip prerelease off
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # --latest is required: releases born as prereleases are not
+        # re-evaluated for the "latest" marker when the flag is flipped,
+        # so releases/latest (and the installer) would keep serving the
+        # previous version (observed on v0.1.2).
         run: |
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --prerelease=false
+            --prerelease=false --latest
