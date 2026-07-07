@@ -4101,4 +4101,153 @@ mod tests {
         assert_eq!(picker2.items[1], "● dev");
         assert_eq!(picker2.items[2], "prod");
     }
+
+    // ---- M7.2 quick-jump pickers ----
+
+    /// A second workspace fixture with a distinctly-named collection, so a
+    /// workspace switch is observable in the explorer tree.
+    fn other_workspace_fixture(root: &Path) {
+        std::fs::write(root.join("churl.toml"), "name = \"other\"\n").unwrap();
+        let coll = root.join("orders");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("create.toml"),
+            "seq = 0\nname = \"Create order\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://x/orders\"\n",
+        )
+        .unwrap();
+    }
+
+    /// `<leader>f` reuses the endpoint-search overlay as the request picker.
+    #[test]
+    fn leader_f_opens_request_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.pending_leader, "space enters pending-leader state");
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Search, "<leader>f opens the search overlay");
+        let picker = app.picker.as_ref().expect("picker open");
+        assert!(
+            picker.items.iter().any(|i| i.contains("Get user")),
+            "request picker lists the workspace endpoints: {:?}",
+            picker.items
+        );
+    }
+
+    /// `<leader>w` with no history store shows a message, not an empty picker.
+    #[test]
+    fn workspace_picker_empty_without_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        app.dispatch(Action::QuickJumpWorkspaces, None).unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.picker.is_none());
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("no recent workspaces")
+        );
+    }
+
+    /// `<leader>w` opens the workspace picker over the recency list (newest
+    /// first), storing canonical paths index-aligned with the display items.
+    #[test]
+    fn workspace_picker_lists_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir.path());
+        let store = HistoryStore::in_memory().unwrap();
+        store.touch_workspace("/ws/alpha", 1_000).unwrap();
+        store.touch_workspace("/ws/beta", 2_000).unwrap();
+        app.history = Some(store);
+
+        app.dispatch(Action::QuickJumpWorkspaces, None).unwrap();
+        assert_eq!(app.mode, Mode::WorkspacePicker);
+        let picker = app.picker.as_ref().expect("picker open");
+        assert_eq!(picker.items, vec!["/ws/beta", "/ws/alpha"]);
+        assert_eq!(
+            app.workspace_choices,
+            vec![PathBuf::from("/ws/beta"), PathBuf::from("/ws/alpha")]
+        );
+    }
+
+    /// Switching workspaces rebuilds the explorer against the new tree and resets
+    /// every endpoint/workspace-scoped field (a stale one would be a correctness
+    /// bug). Also records the switch in the recency table.
+    #[test]
+    fn switch_workspace_resets_state_and_loads_new_tree() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+
+        // Load an endpoint from A and make the app "busy": dirty editor, response
+        // pane focus, an active profile, a non-Idle response.
+        app.explorer.expand().unwrap();
+        app.guarded_load(PendingLoad::Row(1)).unwrap();
+        assert!(app.selected.is_some());
+        app.editor = EditorState::new(Lines::from("dirty body"));
+        app.active_profile = Some("dev".to_owned());
+        app.focus = Pane::Response;
+        app.response = ResponseState::Cancelled;
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        let path_b = dir_b.path().to_path_buf();
+
+        app.switch_workspace(path_b.clone()).unwrap();
+
+        // The workspace + explorer now reflect B.
+        assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
+        let names: Vec<String> = app.explorer.rows().iter().map(|r| r.name.clone()).collect();
+        assert!(names.iter().any(|n| n == "orders"), "shows B: {names:?}");
+        assert!(!names.iter().any(|n| n == "users"), "no A rows: {names:?}");
+
+        // Endpoint/workspace-scoped state is reset.
+        assert!(app.selected.is_none());
+        assert!(app.loaded_snapshot.is_none());
+        assert_eq!(String::from(app.editor.lines.clone()), "");
+        assert!(app.active_profile.is_none());
+        assert_eq!(app.explorer.cursor, 0);
+        assert_eq!(app.focus, Pane::Explorer);
+        assert!(matches!(app.response, ResponseState::Idle));
+        assert!(!app.is_dirty(), "no dirty state after switch");
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("switched to other")
+        );
+
+        // Recency recorded the switch (canonical path of B).
+        let recent = app.history.as_ref().unwrap().recent_workspaces(10).unwrap();
+        let canon = canonical_path(&path_b).to_string_lossy().into_owned();
+        assert!(recent.contains(&canon), "recency has B: {recent:?}");
+    }
+
+    /// A dirty switch defers to the discard-changes confirm (workspace targets
+    /// are always "other"); discarding then performs the switch.
+    #[test]
+    fn dirty_workspace_switch_defers_to_confirm() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.explorer.expand().unwrap();
+        app.guarded_load(PendingLoad::Row(1)).unwrap();
+        app.editor = EditorState::new(Lines::from("unsaved edit"));
+        assert!(app.is_dirty());
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        // Deferred: confirm overlay open, switch not yet performed.
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "demo");
+
+        // Discard: the switch goes through.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
+        assert!(app.selected.is_none());
+    }
 }
