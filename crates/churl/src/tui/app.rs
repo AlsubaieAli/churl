@@ -3359,7 +3359,29 @@ fn export_target(root: &Path, input: &str) -> Result<PathBuf, String> {
     if !normalized.starts_with(&root) {
         return Err("path escapes the workspace root".to_owned());
     }
+    // The lexical check above can be fooled by a symlinked component *inside* the
+    // root that points elsewhere (the subsequent write follows symlinks).
+    // Canonicalize the deepest existing ancestor of the target and re-check it
+    // against the root, so an `exports -> /etc` symlink can't tunnel out.
+    if let Some(real) = existing_ancestor_canonical(&normalized)
+        && !real.starts_with(&root)
+    {
+        return Err("path escapes the workspace root (symlinked component)".to_owned());
+    }
     Ok(normalized)
+}
+
+/// Canonicalizes the deepest ancestor of `path` that actually exists on disk
+/// (the target itself usually does not exist yet). Returns `None` if nothing up
+/// the chain resolves.
+fn existing_ancestor_canonical(path: &Path) -> Option<PathBuf> {
+    let mut probe = path;
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            return Some(real);
+        }
+        probe = probe.parent()?;
+    }
 }
 
 /// Resolves `.`/`..` components without touching the filesystem. A leading `..`
@@ -3418,6 +3440,21 @@ mod tests {
         assert!(export_target(root, "exports/../../escape.json").is_err());
         assert!(export_target(root, "/etc/passwd").is_err());
         assert!(export_target(root, "   ").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_target_rejects_symlinked_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        // A symlinked dir inside the root that points elsewhere: lexically the
+        // target is "under" the root, but the write would follow the link out.
+        std::os::unix::fs::symlink(outside.path(), root.join("exports")).unwrap();
+        assert!(
+            export_target(root, "exports/leak.json").is_err(),
+            "a symlinked component must not tunnel out of the workspace"
+        );
     }
 
     #[test]

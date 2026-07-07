@@ -18,7 +18,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::config::{auth_secret_violations, is_template_placeholder, looks_like_secret_name};
-use crate::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, Request};
+use crate::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, Request, Workspace};
 use crate::persistence::{self, OpenWorkspace, PersistenceError};
 
 /// The Postman v2.1 collection schema URL churl emits on export and (loosely)
@@ -169,11 +169,10 @@ fn walk_items(items: &[Value], folder_path: &mut Vec<String>, ctx: &mut ImportCt
         };
         if let Some(sub) = obj.get("item").and_then(Value::as_array) {
             // Folder: recurse with the folder name pushed on.
-            let folder_name = obj
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("folder")
-                .to_owned();
+            let folder_name = match obj.get("name").and_then(Value::as_str) {
+                Some(name) if !name.trim().is_empty() => name.to_owned(),
+                _ => "folder".to_owned(),
+            };
             folder_path.push(folder_name);
             walk_items(sub, folder_path, ctx);
             folder_path.pop();
@@ -225,6 +224,12 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
         .unwrap_or(Method::Get);
 
     let url = map_url(request.get("url"));
+    if url.is_empty() && request.get("url").is_some_and(|v| !v.is_null()) {
+        ctx.warnings.push(
+            "request URL had no `url.raw` (structured host/path form) — imported with an empty URL"
+                .to_owned(),
+        );
+    }
     let headers = map_headers(request.get("header"));
     let body = map_body(request.get("body"), ctx);
     let auth = map_auth(request.get("auth"), ctx);
@@ -488,6 +493,26 @@ pub fn write_import(
 ) -> Result<ImportSummary, InterchangeError> {
     use std::collections::BTreeMap;
 
+    // Bootstrap a manifest so an import into a bare directory yields a workspace
+    // the TUI can actually open and display — not just loose files on disk. An
+    // existing manifest is left untouched (in-TUI imports already have one).
+    let manifest = root.join(persistence::MANIFEST_FILENAME);
+    if !manifest.exists() {
+        let name = if import.name.trim().is_empty() {
+            "imported".to_owned()
+        } else {
+            import.name.clone()
+        };
+        persistence::save_workspace_manifest(
+            root,
+            &Workspace {
+                name,
+                vars: BTreeMap::new(),
+                profiles: Vec::new(),
+            },
+        )?;
+    }
+
     // Group requests by their flattened collection name, preserving first-seen
     // order for a stable, predictable layout.
     let mut order: Vec<String> = Vec::new();
@@ -504,11 +529,24 @@ pub fn write_import(
         groups.entry(collection_name).or_default().push(req);
     }
 
+    let mut warnings = import.warnings.clone();
     let mut endpoints_written = 0usize;
-    let mut collections_written = 0usize;
+    // Distinct group names can slugify to the same directory (e.g. "A B" and
+    // "a-b", or a nested path colliding with a literal folder). `ensure_collection`
+    // reuses the existing dir, silently merging them — detect that and warn.
+    let mut dir_owner: BTreeMap<std::path::PathBuf, String> = BTreeMap::new();
     for collection_name in &order {
         let dir = ensure_collection(root, collection_name)?;
-        collections_written += 1;
+        match dir_owner.get(&dir) {
+            Some(prev) if prev != collection_name => warnings.push(format!(
+                "collections {prev:?} and {collection_name:?} map to the same directory \
+                 (name collision) — their endpoints were merged"
+            )),
+            Some(_) => {}
+            None => {
+                dir_owner.insert(dir.clone(), collection_name.clone());
+            }
+        }
         for req in &groups[collection_name] {
             // `create_endpoint` makes a default file + name; overwrite it with
             // the imported request via `save_endpoint` (which runs the secrets
@@ -524,8 +562,8 @@ pub fn write_import(
 
     Ok(ImportSummary {
         endpoints: endpoints_written,
-        collections: collections_written,
-        warnings: import.warnings.clone(),
+        collections: dir_owner.len(),
+        warnings,
     })
 }
 
@@ -1104,5 +1142,66 @@ mod tests {
         // Nested folders flatten via " / " → slugified "outer-inner".
         let nested = dir.path().join("outer-inner").join("deep.toml");
         assert!(nested.exists(), "missing {}", nested.display());
+    }
+
+    #[test]
+    fn write_import_bootstraps_manifest_in_bare_dir() {
+        let json = r#"{ "info": { "name": "My API" },
+            "item": [ { "name": "list", "request": { "method": "GET", "url": { "raw": "https://e/l" } } } ] }"#;
+        let import = import_postman_v21(json).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Bare dir: no manifest yet, so the TUI would open an empty workspace.
+        assert!(persistence::load_workspace_manifest(dir.path()).is_err());
+        write_import(dir.path(), &import).unwrap();
+        // A manifest now exists → the launched TUI can open + display the import.
+        let ws =
+            persistence::load_workspace_manifest(dir.path()).expect("manifest was bootstrapped");
+        assert_eq!(ws.name, "My API");
+        // A second import into the now-established workspace keeps the manifest.
+        let other = import_postman_v21(r#"{ "info": { "name": "Renamed" }, "item": [] }"#).unwrap();
+        write_import(dir.path(), &other).unwrap();
+        assert_eq!(
+            persistence::load_workspace_manifest(dir.path())
+                .unwrap()
+                .name,
+            "My API",
+            "an existing manifest is preserved, not overwritten"
+        );
+    }
+
+    #[test]
+    fn write_import_warns_on_collection_slug_collision() {
+        // Two folder names that slugify to the same directory ("a-b").
+        let json = r#"{ "info": { "name": "root" },
+            "item": [
+                { "name": "A B", "item": [ { "name": "one", "request": { "method": "GET", "url": { "raw": "https://e/1" } } } ] },
+                { "name": "a-b", "item": [ { "name": "two", "request": { "method": "GET", "url": { "raw": "https://e/2" } } } ] }
+            ] }"#;
+        let import = import_postman_v21(json).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let summary = write_import(dir.path(), &import).unwrap();
+        assert_eq!(summary.endpoints, 2);
+        assert_eq!(
+            summary.collections, 1,
+            "distinct names collided into one dir"
+        );
+        assert!(
+            summary.warnings.iter().any(|w| w.contains("collision")),
+            "expected a collision warning, got {:?}",
+            summary.warnings
+        );
+    }
+
+    #[test]
+    fn structured_url_without_raw_warns_and_imports_empty() {
+        let json = r#"{ "info": { "name": "x" },
+            "item": [ { "name": "q", "request": { "method": "GET", "url": { "host": ["e"], "path": ["p"] } } } ] }"#;
+        let import = import_postman_v21(json).unwrap();
+        assert_eq!(import.requests[0].endpoint.request.url, "");
+        assert!(
+            import.warnings.iter().any(|w| w.contains("url.raw")),
+            "expected a url.raw warning, got {:?}",
+            import.warnings
+        );
     }
 }
