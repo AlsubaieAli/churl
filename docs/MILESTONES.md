@@ -14,9 +14,16 @@
 | M6.5 | UX review round 1 (owner drive-test fixes) | **done** |
 | M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | **done** |
 | M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | **done** |
-| M7 | Polish + perf + release | planned |
+| M7 | Polish + perf + release | **done** |
+| M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | planned |
+| M7.2 | Environments & vars editor | planned |
+| M7.3 | Quick-jump pickers (requests + workspaces) | planned |
+| M7.4 | Request sequences (E2E testing) | planned |
+| M7.5 | Concurrent requests (throttle / load testing) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
+
+> M7.1–M7.5 scheduled 2026-07-07 (owner priority: "these features need to be ready before the plugin feature, right after release") — fractional numbers per the M6.5 precedent so baked-in M8/M9 references stay valid. They run after Ship 0.1 and before M8/M9; order within the block is a proposal, adjustable per session.
 
 > Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
 
@@ -428,7 +435,7 @@ The response viewer gained a display pipeline and vim-like navigation. All keys 
 
 **Verified by**: `cargo fmt --all --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo test --all` — **363 tests** (360 baseline + jump-disjointness guard + popup snapshot; jump tests rewritten for the mnemonics), all green; PTY drive of the real binary (jump labels, zoom→jump auto-unzoom, popup footer). Repo URLs corrected `ali-subaie` → `AlsubaieAli` (actual GitHub account) across Cargo.toml, README, install.sh, core README.
 
-**Next**: ship 0.1, then M8
+**Next**: ship 0.1, then M7.1–M7.5 (owner priority 2026-07-07: interchange/env-editor/pickers/sequences/concurrency before M8/M9)
 
 ---
 
@@ -446,9 +453,91 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 ---
 
+## M7.1 — Collection interchange (JSON import/export + in-TUI curl paste/copy)
+
+**Scope**: Getting collections in and out of churl (owner requests 2026-07-05 + clarifications 2026-07-07). churl becomes adoptable by people with existing Postman/JSON collections, and requests become shareable without leaving the TUI.
+
+**Deliverables**:
+- **JSON collection import** — two entry points (owner requirement 2026-07-07): (a) in the TUI (palette action + keybind, path prompt with completion); (b) at launch via a flag taking the JSON file path (e.g. `churl --import-collection <file.json>` opens the TUI with the imported collection loaded). Imported collections land as normal file-per-endpoint TOML in the open workspace — import is a one-time conversion, not a second storage format.
+- **Export** — scope selectable: one **collection** or the whole **workspace** (owner requirement 2026-07-07); output written to a specific path **inside the currently open project/workspace** (owner requirement — e.g. `exports/<name>.json`, path shown and overridable). Palette action + keybind. Secrets policy carries over: placeholders exported verbatim, literal secrets refused (M5 rule).
+- **In-TUI curl paste**: paste/enter a curl command in the TUI → new endpoint via the existing M4 `import` module (today it's CLI-only).
+- **In-TUI copy-as-curl**: copy the selected request as a curl one-liner via the existing M4 `export` module + OSC 52 (M7 copy path). Default copies `{{var}}` placeholders verbatim; resolved-value copy is an explicit variant (secrets caution).
+- Tests: import corpus against real-world collection fixtures, export→import round-trip, path handling (workspace-relative, refuses escaping the workspace), TUI wiring.
+
+**Open questions**:
+- JSON dialect(s): Postman Collection v2.1 first is the working assumption (largest install base); Insomnia/Bruno/OpenAPI later or via M9 importer plugins. Export dialect: same as import (round-trip) vs churl-native JSON — decide in the design session.
+
+**Next**: M7.2
+
+---
+
+## M7.2 — Environments & vars editor
+
+**Scope**: In-app editing for the M6 three-scope var system (owner request 2026-07-05, clarified 2026-07-07). Today vars/profiles are file-edit-only; this makes them first-class in the TUI.
+
+**Deliverables** (design session first — same simplicity principles as the rest of the TUI, owner requirement):
+- **Own layout or large popover pane with split view** (owner's words): left pane selects the scope — whole workspace, a collection, or a profile; right pane edits the selected scope's vars (add / edit / delete).
+- Explicit **save mechanism** (owner requirement): `w` to save through the existing format-preserving toml_edit persistence; dirty tracking + discard guard reusing the M6.6 `guarded_load` seams.
+- Profile management in the same view: create/rename/delete profiles, edit their vars; active profile stays visible.
+- Secrets rules unchanged: name-marker enforcement on save, masked display.
+- Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
+- Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
+
+**Next**: M7.3
+
+---
+
+## M7.3 — Quick-jump pickers (requests + workspaces)
+
+**Scope**: Telescope/snacks-style navigation (owner addition 2026-07-07) — type-to-search pickers on logical, remappable hotkeys, building on the existing shared picker overlay + nucleo-matcher (M2).
+
+**Deliverables**:
+- **Request picker**: one hotkey (logical default, remappable via `[keys]` like everything else) → fuzzy picker over all endpoints across all collections in the workspace, type to filter, Enter opens the request file in the Request pane. Explicitly an alternative to `f`-jump navigation (owner: "could allow us to skip jumping using `f-char`").
+- **Workspace picker**: a second hotkey → recently opened workspaces (recency list persisted in the SQLite state DB — never in workspace files), type to filter, Enter loads that workspace (through `guarded_load` so dirty state is never silently dropped).
+- Both honour the M6.6 dirty guards and appear in the `?` help overlay + which-key.
+- Tests: picker filtering, recency persistence + ordering, dirty-guard interaction, snapshots.
+
+**Open questions**:
+- Default keybinds (decide in design session against the live keymap — candidates: `<leader>f` / `<leader>w`, or Ctrl-P-style): must not collide with pane-local overlays.
+
+**Next**: M7.4
+
+---
+
+## M7.4 — Request sequences (API E2E testing)
+
+**Scope**: Run endpoints in a defined order for end-to-end API testing (owner request from day one, 2026-07-05; promoted from backlog 2026-07-07). Intuitive TUI is a hard requirement (owner 2026-07-07) — same simplicity principles, design session first.
+
+**Deliverables**:
+- Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
+- **Value extraction**: pull values out of a step's response (JSONPath or similar) into variables consumed by later steps — extracted values enter the same `{{var}}` chain (single resolver seam, M9 guardrail).
+- **Run view**: per-step status/timing as the sequence executes; a failed step halts (continue-on-error as a knob); results inspectable per step in the normal response viewer.
+- TUI: create/edit/reorder sequence steps in-app, run on a keybind; sequences visible in the explorer.
+- Depends on M3 execution + M6 templating (both done — this was the blocker note in the backlog entry).
+- Tests: wiremock multi-step suites (extraction chain, halt-on-fail, var precedence with extracted values), sequence TOML round-trip.
+
+**Next**: M7.5
+
+---
+
+## M7.5 — Concurrent requests (throttle / load testing)
+
+**Scope**: Fire N copies of one endpoint (or several endpoints) concurrently to expose rate limits and race bugs (owner request from day one, 2026-07-05; promoted from backlog 2026-07-07). Intuitive TUI required — design session first.
+
+**Deliverables**:
+- Concurrency runner on M3's task-per-request + `AbortHandle` architecture: N copies, configurable concurrency/pacing (burst vs paced — knobs decided in design session), cancellable as a batch.
+- **Results-comparison view**: per-request status/timing side by side; summary line (success/fail counts, min/median/max latency); individual responses inspectable.
+- History: batch runs recorded in SQLite without flooding the per-endpoint history view (grouping decided in design).
+- Guardrail: this is a testing aid, not a load-cannon — sane default caps, loud confirmation above them.
+- Tests: wiremock concurrency suites (N-copy fan-out, cancel mid-batch, timing capture), results-view snapshots.
+
+**Next**: M8
+
+---
+
 ## M8 — Cookies + proxy
 
-**Scope**: Session and network-environment support (promoted from the backlog, owner decision 2026-07-05 — first post-release milestone).
+**Scope**: Session and network-environment support (promoted from the backlog, owner decision 2026-07-05; since 2026-07-07 it follows the M7.1–M7.5 block — owner priority puts those before everything else post-release).
 
 **Deliverables**:
 - **Cookie jar**: opt-in per workspace (`cookies = true` in `churl.toml`); reqwest cookie store enabled on the client; `Set-Cookie` responses carried into subsequent requests. Persistent cookies live in the SQLite state DB (the day-one ARCHITECTURE decision — never in workspace files); a `churl cookies` subcommand (or palette action) lists/clears the jar
@@ -486,11 +575,13 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 ## Post-release backlog (owner requests, 2026-07-05)
 
-Not yet scheduled into milestones; each becomes an M9+ milestone (or folds into an existing one) when picked up.
+Not yet scheduled into milestones; each becomes a milestone (or folds into an existing one) when picked up.
+
+> Requirements-drop #5 (2026-07-07): JSON collection import/export, in-TUI curl paste/copy-as-curl, and in-app environment editing were owner requests from the project's start but never reached this backlog or any milestone — the owner caught it at ship-readiness review. All three are now scheduled (M7.1–M7.3) alongside the two backlog promotions (M7.4/M7.5).
 
 - ~~Auth types~~ → **promoted to milestone M5** in the 2026-07-05 plan review (OAuth2 client-credentials remains here as backlog).
-- **Request sequences (API E2E testing)** — run endpoints in a defined order; extract values from a response (JSONPath or similar) into variables consumed by later requests. Depends on M3 execution + M6 templating (extracted values enter the same `{{var}}` chain). Sequence definitions live in the workspace as TOML (same file-per-unit, `seq`-ordered philosophy).
-- **Concurrent requests (throttle / race-condition testing)** — fire N copies of one endpoint (or several endpoints) concurrently; report per-request status/timing side by side to expose rate limits and race bugs. Builds directly on M3's task-per-request + `AbortHandle` architecture; needs a results-comparison view.
+- ~~Request sequences (API E2E testing)~~ → **promoted to milestone M7.4** (owner priority 2026-07-07: before plugins, right after release).
+- ~~Concurrent requests (throttle / race-condition testing)~~ → **promoted to milestone M7.5** (owner priority 2026-07-07).
 - ~~Cookies / sessions~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 - ~~Proxy configuration + per-request TLS-skip~~ → **promoted to milestone M8** (owner decision 2026-07-05).
 - **Multipart (`-F`) bodies** (approved, owner decision 2026-07-06 — resolves the M4 open question): multipart/form-data as a model feature — multi-part body (fields + file refs), TUI body-type editing, reqwest multipart execution, `-F` import/export remap replacing the hard `Unsupported` error. Slot after M8.
