@@ -3396,6 +3396,36 @@ mod tests {
     use super::*;
     use churl_core::model::Timing;
 
+    #[test]
+    fn export_target_stays_inside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A relative path resolves under the (canonicalized) root.
+        let target = export_target(root, "exports/api.json").unwrap();
+        let canon_root = root.canonicalize().unwrap();
+        assert!(target.starts_with(&canon_root), "{target:?}");
+        assert!(target.ends_with("exports/api.json"));
+        // A nested `..` that stays inside is fine.
+        let ok = export_target(root, "exports/../api.json").unwrap();
+        assert_eq!(ok, canon_root.join("api.json"));
+    }
+
+    #[test]
+    fn export_target_rejects_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(export_target(root, "../escape.json").is_err());
+        assert!(export_target(root, "exports/../../escape.json").is_err());
+        assert!(export_target(root, "/etc/passwd").is_err());
+        assert!(export_target(root, "   ").is_err());
+    }
+
+    #[test]
+    fn default_export_path_slugifies() {
+        assert_eq!(default_export_path("My API"), "exports/my-api.json");
+        assert_eq!(default_export_path("  "), "exports/export.json");
+    }
+
     fn meta() -> ResponseMeta {
         ResponseMeta {
             method: "GET".to_owned(),

@@ -15,7 +15,7 @@
 | M6.6 | Request editing UX (URL bar, tabs, in-app CRUD) | **done** |
 | M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | **done** |
 | M7 | Polish + perf + release | **done** |
-| M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | planned |
+| M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | **done** |
 | M7.2 | Environments & vars editor | planned |
 | M7.3 | Quick-jump pickers (requests + workspaces) | planned |
 | M7.4 | Request sequences (E2E testing) | planned |
@@ -457,15 +457,18 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 **Scope**: Getting collections in and out of churl (owner requests 2026-07-05 + clarifications 2026-07-07). churl becomes adoptable by people with existing Postman/JSON collections, and requests become shareable without leaving the TUI.
 
-**Deliverables**:
-- **JSON collection import** — two entry points (owner requirement 2026-07-07): (a) in the TUI (palette action + keybind, path prompt with completion); (b) at launch via a flag taking the JSON file path (e.g. `churl --import-collection <file.json>` opens the TUI with the imported collection loaded). Imported collections land as normal file-per-endpoint TOML in the open workspace — import is a one-time conversion, not a second storage format.
-- **Export** — scope selectable: one **collection** or the whole **workspace** (owner requirement 2026-07-07); output written to a specific path **inside the currently open project/workspace** (owner requirement — e.g. `exports/<name>.json`, path shown and overridable). Palette action + keybind. Secrets policy carries over: placeholders exported verbatim, literal secrets refused (M5 rule).
-- **In-TUI curl paste**: paste/enter a curl command in the TUI → new endpoint via the existing M4 `import` module (today it's CLI-only).
-- **In-TUI copy-as-curl**: copy the selected request as a curl one-liner via the existing M4 `export` module + OSC 52 (M7 copy path). Default copies `{{var}}` placeholders verbatim; resolved-value copy is an explicit variant (secrets caution).
-- Tests: import corpus against real-world collection fixtures, export→import round-trip, path handling (workspace-relative, refuses escaping the workspace), TUI wiring.
+**Deliverables** (all shipped):
+- ✅ **JSON collection import** — Postman Collection v2.1 → churl endpoints via the new `churl_core::interchange` module (hand-rolled `serde_json::Value` mapping — no strict schema crate, so messy real-world exports still import). Two entry points: (a) in the TUI — palette `import collection (JSON)` + a path prompt; (b) at launch — global `churl --import-collection <file.json>`, which writes into the cwd workspace, prints a summary, then continues into the TUI. Both share `interchange::write_import`. Imported requests land as normal file-per-endpoint TOML — a one-time conversion, not a second storage format.
+- ✅ **Export** — scope-selectable (one **collection** or the whole **workspace**) with a selectable **dialect**: Postman v2.1 (round-trips) or churl-native JSON (lossless). Palette actions + a path prompt pre-filled with `exports/<slug>.json`; writes are guarded to stay inside the workspace root (`..`/absolute escapes refused). Secrets policy carries over: `{{var}}` placeholders exported verbatim, literal secret auth refused (reuses `auth_secret_violations`).
+- ✅ **In-TUI curl paste**: palette `paste curl as new endpoint` → prompt → `churl_core::import::import_curl` → new endpoint in the selected collection.
+- ✅ **In-TUI copy-as-curl**: `C` in the Request pane (and palette) copies the loaded request as a curl one-liner via `export::export_curl` + OSC 52. Default copies `{{var}}` verbatim; a separate palette variant resolves vars first (explicit secrets-caution opt-in).
+- ✅ Tests: Postman import fixtures (nested folders, each auth kind, each body mode incl. an unsupported one, disabled headers, `{{var}}` URL), Postman round-trip (churl → Postman JSON → churl structural equality), native-export validity, secret-refusal on export, `write_import` folder-flattening, CLI parse + fail-loud paths, export path-escape guard, and the palette/keymap TUI wiring.
 
-**Open questions**:
-- JSON dialect(s): Postman Collection v2.1 first is the working assumption (largest install base); Insomnia/Bruno/OpenAPI later or via M9 importer plugins. Export dialect: same as import (round-trip) vs churl-native JSON — decide in the design session.
+**Decisions made** (see DECISIONS.md 2026-07-08):
+- **Export dialect is user-selectable** (Postman v2.1 for round-trip, churl-native JSON for lossless) — resolves the design-session open question.
+- **Nested Postman folders flatten on import** — `folder_path` is joined with `" / "` into a single collection name (nested collection directories are a post-release backlog item). Root-level requests land in a collection named after the import.
+- **Postman body-mode limits**: `raw` (Text/Json by `options.raw.language`) and `urlencoded` (→ Form) import; `formdata`/`file`/`graphql` drop the body with a warning. Postman collection `variable[]` is not imported (warned).
+- **Query stays in the URL** on Postman import (matches curl-import behaviour — no explosion into params).
 
 **Next**: M7.2
 

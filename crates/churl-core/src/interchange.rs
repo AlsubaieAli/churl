@@ -1080,4 +1080,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn write_import_flattens_folders_into_collection_dirs() {
+        let json = r#"{
+            "info": { "name": "My API" },
+            "item": [
+                { "name": "root req", "request": { "method": "GET", "url": { "raw": "https://e/r" } } },
+                { "name": "outer", "item": [
+                    { "name": "inner", "item": [
+                        { "name": "deep", "request": { "method": "POST", "url": { "raw": "https://e/d" } } }
+                    ] }
+                ] }
+            ]
+        }"#;
+        let import = import_postman_v21(json).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let summary = write_import(dir.path(), &import).unwrap();
+        assert_eq!(summary.endpoints, 2);
+        assert_eq!(summary.collections, 2);
+        // Root-level request → a collection named after the import.
+        assert!(dir.path().join("my-api").join("root-req.toml").exists());
+        // Nested folders flatten via " / " → slugified "outer-inner".
+        let nested = dir.path().join("outer-inner").join("deep.toml");
+        assert!(nested.exists(), "missing {}", nested.display());
+    }
 }
