@@ -49,9 +49,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
-          # PAT so the bump push triggers release-plz (a GITHUB_TOKEN push
-          # would not fire downstream workflows).
+          # Persist the PAT (default) so the later `git push` is authenticated
+          # — this job pushes a commit directly, unlike the release-plz jobs.
+          # The PAT (not GITHUB_TOKEN) also makes that push trigger release-plz.
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Decide whether to release
