@@ -16,8 +16,8 @@
 | M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | **done** |
 | M7 | Polish + perf + release | **done** |
 | M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | planned |
-| M7.2 | Environments & vars editor | planned |
-| M7.3 | Quick-jump pickers (requests + workspaces) | planned |
+| M7.2 | Quick-jump pickers (requests + workspaces) | planned |
+| M7.3 | Environments & vars editor | planned |
 | M7.4 | Request sequences (E2E testing) | planned |
 | M7.5 | Concurrent requests (throttle / load testing) | planned |
 | M8 | Cookies + proxy | planned |
@@ -471,23 +471,7 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 ---
 
-## M7.2 — Environments & vars editor
-
-**Scope**: In-app editing for the M6 three-scope var system (owner request 2026-07-05, clarified 2026-07-07). Today vars/profiles are file-edit-only; this makes them first-class in the TUI.
-
-**Deliverables** (design session first — same simplicity principles as the rest of the TUI, owner requirement):
-- **Own layout or large popover pane with split view** (owner's words): left pane selects the scope — whole workspace, a collection, or a profile; right pane edits the selected scope's vars (add / edit / delete).
-- Explicit **save mechanism** (owner requirement): `w` to save through the existing format-preserving toml_edit persistence; dirty tracking + discard guard reusing the M6.6 `guarded_load` seams.
-- Profile management in the same view: create/rename/delete profiles, edit their vars; active profile stays visible.
-- Secrets rules unchanged: name-marker enforcement on save, masked display.
-- Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
-- Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
-
-**Next**: M7.3
-
----
-
-## M7.3 — Quick-jump pickers (requests + workspaces)
+## M7.2 — Quick-jump pickers (requests + workspaces)
 
 **Scope**: Telescope/snacks-style navigation (owner addition 2026-07-07) — type-to-search pickers on logical, remappable hotkeys, building on the existing shared picker overlay + nucleo-matcher (M2).
 
@@ -499,6 +483,22 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 **Open questions**:
 - Default keybinds (decide in design session against the live keymap — candidates: `<leader>f` / `<leader>w`, or Ctrl-P-style): must not collide with pane-local overlays.
+
+**Next**: M7.3
+
+---
+
+## M7.3 — Environments & vars editor
+
+**Scope**: In-app editing for the M6 three-scope var system (owner request 2026-07-05, clarified 2026-07-07). Today vars/profiles are file-edit-only; this makes them first-class in the TUI.
+
+**Deliverables** (design session first — same simplicity principles as the rest of the TUI, owner requirement):
+- **Own layout or large popover pane with split view** (owner's words): left pane selects the scope — whole workspace, a collection, or a profile; right pane edits the selected scope's vars (add / edit / delete).
+- Explicit **save mechanism** (owner requirement): `w` to save through the existing format-preserving toml_edit persistence; dirty tracking + discard guard reusing the M6.6 `guarded_load` seams.
+- Profile management in the same view: create/rename/delete profiles, edit their vars; active profile stays visible.
+- Secrets rules unchanged: name-marker enforcement on save, masked display.
+- Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
+- Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
 
 **Next**: M7.4
 
