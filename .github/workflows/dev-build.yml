@@ -1,0 +1,119 @@
+name: Dev build
+
+# Tester builds for unreleased code — never touches releases or tags.
+# Two ways in:
+#   1. Actions tab → "Dev build" → Run workflow (pick any branch/ref).
+#   2. Comment `/build` on a pull request (collaborators only).
+# Binaries land as workflow artifacts (14-day retention), one per platform.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build (defaults to the selected branch)"
+        required: false
+        default: ""
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    name: Resolve ref
+    # For comments: only PR comments that start with /build, from users with
+    # push access — issue_comment workflows run with the default branch's
+    # config, so gate before building anyone's code.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/build') &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      pr: ${{ steps.resolve.outputs.pr }}
+    steps:
+      - name: Resolve build ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "issue_comment" ]; then
+            pr="${{ github.event.issue.number }}"
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq .head.sha)"
+            echo "ref=$sha" >> "$GITHUB_OUTPUT"
+            echo "pr=$pr" >> "$GITHUB_OUTPUT"
+            # Acknowledge the comment so the tester knows the build started.
+            gh api "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" \
+              -f content=rocket > /dev/null
+          else
+            echo "ref=${{ inputs.ref || github.ref }}" >> "$GITHUB_OUTPUT"
+            echo "pr=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: churl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: churl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: churl.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.ref }}
+          # Dev builds compile unreviewed PR code; keep the token out of it.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: dev-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p churl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: churl-dev-${{ matrix.target }}
+          path: target/release/${{ matrix.bin }}
+          retention-days: 14
+          if-no-files-found: error
+
+  notify:
+    name: Comment on PR
+    needs: [gate, build]
+    if: always() && needs.gate.outputs.pr != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            body="Dev build ready for \`${{ needs.gate.outputs.ref }}\` — download the artifacts (macOS arm64, Linux x86_64, Windows x86_64) from the [workflow run]($run_url). Artifacts expire in 14 days."
+          else
+            body="Dev build **failed** for \`${{ needs.gate.outputs.ref }}\` — see the [workflow run]($run_url)."
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/issues/${{ needs.gate.outputs.pr }}/comments" \
+            -f body="$body" > /dev/null

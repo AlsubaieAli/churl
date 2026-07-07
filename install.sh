@@ -5,6 +5,7 @@
 #
 # Options:
 #   --to DIR      Install to DIR instead of ~/.local/bin
+#   --tag TAG     Install a specific release (e.g. v0.2.0-beta.1) instead of latest
 #   --force       Overwrite an existing churl binary
 #   --dry-run     Print resolved URL/target and exit without downloading
 #
@@ -17,21 +18,32 @@ REPO="AlsubaieAli/churl"
 BIN="churl"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 
-# --- option parsing ---
+# --- option parsing (both --opt VALUE and --opt=VALUE forms) ---
 TO_DIR=""
+TAG=""
 FORCE=0
 DRY_RUN=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --to=*) TO_DIR="${arg#--to=}" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --to=*) TO_DIR="${1#--to=}" ;;
+    --to)
+      [ $# -ge 2 ] || { printf 'error: --to requires a value\n' >&2; exit 1; }
+      TO_DIR="$2"; shift
+      ;;
+    --tag=*) TAG="${1#--tag=}" ;;
+    --tag)
+      [ $# -ge 2 ] || { printf 'error: --tag requires a value\n' >&2; exit 1; }
+      TAG="$2"; shift
+      ;;
     --force) FORCE=1 ;;
     --dry-run) DRY_RUN=1 ;;
     *)
-      printf 'error: unknown option %s\n' "$arg" >&2
+      printf 'error: unknown option %s\n' "$1" >&2
       exit 1
       ;;
   esac
+  shift
 done
 
 INSTALL_DIR="${TO_DIR:-$DEFAULT_INSTALL_DIR}"
@@ -69,7 +81,12 @@ case "$OS" in
 esac
 
 ARCHIVE="${BIN}-${TARGET}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/latest/download"
+# `latest` never resolves to a prerelease — betas are only reachable via --tag.
+if [ -n "$TAG" ]; then
+  BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+else
+  BASE_URL="https://github.com/${REPO}/releases/latest/download"
+fi
 ARCHIVE_URL="${BASE_URL}/${ARCHIVE}"
 CHECKSUM_URL="${BASE_URL}/${ARCHIVE}.sha256"
 

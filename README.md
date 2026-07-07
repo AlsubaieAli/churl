@@ -2,9 +2,9 @@
 
 **A fast terminal API client — craft, send, and inspect HTTP requests from your terminal.**
 
-![CI](https://github.com/AlsubaieAli/churl/actions/workflows/ci.yml/badge.svg)
-
-<!-- TODO: add a crates.io badge once published -->
+[![CI](https://github.com/AlsubaieAli/churl/actions/workflows/ci.yml/badge.svg)](https://github.com/AlsubaieAli/churl/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/churl.svg)](https://crates.io/crates/churl)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 ---
 
@@ -17,9 +17,20 @@ curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install
 ```
 
 The script detects your OS and architecture, downloads the matching binary,
-verifies its SHA-256 checksum, and installs to `~/.local/bin` (add a `--to DIR`
-override or `--force` to overwrite an existing binary). Run with `--dry-run`
-to preview the resolved URL without downloading.
+verifies its SHA-256 checksum, and installs to `~/.local/bin`. To pass options
+through the pipe, use `sh -s --`:
+
+```sh
+curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install.sh \
+  | sh -s -- --to ~/bin --force
+```
+
+| Option | Effect |
+|---|---|
+| `--to DIR` | Install to `DIR` instead of `~/.local/bin` |
+| `--tag TAG` | Install a specific release, including betas (e.g. `--tag v0.2.0-beta.1`) |
+| `--force` | Overwrite an existing `churl` binary |
+| `--dry-run` | Print the resolved URL and target, download nothing |
 
 ### Prebuilt binaries
 
@@ -40,6 +51,21 @@ Each archive includes a `churl` binary and a `.sha256` checksum file.
 
 ```sh
 cargo install churl
+```
+
+### Beta releases
+
+Pre-releases (tags like `v0.2.0-beta.1`) ship the same binaries as stable
+releases but are never picked up by `releases/latest` or a plain
+`cargo install churl` — you opt in explicitly:
+
+```sh
+# installer
+curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install.sh \
+  | sh -s -- --tag v0.2.0-beta.1 --force
+
+# or cargo
+cargo install churl --version 0.2.0-beta.1
 ```
 
 ---
@@ -66,12 +92,10 @@ echo service — so your first request works immediately without any sign-up.
 
 ---
 
+<!-- TODO: capture a screenshot to docs/screenshot.png, then restore:
 ## Screenshot
-
-<!-- TODO: capture a screenshot and save to docs/screenshot.png -->
 ![screenshot](docs/screenshot.png)
-
----
+-->
 
 ## Feature matrix
 
@@ -122,6 +146,41 @@ Print the effective keymap (defaults + your overrides) at any time:
 ```sh
 churl keymaps
 ```
+
+---
+
+## What's next
+
+Roughly in order — see [docs/MILESTONES.md](docs/MILESTONES.md) for detail:
+
+- **Collection interchange** — JSON collection import/export, plus curl paste/copy directly inside the TUI
+- **Environments & variables editor** — manage profiles, collection, and workspace vars without leaving the app
+- **Quick-jump pickers** — fuzzy-jump straight to any request or workspace
+- **Request sequences** — chain requests into end-to-end flows with shared state
+- **Concurrent requests** — fire throttled batches for smoke and light load testing
+- **Cookies & proxy** — cookie jar persistence and HTTP(S) proxy support
+- **Plugin system** — extend auth schemes, body types, and viewers
+- Also on the backlog: multipart bodies (`curl -F`) and nested folders in the explorer
+
+---
+
+## Development
+
+```sh
+git clone https://github.com/AlsubaieAli/churl
+cd churl
+cargo test --all       # full suite
+cargo run -p churl     # run the TUI from source
+```
+
+CI runs fmt, clippy (`-D warnings`), the test suite, and a security audit on
+every push and pull request. Releases are cut by pushing a `v*` tag — the
+release workflow builds binaries for all five supported targets and attaches
+them, with checksums, to a GitHub Release.
+
+Need a binary from an unreleased branch? Collaborators can comment `/build`
+on a pull request (or run the **Dev build** workflow from the Actions tab) to
+get macOS/Linux/Windows binaries as workflow artifacts.
 
 ---
 
