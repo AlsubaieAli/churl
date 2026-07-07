@@ -174,9 +174,12 @@ cargo run -p churl     # run the TUI from source
 ```
 
 CI runs fmt, clippy (`-D warnings`), the test suite, and a security audit on
-every push and pull request. Releases are cut by pushing a `v*` tag — the
-release workflow builds binaries for all five supported targets and attaches
-them, with checksums, to a GitHub Release.
+every push and pull request. Releases are fully automated: PR titles follow
+[Conventional Commits](https://www.conventionalcommits.org), and merging the
+bot-maintained release PR publishes to crates.io, tags, writes the changelog,
+and builds binaries for all five supported targets. The full workflow —
+conventions, release train, betas, dev builds — is in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Need a binary from an unreleased branch? Collaborators can comment `/build`
 on a pull request (or run the **Dev build** workflow from the Actions tab) to

@@ -1,0 +1,64 @@
+name: Release-plz
+
+# The release train (see CONTRIBUTING.md):
+#   merge PRs to master → the "release-pr" job opens/updates a release PR
+#   (version bump + CHANGELOG.md from conventional commits) → merging that PR
+#   makes the "release" job publish to crates.io and push the v* tag, which
+#   triggers release.yml to build binaries and create the GitHub release.
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-plz-release:
+    name: Publish + tag
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'AlsubaieAli'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          # Must be a PAT (RELEASE_PLZ_TOKEN), not GITHUB_TOKEN: tags pushed
+          # with GITHUB_TOKEN never trigger other workflows, so release.yml
+          # would not fire and no binaries would be built.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-plz-pr:
+    name: Open/update release PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'AlsubaieAli'
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
