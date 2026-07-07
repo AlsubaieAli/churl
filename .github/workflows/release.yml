@@ -18,18 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Tags with a pre-release suffix (v0.2.0-beta.1) are marked prerelease,
-      # so `releases/latest` — and therefore the curl|sh installer — keeps
-      # serving the last stable release. install.sh is attached here so
+      # Every release starts as a prerelease: `releases/latest` ignores
+      # prereleases, so the installer keeps serving the previous stable
+      # while the binaries build (~6 min) — otherwise `latest` would point
+      # at an assetless release and curl|sh installs 404 in that window.
+      # finalize-release flips stable tags to full releases once all
+      # binaries are attached; -suffix tags (v0.2.0-beta.1) stay prerelease
+      # forever. install.sh is attached here so
       # `releases/latest/download/install.sh` resolves.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          prerelease=""
-          case "$GITHUB_REF_NAME" in
-            *-*) prerelease="--prerelease" ;;
-          esac
+          prerelease="--prerelease"
           # Notes come from the CHANGELOG.md section release-plz wrote for
           # this version; manual tags without an entry (e.g. betas) fall
           # back to GitHub's auto-generated notes.
@@ -89,3 +90,18 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           checksum: sha256
           archive: churl-$target
+
+  finalize-release:
+    name: Mark release stable
+    needs: build-release
+    # Stable tags only — beta/rc tags stay prerelease so `latest` never
+    # serves them.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flip prerelease off
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --prerelease=false
