@@ -17,6 +17,10 @@ struct Cli {
     /// Activate a named profile at startup (unknown name is an error).
     #[arg(long, global = true)]
     profile: Option<String>,
+    /// Import a Postman v2.1 collection JSON file into the cwd workspace before
+    /// launching the TUI (endpoints land as normal file-per-endpoint TOML).
+    #[arg(long = "import-collection", value_name = "FILE", global = true)]
+    import_collection: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -72,12 +76,47 @@ async fn main() -> Result<()> {
         }
         None => {
             let vars = parse_vars(&cli.vars)?;
+            // Import into the cwd workspace *before* the TUI launches (fail loudly
+            // on a bad file — never launch a half-imported TUI silently).
+            if let Some(file) = &cli.import_collection {
+                let cwd = std::env::current_dir()?;
+                match import_collection_into(&cwd, file) {
+                    Ok(summary) => {
+                        println!(
+                            "imported {} endpoint(s) into {} collection(s)",
+                            summary.endpoints, summary.collections
+                        );
+                        for warning in &summary.warnings {
+                            eprintln!("warning: {warning}");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("error: import failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             install_hooks()?;
             churl::tui::run(vars, cli.profile).await?;
         }
     }
 
     Ok(())
+}
+
+/// Reads a Postman v2.1 collection JSON file and writes its endpoints into the
+/// workspace rooted at `root`. Shared, testable seam behind
+/// `--import-collection` (the in-TUI import path uses the same
+/// [`churl_core::interchange::write_import`] core helper). Returns a summary.
+fn import_collection_into(
+    root: &std::path::Path,
+    file: &std::path::Path,
+) -> Result<churl_core::interchange::ImportSummary> {
+    let json = std::fs::read_to_string(file)
+        .map_err(|err| eyre!("cannot read {}: {err}", file.display()))?;
+    let import = churl_core::interchange::import_postman_v21(&json)?;
+    let summary = churl_core::interchange::write_import(root, &import)?;
+    Ok(summary)
 }
 
 /// `churl keymaps`: print the effective keymap (defaults + config overrides) as
@@ -225,4 +264,74 @@ fn install_hooks() -> Result<()> {
     }))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    const FIXTURE: &str = r#"{
+        "info": { "name": "Fixture API", "schema": "…v2.1.0…" },
+        "item": [
+            { "name": "list users", "request": { "method": "GET", "url": { "raw": "https://api.test/users" } } },
+            { "name": "folder", "item": [
+                { "name": "nested", "request": { "method": "POST", "url": { "raw": "https://api.test/n" },
+                    "auth": { "type": "bearer", "bearer": [ { "key": "token", "value": "ghp_literal" } ] } } }
+            ] }
+        ]
+    }"#;
+
+    #[test]
+    fn cli_parses_global_import_collection_flag() {
+        let cli = Cli::try_parse_from(["churl", "--import-collection", "coll.json"]).unwrap();
+        assert_eq!(
+            cli.import_collection.as_deref(),
+            Some(std::path::Path::new("coll.json"))
+        );
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn import_collection_into_writes_endpoints_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("collection.json");
+        std::fs::write(&file, FIXTURE).unwrap();
+
+        let summary = import_collection_into(root, &file).unwrap();
+        assert_eq!(summary.endpoints, 2);
+        assert_eq!(summary.collections, 2);
+        // The bearer secret was placeholder-ized → a warning fired.
+        assert!(
+            summary.warnings.iter().any(|w| w.contains("placeholder")),
+            "{:?}",
+            summary.warnings
+        );
+
+        // Root-level request lands in a collection named after the import.
+        let flat = root.join("fixture-api").join("list-users.toml");
+        assert!(flat.exists(), "missing {}", flat.display());
+        let toml = std::fs::read_to_string(&flat).unwrap();
+        assert!(toml.contains(r#"name = "list users""#), "{toml}");
+        assert!(toml.contains(r#"url = "https://api.test/users""#), "{toml}");
+
+        // Nested folder request lands in a "folder" collection, secret masked.
+        let nested = root.join("folder").join("nested.toml");
+        assert!(nested.exists(), "missing {}", nested.display());
+        let nested_toml = std::fs::read_to_string(&nested).unwrap();
+        assert!(nested_toml.contains("{{token}}"), "{nested_toml}");
+        assert!(
+            !nested_toml.contains("ghp_literal"),
+            "literal secret leaked: {nested_toml}"
+        );
+    }
+
+    #[test]
+    fn import_collection_into_rejects_bad_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bad.json");
+        std::fs::write(&file, "not json").unwrap();
+        assert!(import_collection_into(dir.path(), &file).is_err());
+    }
 }
