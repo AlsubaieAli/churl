@@ -35,12 +35,13 @@ use tokio::task::AbortHandle;
 
 use churl_core::config::UrlEditMode;
 
+use super::clipboard;
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
-use super::components::response::{ResponseMeta, ResponseState, ResponseView};
+use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
 use super::components::{
     explorer, help, message, method_menu, palette, picker, prompt, request, response, statusline,
     urlbar,
@@ -111,6 +112,8 @@ pub enum Mode {
     Jump,
     /// The method-picker menu is open (URL bar `M`).
     MethodMenu,
+    /// The response body incremental-search input is open (Response `/`).
+    BodySearch,
     /// A text-input prompt overlay is open (CRUD naming / typed confirm).
     Prompt(PromptPurpose),
     /// A y/n confirmation overlay is open.
@@ -261,8 +264,24 @@ pub struct App {
     pub response: ResponseState,
     /// Response body scroll offset (clamped to the viewport at render time).
     response_scroll: usize,
+    /// Response viewer cursor as a display-row index (post-fold, post-wrap);
+    /// clamped at render time. Reset to 0 on each new response (M7).
+    response_cursor: usize,
+    /// Total display rows in the response viewer as of the last render, for
+    /// clamping cursor/scroll motion between frames.
+    response_total_rows: usize,
     /// Last rendered response body height, for half-page scrolling.
     response_viewport_height: usize,
+    /// Last rendered response body width, for cursor→logical mapping (wrap).
+    response_viewport_width: usize,
+    /// The highlight hash last enqueued but not yet returned; guards against
+    /// re-enqueueing the same viewport twice (M7 highlight micro-nit).
+    pending_highlight: Option<u64>,
+    /// A clipboard payload to flush to the terminal via OSC 52 after the next
+    /// key is handled (dispatch has no terminal handle; the run loop owns it).
+    pending_clipboard: Option<String>,
+    /// The incremental body-search input editor while `Mode::BodySearch` is open.
+    body_search_editor: LineEditor,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
     /// Viewport-hash → highlighted-lines cache (capped, cleared on new response).
@@ -370,7 +389,13 @@ impl App {
             generation: 0,
             response: ResponseState::Idle,
             response_scroll: 0,
+            response_cursor: 0,
+            response_total_rows: 0,
             response_viewport_height: 0,
+            response_viewport_width: 0,
+            pending_highlight: None,
+            pending_clipboard: None,
+            body_search_editor: LineEditor::default(),
             highlight_tx: None,
             highlight_cache: HashMap::new(),
             history: None,
@@ -517,6 +542,13 @@ impl App {
                 maybe_event = events.next() => match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         self.handle_key(key)?;
+                        // Flush any clipboard payload a copy action queued: OSC 52
+                        // goes straight to the terminal's backend writer (dispatch
+                        // has no terminal handle). A write error is non-fatal — the
+                        // copy silently no-ops on terminals that reject it anyway.
+                        if let Some(payload) = self.pending_clipboard.take() {
+                            let _ = clipboard::copy_osc52(payload.as_str(), terminal.backend_mut());
+                        }
                     }
                     Some(Ok(_)) => {} // resize etc. — redraw happens next iteration
                     Some(Err(err)) => return Err(err.into()),
@@ -557,6 +589,10 @@ impl App {
             Mode::Jump => self.handle_jump_key(key),
             Mode::MethodMenu => {
                 self.handle_method_menu_key(key);
+                Ok(())
+            }
+            Mode::BodySearch => {
+                self.handle_body_search_key(key);
                 Ok(())
             }
             Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
@@ -765,6 +801,15 @@ impl App {
                     self.response_half_page(matches!(action, Action::HalfPageDown));
                 }
             }
+            Action::ToggleHeadersView => self.response_toggle_headers(),
+            Action::ToggleWrap => self.response_toggle_wrap(),
+            Action::OpenBodySearch => self.open_body_search(),
+            Action::SearchNext => self.response_search_step(true),
+            Action::SearchPrev => self.response_search_step(false),
+            Action::ToggleFold => self.response_toggle_fold(),
+            Action::ToggleAllFolds => self.response_toggle_all_folds(),
+            Action::CopyResponse => self.response_copy_view(),
+            Action::CopyLine => self.response_copy_line(),
             Action::Up
             | Action::Down
             | Action::Select
@@ -968,6 +1013,8 @@ impl App {
         });
         self.response = ResponseState::InFlight { started };
         self.response_scroll = 0;
+        self.response_cursor = 0;
+        self.pending_highlight = None;
         self.highlight_cache.clear();
         self.message = None;
     }
@@ -996,36 +1043,283 @@ impl App {
             .map(|path| path.to_string_lossy().into_owned())
     }
 
-    /// The coarse maximum scroll offset (line count minus one); render clamps
-    /// further to the true last screenful.
-    fn response_max_scroll(&self) -> usize {
-        match &self.response {
-            ResponseState::Done { view } => view.line_count().saturating_sub(1),
-            _ => 0,
-        }
+    /// The coarse maximum cursor row (total display rows minus one, as of the
+    /// last render); render clamps further.
+    fn response_max_cursor(&self) -> usize {
+        self.response_total_rows.saturating_sub(1)
     }
 
-    /// Moves the response body scroll offset for a navigation action.
+    /// Moves the response viewer *cursor* for a navigation action. Scroll follows
+    /// the cursor at render time (see `response::render`). `g`/`G` jump to the
+    /// first/last visible display row.
     fn response_scroll(&mut self, action: Action) {
-        let max = self.response_max_scroll();
+        if !matches!(self.response, ResponseState::Done { .. }) {
+            return;
+        }
+        let max = self.response_max_cursor();
         match action {
-            Action::Up => self.response_scroll = self.response_scroll.saturating_sub(1),
-            Action::Down => self.response_scroll = (self.response_scroll + 1).min(max),
-            Action::Top => self.response_scroll = 0,
-            Action::Bottom => self.response_scroll = max,
+            Action::Up => self.response_cursor = self.response_cursor.saturating_sub(1),
+            Action::Down => self.response_cursor = (self.response_cursor + 1).min(max),
+            Action::Top => self.response_cursor = 0,
+            Action::Bottom => self.response_cursor = max,
             _ => {}
         }
     }
 
-    /// Scrolls the response body by half a viewport.
+    /// Moves the response cursor by half a viewport (scroll follows at render).
     fn response_half_page(&mut self, down: bool) {
+        if !matches!(self.response, ResponseState::Done { .. }) {
+            return;
+        }
         let half = (self.response_viewport_height / 2).max(1);
-        let max = self.response_max_scroll();
-        self.response_scroll = if down {
-            (self.response_scroll + half).min(max)
+        let max = self.response_max_cursor();
+        self.response_cursor = if down {
+            (self.response_cursor + half).min(max)
         } else {
-            self.response_scroll.saturating_sub(half)
+            self.response_cursor.saturating_sub(half)
         };
+    }
+
+    // ---- Response viewer M7 actions ----
+
+    /// The live `ResponseView`, when the pane holds a completed response.
+    fn response_view_mut(&mut self) -> Option<&mut ResponseView> {
+        match &mut self.response {
+            ResponseState::Done { view } => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The logical line under the response cursor (through the last render's
+    /// fold/wrap geometry), or `None` when there is no response.
+    fn response_cursor_logical(&self) -> Option<usize> {
+        let width = self.response_viewport_width;
+        let cursor = self.response_cursor;
+        match &self.response {
+            ResponseState::Done { view } => view.logical_at_display_row(cursor, width),
+            _ => None,
+        }
+    }
+
+    /// `h`: toggle body/headers view. Resets cursor + scroll (the two views have
+    /// different geometry) and clears any live search.
+    fn response_toggle_headers(&mut self) {
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_view_mode();
+            self.response_cursor = 0;
+            self.response_scroll = 0;
+            self.pending_highlight = None;
+            self.highlight_cache.clear();
+        }
+    }
+
+    /// `W`: toggle soft-wrap. Cursor/scroll geometry changes, so reset them.
+    fn response_toggle_wrap(&mut self) {
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_wrap();
+            self.response_cursor = 0;
+            self.response_scroll = 0;
+            self.pending_highlight = None;
+        }
+    }
+
+    /// `o`: fold/unfold the innermost JSON region at the cursor. Non-JSON views
+    /// notify and no-op.
+    /// Why folding is unsupported right now, or `None` when it is available.
+    /// The headers view of a JSON response gets its own reason — "JSON responses
+    /// only" would be wrong there.
+    fn fold_unsupported_notice(&mut self) -> Option<&'static str> {
+        let view = match &self.response {
+            ResponseState::Done { view } => view,
+            _ => return Some("folding: no response"),
+        };
+        if view.view_mode() == ViewMode::Headers {
+            return Some("folding: body view only");
+        }
+        if view.syntax() != crate::tui::highlight::SyntaxToken::Json {
+            return Some("folding: JSON responses only");
+        }
+        None
+    }
+
+    fn response_toggle_fold(&mut self) {
+        let Some(logical) = self.response_cursor_logical() else {
+            return;
+        };
+        if let Some(notice) = self.fold_unsupported_notice() {
+            self.notify(notice);
+            return;
+        }
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_fold_at(logical);
+            self.pending_highlight = None;
+            self.highlight_cache.clear();
+        }
+    }
+
+    /// `O`: collapse all top-level JSON regions, or expand all. Non-JSON no-ops
+    /// with a notice.
+    fn response_toggle_all_folds(&mut self) {
+        if let Some(notice) = self.fold_unsupported_notice() {
+            self.notify(notice);
+            return;
+        }
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_all_folds();
+            self.response_cursor = 0;
+            self.response_scroll = 0;
+            self.pending_highlight = None;
+            self.highlight_cache.clear();
+        }
+    }
+
+    /// `/`: open the incremental body-search input in the message-row position.
+    fn open_body_search(&mut self) {
+        if self.response_view_mut().is_none() {
+            self.notify("no response to search");
+            return;
+        }
+        self.body_search_editor = LineEditor::new("");
+        // Seed an empty (live) search so highlighting/feedback engage immediately.
+        if let Some(view) = self.response_view_mut() {
+            view.set_search(String::new());
+        }
+        self.mode = Mode::BodySearch;
+    }
+
+    /// Handles one key while the body-search input is open. Every keystroke
+    /// recomputes matches and jumps to the first; Enter commits (keeps matches
+    /// for `n`/`N`), Esc cancels (clears the search).
+    fn handle_body_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                if let Some(view) = self.response_view_mut() {
+                    view.clear_search();
+                }
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                // Move the cursor onto the current match, if any.
+                self.response_center_on_match();
+            }
+            _ => {
+                self.body_search_editor.handle_key(key);
+                let query = self.body_search_editor.text();
+                if let Some(view) = self.response_view_mut() {
+                    view.set_search(query);
+                }
+                // Jump to the first match live while typing.
+                self.response_center_on_match();
+            }
+        }
+    }
+
+    /// `n`/`N`: step to the next/previous match (wrapping), scrolling it into
+    /// view and auto-unfolding its region.
+    fn response_search_step(&mut self, forward: bool) {
+        let has_search = self
+            .response_view_mut()
+            .map(|v| v.search().is_some())
+            .unwrap_or(false);
+        if !has_search {
+            return;
+        }
+        let stepped = self.response_view_mut().and_then(|v| v.step_match(forward));
+        if stepped.is_some() {
+            self.pending_highlight = None;
+            self.highlight_cache.clear();
+            self.response_center_on_match();
+            // Feedback: `match k/N` in the message row.
+            if let Some(view) = self.response_view_mut()
+                && let Some(search) = view.search()
+                && let Some(ord) = search.current_ordinal()
+            {
+                let total = search.count();
+                self.notify(format!("match {ord}/{total}"));
+            }
+        } else {
+            self.notify("no matches");
+        }
+    }
+
+    /// Moves the response cursor onto the current search match's logical line,
+    /// so scroll follows it into view at the next render.
+    fn response_center_on_match(&mut self) {
+        let width = self.response_viewport_width;
+        let row = match &self.response {
+            ResponseState::Done { view } => view
+                .current_match_line()
+                .and_then(|logical| view.display_row_for_logical(logical, width)),
+            _ => None,
+        };
+        if let Some(row) = row {
+            self.response_cursor = row;
+        }
+    }
+
+    /// `y`: copy the current response view's full text via OSC 52 (capped).
+    fn response_copy_view(&mut self) {
+        let Some(view) = self.response_view_mut() else {
+            return;
+        };
+        let full = view.copy_all().to_owned();
+        let truncated = view.truncated();
+        self.copy_to_clipboard_view(&full, truncated);
+    }
+
+    /// `Y`: copy the response cursor's logical line via OSC 52.
+    fn response_copy_line(&mut self) {
+        let Some(logical) = self.response_cursor_logical() else {
+            return;
+        };
+        let Some(view) = self.response_view_mut() else {
+            return;
+        };
+        let line = view.copy_line(logical);
+        self.enqueue_clipboard(&line);
+        self.notify("copied line");
+    }
+
+    /// Copies the full-view text, reporting its size (with a `(truncated)` note
+    /// when the body hit the size cap, and a `copied first X of Y` note when the
+    /// 1 MB OSC 52 cap kicked in).
+    fn copy_to_clipboard_view(&mut self, text: &str, body_truncated: bool) {
+        let full_len = text.len();
+        let payload = self.enqueue_clipboard(text);
+        let capped = full_len > payload;
+        let mut msg = if capped {
+            format!(
+                "copied first {} of {}",
+                response::fmt_bytes(payload),
+                response::fmt_bytes(full_len)
+            )
+        } else {
+            format!("copied {}", response::fmt_bytes(payload))
+        };
+        // The body-truncation note stacks with the cap note — both facts matter.
+        if body_truncated {
+            msg.push_str(" (truncated)");
+        }
+        self.notify(msg);
+    }
+
+    /// Queues `text` (capped at [`clipboard::MAX_COPY_BYTES`], on a char
+    /// boundary) for an OSC 52 write on the next loop iteration. Returns the
+    /// number of bytes actually queued.
+    fn enqueue_clipboard(&mut self, text: &str) -> usize {
+        let payload = if text.len() > clipboard::MAX_COPY_BYTES {
+            let mut end = clipboard::MAX_COPY_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text[..end].to_owned()
+        } else {
+            text.to_owned()
+        };
+        let len = payload.len();
+        self.pending_clipboard = Some(payload);
+        len
     }
 
     /// Dispatches a channel message.
@@ -1055,6 +1349,8 @@ impl App {
         self.in_flight = None;
         self.highlight_cache.clear();
         self.response_scroll = 0;
+        self.response_cursor = 0;
+        self.pending_highlight = None;
         match outcome {
             Ok(response) => {
                 self.write_history(&meta, Some(response.status), Some(response.timing.total));
@@ -1074,6 +1370,10 @@ impl App {
     fn cache_highlighted(&mut self, hash: u64, lines: Vec<Line<'static>>) {
         if self.highlight_cache.len() >= 64 {
             self.highlight_cache.clear();
+        }
+        // Clear the in-flight guard when its result lands (M7 dedup micro-nit).
+        if self.pending_highlight == Some(hash) {
+            self.pending_highlight = None;
         }
         self.highlight_cache.insert(hash, lines);
     }
@@ -2301,7 +2601,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // The dedicated message row (deliverable 9) sits directly above the
     // statusline and only occupies a row while a message is live — so the
     // statusline never moves and its content is never covered.
-    let message_text = app.message.as_ref().map(|m| m.text.clone());
+    // While the body-search input is open it occupies the message-row position
+    // (vim-style `/query`), shadowing any transient message.
+    let body_search_input: Option<String> = (app.mode == Mode::BodySearch).then(|| {
+        let q = app.body_search_editor.text();
+        let matches = match &app.response {
+            ResponseState::Done { view } => view.search().map(|s| s.count()).unwrap_or(0),
+            _ => 0,
+        };
+        if q.is_empty() {
+            "/".to_owned()
+        } else if matches == 0 {
+            format!("/{q}    no matches")
+        } else {
+            format!("/{q}    {matches} matches")
+        }
+    });
+    let message_text = body_search_input
+        .clone()
+        .or_else(|| app.message.as_ref().map(|m| m.text.clone()));
     let (main, msg_area, status) = if message_text.is_some() {
         let [main, msg, status] = Layout::vertical([
             Constraint::Fill(1),
@@ -2412,8 +2730,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 response::RenderCtx {
                     state: &app.response,
                     request: selected_request,
-                    focused: app.focus == Pane::Response && app.mode == Mode::Normal,
+                    focused: app.focus == Pane::Response
+                        && (app.mode == Mode::Normal || app.mode == Mode::BodySearch),
                     scroll: app.response_scroll,
+                    cursor: app.response_cursor,
                     cache: &app.highlight_cache,
                     theme: &theme,
                     jump_label: app
@@ -2424,9 +2744,20 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
+            app.response_cursor = outcome.clamped_cursor;
+            app.response_total_rows = outcome.total_rows;
             app.response_viewport_height = outcome.viewport_height;
-            if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
-                let _ = tx.send(job);
+            app.response_viewport_width = outcome.viewport_width;
+            if let Some(job) = outcome.job {
+                let dup = app.pending_highlight == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    // Mark in-flight only when the send actually succeeded — a
+                    // dead worker must not wedge the guard.
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        app.pending_highlight = Some(hash);
+                    }
+                }
             }
         }
         None => {
@@ -2449,8 +2780,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 response::RenderCtx {
                     state: &app.response,
                     request: selected_request,
-                    focused: app.focus == Pane::Response && app.mode == Mode::Normal,
+                    focused: app.focus == Pane::Response
+                        && (app.mode == Mode::Normal || app.mode == Mode::BodySearch),
                     scroll: app.response_scroll,
+                    cursor: app.response_cursor,
                     cache: &app.highlight_cache,
                     theme: &theme,
                     jump_label: app
@@ -2461,9 +2794,20 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
+            app.response_cursor = outcome.clamped_cursor;
+            app.response_total_rows = outcome.total_rows;
             app.response_viewport_height = outcome.viewport_height;
-            if let (Some(job), Some(tx)) = (outcome.job, &app.highlight_tx) {
-                let _ = tx.send(job);
+            app.response_viewport_width = outcome.viewport_width;
+            if let Some(job) = outcome.job {
+                let dup = app.pending_highlight == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    // Mark in-flight only when the send actually succeeded — a
+                    // dead worker must not wedge the guard.
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        app.pending_highlight = Some(hash);
+                    }
+                }
             }
         }
     }

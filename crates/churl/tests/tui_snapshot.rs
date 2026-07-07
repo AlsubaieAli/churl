@@ -320,6 +320,311 @@ fn response_pane_draws_one_megabyte_body_under_50ms() {
     );
 }
 
+// ---- M7 wave 1: response viewer features ----
+
+/// Focuses the Response pane on a completed JSON response, ready for viewer keys.
+fn json_done_app(root: &Path, body: &str) -> App {
+    let mut app = app_with_fixture(root);
+    app.focus = Pane::Response;
+    app.response = ResponseState::Done {
+        view: ResponseView::build(&json_response(body), 1),
+    };
+    app
+}
+
+/// A response carrying several headers (for the headers-view tests).
+fn headered_response(body: &str) -> Response {
+    Response {
+        status: 200,
+        headers: vec![
+            Header {
+                name: "Content-Type".to_owned(),
+                value: "application/json".to_owned(),
+                enabled: true,
+            },
+            Header {
+                name: "X-Request-Id".to_owned(),
+                value: "abc-123".to_owned(),
+                enabled: true,
+            },
+        ],
+        body: body.as_bytes().to_vec(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(142),
+        },
+    }
+}
+
+#[test]
+fn response_headers_view_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.focus = Pane::Response;
+    app.response = ResponseState::Done {
+        view: ResponseView::build(&headered_response("{\n  \"id\": 1\n}"), 1),
+    };
+    // `h` in the Response overlay toggles to the headers view.
+    press(&mut app, KeyCode::Char('h'));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn response_wrap_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    // A single very long line so wrap has a visible effect in the narrow pane.
+    let long = format!("{{\"data\":\"{}\"}}", "wrap-me-".repeat(20));
+    let mut app = json_done_app(dir.path(), &long);
+    // `W` toggles soft-wrap on; the stats title gains `· wrap`.
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn response_fold_renders_ellipsis_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}";
+    let mut app = json_done_app(dir.path(), body);
+    // Cursor is on line 0 (the opener); `o` folds the region.
+    press(&mut app, KeyCode::Char('o'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('⋯'),
+        "folded region must render a ⋯ marker:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn response_fold_non_json_notifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.focus = Pane::Response;
+    // A plain-text response: folding is unsupported.
+    let response = Response {
+        status: 200,
+        headers: Vec::new(),
+        body: b"line one\nline two".to_vec(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(5),
+        },
+    };
+    app.response = ResponseState::Done {
+        view: ResponseView::build(&response, 1),
+    };
+    press(&mut app, KeyCode::Char('o'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("JSON responses only"),
+        "non-JSON fold must notify:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_search_highlights_and_navigates() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "{\n  \"name\": \"needle\",\n  \"other\": \"needle\"\n}";
+    let mut app = json_done_app(dir.path(), body);
+    // `/` opens the incremental search input.
+    press(&mut app, KeyCode::Char('/'));
+    assert_eq!(app.mode, Mode::BodySearch);
+    type_str(&mut app, "needle");
+    // Two matches; the input row shows the count.
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("/needle") && rendered.contains("2 matches"),
+        "search input must show query + count:\n{rendered}"
+    );
+    // Commit and step to the next match.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Normal);
+    press(&mut app, KeyCode::Char('n'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("match 2/2"),
+        "n must report match position:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_search_wraps_around() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "{\n  \"a\": \"x\",\n  \"b\": \"x\"\n}";
+    let mut app = json_done_app(dir.path(), body);
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "x");
+    press(&mut app, KeyCode::Enter);
+    // Two matches; n, n wraps back to the first.
+    press(&mut app, KeyCode::Char('n')); // → 2/2
+    press(&mut app, KeyCode::Char('n')); // wrap → 1/2
+    let rendered = snapshot(&mut app);
+    assert!(rendered.contains("match 1/2"), "n must wrap:\n{rendered}");
+    // N steps backward → 2/2.
+    app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT))
+        .unwrap();
+    let rendered = snapshot(&mut app);
+    assert!(rendered.contains("match 2/2"), "N steps back:\n{rendered}");
+}
+
+#[test]
+fn response_search_auto_unfolds_while_typing() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two matches, both inside the (foldable) outer object.
+    let body = "{\n  \"a\": \"needle\",\n  \"b\": \"needle\"\n}";
+    let mut app = json_done_app(dir.path(), body);
+    let _ = snapshot(&mut app); // prime geometry
+    // Collapse all top-level regions: only the `{ ⋯` header remains visible.
+    app.handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT))
+        .unwrap();
+    let rendered = snapshot(&mut app);
+    assert!(rendered.contains('⋯'), "precondition: folded:\n{rendered}");
+    // Typing the query must auto-unfold and show match 1 (the needle line).
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "needle");
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("\"a\": \"needle\""),
+        "incremental search must auto-unfold to match 1:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("2 matches"),
+        "both folded matches must count:\n{rendered}"
+    );
+    // Commit; the first `n` advances to match 2 of 2 (match 1 was current).
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('n'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("match 2/2"),
+        "first n after commit goes to match 2:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_fold_in_headers_view_says_body_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    press(&mut app, KeyCode::Char('h')); // → headers view
+    press(&mut app, KeyCode::Char('o'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("folding: body view only"),
+        "headers view must get its own fold notice:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_search_no_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "zzz");
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("no matches"),
+        "empty result set must say so:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_search_esc_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": \"hit\"\n}");
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "hit");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal);
+    // Esc clears the live search.
+    if let ResponseState::Done { view } = &app.response {
+        assert!(view.search().is_none(), "esc must clear the search");
+    } else {
+        panic!("expected Done");
+    }
+}
+
+#[test]
+fn response_copy_sets_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    press(&mut app, KeyCode::Char('y'));
+    // Copy reports a size in the message row.
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("copied"),
+        "copy must confirm in the message row:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_copy_line_reports_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
+        .unwrap();
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("copied line"),
+        "Y must confirm a line copy:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_cursor_moves_with_j_and_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1,\n  \"b\": 2\n}");
+    // Prime the geometry with an initial render, then move the cursor down.
+    let _ = snapshot(&mut app);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn response_view_toggle_resets_cursor_and_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": \"z\",\n  \"b\": \"z\"\n}");
+    let _ = snapshot(&mut app);
+    // Move the cursor and start a search, then toggle to headers.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "z");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('h')); // → headers view
+    if let ResponseState::Done { view } = &app.response {
+        assert!(view.search().is_none(), "view toggle clears search");
+    }
+    // Cursor reset to 0 is asserted indirectly: no panic + headers render.
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("headers"),
+        "stats title must show the headers marker:\n{rendered}"
+    );
+}
+
+#[test]
+fn response_zoom_stub_unchanged_by_viewer_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    // Turn on wrap + a search, then zoom the response pane. The collapsed stub
+    // (when the *request* pane is zoomed) is the one-line summary and is
+    // unaffected by viewer state — assert it still renders the status summary.
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT))
+        .unwrap();
+    // Zoom the Request pane (collapsing Response to its one-line stub) via `z`.
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('z'));
+    let rendered = snapshot(&mut app);
+    // The collapsed response summary line shows the status.
+    assert!(
+        rendered.contains("200 OK"),
+        "collapsed response stub must show the status summary:\n{rendered}"
+    );
+}
+
 #[test]
 fn explorer_scrolls_to_keep_selection_visible() {
     // A tall collection (more endpoints than the pane height) must scroll so the
@@ -571,6 +876,12 @@ fn every_palette_command_dispatches() {
             Action::SwitchProfile => {
                 assert_eq!(app.mode, Mode::Palette, "{label:?} must open the picker");
                 assert!(app.picker.is_some());
+            }
+            // The two viewer toggles are palette-exposed; with no response they
+            // no-op gracefully (the pane is Idle), so just assert no crash / mode
+            // stays Normal.
+            Action::ToggleHeadersView | Action::ToggleWrap => {
+                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
             }
             Action::FocusExplorer => assert_eq!(app.focus, Pane::Explorer),
             Action::FocusUrlBar => assert_eq!(app.focus, Pane::UrlBar),

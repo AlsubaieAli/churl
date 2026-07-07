@@ -23,6 +23,8 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("rename", Action::Rename),
     ("delete", Action::Delete),
     ("switch profile", Action::SwitchProfile),
+    ("toggle response headers view", Action::ToggleHeadersView),
+    ("toggle response wrap", Action::ToggleWrap),
     ("focus explorer", Action::FocusExplorer),
     ("focus URL bar", Action::FocusUrlBar),
     ("focus request", Action::FocusRequest),
@@ -89,6 +91,14 @@ mod tests {
             Action::EditUrl,
             Action::FocusNext,
             Action::FocusPrev,
+            // Response-pane actions that need cursor/pane context stay keymap-only.
+            Action::OpenBodySearch,
+            Action::SearchNext,
+            Action::SearchPrev,
+            Action::ToggleFold,
+            Action::ToggleAllFolds,
+            Action::CopyResponse,
+            Action::CopyLine,
         ];
         for (_, action) in COMMANDS {
             assert!(

@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 536
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -18,9 +17,9 @@ expression: snapshot(&mut app)
 │              ┃  rename                                        ┃──────────────┘
 │              ┃  delete                                        ┃──────────────┐
 │              ┃  switch profile                                ┃              │
+│              ┃  toggle response headers view                  ┃              │
+│              ┃  toggle response wrap                          ┃              │
 │              ┃  focus explorer                                ┃              │
-│              ┃  focus URL bar                                 ┃              │
-│              ┃  focus request                                 ┃              │
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
 │                            ││                                                │
 │                            ││                                                │

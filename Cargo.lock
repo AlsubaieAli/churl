@@ -330,6 +330,7 @@ dependencies = [
 name = "churl"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "churl-core",
  "clap",
  "color-eyre",

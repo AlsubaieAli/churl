@@ -30,7 +30,8 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 | `tui::events` | `Action` enum (+ `Jump`, `SwitchProfile`, and the M6.6 URL-bar/tab/row/CRUD/save actions) + crokey `KeyMap` with per-pane `overlays` (`PaneCtx ∈ {Explorer, UrlBar, Request, Response}`; `lookup_ctx` = overlay-then-global) built from `[keys]` + `[keys.<pane>]` config; `iter`/`combos_for` (+ overlay variants) for the `keymaps` subcommand; `FuzzyFinder` (nucleo-matcher) |
 | `tui::theme` | `Theme` (named style slots) parsed from core config strings, mirroring `[keys]`: built-in `dark`/`light` + `[theme_colors]` per-slot overrides (named ANSI or `#rrggbb`); fails loudly on unknown built-in/slot/colour. Core stays TUI-free (carries strings only) |
 | `tui::highlight` | Off-thread syntect worker: a dedicated `std::thread` owns the `SyntaxSet`/theme (lazy-loaded on first job), receives `HighlightJob`s over `std::sync::mpsc`, returns `AppMsg::Highlighted`. Embedded theme follows the UI theme (Nord dark / InspiredGithub light). `SyntaxToken` (json/xml/html/plain) derives from the response `Content-Type` |
-| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset, cached `folder.toml` vars, CRUD-support accessors + `reload`/`select_file`), `urlbar` (focusable strip: method/URL + inline edit cursor + `●` dirty dot + auth kind + placeholder count), `line_editor` (shared single-line editor — no dep), `request` (tab bar + Params/Headers/Auth row lists + edtui Body), `request_tabs` (pure tab/row/field-edit state machine), `response` (virtualised viewer), `picker` (generic fuzzy overlay), `method_menu` (one-key method picker), `prompt` (CRUD text prompt + y/n confirm overlays), `search`, `palette` (curated command allowlist), `jump`, `statusline` |
+| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset, cached `folder.toml` vars, CRUD-support accessors + `reload`/`select_file`), `urlbar` (focusable strip: method/URL + inline edit cursor + `●` dirty dot + auth kind + placeholder count), `line_editor` (shared single-line editor — no dep), `request` (tab bar + Params/Headers/Auth row lists + edtui Body), `request_tabs` (pure tab/row/field-edit state machine), `response` (virtualised viewer + M7 display pipeline: cursor, headers view, wrap, JSON folding, body search, copy), `fold` (string-aware JSON fold-region scanner), `picker` (generic fuzzy overlay), `method_menu` (one-key method picker), `prompt` (CRUD text prompt + y/n confirm overlays), `search`, `palette` (curated command allowlist), `jump`, `statusline` |
+| `tui::clipboard` | Clipboard writes via OSC 52 (`ESC ] 52 ; c ; <base64> BEL`) to ratatui's terminal backend writer — no native clipboard dep (works over SSH/tmux; macOS Terminal.app ignores it). 1 MB payload cap |
 
 ### Event / render loop (M2+)
 
@@ -53,6 +54,21 @@ Key routing precedence (per key event, in `Mode::Normal` the crokey map is autho
 2. Inline editors in `Mode::Normal` intercept next: the URL bar editor (`url_editor`) and request-row field edits (`RequestTabs::editing`) each own the keyboard — except a CONTROL key the keymap resolves to `Send`/`Quit` (the M4 interception, generalised to `LineEditor`). `Enter` commits, `Esc` cancels.
 3. Request pane, Body tab, edtui in a non-Normal mode: keys go to edtui with the same Ctrl-S/Ctrl-C interception (M4, DECISIONS.md).
 4. Otherwise: `KeyMap::lookup_ctx(key, focused_pane.ctx())` — the focused pane's overlay wins over the global map (so `1`–`4` are tab jumps in the Request pane but pane-focus globally). Unmapped keys fall through to edtui only on the Body tab; navigation actions forward their key event to edtui there so vim motions keep working.
+
+The Response pane (M7) adds a `[keys.response]` overlay (`h` headers · `W` wrap · `/` search · `n`/`N` match nav · `o`/`O` fold · `y`/`Y` copy) and a new keyboard-owning overlay mode `Mode::BodySearch` (routed like the other overlays; the incremental `/query` input renders in the message-row position via the shared `LineEditor`).
+
+### Response viewer pipeline (M7)
+
+The response viewer composes three pure transforms over the logical lines, evaluated fresh each render (`components/response.rs`):
+
+```
+logical lines (body or headers text, CRLF-stripped)
+  → fold filter      (JSON-only; folded regions elided to a `⋯ N lines` header)
+  → wrap expansion    (optional; each display row = a char sub-range of one logical line)
+  → viewport slice    (scroll offset + height)
+```
+
+Cursor and scroll are **display-row** indices (post-fold, post-wrap); the cursor follows-and-scrolls at render time. Search matches are stored against *logical* lines (byte ranges) and mapped through the pipeline for navigation, auto-unfold, and highlight overlay. Per-view UI state (view mode, folds, wrap, search) lives on `ResponseView` so it resets on each new response; cursor/scroll/geometry live on `App`. Fold regions come from `components::fold::scan_regions` (single O(n) string-aware pass, cached lazily). Highlighting is deferred under wrap (wrapped bodies render plain); unwrapped bodies keep full off-thread syntect highlighting with a duplicate-enqueue guard (`App::pending_highlight`).
 
 ## On-disk format
 

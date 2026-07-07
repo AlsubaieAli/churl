@@ -77,9 +77,11 @@ crates/
                            #   with per-pane overlays (PaneCtx, lookup_ctx, [keys.<pane>] config), nucleo-matcher FuzzyFinder
         theme.rs           # Theme (named style slots) parsed from core strings; dark/light built-ins + [theme_colors]
         highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, theme-aware, returns Highlighted
+        clipboard.rs       # OSC 52 clipboard writes (no native dep; works over SSH/tmux), 1 MB cap
         components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
-                           #   response (virtualised viewer), picker, method_menu, prompt (CRUD prompt + confirm overlays),
+                           #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy),
+                           #   fold (JSON fold-region scanner), picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump, statusline
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
