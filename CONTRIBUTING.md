@@ -15,21 +15,26 @@ PR titles follow [Conventional Commits](https://www.conventionalcommits.org):
 <type>(<optional scope>): <summary in imperative mood>
 ```
 
-| Type | Use for | Version impact |
-|---|---|---|
-| `feat` | New user-facing capability | minor bump |
-| `fix` | Bug fix | patch bump |
-| `perf` | Performance improvement | patch bump |
-| `refactor` | Code change with no behaviour change | none |
-| `docs` | Documentation only | none |
-| `test` | Tests only | none |
-| `build` / `ci` | Build system / CI changes | none |
-| `chore` | Everything else (deps, tooling) | none |
-| `revert` | Reverting a previous change | matches reverted change |
+| Type | Use for | Version impact | Auto-label |
+|---|---|---|---|
+| `feat` | New user-facing capability | minor bump | `enhancement` |
+| `fix` | Bug fix | patch bump | `bug` |
+| `perf` | Performance improvement | patch bump | `performance` |
+| `refactor` | Code change with no behaviour change | none | `refactor` |
+| `docs` | Documentation only | none | `documentation` |
+| `test` | Tests only | none | `tests` |
+| `build` / `ci` | Build system / CI changes | none | `ci` |
+| `chore` | Everything else (deps, tooling) | none | `chore` |
+| `revert` | Reverting a previous change | matches reverted change | `revert` |
 
 A `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer marks a breaking
 change → major bump (while churl is 0.x, cargo semver treats this as a minor
 bump, which is still breaking for 0.x users).
+
+Labels are applied automatically from the title when a PR is opened, retitled,
+or reopened (`pr-label.yml`); `!` additionally applies `breaking`. Retitling
+adds the new type's label but doesn't remove the old one — drop stale labels
+by hand.
 
 Examples:
 
@@ -81,6 +86,7 @@ binaries appear as workflow artifacts with 14-day retention.
 | Piece | Role |
 |---|---|
 | `.github/workflows/pr-title.yml` | Enforces conventional PR titles |
+| `.github/workflows/pr-label.yml` | Auto-labels PRs from the title type |
 | `release-plz.toml` | Version/changelog/tag policy (single release train) |
 | `.github/workflows/release-plz.yml` | Release PR + crates.io publish + tag push |
 | `.github/workflows/release.yml` | Binaries + GitHub release on `v*` tags |
