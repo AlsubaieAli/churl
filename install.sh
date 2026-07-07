@@ -81,6 +81,9 @@ case "$OS" in
 esac
 
 ARCHIVE="${BIN}-${TARGET}.tar.gz"
+# The release action names the checksum after the archive stem, not the
+# full archive name: churl-<target>.sha256, NOT churl-<target>.tar.gz.sha256.
+CHECKSUM="${BIN}-${TARGET}.sha256"
 # `latest` never resolves to a prerelease — betas are only reachable via --tag.
 if [ -n "$TAG" ]; then
   BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
@@ -88,7 +91,7 @@ else
   BASE_URL="https://github.com/${REPO}/releases/latest/download"
 fi
 ARCHIVE_URL="${BASE_URL}/${ARCHIVE}"
-CHECKSUM_URL="${BASE_URL}/${ARCHIVE}.sha256"
+CHECKSUM_URL="${BASE_URL}/${CHECKSUM}"
 
 if [ "$DRY_RUN" = "1" ]; then
   printf 'dry-run: target  = %s\n' "$TARGET"
@@ -113,22 +116,23 @@ printf 'Downloading %s ...\n' "$ARCHIVE_URL"
 
 if command -v curl > /dev/null 2>&1; then
   curl -fsSL "$ARCHIVE_URL"  -o "${TMP_DIR}/${ARCHIVE}"
-  curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/${ARCHIVE}.sha256"
+  curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/${CHECKSUM}"
 elif command -v wget > /dev/null 2>&1; then
   wget -q "$ARCHIVE_URL"  -O "${TMP_DIR}/${ARCHIVE}"
-  wget -q "$CHECKSUM_URL" -O "${TMP_DIR}/${ARCHIVE}.sha256"
+  wget -q "$CHECKSUM_URL" -O "${TMP_DIR}/${CHECKSUM}"
 else
   printf 'error: neither curl nor wget is available\n' >&2
   exit 1
 fi
 
-# --- verify sha256 checksum ---
+# --- verify sha256 checksum (the file references the archive by name, so
+# run the check from the temp dir where the archive lives) ---
 printf 'Verifying checksum ...\n'
 cd "$TMP_DIR"
 if command -v sha256sum > /dev/null 2>&1; then
-  sha256sum -c "${ARCHIVE}.sha256"
+  sha256sum -c "${CHECKSUM}"
 elif command -v shasum > /dev/null 2>&1; then
-  shasum -a 256 -c "${ARCHIVE}.sha256"
+  shasum -a 256 -c "${CHECKSUM}"
 else
   printf 'warning: no sha256 tool found, skipping checksum verification\n' >&2
 fi

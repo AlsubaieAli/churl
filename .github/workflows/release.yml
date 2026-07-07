@@ -91,9 +91,32 @@ jobs:
           checksum: sha256
           archive: churl-$target
 
+  smoke-test-install:
+    name: Smoke-test the installer
+    needs: build-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Exercise the real end-to-end path against the just-built release
+      # assets: download archive + checksum, verify, install, run. Catches
+      # asset-naming drift between the release action and install.sh — e.g.
+      # the churl-<t>.sha256 vs churl-<t>.tar.gz.sha256 mismatch that made
+      # every install 404 on the checksum step through v0.1.2.
+      - name: Install via install.sh from this release
+        run: |
+          sh install.sh --tag "$GITHUB_REF_NAME" --to "$HOME/.local/bin" --force
+          "$HOME/.local/bin/churl" --version
+
   finalize-release:
     name: Mark release stable
-    needs: build-release
+    # Gated on the smoke test: never promote a release to latest if the
+    # installer can't actually install it.
+    needs: [build-release, smoke-test-install]
     # Stable tags only — beta/rc tags stay prerelease so `latest` never
     # serves them.
     if: ${{ !contains(github.ref_name, '-') }}
