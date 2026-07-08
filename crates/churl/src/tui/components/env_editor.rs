@@ -89,6 +89,9 @@ pub struct EnvFieldEdit {
     pub field: EnvField,
     /// The shared single-line editor.
     pub editor: LineEditor,
+    /// The field's value before this edit began, so `Esc` can revert the
+    /// live-mirrored preview (see [`EnvEditorState::cancel_edit`]).
+    pub original: String,
     /// True when this edit is for a freshly-added row, so committing the name
     /// auto-advances into the value (keystroke economy).
     pub is_new: bool,
@@ -149,6 +152,9 @@ pub struct EnvEditorState {
     /// Mirror of the app's active profile, for the precedence display; may be
     /// changed with `x` and applied to the app on save.
     pub active_profile: Option<String>,
+    /// The active profile as of the last open/save, so activating a different
+    /// profile with `x` counts toward dirtiness (and discard can revert it).
+    snapshot_active_profile: Option<String>,
     /// CLI `--var` overrides (highest-precedence scope), for precedence display.
     cli_vars: BTreeMap<String, String>,
 }
@@ -200,14 +206,16 @@ impl EnvEditorState {
             naming: None,
             message: None,
             pending_close: false,
+            snapshot_active_profile: active_profile.clone(),
             active_profile,
             cli_vars,
         })
     }
 
-    /// Whether the working scopes differ from the pristine snapshot.
+    /// Whether the working state differs from the pristine snapshot: any var/scope
+    /// edit, or a change to the active profile (`x`).
     pub fn is_dirty(&self) -> bool {
-        self.scopes != self.snapshot
+        self.scopes != self.snapshot || self.active_profile != self.snapshot_active_profile
     }
 
     /// The currently-selected scope.
@@ -239,7 +247,12 @@ impl EnvEditorState {
     fn handle_confirm_key(&mut self, key: KeyEvent) -> EnvKeyOutcome {
         match key.code {
             KeyCode::Char('s') => EnvKeyOutcome::SaveAndClose,
-            KeyCode::Char('d') => EnvKeyOutcome::Close,
+            KeyCode::Char('d') => {
+                // Discard: revert the active-profile selection to what it was at
+                // open (var edits are simply dropped with the state).
+                self.active_profile = self.snapshot_active_profile.clone();
+                EnvKeyOutcome::Close
+            }
             KeyCode::Esc => {
                 self.pending_close = false;
                 EnvKeyOutcome::Consumed
@@ -444,6 +457,7 @@ impl EnvEditorState {
             row,
             field,
             editor: LineEditor::new(&seed),
+            original: seed,
             is_new,
         });
     }
@@ -488,10 +502,13 @@ impl EnvEditorState {
     }
 
     fn cancel_edit(&mut self) {
-        // If cancelling a fresh, still-empty row, drop the placeholder row.
-        if let Some(edit) = self.editing.take()
-            && edit.is_new
-        {
+        let Some(edit) = self.editing.take() else {
+            return;
+        };
+        // Revert the live-mirrored preview back to the pre-edit value.
+        self.write_field(edit.row, edit.field, edit.original.clone());
+        // A fresh row left fully empty (its name was never committed) is dropped.
+        if edit.is_new {
             let scope = &mut self.scopes[self.selected_scope];
             if let Some((name, value)) = scope.vars.get(edit.row)
                 && name.is_empty()
@@ -592,6 +609,15 @@ impl EnvEditorState {
     /// success, refreshes the dirty snapshot and returns the new manifest for the
     /// app to apply live.
     pub fn save(&mut self, root: &Path, workspace_name: &str) -> EnvSaveResult {
+        // Refuse duplicate var names before anything else: on save the rows
+        // collapse to a `BTreeMap` (last wins), which would silently drop a
+        // visible row. Name the scope + var and write nothing.
+        if let Some(dup) = self.duplicate_name_violation() {
+            let msg = format!("{dup} — rename or remove the duplicate before saving");
+            self.message = Some(msg.clone());
+            return EnvSaveResult::Refused(msg);
+        }
+
         let workspace = self.build_workspace(workspace_name);
         let collections = self.build_collection_metas();
 
@@ -644,10 +670,29 @@ impl EnvEditorState {
 
         // Success: the working state is now the pristine state.
         self.snapshot = self.scopes.clone();
+        self.snapshot_active_profile = self.active_profile.clone();
         EnvSaveResult::Ok {
             workspace,
             active_profile: self.active_profile.clone(),
         }
+    }
+
+    /// The first duplicate (trimmed, non-empty) var name within any scope, as a
+    /// `"duplicate var name 'x' in <scope>"` message, or `None` when clean.
+    fn duplicate_name_violation(&self) -> Option<String> {
+        for scope in &self.scopes {
+            let mut seen = std::collections::HashSet::new();
+            for (name, _) in &scope.vars {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if !seen.insert(trimmed.to_owned()) {
+                    return Some(format!("duplicate var name {trimmed:?} in {}", scope.label));
+                }
+            }
+        }
+        None
     }
 
     /// Rebuilds a [`Workspace`] from the workspace + profile scopes.
@@ -772,7 +817,21 @@ impl EnvEditorState {
             && self.active_profile.as_deref() != Some(sel.label.as_str())
     }
 
-    /// The inline precedence tag for a row `name` in the selected scope.
+    /// Whether any collection scope defines `name`. Used to qualify a workspace
+    /// winner: the collection layer (rank 2) sits above workspace (rank 3), so a
+    /// workspace value that a collection also defines is overridden for that
+    /// collection's endpoints — a bare ` ✓` would overstate the win. (Profile and
+    /// cli outrank collections, so their winners stay a precise ` ✓`.)
+    fn defined_in_a_collection(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| {
+            matches!(s.kind, EnvScopeKind::Collection { .. })
+                && s.vars.iter().any(|(n, _)| n == name)
+        })
+    }
+
+    /// The inline precedence tag for a row `name` in the selected scope. A
+    /// workspace ` ✓` winner becomes ` ✓*` when the same name is also set in a
+    /// collection (overridden there per-request — see the footer legend).
     fn row_precedence_tag(&self, name: &str) -> String {
         if name.is_empty() {
             return String::new();
@@ -783,10 +842,27 @@ impl EnvEditorState {
         let links = self.precedence_chain(name);
         let winner = links.iter().find(|l| l.defines);
         match winner {
-            Some(w) if w.is_selected => " ✓".to_owned(),
+            Some(w) if w.is_selected => {
+                if matches!(self.scope().kind, EnvScopeKind::Workspace)
+                    && self.defined_in_a_collection(name)
+                {
+                    " ✓*".to_owned()
+                } else {
+                    " ✓".to_owned()
+                }
+            }
             Some(w) => format!(" → {}", w.label),
             None => String::new(),
         }
+    }
+
+    /// Whether the currently-selected row carries the ` ✓*` collection-override
+    /// caveat, so the footer can show the legend.
+    fn selected_row_has_collection_caveat(&self) -> bool {
+        self.scope()
+            .vars
+            .get(self.selected_row)
+            .is_some_and(|(name, _)| self.row_precedence_tag(name).ends_with('*'))
     }
 
     /// The full precedence chain string for the selected row (footer).
@@ -1129,11 +1205,17 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &
     let [chain_row, hint_row] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-    // Line 1: a live message (errors/status) wins over the precedence chain.
+    // Line 1: a live message (errors/status) wins over the precedence chain; the
+    // `✓*` collection-override legend appends to the chain when relevant.
     let top = if let Some(msg) = &state.message {
         Line::styled(format!(" {msg}"), theme.status_error)
     } else if let Some(chain) = state.selected_row_chain() {
-        Line::styled(format!(" {chain}"), theme.auth_mask)
+        let legend = if state.selected_row_has_collection_caveat() {
+            "   * also set in a collection — overridden there per-request"
+        } else {
+            ""
+        };
+        Line::styled(format!(" {chain}{legend}"), theme.auth_mask)
     } else {
         Line::from("")
     };
@@ -1218,6 +1300,7 @@ mod tests {
             message: None,
             pending_close: false,
             active_profile: None,
+            snapshot_active_profile: None,
             cli_vars: BTreeMap::new(),
         }
         .with_snapshot()
@@ -1226,6 +1309,7 @@ mod tests {
     impl EnvEditorState {
         fn with_snapshot(mut self) -> Self {
             self.snapshot = self.scopes.clone();
+            self.snapshot_active_profile = self.active_profile.clone();
             self
         }
     }
@@ -1445,6 +1529,7 @@ mod tests {
             message: None,
             pending_close: false,
             active_profile: None,
+            snapshot_active_profile: None,
             cli_vars: BTreeMap::new(),
         }
         .with_snapshot();
@@ -1528,5 +1613,97 @@ mod tests {
             !map.values().any(|v| v == "orphan"),
             "blank-named row dropped"
         );
+    }
+
+    // --- Fix-round (2026-07-08 review) regression tests. ---
+
+    #[test]
+    fn esc_reverts_an_existing_field_edit() {
+        // Fix 1: Esc must restore the pre-edit value (the live mirror is reverted)
+        // and leave the editor clean.
+        let mut s = fixture();
+        s.handle_key(key(KeyCode::Tab)); // into workspace rows (base_url)
+        let original = s.scopes[0].vars[0].1.clone();
+        s.handle_key(key(KeyCode::Enter)); // edit base_url value
+        type_str(&mut s, "XYZ");
+        assert!(s.is_dirty(), "typing live-mirrors → dirty mid-edit");
+        s.handle_key(key(KeyCode::Esc)); // cancel
+        assert_eq!(s.scopes[0].vars[0].1, original, "value reverted");
+        assert!(!s.is_dirty(), "cancel leaves the editor clean");
+    }
+
+    #[test]
+    fn winner_marker_flags_collection_override() {
+        // Fix 2: a workspace var also defined in a collection shows ✓* (not a bare
+        // ✓), because the collection value wins for that collection's endpoints.
+        let mut s = fixture();
+        // `page_size` lives in the collection; also add it to the workspace.
+        s.scopes[0].vars.push(("page_size".into(), "10".into()));
+        s.selected_scope = 0; // workspace
+        s.selected_row = s.scopes[0].vars.len() - 1; // the page_size row
+        assert_eq!(s.row_precedence_tag("page_size"), " ✓*");
+        assert!(
+            s.selected_row_has_collection_caveat(),
+            "selected ✓* row shows the footer legend"
+        );
+        // A workspace var that no collection defines stays a bare ✓.
+        assert_eq!(s.row_precedence_tag("base_url"), " ✓");
+        // In the collection scope view the same var is precise (bare ✓).
+        s.selected_scope = 1;
+        assert_eq!(s.row_precedence_tag("page_size"), " ✓");
+    }
+
+    #[test]
+    fn save_refuses_duplicate_var_names() {
+        // Fix 3: two rows with the same name refuse the whole save (no silent
+        // last-wins collapse), naming the scope + var; the file is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let before = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+        let mut s = fixture();
+        s.scopes[0]
+            .vars
+            .push(("base_url".into(), "https://dup".into()));
+        let result = s.save(dir.path(), "demo");
+        match result {
+            EnvSaveResult::Refused(msg) => {
+                assert!(msg.contains("duplicate var name"), "{msg}");
+                assert!(msg.contains("base_url"), "{msg}");
+                assert!(msg.contains("Workspace"), "{msg}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        let after = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+        assert_eq!(before, after, "refused save writes nothing");
+    }
+
+    #[test]
+    fn activating_profile_is_dirty_discard_reverts_save_commits() {
+        // Fix 4: `x` folds into dirtiness; discard reverts active_profile; save
+        // updates the snapshot so it clears.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let mut s = fixture();
+        assert!(!s.is_dirty());
+        s.selected_scope = 2; // dev
+        s.set_active_profile(); // activate dev
+        assert_eq!(s.active_profile.as_deref(), Some("dev"));
+        assert!(s.is_dirty(), "activating a profile marks dirty");
+
+        // Discard (via the confirm) reverts the active profile.
+        let out = s.handle_key(ch('q')); // dirty → confirm
+        assert_eq!(out, EnvKeyOutcome::Consumed);
+        assert!(s.pending_close);
+        let out = s.handle_key(ch('d')); // discard
+        assert_eq!(out, EnvKeyOutcome::Close);
+        assert_eq!(s.active_profile, None, "discard reverts active profile");
+
+        // Re-activate and save: the snapshot updates so dirty clears.
+        s.pending_close = false;
+        s.set_active_profile();
+        assert!(s.is_dirty());
+        let result = s.save(dir.path(), "demo");
+        assert!(matches!(result, EnvSaveResult::Ok { .. }));
+        assert!(!s.is_dirty(), "save commits the active-profile change");
     }
 }

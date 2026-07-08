@@ -1758,3 +1758,35 @@ fn env_editor_save_refuses_secret_literal() {
         "refusal message shown:\n{rendered}"
     );
 }
+
+#[test]
+fn env_editor_collection_override_marker_and_legend() {
+    // Fix 2 (visible): a workspace var also set in a collection renders `✓*` with
+    // a footer legend, so the winner marker never overstates the win.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nbase_url = \"https://api.example.com\"\n",
+    )
+    .unwrap();
+    let users = dir.path().join("users");
+    std::fs::create_dir(&users).unwrap();
+    std::fs::write(
+        users.join("folder.toml"),
+        "[vars]\nbase_url = \"https://users.example.com\"\n",
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // into the workspace var rows (base_url selected)
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("✓*"),
+        "collection-override marker shown:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("also set in a collection"),
+        "footer legend shown:\n{rendered}"
+    );
+}
