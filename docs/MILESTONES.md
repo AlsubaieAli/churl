@@ -16,8 +16,8 @@
 | M6.7 | UX round 2 (leader key, zoom, URL↔params sync, help overlay) | **done** |
 | M7 | Polish + perf + release | **done** |
 | M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | **done** |
-| M7.2 | Environments & vars editor | planned |
-| M7.3 | Quick-jump pickers (requests + workspaces) | planned |
+| M7.2 | Quick-jump pickers (requests + workspaces) | **done** |
+| M7.3 | Environments & vars editor | planned |
 | M7.4 | Request sequences (E2E testing) | planned |
 | M7.5 | Concurrent requests (throttle / load testing) | planned |
 | M8 | Cookies + proxy | planned |
@@ -474,7 +474,24 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 ---
 
-## M7.2 — Environments & vars editor
+## M7.2 — Quick-jump pickers (requests + workspaces)
+
+**Scope**: Telescope/snacks-style navigation (owner addition 2026-07-07) — type-to-search pickers on logical, remappable hotkeys, building on the existing shared picker overlay + nucleo-matcher (M2).
+
+**Deliverables** (all shipped):
+- **Request picker** (`<leader>f`, remappable via `[keys.leader]`) — ✅ **reuses the existing endpoint-search overlay** (`Action::OpenSearch` / `Mode::Search` / `explorer.all_endpoints()`) rather than rebuilding a picker: a new `Action::QuickJumpRequests` dispatches to the same `open_search()` code path, so Enter opens the endpoint through the existing dirty-guarded load. The `/` search bind stays as a second entry point. An explicit alternative to `f`-jump navigation.
+- **Workspace picker** (`<leader>w`, remappable) — ✅ new `Action::QuickJumpWorkspaces` opens a picker over recently-opened workspaces. Recency lives in the SQLite **state DB** (new `workspaces(path UNIQUE, last_opened_ms)` table, migration 2 — `touch_workspace`/`recent_workspaces` on `HistoryStore`), never in workspace files. Paths are stored canonical/absolute (deduped); `$HOME` collapses to `~` in the display. Enter routes the switch through `guarded_load` via a new `PendingLoad::Workspace(path)` variant (always treated as "other", so a dirty switch defers to the discard-changes confirm). `install_runtime` seeds recency with the launch workspace.
+- **Runtime workspace switch** — ✅ new `App::switch_workspace` opens the new manifest (fail-loud on error, current state preserved), rebuilds the explorer against it, and resets every endpoint/workspace-scoped field: `selected`, `loaded_snapshot`, editor body, `active_profile`, response state (+ scroll/cursor/highlight cache), tabs, url editor/popup, in-flight request (aborted), pending load, zoom, and focus (→ Explorer). Empty/absent recency shows a message instead of an empty picker.
+- ✅ Both honour the M6.6 dirty guards and, being labelled leader actions, appear automatically in the `?` help overlay + which-key popup (enforced by the help-overlay guard test).
+- ✅ Tests: core recency (insert/upsert/order/limit/dedup), `<leader>f` opens search, workspace picker open + empty-list guard, `switch_workspace` state reset + tree reload + recency write, dirty-switch defers to confirm, updated which-key snapshot.
+
+**Decisions**: request picker reuses the endpoint-search overlay (no separate picker); workspace recency lives in SQLite state (never in workspace files); the runtime switch resets endpoint-scoped state through the dirty guard. See DECISIONS.md.
+
+**Next**: M7.3
+
+---
+
+## M7.3 — Environments & vars editor
 
 **Scope**: In-app editing for the M6 three-scope var system (owner request 2026-07-05, clarified 2026-07-07). Today vars/profiles are file-edit-only; this makes them first-class in the TUI.
 
@@ -485,23 +502,6 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - Secrets rules unchanged: name-marker enforcement on save, masked display.
 - Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
 - Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
-
-**Next**: M7.3
-
----
-
-## M7.3 — Quick-jump pickers (requests + workspaces)
-
-**Scope**: Telescope/snacks-style navigation (owner addition 2026-07-07) — type-to-search pickers on logical, remappable hotkeys, building on the existing shared picker overlay + nucleo-matcher (M2).
-
-**Deliverables**:
-- **Request picker**: one hotkey (logical default, remappable via `[keys]` like everything else) → fuzzy picker over all endpoints across all collections in the workspace, type to filter, Enter opens the request file in the Request pane. Explicitly an alternative to `f`-jump navigation (owner: "could allow us to skip jumping using `f-char`").
-- **Workspace picker**: a second hotkey → recently opened workspaces (recency list persisted in the SQLite state DB — never in workspace files), type to filter, Enter loads that workspace (through `guarded_load` so dirty state is never silently dropped).
-- Both honour the M6.6 dirty guards and appear in the `?` help overlay + which-key.
-- Tests: picker filtering, recency persistence + ordering, dirty-guard interaction, snapshots.
-
-**Open questions**:
-- Default keybinds (decide in design session against the live keymap — candidates: `<leader>f` / `<leader>w`, or Ctrl-P-style): must not collide with pane-local overlays.
 
 **Next**: M7.4
 

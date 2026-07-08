@@ -336,6 +336,7 @@ dependencies = [
  "color-eyre",
  "crokey",
  "crossterm",
+ "dirs",
  "edtui",
  "futures",
  "insta",
