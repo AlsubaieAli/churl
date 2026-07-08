@@ -2,6 +2,7 @@
 //! are pure (state in, widgets out) so snapshot tests can drive them through a
 //! `TestBackend` without a tokio runtime.
 
+pub mod env_editor;
 pub mod explorer;
 pub mod fold;
 pub mod help;

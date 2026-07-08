@@ -17,9 +17,9 @@ expression: snapshot(&mut app)
 │              ┃  rename                                        ┃──────────────┘
 │              ┃  delete                                        ┃──────────────┐
 │              ┃  switch profile                                ┃              │
+│              ┃  environments & vars                           ┃              │
 │              ┃  toggle response headers view                  ┃              │
 │              ┃  toggle response wrap                          ┃              │
-│              ┃  import collection (JSON)                      ┃              │
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
 │                            ││                                                │
 │                            ││                                                │

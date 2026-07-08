@@ -37,6 +37,7 @@ use tokio::task::AbortHandle;
 use churl_core::config::UrlEditMode;
 
 use super::clipboard;
+use super::components::env_editor::{EnvEditorState, EnvKeyOutcome, EnvSaveResult};
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
@@ -45,8 +46,8 @@ use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestT
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    explorer, help, message, method_menu, palette, picker, prompt, request, response, statusline,
-    urlbar,
+    env_editor, explorer, help, message, method_menu, palette, picker, prompt, request, response,
+    statusline, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -122,6 +123,9 @@ pub enum Mode {
     Prompt(PromptPurpose),
     /// A y/n confirmation overlay is open.
     Confirm(ConfirmPurpose),
+    /// The environments & variables editor (M7.3): a modal split-view that grabs
+    /// every key (same routing tier as Search/Palette/Picker).
+    EnvEditor,
 }
 
 /// What a [`Mode::Prompt`] is collecting text for.
@@ -367,6 +371,8 @@ pub struct App {
     url_popup_vim: VimExt,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
+    /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
+    env_editor: Option<EnvEditorState>,
 }
 
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
@@ -473,6 +479,7 @@ impl App {
             url_popup_events: EditorEventHandler::default(),
             url_popup_vim: VimExt::default(),
             url_edit_mode: UrlEditMode::Inline,
+            env_editor: None,
         })
     }
 
@@ -690,6 +697,7 @@ impl App {
             }
             Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
             Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
+            Mode::EnvEditor => self.handle_env_editor_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -893,6 +901,7 @@ impl App {
             Action::OpenPalette => self.open_palette(),
             Action::Jump => self.open_jump(),
             Action::SwitchProfile => self.open_profile_picker(),
+            Action::OpenEnvEditor => self.open_env_editor(),
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
             Action::Save => self.save_request(),
@@ -1646,6 +1655,86 @@ impl App {
         self.profile_choices = choices;
         self.picker = Some(picker::PickerState::new(" Switch profile ", labels));
         self.mode = Mode::Palette;
+    }
+
+    /// Opens the environments & variables editor over the current workspace.
+    /// Requires an open workspace (there is nothing to edit otherwise).
+    fn open_env_editor(&mut self) {
+        let Some(ws) = self.workspace.as_ref() else {
+            self.notify("open a workspace first");
+            return;
+        };
+        match EnvEditorState::from_workspace(ws, self.active_profile.clone(), self.cli_vars.clone())
+        {
+            Ok(state) => {
+                self.env_editor = Some(state);
+                self.mode = Mode::EnvEditor;
+            }
+            Err(err) => self.notify(format!("couldn't open editor: {err}")),
+        }
+    }
+
+    /// Routes a key to the open env editor and acts on its outcome (save / close).
+    fn handle_env_editor_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(editor) = self.env_editor.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        match editor.handle_key(key) {
+            EnvKeyOutcome::Consumed => {}
+            EnvKeyOutcome::Save => {
+                self.env_save()?;
+            }
+            EnvKeyOutcome::SaveAndClose => {
+                // Close only if the save actually took (a secrets refusal / IO
+                // error keeps the editor open with the error visible).
+                if self.env_save()? {
+                    self.close_env_editor();
+                }
+            }
+            EnvKeyOutcome::Close => self.close_env_editor(),
+        }
+        Ok(())
+    }
+
+    /// Closes the editor and returns to normal mode.
+    fn close_env_editor(&mut self) {
+        self.env_editor = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Runs the editor's save against the current workspace and, on success,
+    /// live-refreshes the app so edits take effect without a restart. Returns
+    /// whether the save succeeded (drives the save-and-close path).
+    fn env_save(&mut self) -> Result<bool> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace to save into");
+            return Ok(false);
+        };
+        let name = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.manifest().name.clone())
+            .unwrap_or_default();
+        let Some(editor) = self.env_editor.as_mut() else {
+            return Ok(false);
+        };
+        match editor.save(&root, &name) {
+            EnvSaveResult::Ok { active_profile, .. } => {
+                // Live-refresh: re-open the manifest and reload the explorer so the
+                // send-time resolver (workspace/collection/profile vars) reflects
+                // the edits immediately.
+                self.active_profile = active_profile;
+                self.workspace = Some(OpenWorkspace::open(&root)?);
+                self.reload_explorer()?;
+                self.notify("saved · vars applied");
+                Ok(true)
+            }
+            EnvSaveResult::Refused(msg) | EnvSaveResult::Failed(msg) => {
+                self.notify(msg);
+                Ok(false)
+            }
+        }
     }
 
     fn close_overlay(&mut self) {
@@ -3373,6 +3462,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Confirm(purpose) => {
             let (title, question, hint) = confirm_text(purpose);
             prompt::render_confirm(frame, main, title, question, hint, &theme);
+        }
+        Mode::EnvEditor => {
+            if let Some(editor) = &app.env_editor {
+                env_editor::render(frame, main, editor, &theme);
+            }
         }
         _ => {}
     }

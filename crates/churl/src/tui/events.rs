@@ -59,6 +59,8 @@ pub enum Action {
     Jump,
     /// Switch the active variable profile (palette-only; opens the profile picker).
     SwitchProfile,
+    /// Open the environments & variables editor (workspace/collection/profile vars).
+    OpenEnvEditor,
     /// Focus the URL bar.
     FocusUrlBar,
     /// Edit the focused URL bar's URL inline.
@@ -178,6 +180,7 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::OpenPalette, "open-palette", "command palette"),
     (Action::Jump, "jump", "jump to pane / row"),
     (Action::SwitchProfile, "switch-profile", "switch profile"),
+    (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
     (Action::FocusUrlBar, "focus-urlbar", "focus URL bar"),
     (Action::EditUrl, "edit-url", "edit URL"),
     (Action::MethodCycle, "method-cycle", "cycle method"),
@@ -496,6 +499,8 @@ impl Default for KeyMap {
         leader_bind(key!(s), Action::Send);
         leader_bind(key!(c), Action::Cancel);
         leader_bind(key!(p), Action::SwitchProfile);
+        // `<leader>v` opens the environments & variables editor (`v` is free).
+        leader_bind(key!(v), Action::OpenEnvEditor);
         leader_bind(key!(q), Action::Quit);
         // Quick-jump pickers (M7.2): `<leader>f` reuses the endpoint-search
         // overlay; `<leader>w` opens the recent-workspace picker.
