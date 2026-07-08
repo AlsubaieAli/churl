@@ -44,6 +44,16 @@ two-face = "0.4"
 # Terminal cell widths (inline-edit viewport)
 unicode-width = "0.2"
 
+# Native OS clipboard (churl bin only; never churl-core). Already a transitive
+# dep via edtui, so it adds no new packages. `default-features = false`
+# documents churl's text-only intent, but note edtui pulls arboard with its
+# defaults too — Cargo feature-unification keeps `image-data` in the build
+# regardless, so this flag does not actually slim the compiled surface today.
+# X11 backend is pure-Rust (x11rb via rustix) — no libxcb-dev on Linux CI.
+# Native path = macOS / Windows / Linux-X11; Wayland is NOT native here
+# (wayland-data-control feature is off) — it falls back to OSC 52.
+arboard = { version = "3.6", default-features = false }
+
 # Serialization / persistence
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

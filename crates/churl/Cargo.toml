@@ -34,6 +34,7 @@ reqwest.workspace = true
 syntect.workspace = true
 two-face.workspace = true
 unicode-width.workspace = true
+arboard.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

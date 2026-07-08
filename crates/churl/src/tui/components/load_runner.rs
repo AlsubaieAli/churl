@@ -896,7 +896,6 @@ fn render_response(
             theme,
             jump_label: None,
             tick_count,
-            idle_hint: Some("press r to run"),
         },
     );
     state.resp_scroll = outcome.clamped_scroll;

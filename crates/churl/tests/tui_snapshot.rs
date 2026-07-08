@@ -551,11 +551,13 @@ fn response_copy_sets_message() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
     press(&mut app, KeyCode::Char('y'));
-    // Copy reports a size in the message row.
-    let rendered = snapshot(&mut app);
+    // The copy is queued for the run loop (which owns the real clipboard); the
+    // queued success message reports a size. We assert on the intent, not the
+    // rendered row, so the test never touches a real clipboard.
+    let msg = app.pending_copy_message().expect("copy must be queued");
     assert!(
-        rendered.contains("copied"),
-        "copy must confirm in the message row:\n{rendered}"
+        msg.contains("copied"),
+        "copy must confirm with a size: {msg}"
     );
 }
 
@@ -565,11 +567,8 @@ fn response_copy_line_reports_line() {
     let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
     app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
         .unwrap();
-    let rendered = snapshot(&mut app);
-    assert!(
-        rendered.contains("copied line"),
-        "Y must confirm a line copy:\n{rendered}"
-    );
+    let msg = app.pending_copy_message().expect("copy must be queued");
+    assert_eq!(msg, "copied line", "Y must confirm a line copy");
 }
 
 #[test]

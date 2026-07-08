@@ -5,7 +5,7 @@ expression: render_runner(&mut state)
                                                                                           
      ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
      ┃1/3 · 120ms total   on_error: halt                                             ┃    
-     ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Res 200 OK · 120 ms · 27 B · 1 header ┐┃    
+     ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌200 OK · 120 ms · 27 B · 1 header  [h] ┐┃    
      ┃┃✓ POST auth/login.toml  200  120ms  ┃│{"data":{"token":"abc123"}}            │┃    
      ┃┃    ↳ token = ••••••                ┃│                                       │┃    
      ┃┃⠋ GET users/me.toml                 ┃│                                       │┃    

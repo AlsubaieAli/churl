@@ -10,7 +10,7 @@ expression: snapshot(&mut r)
 "      ┃┌ Results ─────────────────────────────┐┌ Response ──────────────────────────────────────────────────┐┃      "
 "      ┃│                                      ││no response yet                                             │┃      "
 "      ┃│                                      ││                                                            │┃      "
-"      ┃│                                      ││press r to run                                              │┃      "
+"      ┃│                                      ││no endpoint selected                                        │┃      "
 "      ┃│                                      ││                                                            │┃      "
 "      ┃│                                      ││                                                            │┃      "
 "      ┃│                                      ││                                                            │┃      "

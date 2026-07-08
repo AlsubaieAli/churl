@@ -608,7 +608,6 @@ fn render_response(
             theme,
             jump_label: None,
             tick_count,
-            idle_hint: None,
         },
     );
     // Store clamp geometry for the next key press (mirrors the top-level render).

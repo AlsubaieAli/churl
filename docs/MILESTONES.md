@@ -20,6 +20,7 @@
 | M7.3 | Environments & vars editor | **done** |
 | M7.4 | Request sequences (E2E testing) | **done** |
 | M7.5 | Concurrent requests (throttle / load testing) | **done** |
+| M7.5.3 | Clipboard cross-platform compat (native + OSC-52 passthrough) | **done** |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
 | M7.7 | Response formatting + help search (UX round) | planned |
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
@@ -567,6 +568,22 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - **Non-negotiables honoured**: `churl-core` stays UI-free; `execute()` is the only HTTP chokepoint (both `run_load` and the TUI launcher go through it); the request is resolved once and cloned for all N copies; bounded concurrency actually bounds; cancel aborts all in-flight; stale results dropped by generation; never panics (total 0/1, huge N refused by the cap, all-errored, percentile of empty, unicode URL); the results list renders O(viewport), not O(N).
 - **Deviations** (recorded in DECISIONS.md): `buffer_unordered` instead of a manual `FuturesUnordered`+`Semaphore` (same bound, less code); absolute-target pacing; an added `LoadStarted` launcher message so a running copy shows its glyph honestly; a `cancelled` column added to `load_batches` (the DDL in the design omitted it but §1d/§2 require marking a cancelled run); `tokio`+`futures` promoted to `churl-core` direct deps (used only inside `run_load`; `execute` stays runtime-agnostic).
 - **Fix round (pre-merge polish)**: all three batch-interrupt paths (Ctrl-C cancel, `r` re-run mid-batch, close mid-batch) now route through one `interrupt_running_batch` seam that records the partial cancelled summary before aborting — a partial run is never lost from `load_batches`. `LoadStats.mean` is surfaced in the stats line and persisted via **migration 4** (`ALTER TABLE load_batches ADD COLUMN mean_ms` — appended, not by editing migration 3, so it lands on already-v3 DBs too; regression-tested). See DECISIONS.md "M7.5 fix round".
+
+**Next**: M7.6
+
+---
+
+## M7.5.3 — Clipboard cross-platform compat (native + OSC-52 passthrough)
+
+**Scope**: Bug-fix milestone (owner report). Copy-as-curl (`C`) and response copy (`y`/`Y`) never reached the system clipboard for tmux users: the M7-wave-1 path emitted a *raw* OSC 52 escape (which tmux/screen swallow without passthrough-wrapping) and reported success unconditionally. Owner requirement: copy must work across almost all terminals, multiplexers, and operating systems (macOS, Windows, Linux X11 natively; pure Wayland via the OSC 52 fallback — native Wayland is a follow-up).
+
+**Deliverables**:
+- ✅ **Layered clipboard** (`tui/clipboard.rs`): `copy(payload, out) -> CopyOutcome` tries the **native OS clipboard first** (`arboard` — cross-OS), falling back to **OSC 52 wrapped for the active multiplexer** (tmux/screen DCS passthrough, else raw). `MAX_COPY_BYTES` cap + char-boundary truncation preserved.
+- ✅ **Honesty**: the silent `let _ =` is gone. The run loop reports the real outcome — "copied…" only when a path succeeded, "copy failed" otherwise. Resolved-vars secret warning preserved.
+- ✅ **Dep**: `arboard = { version = "3.6", default-features = false }` on the churl bin only (never churl-core). Already a transitive dep via edtui, so no new packages and no `ci.yml` change (its Linux backend `x11rb` is pure-Rust, no system libs).
+- ✅ **Tests**: pure logic only (OSC 52 framing, tmux/screen passthrough wrapping, multiplexer detection, payload capping, `CopyOutcome`) — `cargo test` never calls `arboard` (headless CI has no clipboard). Copy messages asserted via `App::pending_copy_message`.
+
+**Reverses** the M7-wave-1 "OSC 52, no native dep" decision (DECISIONS.md).
 
 **Next**: M7.6
 
