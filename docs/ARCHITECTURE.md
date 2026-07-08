@@ -10,8 +10,9 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 |---|---|
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
 | `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
-| `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint) |
-| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06) |
+| `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint). Sequences (M7.4): `SEQUENCES_DIRNAME` reserved dir (excluded from `collections()`); `OpenWorkspace::sequences() -> SequenceLoad { sequences, warnings }` (lenient); `load/save/create/rename/delete_sequence` CRUD seams |
+| `sequence` | Request-sequence run engine (M7.4, UI-free): dependency-free extraction subset (`extract_value`: `status` / `header:<Name>` / JSON-path `$.a.b[0].c`) over `serde_json`; run primitives shared by tests and the live TUI — `prepare_step` (resolver with the extracted scope prepended highest), `extract_step`, `classify_step` (the single classify+extract seam), `ordered_steps`; `run_sequence` wiremock-tested convenience. Rejects `..`/absolute step endpoints; never panics |
+| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06). Sequences prepend an ephemeral highest-precedence `extracted` scope (M7.4) — one extra scope, resolution never forked |
 | `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
 | `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
 | `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. Auth injected via `auth::apply_auth` (M5): header effects skipped when an enabled user header with the same name exists (the user's header wins), query effects appended after enabled params. No `{{var}}` templating (M6); URL/headers/body/auth used verbatim |
@@ -26,11 +27,11 @@ The `lib.rs` target exists solely to let integration tests (`tests/`) import int
 |---|---|
 | `main` | `Cli` (clap derive); global `--var key=value` (repeatable) + `--profile` args; `Command` variants (`import` since M4; `keymaps` since M6: prints the effective keymap sorted by action name, `(default \| overridden)`); `#[tokio::main]`; color-eyre hook installation |
 | `tui` | Terminal init/restore; `run(cli_vars, profile)` entry point (config → keymap → theme → workspace → `App::with_config`; unknown profile / bad theme error before the alternate screen) |
-| `tui::app` | `App` state (`Pane` focus incl. `UrlBar`, `Mode` overlays incl. `Jump`/`MethodMenu`/`Prompt`/`Confirm`/`EnvEditor` (the M7.3 env editor, holding `env_editor: Option<EnvEditorState>`), `RequestTabs`, `loaded_snapshot` for derived dirty, inline `url_editor`/`prompt_editor`, `AppMsg`, active profile, cli vars, `Theme`, `tick_count`); key routing via `lookup_ctx(key, pane.ctx())`; inline `LineEditor` editing (URL bar + request rows + CRUD prompts); in-app CRUD via `churl-core::persistence` seams; send-time `{{var}}` resolution; `tokio::select!` loop; top-level `render` — two-column layout: Explorer (left) + three-row column B: focusable URL bar / Request (tabs) / Response |
+| `tui::app` | `App` state (`Pane` focus incl. `UrlBar`, `Mode` overlays incl. `Jump`/`MethodMenu`/`Prompt`/`Confirm`/`EnvEditor` (the M7.3 env editor, holding `env_editor: Option<EnvEditorState>`)/`SequenceRunner`/`SequenceEditor` (M7.4, holding `sequence_runner`/`sequence_editor`; `AppMsg::SequenceStep` + `sequence_abort` drive the live run), `RequestTabs`, `loaded_snapshot` for derived dirty, inline `url_editor`/`prompt_editor`, `AppMsg`, active profile, cli vars, `Theme`, `tick_count`); key routing via `lookup_ctx(key, pane.ctx())`; inline `LineEditor` editing (URL bar + request rows + CRUD prompts); in-app CRUD via `churl-core::persistence` seams; send-time `{{var}}` resolution; `tokio::select!` loop; top-level `render` — two-column layout: Explorer (left) + three-row column B: focusable URL bar / Request (tabs) / Response |
 | `tui::events` | `Action` enum (+ `Jump`, `SwitchProfile`, and the M6.6 URL-bar/tab/row/CRUD/save actions) + crokey `KeyMap` with per-pane `overlays` (`PaneCtx ∈ {Explorer, UrlBar, Request, Response}`; `lookup_ctx` = overlay-then-global) built from `[keys]` + `[keys.<pane>]` config; `iter`/`combos_for` (+ overlay variants) for the `keymaps` subcommand; `FuzzyFinder` (nucleo-matcher) |
 | `tui::theme` | `Theme` (named style slots) parsed from core config strings, mirroring `[keys]`: built-in `dark`/`light` + `[theme_colors]` per-slot overrides (named ANSI or `#rrggbb`); fails loudly on unknown built-in/slot/colour. Core stays TUI-free (carries strings only) |
 | `tui::highlight` | Off-thread syntect worker: a dedicated `std::thread` owns the `SyntaxSet`/theme (lazy-loaded on first job), receives `HighlightJob`s over `std::sync::mpsc`, returns `AppMsg::Highlighted`. Embedded theme follows the UI theme (Nord dark / InspiredGithub light). `SyntaxToken` (json/xml/html/plain) derives from the response `Content-Type` |
-| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset, cached `folder.toml` vars, CRUD-support accessors + `reload`/`select_file`, lenient-load `take_warnings`), `urlbar` (focusable strip: method/URL + inline edit cursor + `●` dirty dot + auth kind + placeholder count), `line_editor` (shared single-line editor — no dep), `request` (tab bar + Params/Headers/Auth row lists + edtui Body), `request_tabs` (pure tab/row/field-edit state machine), `response` (virtualised viewer + M7 display pipeline: cursor, headers view, wrap, JSON folding, body search, copy), `fold` (string-aware JSON fold-region scanner), `env_editor` (M7.3 environments & vars editor: `EnvEditorState` split-view over workspace/collection/profile var scopes — profile CRUD, dirty/discard guard, secret mask+refuse, live precedence display; all UI state here, core stays UI-free), `picker` (generic fuzzy overlay), `method_menu` (one-key method picker), `prompt` (CRUD text prompt + y/n confirm overlays), `search`, `palette` (curated command allowlist), `jump`, `statusline` |
+| `tui::components` | One module per pane/overlay: `explorer` (tree state machine, viewport scroll offset, cached `folder.toml` vars, CRUD-support accessors + `reload`/`select_file`, lenient-load `take_warnings`), `urlbar` (focusable strip: method/URL + inline edit cursor + `●` dirty dot + auth kind + placeholder count), `line_editor` (shared single-line editor — no dep), `request` (tab bar + Params/Headers/Auth row lists + edtui Body), `request_tabs` (pure tab/row/field-edit state machine), `response` (virtualised viewer + M7 display pipeline: cursor, headers view, wrap, JSON folding, body search, copy), `fold` (string-aware JSON fold-region scanner), `env_editor` (M7.3 environments & vars editor: `EnvEditorState` split-view over workspace/collection/profile var scopes — profile CRUD, dirty/discard guard, secret mask+refuse, live precedence display; all UI state here, core stays UI-free), `picker` (generic fuzzy overlay), `method_menu` (one-key method picker), `prompt` (CRUD text prompt + y/n confirm overlays), `search`, `palette` (curated command allowlist), `jump`, `statusline`, `sequence_runner` (M7.4 live run view — reuses `response::render`, UI-only), `sequence_editor` (M7.4 §4 — steps + extraction-rule CRUD + reorder, saves via `save_sequence`) |
 | `tui::clipboard` | Clipboard writes via OSC 52 (`ESC ] 52 ; c ; <base64> BEL`) to ratatui's terminal backend writer — no native clipboard dep (works over SSH/tmux; macOS Terminal.app ignores it). 1 MB payload cap |
 
 ### Event / render loop (M2+)
@@ -78,6 +79,27 @@ Cursor and scroll are **display-row** indices (post-fold, post-wrap); the cursor
   <collection>/                 # a directory = a collection
     folder.toml?                # optional collection metadata + flat [vars] defaults (M6)
     <endpoint>.toml             # one file per endpoint; explicit `seq` for ordering
+  sequences/                    # reserved dir (M7.4) — request sequences, NOT a collection
+    <sequence>.toml             # one file per sequence; ordered [[step]]s + [step.extract] rules
+```
+
+Sequence file shape (M7.4):
+
+```toml
+seq = 0
+name = "Auth flow"
+on_error = "halt"               # halt (default) | continue
+
+[[step]]
+seq = 0
+endpoint = "auth/login.toml"    # workspace-relative endpoint path
+[step.extract]
+token = "$.data.token"          # var name -> extraction expression
+user_id = "$.data.user.id"
+
+[[step]]
+seq = 1
+endpoint = "users/me.toml"      # its request uses {{token}} — resolved from the extracted scope
 ```
 
 Endpoint file shape (M1):

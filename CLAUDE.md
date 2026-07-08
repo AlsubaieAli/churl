@@ -46,7 +46,8 @@ crates/
     src/
       lib.rs               # pub const VERSION + module exports
       model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace,
-                           #   Auth/ApiKeyPlacement (internally-tagged [request.auth])
+                           #   Auth/ApiKeyPlacement (internally-tagged [request.auth]);
+                           #   Sequence/SequenceStep/OnError (M7.4 request sequences)
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge), lazy OpenWorkspace/Collection;
@@ -54,9 +55,16 @@ crates/
                            #   warning; both skip folder.toml AND churl.toml — M7.3 crash fix);
                            #   CollectionMeta (folder.toml [vars]) load/save (M6); CRUD seams (M6.6):
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
-                           #   secrets refusal on every save path)
+                           #   secrets refusal on every save path);
+                           #   SEQUENCES_DIRNAME (excluded from collections()), OpenWorkspace::sequences() →
+                           #   SequenceLoad (lenient), load/save/create/rename/delete_sequence (M7.4)
+      sequence.rs          # M7.4 run engine (UI-free): extract_value (status/header:/JSON-path subset, no
+                           #   jsonpath dep), prepare_step (resolver + prepended extracted scope), extract_step,
+                           #   classify_step (single classify+extract seam), ordered_steps, run_sequence
+                           #   (wiremock-tested); rejects ../absolute step endpoints, never panics
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
-                           #   substitute / substitute_request (M6)
+                           #   substitute / substitute_request (M6); sequences prepend a highest-precedence
+                           #   `extracted` scope (M7.4) — resolution never forked
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
                            #   timeout_secs, max_body_bytes) + secrets heuristics (looks_like_secret_name,
                            #   is_template_placeholder, secret_violations incl. workspace [vars],
@@ -72,6 +80,7 @@ crates/
       roundtrip_prop.rs    # proptest Endpoint round-trip
       curl_roundtrip.rs    # ≥20-command curl import→export→import corpus
       http.rs              # wiremock execution suite incl. body-size cap
+      sequence.rs          # M7.4 wiremock chain/halt/continue/precedence/traversal + sequence TOML round-trip
       fixtures/            # comment-bearing endpoint TOML fixtures
   churl/                   # binary crate + thin lib for integration tests
     src/
@@ -80,7 +89,8 @@ crates/
       tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
       tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
-        app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor)/AppMsg,
+        app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor/
+                           #   SequenceRunner/SequenceEditor — M7.4)/AppMsg (incl. SequenceStep),
                            #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
                            #   lookup_ctx; in-app CRUD via core seams; tokio::select! loop, render; send-time {{var}}
                            #   resolution, profile switching, Theme; send/cancel, history, highlight cache
@@ -97,7 +107,10 @@ crates/
                            #     dirty/discard guard, secret mask+refuse, live precedence display; core stays UI-free),
                            #   picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump, statusline,
-                           #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors)
+                           #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors),
+                           #   sequence_runner (M7.4 run view: live per-step status/timing + reused response viewer,
+                           #     masked extracted values; UI-only, App drives via core primitives),
+                           #   sequence_editor (M7.4 §4: steps + extraction-rule CRUD + reorder + on_error, save_sequence)
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary

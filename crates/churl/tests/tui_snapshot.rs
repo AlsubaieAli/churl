@@ -903,6 +903,9 @@ fn every_palette_command_dispatches() {
             }
             // The env editor needs an open workspace; without one it warns.
             Action::OpenEnvEditor => expect_status(&mut app, "open a workspace first"),
+            // Sequences (M7.4): no workspace / no sequence selected → warn.
+            Action::RunSequence => expect_status(&mut app, "select a sequence"),
+            Action::EditSequence => expect_status(&mut app, "open a workspace first"),
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
@@ -1334,6 +1337,255 @@ fn url_popup_editor() {
         !rendered.contains("NORMAL \u{b7} enter commit"),
         "footer must not duplicate the vim mode: {rendered}"
     );
+    insta::assert_snapshot!(rendered);
+}
+
+/// Renders a sequence-runner state directly to a `TestBackend` string (no tokio;
+/// the component render is pure).
+fn render_runner(
+    state: &mut churl::tui::components::sequence_runner::SequenceRunnerState,
+) -> String {
+    use churl::tui::theme::Theme;
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    let cache = std::collections::HashMap::new();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let _ = churl::tui::components::sequence_runner::render(
+                frame, area, state, 0, &cache, &theme,
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..24)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn runner_step(endpoint: &str) -> churl_core::model::SequenceStep {
+    churl_core::model::SequenceStep {
+        seq: 0,
+        endpoint: endpoint.to_owned(),
+        extract: std::collections::BTreeMap::new(),
+    }
+}
+
+/// A mid-run runner: step 0 done + extracted (a masked secret) + its response
+/// shown; step 1 running; step 2 pending.
+#[test]
+fn sequence_runner_midrun() {
+    use churl::tui::components::sequence_runner::{SequenceRunnerState, StepStatus};
+    use churl_core::model::{Method, OnError};
+    let mut state = SequenceRunnerState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        OnError::Halt,
+        vec![
+            runner_step("auth/login.toml"),
+            runner_step("users/me.toml"),
+            runner_step("users/by_id.toml"),
+        ],
+    );
+    let resp = Response {
+        status: 200,
+        headers: vec![Header {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            enabled: true,
+        }],
+        body: br#"{"data":{"token":"abc123"}}"#.to_vec(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(120),
+        },
+    };
+    state.steps[0].status = StepStatus::Ok(200);
+    state.steps[0].method = Method::Post;
+    state.steps[0].timing = Some(Duration::from_millis(120));
+    state.steps[0]
+        .extracted
+        .insert("token".to_owned(), "abc123".to_owned());
+    state.steps[0].response = ResponseState::Done {
+        view: ResponseView::build(&resp, 1),
+    };
+    state.steps[1].status = StepStatus::Running;
+    state.steps[1].method = Method::Get;
+    state.current = Some(1);
+    state.selected = 0;
+    insta::assert_snapshot!(render_runner(&mut state));
+}
+
+/// A finished run with a failed step and a skipped tail.
+#[test]
+fn sequence_runner_finished_with_failure() {
+    use churl::tui::components::sequence_runner::{SequenceRunnerState, StepStatus};
+    use churl_core::model::{Method, OnError};
+    let mut state = SequenceRunnerState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        OnError::Halt,
+        vec![
+            runner_step("auth/login.toml"),
+            runner_step("users/me.toml"),
+            runner_step("users/by_id.toml"),
+        ],
+    );
+    state.steps[0].status = StepStatus::Ok(200);
+    state.steps[0].method = Method::Post;
+    state.steps[0].timing = Some(Duration::from_millis(90));
+    state.steps[1].status = StepStatus::Failed(500);
+    state.steps[1].method = Method::Get;
+    state.steps[1].timing = Some(Duration::from_millis(45));
+    state.steps[1].response = ResponseState::Failed {
+        error: "HTTP 500".to_owned(),
+        meta: ResponseMeta {
+            method: String::new(),
+            url: "users/me.toml".to_owned(),
+            endpoint_path: Some("users/me.toml".to_owned()),
+            executed_at_ms: 0,
+        },
+    };
+    state.steps[2].status = StepStatus::Skipped;
+    state.selected = 1;
+    state.finished = true;
+    insta::assert_snapshot!(render_runner(&mut state));
+}
+
+/// The runner's response viewer produces a highlight job for a `Done` step (it
+/// used to build a throwaway cache and discard the job, so it never highlighted),
+/// and each step's view gets a distinct cache key so two steps never collide.
+#[test]
+fn sequence_runner_enqueues_highlight_job() {
+    use churl::tui::components::sequence_runner::{SequenceRunnerState, StepStatus};
+    use churl::tui::theme::Theme;
+    use churl_core::model::{Method, OnError};
+
+    fn resp(body: &str) -> Response {
+        Response {
+            status: 200,
+            headers: vec![Header {
+                name: "Content-Type".into(),
+                value: "application/json".into(),
+                enabled: true,
+            }],
+            body: body.as_bytes().to_vec(),
+            truncated: false,
+            timing: Timing {
+                connect: None,
+                total: Duration::from_millis(10),
+            },
+        }
+    }
+    fn render_capture(
+        state: &mut SequenceRunnerState,
+        cache: &std::collections::HashMap<u64, Vec<ratatui::text::Line<'static>>>,
+    ) -> Option<u64> {
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        let mut hash = None;
+        terminal
+            .draw(|frame| {
+                let job = churl::tui::components::sequence_runner::render(
+                    frame,
+                    frame.area(),
+                    state,
+                    0,
+                    cache,
+                    &theme,
+                );
+                hash = job.map(|j| j.hash);
+            })
+            .unwrap();
+        hash
+    }
+
+    let mut state = SequenceRunnerState::new(
+        "Flow".to_owned(),
+        std::path::PathBuf::from("sequences/flow.toml"),
+        OnError::Halt,
+        vec![runner_step("a.toml"), runner_step("b.toml")],
+    );
+    // Two Done steps with DISTINCT view generations (as the driver mints them).
+    let g0 = state.next_view_gen();
+    let g1 = state.next_view_gen();
+    state.steps[0].status = StepStatus::Ok(200);
+    state.steps[0].method = Method::Get;
+    state.steps[0].response = ResponseState::Done {
+        view: ResponseView::build(&resp(r#"{"a":1}"#), g0),
+    };
+    state.steps[1].status = StepStatus::Ok(200);
+    state.steps[1].response = ResponseState::Done {
+        view: ResponseView::build(&resp(r#"{"b":2}"#), g1),
+    };
+
+    let cache = std::collections::HashMap::new();
+    // A Done step yields a job to enqueue (previously always None → plain text).
+    state.selected = 0;
+    let job0 = render_capture(&mut state, &cache);
+    assert!(job0.is_some(), "a Done step must produce a highlight job");
+    // A different step's view has a distinct cache key (no collision).
+    state.selected = 1;
+    let job1 = render_capture(&mut state, &cache);
+    assert!(job1.is_some());
+    assert_ne!(job0, job1, "distinct step views must not share a cache key");
+}
+
+/// The sequence editor modal: two steps, the first with extraction rules.
+#[test]
+fn sequence_editor_modal() {
+    use churl::tui::components::sequence_editor::{self, SequenceEditorState};
+    use churl::tui::theme::Theme;
+    use churl_core::model::{OnError, Sequence, SequenceStep};
+    let mut rules = std::collections::BTreeMap::new();
+    rules.insert("token".to_owned(), "$.data.token".to_owned());
+    rules.insert("user_id".to_owned(), "$.data.user.id".to_owned());
+    let sequence = Sequence {
+        seq: 0,
+        name: "Auth flow".to_owned(),
+        on_error: OnError::Halt,
+        steps: vec![
+            SequenceStep {
+                seq: 0,
+                endpoint: "auth/login.toml".to_owned(),
+                extract: rules,
+            },
+            SequenceStep {
+                seq: 1,
+                endpoint: "users/me.toml".to_owned(),
+                extract: std::collections::BTreeMap::new(),
+            },
+        ],
+    };
+    let state = SequenceEditorState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        &sequence,
+        vec!["auth/login.toml".to_owned(), "users/me.toml".to_owned()],
+    );
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    terminal
+        .draw(|frame| sequence_editor::render(frame, frame.area(), &state, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let rendered = (0..24)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     insta::assert_snapshot!(rendered);
 }
 

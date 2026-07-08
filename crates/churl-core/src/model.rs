@@ -276,6 +276,68 @@ pub struct CollectionMeta {
     pub vars: BTreeMap<String, String>,
 }
 
+/// What a [`Sequence`] does when a step fails (transport error, HTTP status
+/// ≥ 400, or an extraction failure). Persisted as `on_error = "halt" | "continue"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnError {
+    /// Stop the run at the first failing step; every later step is `Skipped`.
+    /// The default.
+    #[default]
+    Halt,
+    /// Keep running later steps even after a failure.
+    Continue,
+}
+
+impl OnError {
+    /// Serde default for [`Sequence::on_error`] — [`OnError::Halt`].
+    pub fn halt() -> Self {
+        OnError::Halt
+    }
+}
+
+/// A request sequence: an ordered run of existing endpoints for end-to-end API
+/// testing. Persisted as one `sequences/<slug>.toml` file inside a workspace
+/// (`persistence::SEQUENCES_DIRNAME`, a reserved workspace dir — never a
+/// collection). Values extracted from a step's response feed later steps through
+/// the `{{var}}` resolver chain (see [`crate::template`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sequence {
+    /// Explicit ordering key within the `sequences/` dir (lower sorts first).
+    /// Defaults to `0` so hand-written files stay minimal.
+    #[serde(default)]
+    pub seq: u32,
+    /// Human-readable sequence name shown in the explorer.
+    pub name: String,
+    /// Failure policy; defaults to [`OnError::Halt`].
+    #[serde(default = "OnError::halt")]
+    pub on_error: OnError,
+    /// Ordered steps, serialized as `[[step]]` tables; omitted from serialized
+    /// output when empty.
+    #[serde(default, rename = "step", skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<SequenceStep>,
+}
+
+/// One step of a [`Sequence`]: runs an endpoint and optionally extracts values
+/// from its response into named variables consumed by later steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceStep {
+    /// Explicit ordering key within the sequence (lower runs first). Defaults to
+    /// `0`; the in-app editor renumbers on reorder.
+    #[serde(default)]
+    pub seq: u32,
+    /// Workspace-relative path to the endpoint file this step runs, e.g.
+    /// `"auth/login.toml"`. Must stay inside the workspace root — `..` and
+    /// absolute paths are rejected at run time (see
+    /// [`crate::sequence::prepare_step`]).
+    pub endpoint: String,
+    /// Extraction rules `variable name → expression` (`[step.extract]`), each run
+    /// via [`crate::sequence::extract_value`]. Omitted from serialized output when
+    /// empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extract: BTreeMap<String, String>,
+}
+
 /// An executed HTTP response. Runtime-only: never persisted to TOML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {

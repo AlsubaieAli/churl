@@ -24,6 +24,8 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("delete", Action::Delete),
     ("switch profile", Action::SwitchProfile),
     ("environments & vars", Action::OpenEnvEditor),
+    ("run sequence", Action::RunSequence),
+    ("edit sequence", Action::EditSequence),
     ("toggle response headers view", Action::ToggleHeadersView),
     ("toggle response wrap", Action::ToggleWrap),
     ("import collection (JSON)", Action::ImportCollection),

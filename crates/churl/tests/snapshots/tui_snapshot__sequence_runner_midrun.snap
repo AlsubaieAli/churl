@@ -1,0 +1,27 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: render_runner(&mut state)
+---
+                                                                                          
+     ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┃1/3 · 120ms total   on_error: halt                                             ┃    
+     ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Respo 200 OK · 120 ms · 27 B · 1 hdrs ┐┃    
+     ┃┃✓ POST auth/login.toml  200  120ms  ┃│{"data":{"token":"abc123"}}            │┃    
+     ┃┃    ↳ token = ••••••                ┃│                                       │┃    
+     ┃┃⠋ GET users/me.toml                 ┃│                                       │┃    
+     ┃┃○ GET users/by_id.toml              ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
+     ┃j/k step · tab response · r re-run · ctrl-c cancel · q close                   ┃    
+     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

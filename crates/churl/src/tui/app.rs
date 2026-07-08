@@ -44,10 +44,14 @@ use super::components::line_editor::LineEditor;
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
+use churl_core::sequence::StepResult;
+
+use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
+use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
     env_editor, explorer, help, message, method_menu, palette, picker, prompt, request, response,
-    statusline, urlbar,
+    sequence_editor, sequence_runner, statusline, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -126,6 +130,12 @@ pub enum Mode {
     /// The environments & variables editor (M7.3): a modal split-view that grabs
     /// every key (same routing tier as Search/Palette/Picker).
     EnvEditor,
+    /// The sequence runner (M7.4): a large modal driving a request sequence and
+    /// showing live per-step status + each step's response.
+    SequenceRunner,
+    /// The in-app sequence editor (M7.4 §4): edit steps, extraction rules, and
+    /// `on_error`; saved through `save_sequence`.
+    SequenceEditor,
 }
 
 /// What a [`Mode::Prompt`] is collecting text for.
@@ -149,6 +159,8 @@ pub enum PromptPurpose {
     ExportWorkspace(JsonDialect),
     /// A curl command to import as a new endpoint in the selected collection.
     PasteCurl,
+    /// Name for a new request sequence (M7.4); opens the editor on the created file.
+    NewSequence,
 }
 
 impl PromptPurpose {
@@ -171,6 +183,7 @@ impl PromptPurpose {
             }
             PromptPurpose::ExportWorkspace(JsonDialect::Native) => "Export workspace · churl JSON",
             PromptPurpose::PasteCurl => "Paste curl",
+            PromptPurpose::NewSequence => "New sequence",
         }
     }
 }
@@ -224,6 +237,16 @@ pub enum AppMsg {
         hash: u64,
         /// The highlighted lines.
         lines: Vec<Line<'static>>,
+    },
+    /// A sequence step completed (M7.4). `run_generation` is matched against the
+    /// runner's generation so results from a cancelled/superseded run are dropped.
+    SequenceStep {
+        /// The run generation this step belonged to.
+        run_generation: u64,
+        /// The step index within the runner.
+        index: usize,
+        /// The response, or a stringified transport error.
+        outcome: Result<Response, String>,
     },
 }
 
@@ -373,6 +396,23 @@ pub struct App {
     url_edit_mode: UrlEditMode,
     /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
     env_editor: Option<EnvEditorState>,
+    /// The open sequence runner (M7.4), when `Mode::SequenceRunner`.
+    sequence_runner: Option<SequenceRunnerState>,
+    /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
+    sequence_abort: Option<AbortHandle>,
+    /// The open sequence editor (M7.4 §4), when `Mode::SequenceEditor`.
+    sequence_editor: Option<SequenceEditorState>,
+}
+
+/// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
+/// (sequence steps write no history, so only the display fields matter).
+fn sequence_step_meta(endpoint: &str) -> ResponseMeta {
+    ResponseMeta {
+        method: String::new(),
+        url: endpoint.to_owned(),
+        endpoint_path: Some(endpoint.to_owned()),
+        executed_at_ms: now_ms(),
+    }
 }
 
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
@@ -480,6 +520,9 @@ impl App {
             url_popup_vim: VimExt::default(),
             url_edit_mode: UrlEditMode::Inline,
             env_editor: None,
+            sequence_runner: None,
+            sequence_abort: None,
+            sequence_editor: None,
         })
     }
 
@@ -698,6 +741,8 @@ impl App {
             Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
             Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
             Mode::EnvEditor => self.handle_env_editor_key(key),
+            Mode::SequenceRunner => self.handle_sequence_runner_key(key),
+            Mode::SequenceEditor => self.handle_sequence_editor_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -902,6 +947,8 @@ impl App {
             Action::Jump => self.open_jump(),
             Action::SwitchProfile => self.open_profile_picker(),
             Action::OpenEnvEditor => self.open_env_editor(),
+            Action::RunSequence => self.run_selected_sequence(),
+            Action::EditSequence => self.edit_selected_sequence()?,
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
             Action::Save => self.save_request(),
@@ -1004,10 +1051,11 @@ impl App {
                 self.surface_explorer_warnings();
             }
             Action::Select => {
-                // Guarded seam: switching to a *different* endpoint while dirty
-                // prompts to save/discard first. A collection toggle (select()
-                // → None) or reselecting the same endpoint is not guarded.
-                self.guarded_load(PendingLoad::Row(self.explorer.cursor))?;
+                // A sequence row opens the runner; otherwise the guarded seam:
+                // switching to a *different* endpoint while dirty prompts to
+                // save/discard first (a collection toggle / same endpoint is not
+                // guarded).
+                self.activate_explorer_row(self.explorer.cursor)?;
             }
             _ => unreachable!("only navigation actions reach explorer_action"),
         }
@@ -1482,6 +1530,11 @@ impl App {
                 meta,
             } => self.on_response(generation, outcome, meta),
             AppMsg::Highlighted { hash, lines } => self.cache_highlighted(hash, lines),
+            AppMsg::SequenceStep {
+                run_generation,
+                index,
+                outcome,
+            } => self.on_sequence_step(run_generation, index, outcome),
         }
     }
 
@@ -1610,10 +1663,10 @@ impl App {
                 JumpTarget::Pane(pane) => self.set_focus(pane),
                 JumpTarget::Row(row) => {
                     self.set_focus(Pane::Explorer);
-                    self.explorer.cursor = row;
-                    // An endpoint row also selects it (same as Enter) — through
-                    // the guarded seam so dirty edits are never lost silently.
-                    self.guarded_load(PendingLoad::Row(row))?;
+                    // An endpoint row selects it (same as Enter) — through the
+                    // guarded seam so dirty edits are never lost silently; a
+                    // sequence row opens the runner.
+                    self.activate_explorer_row(row)?;
                 }
             }
             return Ok(());
@@ -1735,6 +1788,406 @@ impl App {
                 Ok(false)
             }
         }
+    }
+
+    // ---- M7.4 sequence runner ----
+
+    /// Enter (or a jump label) on the current explorer row: opens the sequence
+    /// runner on a sequence row, otherwise loads the endpoint through the guarded
+    /// seam. One seam so both the explorer `Enter` and jump-mode agree.
+    fn activate_explorer_row(&mut self, row: usize) -> Result<()> {
+        self.explorer.cursor = row;
+        if self.explorer.selected_kind() == Some(RowKind::Sequence) {
+            self.run_selected_sequence();
+            Ok(())
+        } else {
+            self.guarded_load(PendingLoad::Row(row))
+        }
+    }
+
+    /// Runs the sequence under the explorer cursor (`<leader>r` / palette / Enter
+    /// on a sequence row). Notifies when the cursor is not on a sequence.
+    fn run_selected_sequence(&mut self) {
+        let Some(selected) = self.explorer.selected_sequence() else {
+            self.notify("select a sequence in the SEQUENCES section first");
+            return;
+        };
+        self.open_sequence_runner(selected);
+    }
+
+    /// Opens the runner over `selected` and starts the run.
+    fn open_sequence_runner(&mut self, selected: super::components::explorer::SelectedSequence) {
+        let steps = churl_core::sequence::ordered_steps(&selected.sequence)
+            .into_iter()
+            .cloned()
+            .collect();
+        self.sequence_runner = Some(SequenceRunnerState::new(
+            selected.name,
+            selected.file,
+            selected.sequence.on_error,
+            steps,
+        ));
+        self.mode = Mode::SequenceRunner;
+        self.start_sequence_run();
+    }
+
+    /// The ambient run scopes (cli / active profile / workspace) for a sequence
+    /// run, mirroring the send-time resolver's non-collection layers. The
+    /// per-step collection scope is loaded inside `prepare_step`.
+    fn sequence_run_scopes(&self) -> churl_core::sequence::RunScopes {
+        churl_core::sequence::RunScopes {
+            cli: self.cli_vars.clone(),
+            profile: self.profile_vars(),
+            workspace: self.workspace_vars(),
+        }
+    }
+
+    /// (Re)starts the run from the top: resets rows, bumps the run generation,
+    /// aborts any in-flight step, and drives the first step.
+    fn start_sequence_run(&mut self) {
+        if let Some(handle) = self.sequence_abort.take() {
+            handle.abort();
+        }
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        runner.reset_for_rerun();
+        runner.run_generation += 1;
+        if runner.steps.is_empty() {
+            runner.finished = true;
+            return;
+        }
+        runner.current = Some(0);
+        self.drive_sequence_step(0);
+    }
+
+    /// Prepares step `index` and spawns its execution (or records a prepare
+    /// failure and advances). No HTTP client (snapshot tests) leaves the step
+    /// pending — deterministic and runtime-free.
+    fn drive_sequence_step(&mut self, index: usize) {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return;
+        };
+        let scopes = self.sequence_run_scopes();
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        let run_generation = runner.run_generation;
+        let Some(row) = runner.steps.get_mut(index) else {
+            return;
+        };
+        let step = row.step.clone();
+        match churl_core::sequence::prepare_step(&root, &step, &runner.extracted, &scopes) {
+            Err(err) => {
+                // A prepare failure is a transport-class failure for the step.
+                row.response = ResponseState::Failed {
+                    error: err.to_string(),
+                    meta: sequence_step_meta(&step.endpoint),
+                };
+                self.finish_sequence_step(index, StepResult::HttpError(err.to_string()));
+            }
+            Ok(prepared) => {
+                row.method = prepared.method;
+                row.url = prepared.url.clone();
+                row.status = StepStatus::Running;
+                row.response = ResponseState::InFlight {
+                    started: Instant::now(),
+                };
+                runner.selected = index;
+                runner.resp_cursor = 0;
+                runner.resp_scroll = 0;
+                // No client (snapshot tests): leave the step running, no spawn.
+                let Some(client) = self.client.clone() else {
+                    return;
+                };
+                let tx = self.tx.clone();
+                let options = self.execute_options;
+                let request = prepared.request;
+                let handle = tokio::spawn(async move {
+                    let outcome = churl_core::http::execute(&client, &request, &options)
+                        .await
+                        .map_err(|err| err.to_string());
+                    let _ = tx.send(AppMsg::SequenceStep {
+                        run_generation,
+                        index,
+                        outcome,
+                    });
+                });
+                self.sequence_abort = Some(handle.abort_handle());
+            }
+        }
+    }
+
+    /// Lands a completed sequence step: drops stale results, classifies with the
+    /// shared core seam, merges extracted values, and advances or finishes.
+    fn on_sequence_step(
+        &mut self,
+        run_generation: u64,
+        index: usize,
+        outcome: Result<Response, String>,
+    ) {
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        if run_generation != runner.run_generation {
+            return; // stale — a cancel or re-run superseded this step
+        }
+        self.sequence_abort = None;
+        let step = match runner.steps.get(index) {
+            Some(row) => row.step.clone(),
+            None => return,
+        };
+        let view_gen = runner.next_view_gen();
+
+        // Classify with the shared core seam for the success branch; a transport
+        // error maps to `HttpError` exactly as `classify_step` does (the one line
+        // the TUI mirrors — guarded by `sequence_transition_matches_core`).
+        let (result, extracted, timing, response) = match outcome {
+            Ok(response) => {
+                let (result, extracted) = churl_core::sequence::classify_response(&response, &step);
+                let timing = Some(response.timing.total);
+                let view = ResponseView::build(&response, view_gen);
+                (result, extracted, timing, ResponseState::Done { view })
+            }
+            Err(error) => (
+                StepResult::HttpError(error.clone()),
+                BTreeMap::new(),
+                None,
+                ResponseState::Failed {
+                    error,
+                    meta: sequence_step_meta(&step.endpoint),
+                },
+            ),
+        };
+
+        // Merge extracted values into the accumulator (empty on any failure).
+        for (name, value) in &extracted {
+            runner.extracted.insert(name.clone(), value.clone());
+        }
+        if let Some(row) = runner.steps.get_mut(index) {
+            row.timing = timing;
+            row.extracted = extracted;
+            row.response = response;
+        }
+        self.finish_sequence_step(index, result);
+    }
+
+    /// Applies a step's classified `result`: sets its display status, then makes
+    /// the halt/advance decision through the shared `should_halt` seam — the
+    /// single place the TUI mirrors core's per-step transition, so the two cannot
+    /// drift. Halt marks the remaining steps `Skipped` and finishes; otherwise the
+    /// run advances.
+    fn finish_sequence_step(&mut self, index: usize, result: churl_core::sequence::StepResult) {
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        if let Some(row) = runner.steps.get_mut(index) {
+            row.status = StepStatus::from_result(&result);
+        }
+        runner.selected = index;
+        if churl_core::sequence::should_halt(&result, runner.on_error) {
+            for row in runner.steps.iter_mut().skip(index + 1) {
+                row.status = StepStatus::Skipped;
+            }
+            runner.current = None;
+            runner.finished = true;
+        } else {
+            self.advance_sequence(index);
+        }
+    }
+
+    /// Advances to the step after `index`, or finishes the run.
+    fn advance_sequence(&mut self, index: usize) {
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        let next = index + 1;
+        if next >= runner.steps.len() {
+            runner.current = None;
+            runner.finished = true;
+            return;
+        }
+        runner.current = Some(next);
+        self.drive_sequence_step(next);
+    }
+
+    /// Cancels the in-flight run: aborts the task, bumps the generation so a
+    /// landed result is dropped, and marks every non-terminal step skipped.
+    fn cancel_sequence_run(&mut self) {
+        if let Some(handle) = self.sequence_abort.take() {
+            handle.abort();
+        }
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            return;
+        };
+        runner.run_generation += 1;
+        for row in &mut runner.steps {
+            if matches!(row.status, StepStatus::Pending | StepStatus::Running) {
+                row.status = StepStatus::Skipped;
+                if matches!(row.response, ResponseState::InFlight { .. }) {
+                    row.response = ResponseState::Cancelled;
+                }
+            }
+        }
+        runner.current = None;
+        runner.finished = true;
+        runner.confirming_close = false;
+        self.notify("run cancelled");
+    }
+
+    /// Routes a key to the open sequence runner and acts on its outcome.
+    fn handle_sequence_runner_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(runner) = self.sequence_runner.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        match runner.handle_key(key) {
+            RunnerOutcome::Consumed => {}
+            RunnerOutcome::Rerun => self.start_sequence_run(),
+            RunnerOutcome::Cancel => self.cancel_sequence_run(),
+            RunnerOutcome::Close => self.close_sequence_runner(),
+        }
+        Ok(())
+    }
+
+    /// Closes the runner, aborting any in-flight step.
+    fn close_sequence_runner(&mut self) {
+        if let Some(handle) = self.sequence_abort.take() {
+            handle.abort();
+        }
+        // Bump the generation so a straggler result is dropped after close.
+        if let Some(runner) = self.sequence_runner.as_mut() {
+            runner.run_generation += 1;
+        }
+        self.sequence_runner = None;
+        self.mode = Mode::Normal;
+    }
+
+    // ---- M7.4 sequence editor ----
+
+    /// `<leader>a` / palette: edit the sequence under the cursor, or prompt for a
+    /// name to create a new one.
+    fn edit_selected_sequence(&mut self) -> Result<()> {
+        if self.workspace.is_none() {
+            self.notify("open a workspace first");
+            return Ok(());
+        }
+        match self.explorer.selected_sequence() {
+            Some(selected) => {
+                self.open_sequence_editor(selected.name, selected.file, &selected.sequence);
+                Ok(())
+            }
+            None => {
+                self.open_prompt(PromptPurpose::NewSequence, "");
+                Ok(())
+            }
+        }
+    }
+
+    /// Workspace-relative endpoint paths for the editor's add-step picker.
+    fn endpoint_rel_paths(&mut self) -> Vec<String> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return Vec::new();
+        };
+        self.explorer
+            .all_endpoint_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| {
+                path.strip_prefix(&root)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Opens the editor over a loaded sequence.
+    fn open_sequence_editor(
+        &mut self,
+        name: String,
+        file: PathBuf,
+        sequence: &churl_core::model::Sequence,
+    ) {
+        let endpoints = self.endpoint_rel_paths();
+        self.sequence_editor = Some(SequenceEditorState::new(name, file, sequence, endpoints));
+        self.mode = Mode::SequenceEditor;
+    }
+
+    /// Commits the "new sequence" name prompt: creates the file and opens the
+    /// editor on it.
+    fn commit_new_sequence(&mut self, name: String) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace open");
+            return Ok(());
+        };
+        match persistence::create_sequence(&root, &name) {
+            Ok(path) => {
+                let sequence = persistence::load_sequence(&path)?;
+                self.reload_explorer()?;
+                self.open_sequence_editor(sequence.name.clone(), path, &sequence);
+            }
+            Err(err) => self.crud_error(err),
+        }
+        Ok(())
+    }
+
+    /// Routes a key to the open sequence editor and acts on its outcome.
+    fn handle_sequence_editor_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(editor) = self.sequence_editor.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        match editor.handle_key(key) {
+            EditorOutcome::Consumed => {}
+            EditorOutcome::Save => {
+                self.save_sequence_editor()?;
+            }
+            EditorOutcome::SaveAndClose => {
+                if self.save_sequence_editor()? {
+                    self.close_sequence_editor();
+                }
+            }
+            EditorOutcome::Close => self.close_sequence_editor(),
+        }
+        Ok(())
+    }
+
+    /// Saves the editor's sequence through the format-preserving seam and reloads
+    /// the explorer so the change is visible. Returns whether the save took.
+    fn save_sequence_editor(&mut self) -> Result<bool> {
+        let Some(editor) = self.sequence_editor.as_ref() else {
+            return Ok(false);
+        };
+        let path = editor.path().to_owned();
+        // Validate first (duplicate rule names refuse the whole save — nothing is
+        // written and the editor stays open + dirty, mirroring the M7.3 gate).
+        let sequence = match editor.to_sequence_checked() {
+            Ok(sequence) => sequence,
+            Err(msg) => {
+                self.notify(msg);
+                return Ok(false);
+            }
+        };
+        match persistence::save_sequence(&path, &sequence) {
+            Ok(()) => {
+                if let Some(editor) = self.sequence_editor.as_mut() {
+                    editor.mark_saved();
+                }
+                self.reload_explorer()?;
+                self.notify("sequence saved");
+                Ok(true)
+            }
+            Err(err) => {
+                self.crud_error(err);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Closes the editor and returns to normal mode.
+    fn close_sequence_editor(&mut self) {
+        self.sequence_editor = None;
+        self.mode = Mode::Normal;
     }
 
     fn close_overlay(&mut self) {
@@ -2395,7 +2848,7 @@ impl App {
             Some(RowKind::Collection) => {
                 self.open_prompt(PromptPurpose::DeleteCollectionConfirm, "");
             }
-            None => {
+            Some(RowKind::Sequence) | Some(RowKind::SequenceHeader) | None => {
                 self.message = Some(Message::new("nothing selected to delete"));
             }
         }
@@ -2718,6 +3171,7 @@ impl App {
                 self.commit_export(purpose, text)
             }
             PromptPurpose::PasteCurl => self.commit_paste_curl(text)?,
+            PromptPurpose::NewSequence => self.commit_new_sequence(text)?,
         }
         Ok(())
     }
@@ -2781,7 +3235,7 @@ impl App {
                     Err(err) => self.crud_error(err),
                 }
             }
-            None => {}
+            Some(RowKind::Sequence) | Some(RowKind::SequenceHeader) | None => {}
         }
         Ok(())
     }
@@ -3468,6 +3922,32 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 env_editor::render(frame, main, editor, &theme);
             }
         }
+        Mode::SequenceRunner => {
+            let tick = app.tick_count;
+            let job = {
+                let cache = &app.highlight_cache;
+                match app.sequence_runner.as_mut() {
+                    Some(runner) => {
+                        sequence_runner::render(frame, main, runner, tick, cache, &theme)
+                    }
+                    None => None,
+                }
+            };
+            if let Some(job) = job {
+                let dup = app.pending_highlight == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        app.pending_highlight = Some(hash);
+                    }
+                }
+            }
+        }
+        Mode::SequenceEditor => {
+            if let Some(editor) = &app.sequence_editor {
+                sequence_editor::render(frame, main, editor, &theme);
+            }
+        }
         _ => {}
     }
 
@@ -3687,7 +4167,7 @@ fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use churl_core::model::Timing;
+    use churl_core::model::{OnError, Timing};
 
     #[test]
     fn export_target_stays_inside_workspace() {
@@ -3882,6 +4362,442 @@ mod tests {
         .unwrap();
         let ws = open_workspace(root).unwrap();
         App::new(ws, KeyMap::default()).unwrap()
+    }
+
+    // ---- M7.4 sequence runner state machine (injected outcomes, no server) ----
+
+    /// Builds a workspace with three GET endpoints and a `sequences/flow.toml`
+    /// running them in order, then opens the runner (client `None`, so steps stay
+    /// in the `Running` stub until an outcome is injected).
+    fn sequence_app(root: &Path, on_error: &str, extract: &str) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        for name in ["one", "two", "three"] {
+            std::fs::write(
+                coll.join(format!("{name}.toml")),
+                format!(
+                    "seq = 0\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        std::fs::write(
+            seq_dir.join("flow.toml"),
+            format!(
+                "seq = 0\nname = \"Flow\"\non_error = \"{on_error}\"\n\n[[step]]\nseq = 0\nendpoint = \"api/one.toml\"\n{extract}\n[[step]]\nseq = 1\nendpoint = \"api/two.toml\"\n\n[[step]]\nseq = 2\nendpoint = \"api/three.toml\"\n"
+            ),
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let file = seq_dir.join("flow.toml");
+        let sequence = churl_core::persistence::load_sequence(&file).unwrap();
+        app.open_sequence_runner(super::super::components::explorer::SelectedSequence {
+            name: sequence.name.clone(),
+            file,
+            sequence,
+        });
+        app
+    }
+
+    fn ok_resp(status: u16, body: &str) -> Response {
+        Response {
+            status,
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            truncated: false,
+            timing: Timing {
+                connect: None,
+                total: std::time::Duration::from_millis(5),
+            },
+        }
+    }
+
+    fn runner_gen(app: &App) -> u64 {
+        app.sequence_runner.as_ref().unwrap().run_generation
+    }
+
+    fn step_status(app: &App, i: usize) -> StepStatus {
+        app.sequence_runner.as_ref().unwrap().steps[i]
+            .status
+            .clone()
+    }
+
+    #[test]
+    fn sequence_runner_opens_with_first_step_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = sequence_app(dir.path(), "halt", "");
+        assert_eq!(app.mode, Mode::SequenceRunner);
+        let runner = app.sequence_runner.as_ref().unwrap();
+        assert_eq!(runner.steps.len(), 3);
+        assert_eq!(runner.current, Some(0));
+        assert_eq!(step_status(&app, 0), StepStatus::Running);
+        assert_eq!(step_status(&app, 1), StepStatus::Pending);
+    }
+
+    #[test]
+    fn sequence_run_halts_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Ok(ok_resp(200, "{}")));
+        assert_eq!(step_status(&app, 0), StepStatus::Ok(200));
+        assert_eq!(step_status(&app, 1), StepStatus::Running);
+        // Step 1 fails with 500 → halt → step 2 skipped, run finished.
+        app.on_sequence_step(run_gen, 1, Ok(ok_resp(500, "err")));
+        assert_eq!(step_status(&app, 1), StepStatus::Failed(500));
+        assert_eq!(step_status(&app, 2), StepStatus::Skipped);
+        assert!(app.sequence_runner.as_ref().unwrap().finished);
+    }
+
+    #[test]
+    fn sequence_run_continue_runs_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "continue", "");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Ok(ok_resp(500, "err")));
+        assert_eq!(step_status(&app, 0), StepStatus::Failed(500));
+        // Continue: step 1 runs despite the earlier failure.
+        assert_eq!(step_status(&app, 1), StepStatus::Running);
+        app.on_sequence_step(run_gen, 1, Ok(ok_resp(200, "{}")));
+        assert_eq!(step_status(&app, 2), StepStatus::Running);
+        app.on_sequence_step(run_gen, 2, Ok(ok_resp(200, "{}")));
+        assert!(app.sequence_runner.as_ref().unwrap().finished);
+    }
+
+    #[test]
+    fn sequence_run_transport_error_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Err("connection refused".to_owned()));
+        assert!(matches!(step_status(&app, 0), StepStatus::HttpError(_)));
+        assert_eq!(step_status(&app, 1), StepStatus::Skipped);
+        assert_eq!(step_status(&app, 2), StepStatus::Skipped);
+    }
+
+    #[test]
+    fn sequence_run_accumulates_and_chains_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Step one extracts token = $.token.
+        let mut app = sequence_app(dir.path(), "halt", "[step.extract]\ntoken = \"$.token\"");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Ok(ok_resp(200, r#"{"token":"XYZ"}"#)));
+        let runner = app.sequence_runner.as_ref().unwrap();
+        assert_eq!(
+            runner.extracted.get("token").map(String::as_str),
+            Some("XYZ")
+        );
+        assert_eq!(runner.steps[0].extracted.get("token").unwrap(), "XYZ");
+        assert_eq!(step_status(&app, 1), StepStatus::Running);
+    }
+
+    #[test]
+    fn sequence_extract_error_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "[step.extract]\nx = \"$.missing\"");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Ok(ok_resp(200, "{}")));
+        assert!(matches!(step_status(&app, 0), StepStatus::ExtractError(_)));
+        assert_eq!(step_status(&app, 1), StepStatus::Skipped);
+    }
+
+    #[test]
+    fn sequence_stale_result_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        let run_gen = runner_gen(&app);
+        // A result from a superseded generation must not advance the run.
+        app.on_sequence_step(run_gen + 99, 0, Ok(ok_resp(200, "{}")));
+        assert_eq!(step_status(&app, 0), StepStatus::Running);
+    }
+
+    #[test]
+    fn sequence_cancel_marks_pending_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        app.cancel_sequence_run();
+        let runner = app.sequence_runner.as_ref().unwrap();
+        assert!(runner.finished);
+        assert!(
+            runner.steps.iter().all(|s| s.status == StepStatus::Skipped),
+            "all non-terminal steps must be skipped on cancel"
+        );
+    }
+
+    /// Cross-check: the same scripted scenarios produce identical per-step
+    /// results + extracted maps through the core `run_sequence` path (real HTTP
+    /// via wiremock) AND the live TUI driver (`on_sequence_step`) — the guard
+    /// against the two drifting (the milestone's stated highest risk).
+    #[tokio::test]
+    async fn sequence_transition_matches_core() {
+        use churl_core::http::{DEFAULT_TIMEOUT, ExecuteOptions, build_client};
+        use churl_core::sequence::{RunScopes, StepResult, run_sequence};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // (label, on_error, [statuses], step0 extract expr or "")
+        let scenarios: [(&str, OnError, [u16; 3], &str); 4] = [
+            ("all-ok+extract", OnError::Halt, [200, 200, 200], "$.token"),
+            ("halt-on-500", OnError::Halt, [200, 500, 200], ""),
+            ("continue-past-500", OnError::Continue, [200, 500, 200], ""),
+            (
+                "extract-error-halts",
+                OnError::Halt,
+                [200, 200, 200],
+                "$.missing",
+            ),
+        ];
+
+        // Maps both result types to a comparable shape (kind tag, status).
+        fn norm_core(r: &StepResult) -> (u8, Option<u16>) {
+            match r {
+                StepResult::Ok { status } => (0, Some(*status)),
+                StepResult::Failed { status } => (1, Some(*status)),
+                StepResult::HttpError(_) => (2, None),
+                StepResult::ExtractError(_) => (3, None),
+                StepResult::Skipped => (4, None),
+            }
+        }
+        fn norm_tui(s: &StepStatus) -> (u8, Option<u16>) {
+            match s {
+                StepStatus::Ok(status) => (0, Some(*status)),
+                StepStatus::Failed(status) => (1, Some(*status)),
+                StepStatus::HttpError(_) => (2, None),
+                StepStatus::ExtractError(_) => (3, None),
+                StepStatus::Skipped => (4, None),
+                StepStatus::Pending | StepStatus::Running => (9, None),
+            }
+        }
+
+        for (label, on_error, statuses, extract) in scenarios {
+            let server = MockServer::start().await;
+            let bodies = [r#"{"token":"T"}"#, "{}", "{}"];
+            for (i, status) in statuses.iter().enumerate() {
+                Mock::given(method("GET"))
+                    .and(path(format!("/s{i}")))
+                    .respond_with(ResponseTemplate::new(*status).set_body_string(bodies[i]))
+                    .mount(&server)
+                    .await;
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+            let coll = root.join("api");
+            std::fs::create_dir(&coll).unwrap();
+            for i in 0..3 {
+                std::fs::write(
+                    coll.join(format!("s{i}.toml")),
+                    format!(
+                        "seq = 0\nname = \"s{i}\"\n\n[request]\nmethod = \"GET\"\nurl = \"{}/s{i}\"\n",
+                        server.uri()
+                    ),
+                )
+                .unwrap();
+            }
+            let extract_block = if extract.is_empty() {
+                String::new()
+            } else {
+                format!("[step.extract]\ntoken = \"{extract}\"\n")
+            };
+            let seq_dir = root.join("sequences");
+            std::fs::create_dir(&seq_dir).unwrap();
+            std::fs::write(
+                seq_dir.join("flow.toml"),
+                format!(
+                    "seq = 0\nname = \"Flow\"\non_error = \"{}\"\n\n[[step]]\nseq = 0\nendpoint = \"api/s0.toml\"\n{extract_block}\n[[step]]\nseq = 1\nendpoint = \"api/s1.toml\"\n\n[[step]]\nseq = 2\nendpoint = \"api/s2.toml\"\n",
+                    match on_error { OnError::Halt => "halt", OnError::Continue => "continue" }
+                ),
+            )
+            .unwrap();
+
+            // --- core path (real HTTP) ---
+            let client = build_client(DEFAULT_TIMEOUT).unwrap();
+            let file = seq_dir.join("flow.toml");
+            let sequence = churl_core::persistence::load_sequence(&file).unwrap();
+            let core_run = run_sequence(
+                &client,
+                root,
+                &sequence,
+                &RunScopes::default(),
+                &ExecuteOptions::default(),
+            )
+            .await;
+            let core_results: Vec<_> = core_run
+                .steps
+                .iter()
+                .map(|s| norm_core(&s.result))
+                .collect();
+            let core_extracted = core_run.steps[0].extracted.clone();
+
+            // --- TUI path (injected outcomes matching the mock) ---
+            let ws = open_workspace(root).unwrap();
+            let mut app = App::new(ws, KeyMap::default()).unwrap();
+            let seq2 = churl_core::persistence::load_sequence(&file).unwrap();
+            app.open_sequence_runner(super::super::components::explorer::SelectedSequence {
+                name: seq2.name.clone(),
+                file: file.clone(),
+                sequence: seq2,
+            });
+            // Feed each step that actually runs the same response the mock returned.
+            while let Some(i) = app.sequence_runner.as_ref().unwrap().current {
+                let g = app.sequence_runner.as_ref().unwrap().run_generation;
+                app.on_sequence_step(g, i, Ok(ok_resp(statuses[i], bodies[i])));
+            }
+            let runner = app.sequence_runner.as_ref().unwrap();
+            let tui_results: Vec<_> = runner.steps.iter().map(|s| norm_tui(&s.status)).collect();
+            let tui_extracted = runner.steps[0].extracted.clone();
+
+            assert_eq!(
+                core_results, tui_results,
+                "scenario {label}: core vs TUI step results diverged"
+            );
+            assert_eq!(
+                core_extracted, tui_extracted,
+                "scenario {label}: core vs TUI extracted maps diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_rerun_resets_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        let run_gen = runner_gen(&app);
+        app.on_sequence_step(run_gen, 0, Ok(ok_resp(500, "err")));
+        assert!(app.sequence_runner.as_ref().unwrap().finished);
+        app.start_sequence_run();
+        let runner = app.sequence_runner.as_ref().unwrap();
+        assert!(!runner.finished);
+        assert_eq!(runner.run_generation, run_gen + 1);
+        assert_eq!(runner.steps[0].status, StepStatus::Running);
+        assert!(
+            runner.steps[1..]
+                .iter()
+                .all(|s| s.status == StepStatus::Pending)
+        );
+    }
+
+    /// End-to-end: create a sequence via the prompt, add a step through the
+    /// picker, toggle on_error, save, and assert the file on disk.
+    #[test]
+    fn sequence_editor_create_add_step_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("login.toml"),
+            "seq = 0\nname = \"login\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/login\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+
+        // `<leader>a` with no sequence selected → new-sequence name prompt.
+        app.edit_selected_sequence().unwrap();
+        assert_eq!(app.mode, Mode::Prompt(PromptPurpose::NewSequence));
+        app.prompt_editor = LineEditor::new("Auth flow");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::SequenceEditor);
+
+        // Add a step: `a` opens the picker, Enter accepts the first endpoint.
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Toggle on_error to continue, then save with `w`.
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+            .unwrap();
+
+        let path = root.join("sequences").join("auth-flow.toml");
+        let sequence = churl_core::persistence::load_sequence(&path).unwrap();
+        assert_eq!(sequence.name, "Auth flow");
+        assert_eq!(sequence.on_error, OnError::Continue);
+        assert_eq!(sequence.steps.len(), 1);
+        assert_eq!(sequence.steps[0].endpoint, "api/login.toml");
+    }
+
+    /// Two extraction rules with the same name on one step refuse the whole save:
+    /// the message names the duplicate, nothing is written, the editor stays open.
+    #[test]
+    fn sequence_editor_duplicate_rule_names_refuse_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        // A sequence with one step, no rules yet.
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        let seq_path = seq_dir.join("flow.toml");
+        std::fs::write(
+            &seq_path,
+            "seq = 0\nname = \"Flow\"\non_error = \"halt\"\n\n[[step]]\nseq = 0\nendpoint = \"api/one.toml\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&seq_path).unwrap();
+
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let sequence = churl_core::persistence::load_sequence(&seq_path).unwrap();
+        app.open_sequence_editor("Flow".to_owned(), seq_path.clone(), &sequence);
+
+        let ch = |app: &mut App, c: char| {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        };
+        let enter = |app: &mut App| {
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+        };
+        ch(&mut app, 'l'); // focus rules
+        // rule "x" = $.a
+        ch(&mut app, 'a');
+        ch(&mut app, 'x');
+        enter(&mut app);
+        for c in "$.a".chars() {
+            ch(&mut app, c);
+        }
+        enter(&mut app);
+        // second rule also "x"
+        ch(&mut app, 'a');
+        ch(&mut app, 'x');
+        enter(&mut app);
+        for c in "$.b".chars() {
+            ch(&mut app, c);
+        }
+        enter(&mut app);
+        // Save → refused.
+        ch(&mut app, 'w');
+
+        assert_eq!(
+            app.mode,
+            Mode::SequenceEditor,
+            "editor stays open on refusal"
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|m| m.text.contains("duplicate rule name 'x'")),
+            "expected a duplicate-name refusal message, got {:?}",
+            app.message.as_ref().map(|m| &m.text)
+        );
+        // Nothing was written — the file is byte-for-byte unchanged.
+        assert_eq!(std::fs::read_to_string(&seq_path).unwrap(), before);
     }
 
     /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.

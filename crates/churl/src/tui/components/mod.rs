@@ -17,6 +17,8 @@ pub mod request;
 pub mod request_tabs;
 pub mod response;
 pub mod search;
+pub mod sequence_editor;
+pub mod sequence_runner;
 pub mod statusline;
 pub mod urlbar;
 pub mod vim_ext;
