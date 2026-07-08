@@ -4183,6 +4183,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         .as_ref()
                         .and_then(|j| j.label_for_pane(Pane::Response)),
                     tick_count: app.tick_count,
+                    idle_hint: None,
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
@@ -4233,6 +4234,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         .as_ref()
                         .and_then(|j| j.label_for_pane(Pane::Response)),
                     tick_count: app.tick_count,
+                    idle_hint: None,
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
