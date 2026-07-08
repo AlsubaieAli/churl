@@ -30,6 +30,28 @@ const MIGRATIONS: &[&str] = &[
         last_opened_ms INTEGER NOT NULL
     );
     CREATE INDEX idx_workspaces_last_opened ON workspaces(last_opened_ms DESC);",
+    // 3: load-run batch summaries (M7.5). A load run fires N copies of one
+    // endpoint; recording one row per copy would flood the per-endpoint history
+    // view, so a completed run writes exactly ONE summary row to this SEPARATE
+    // table (never to `history`). Structural non-flooding: the per-endpoint
+    // history query cannot see these rows.
+    "CREATE TABLE load_batches (
+        id INTEGER PRIMARY KEY,
+        executed_at_ms INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        endpoint_path TEXT,
+        total INTEGER NOT NULL,
+        concurrency INTEGER NOT NULL,
+        ok_count INTEGER NOT NULL,
+        fail_count INTEGER NOT NULL,
+        error_count INTEGER NOT NULL,
+        cancelled INTEGER NOT NULL DEFAULT 0,
+        min_ms INTEGER,
+        median_ms INTEGER,
+        p95_ms INTEGER,
+        max_ms INTEGER
+    );
+    CREATE INDEX idx_load_batches_executed_at ON load_batches(executed_at_ms DESC);",
 ];
 
 /// Error opening or querying the history store.
@@ -88,6 +110,48 @@ pub struct HistoryEntry {
     pub duration_ms: Option<u64>,
     /// Workspace-relative path of the originating endpoint file, when any.
     pub endpoint_path: Option<String>,
+}
+
+/// A completed load-run summary about to be inserted into `load_batches` (M7.5).
+/// Exactly one of these is written per completed (or cancelled) load run — never
+/// per-request rows, so the per-endpoint history view is never flooded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadBatchSummary {
+    /// Run time as Unix milliseconds.
+    pub executed_at_ms: i64,
+    /// The resolved target URL every copy was fired at.
+    pub url: String,
+    /// Workspace-relative path of the originating endpoint file, when any.
+    pub endpoint_path: Option<String>,
+    /// Number of copies fired.
+    pub total: usize,
+    /// Concurrency the run used.
+    pub concurrency: usize,
+    /// Count of `Ok` (< 400) outcomes.
+    pub ok_count: usize,
+    /// Count of `Failed` (>= 400) outcomes.
+    pub fail_count: usize,
+    /// Count of transport-error outcomes.
+    pub error_count: usize,
+    /// Whether the run was cancelled before all copies completed (partial summary).
+    pub cancelled: bool,
+    /// Minimum completed-request latency in ms, if any completed.
+    pub min_ms: Option<u64>,
+    /// Median (nearest-rank p50) completed-request latency in ms.
+    pub median_ms: Option<u64>,
+    /// 95th-percentile completed-request latency in ms.
+    pub p95_ms: Option<u64>,
+    /// Maximum completed-request latency in ms.
+    pub max_ms: Option<u64>,
+}
+
+/// A stored load-batch summary, as returned by [`HistoryStore::recent_load_batches`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadBatchEntry {
+    /// SQLite rowid.
+    pub id: i64,
+    /// The inserted summary.
+    pub summary: LoadBatchSummary,
 }
 
 /// SQLite-backed store for executed-request history.
@@ -209,6 +273,71 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Inserts one load-run summary into the SEPARATE `load_batches` table
+    /// (never `history`) and returns its rowid. Saturates each count to `i64`.
+    pub fn insert_load_batch(&self, summary: &LoadBatchSummary) -> Result<i64, HistoryError> {
+        let as_i64 = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        let ms_i64 = |ms: Option<u64>| ms.map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+        self.conn.execute(
+            "INSERT INTO load_batches
+               (executed_at_ms, url, endpoint_path, total, concurrency,
+                ok_count, fail_count, error_count, cancelled,
+                min_ms, median_ms, p95_ms, max_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                summary.executed_at_ms,
+                summary.url,
+                summary.endpoint_path,
+                as_i64(summary.total),
+                as_i64(summary.concurrency),
+                as_i64(summary.ok_count),
+                as_i64(summary.fail_count),
+                as_i64(summary.error_count),
+                i64::from(summary.cancelled),
+                ms_i64(summary.min_ms),
+                ms_i64(summary.median_ms),
+                ms_i64(summary.p95_ms),
+                ms_i64(summary.max_ms),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Returns up to `limit` load-batch summaries, newest first.
+    pub fn recent_load_batches(&self, limit: usize) -> Result<Vec<LoadBatchEntry>, HistoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, executed_at_ms, url, endpoint_path, total, concurrency,
+                    ok_count, fail_count, error_count, cancelled,
+                    min_ms, median_ms, p95_ms, max_ms
+             FROM load_batches
+             ORDER BY executed_at_ms DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let to_usize = |n: i64| usize::try_from(n).unwrap_or_default();
+        let to_ms = |v: Option<i64>| v.map(|ms| u64::try_from(ms).unwrap_or_default());
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(LoadBatchEntry {
+                id: row.get(0)?,
+                summary: LoadBatchSummary {
+                    executed_at_ms: row.get(1)?,
+                    url: row.get(2)?,
+                    endpoint_path: row.get(3)?,
+                    total: to_usize(row.get(4)?),
+                    concurrency: to_usize(row.get(5)?),
+                    ok_count: to_usize(row.get(6)?),
+                    fail_count: to_usize(row.get(7)?),
+                    error_count: to_usize(row.get(8)?),
+                    cancelled: row.get::<_, i64>(9)? != 0,
+                    min_ms: to_ms(row.get(10)?),
+                    median_ms: to_ms(row.get(11)?),
+                    p95_ms: to_ms(row.get(12)?),
+                    max_ms: to_ms(row.get(13)?),
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Returns up to `limit` workspace paths, most-recently-opened first.
     pub fn recent_workspaces(&self, limit: usize) -> Result<Vec<String>, HistoryError> {
         let mut stmt = self.conn.prepare(
@@ -316,6 +445,130 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    fn batch(at_ms: i64, url: &str, cancelled: bool) -> LoadBatchSummary {
+        LoadBatchSummary {
+            executed_at_ms: at_ms,
+            url: url.into(),
+            endpoint_path: Some("users/list.toml".into()),
+            total: 50,
+            concurrency: 10,
+            ok_count: 44,
+            fail_count: 5,
+            error_count: 1,
+            cancelled,
+            min_ms: Some(12),
+            median_ms: Some(45),
+            p95_ms: Some(120),
+            max_ms: Some(210),
+        }
+    }
+
+    #[test]
+    fn load_batch_insert_and_read_back() {
+        let store = HistoryStore::in_memory().unwrap();
+        let id = store
+            .insert_load_batch(&batch(1_000, "https://api.test/users", false))
+            .unwrap();
+        assert!(id > 0);
+        let got = store.recent_load_batches(10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, id);
+        assert_eq!(
+            got[0].summary,
+            batch(1_000, "https://api.test/users", false)
+        );
+    }
+
+    #[test]
+    fn load_batch_null_percentiles_round_trip() {
+        // An all-errored run has counts but no latencies.
+        let store = HistoryStore::in_memory().unwrap();
+        let summary = LoadBatchSummary {
+            executed_at_ms: 5,
+            url: "https://api.test/down".into(),
+            endpoint_path: None,
+            total: 3,
+            concurrency: 3,
+            ok_count: 0,
+            fail_count: 0,
+            error_count: 3,
+            cancelled: false,
+            min_ms: None,
+            median_ms: None,
+            p95_ms: None,
+            max_ms: None,
+        };
+        store.insert_load_batch(&summary).unwrap();
+        let got = &store.recent_load_batches(1).unwrap()[0].summary;
+        assert_eq!(got, &summary);
+        assert_eq!(got.min_ms, None);
+        assert_eq!(got.endpoint_path, None);
+    }
+
+    #[test]
+    fn cancelled_flag_round_trips() {
+        let store = HistoryStore::in_memory().unwrap();
+        store
+            .insert_load_batch(&batch(1, "https://api.test/a", true))
+            .unwrap();
+        assert!(store.recent_load_batches(1).unwrap()[0].summary.cancelled);
+    }
+
+    #[test]
+    fn load_batches_never_appear_in_per_endpoint_history() {
+        // The structural non-flooding guarantee: batch summaries live in a
+        // separate table, so the per-endpoint history query returns ONLY history
+        // rows even after load batches are recorded.
+        let store = HistoryStore::in_memory().unwrap();
+        store.insert(&entry(1_000, "https://a.example")).unwrap();
+        store
+            .insert_load_batch(&batch(2_000, "https://batch.example", false))
+            .unwrap();
+        store
+            .insert_load_batch(&batch(3_000, "https://batch2.example", true))
+            .unwrap();
+        store.insert(&entry(4_000, "https://b.example")).unwrap();
+
+        // History has exactly the two single-request rows — no batch URLs.
+        let recent = store.recent(100).unwrap();
+        assert_eq!(recent.len(), 2, "load batches must not enter history");
+        let urls: Vec<&str> = recent.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(urls, ["https://b.example", "https://a.example"]);
+        assert!(!urls.iter().any(|u| u.contains("batch")));
+
+        // And the batches are all present in their own table.
+        assert_eq!(store.recent_load_batches(100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn migration_3_applies_from_a_v2_db() {
+        // Build a v2 database by hand (history + workspaces, user_version = 2),
+        // then open through the store: migration 3 must add load_batches without
+        // disturbing the existing data.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch(MIGRATIONS[1]).unwrap();
+            conn.pragma_update(None, "user_version", 2i64).unwrap();
+            conn.execute(
+                "INSERT INTO history (executed_at_ms, method, url) VALUES (1, 'GET', 'https://old.example')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = HistoryStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        // Pre-existing history survived.
+        assert_eq!(store.recent(10).unwrap().len(), 1);
+        // The new table works.
+        store
+            .insert_load_batch(&batch(9, "https://api.test/x", false))
+            .unwrap();
+        assert_eq!(store.recent_load_batches(10).unwrap().len(), 1);
     }
 
     #[test]
