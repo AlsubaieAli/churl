@@ -348,6 +348,7 @@ dependencies = [
  "tokio",
  "two-face",
  "unicode-width",
+ "wiremock",
 ]
 
 [[package]]

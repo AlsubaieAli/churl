@@ -335,7 +335,17 @@ pub enum SequenceError {
 }
 
 /// Resolves a step's `endpoint` against the workspace root, rejecting any path
-/// that would escape it (`..` components, absolute paths, drive prefixes).
+/// that would escape it. Two layers:
+///
+/// 1. A fast **lexical** pre-check rejecting `..` components, absolute paths, and
+///    drive prefixes.
+/// 2. A **canonical containment** check that also catches an in-workspace symlink
+///    pointing outside the root: the deepest existing ancestor of the resolved
+///    path is canonicalized (following symlinks) and must stay under the
+///    canonical root. A missing endpoint file is *not* a traversal — its deepest
+///    existing ancestor (a real in-workspace directory) still resolves inside the
+///    root, so the load simply fails with a not-found error, keeping the two
+///    failure kinds distinct.
 fn resolve_step_path(root: &Path, endpoint: &str) -> Result<PathBuf, SequenceError> {
     let rel = Path::new(endpoint);
     for component in rel.components() {
@@ -348,7 +358,42 @@ fn resolve_step_path(root: &Path, endpoint: &str) -> Result<PathBuf, SequenceErr
             Component::CurDir | Component::Normal(_) => {}
         }
     }
-    Ok(root.join(rel))
+    let resolved = root.join(rel);
+    if canonical_escapes_root(root, &resolved) {
+        return Err(SequenceError::Traversal {
+            endpoint: endpoint.to_owned(),
+        });
+    }
+    Ok(resolved)
+}
+
+/// Whether `path` canonically resolves outside `root` (an in-workspace symlink
+/// escape). Canonicalizes the deepest existing ancestor of `path` — following
+/// symlinks — and re-appends the not-yet-existing tail, then checks containment.
+/// Conservative: if the root itself cannot be canonicalized, returns `false`
+/// (the lexical pre-check already ran).
+fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let mut ancestor = path;
+    let mut tail = PathBuf::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            let full = canonical.join(&tail);
+            return !full.starts_with(&canonical_root);
+        }
+        let Some(name) = ancestor.file_name() else {
+            // Reached a component with no name (root/prefix) that would not
+            // canonicalize; treat as non-escaping (lexical check governs).
+            return false;
+        };
+        tail = Path::new(name).join(&tail);
+        match ancestor.parent() {
+            Some(parent) => ancestor = parent,
+            None => return false,
+        }
+    }
 }
 
 /// Prepares a step for execution: resolves its endpoint (rejecting traversal),
@@ -481,6 +526,13 @@ pub fn classify_step(
     }
 }
 
+/// Whether a completed step's `result` should halt the rest of the run under
+/// `on_error`. The single halt-decision seam shared by [`run_sequence`] and the
+/// live TUI driver so the halt/continue/skipped-tail behaviour cannot drift.
+pub fn should_halt(result: &StepResult, on_error: OnError) -> bool {
+    result.is_failure() && on_error == OnError::Halt
+}
+
 /// The steps of a sequence in run order (by `seq`, stable for ties). Shared by the
 /// core runner and the TUI so both agree on ordering.
 pub fn ordered_steps(sequence: &Sequence) -> Vec<&SequenceStep> {
@@ -553,15 +605,13 @@ pub async fn run_sequence(
                     extracted: BTreeMap::new(),
                     timing: None,
                 });
-                if sequence.on_error == OnError::Halt {
-                    halted = true;
-                }
+                halted = should_halt(&StepResult::HttpError(String::new()), sequence.on_error);
             }
             Ok(prepared) => {
                 let result = execute(client, &prepared.request, options).await;
                 let timing = result.as_ref().ok().map(|response| response.timing);
                 let (step_result, step_extracted) = classify_step(&result, step);
-                if step_result.is_failure() && sequence.on_error == OnError::Halt {
+                if should_halt(&step_result, sequence.on_error) {
                     halted = true;
                 }
                 for (name, value) in &step_extracted {
@@ -751,15 +801,65 @@ mod tests {
 
     #[test]
     fn resolve_step_path_rejects_traversal() {
+        // Lexical rejections work even for a non-existent root (no canonicalize).
         let root = Path::new("/ws");
-        assert!(resolve_step_path(root, "../secret.toml").is_err());
-        assert!(resolve_step_path(root, "a/../../secret.toml").is_err());
-        assert!(resolve_step_path(root, "/etc/passwd").is_err());
-        // A normal relative path is fine.
+        assert!(matches!(
+            resolve_step_path(root, "../secret.toml"),
+            Err(SequenceError::Traversal { .. })
+        ));
+        assert!(matches!(
+            resolve_step_path(root, "a/../../secret.toml"),
+            Err(SequenceError::Traversal { .. })
+        ));
+        assert!(matches!(
+            resolve_step_path(root, "/etc/passwd"),
+            Err(SequenceError::Traversal { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_step_path_accepts_in_workspace_path() {
+        // A normal relative path inside a real workspace resolves cleanly, whether
+        // or not the file exists yet.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("auth")).unwrap();
+        std::fs::write(root.join("auth/login.toml"), "x").unwrap();
         assert_eq!(
             resolve_step_path(root, "auth/login.toml").unwrap(),
-            Path::new("/ws/auth/login.toml")
+            root.join("auth/login.toml")
         );
+        // A missing file is NOT a traversal (its ancestor is inside root); the
+        // load step later reports not-found — a distinct failure kind.
+        assert!(resolve_step_path(root, "auth/missing.toml").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_step_path_rejects_symlink_escape() {
+        // An in-workspace symlink dir pointing outside the root must not let a step
+        // escape — the lexical check misses this; canonical containment catches it.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.toml"), "seq=0\nname=\"s\"").unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        // The symlinked file really exists (so canonicalize resolves it) yet lands
+        // outside the root → Traversal.
+        assert!(matches!(
+            resolve_step_path(root, "link/secret.toml"),
+            Err(SequenceError::Traversal { .. })
+        ));
+        // prepare_step surfaces the same rejection (never loads the outside file).
+        let step = SequenceStep {
+            seq: 0,
+            endpoint: "link/secret.toml".into(),
+            extract: BTreeMap::new(),
+        };
+        assert!(matches!(
+            prepare_step(root, &step, &BTreeMap::new(), &RunScopes::default()),
+            Err(SequenceError::Traversal { .. })
+        ));
     }
 
     #[test]
@@ -781,6 +881,28 @@ mod tests {
         // HttpError
         let (result, _) = classify_step(&Err(HttpError::Timeout), &step);
         assert!(matches!(result, StepResult::HttpError(_)));
+    }
+
+    #[test]
+    fn should_halt_only_on_failure_under_halt() {
+        assert!(should_halt(
+            &StepResult::Failed { status: 500 },
+            OnError::Halt
+        ));
+        assert!(should_halt(
+            &StepResult::HttpError("x".into()),
+            OnError::Halt
+        ));
+        assert!(should_halt(
+            &StepResult::ExtractError("x".into()),
+            OnError::Halt
+        ));
+        assert!(!should_halt(&StepResult::Ok { status: 200 }, OnError::Halt));
+        // Continue never halts, even on failure.
+        assert!(!should_halt(
+            &StepResult::Failed { status: 500 },
+            OnError::Continue
+        ));
     }
 
     #[test]

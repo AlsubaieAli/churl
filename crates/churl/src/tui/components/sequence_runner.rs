@@ -8,7 +8,7 @@
 //! reuses the `churl_core::sequence` primitives so the live driver and the
 //! wiremock-tested `run_sequence` can never drift.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::prompt;
 use super::response::{self, RenderCtx, ResponseState};
+use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
 
 /// Per-step display status in the runner.
@@ -72,6 +73,18 @@ impl StepStatus {
         matches!(
             self,
             StepStatus::Failed(_) | StepStatus::HttpError(_) | StepStatus::ExtractError(_)
+        )
+    }
+
+    /// Whether the step actually ran to a terminal result (a `Skipped` tail did
+    /// not run; `Pending`/`Running` have not finished).
+    fn ran(&self) -> bool {
+        matches!(
+            self,
+            StepStatus::Ok(_)
+                | StepStatus::Failed(_)
+                | StepStatus::HttpError(_)
+                | StepStatus::ExtractError(_)
         )
     }
 
@@ -182,6 +195,10 @@ pub struct SequenceRunnerState {
     resp_total_rows: usize,
     /// Body viewport height from the last render (half-page scrolling).
     resp_viewport_height: usize,
+    /// Monotonic counter minting a unique generation for each step's
+    /// [`ResponseView`], so the shared highlight cache never collides two steps'
+    /// viewports (the viewport hash folds in the generation).
+    view_seq: u64,
     /// True while awaiting an `esc`-again / `y` confirm to stop a running batch.
     pub confirming_close: bool,
 }
@@ -206,8 +223,16 @@ impl SequenceRunnerState {
             resp_scroll: 0,
             resp_total_rows: 0,
             resp_viewport_height: 0,
+            view_seq: 0,
             confirming_close: false,
         }
+    }
+
+    /// Mints a unique generation for the next step [`ResponseView`] built, so the
+    /// shared highlight cache keys each step's viewport distinctly.
+    pub fn next_view_gen(&mut self) -> u64 {
+        self.view_seq += 1;
+        self.view_seq
     }
 
     /// Whether a run is currently in progress (a step is running or pending after
@@ -370,23 +395,30 @@ fn mask(name: &str, value: &str) -> String {
     }
 }
 
-/// The progress summary line: `3/5 · 1 failed · 420ms total`.
+/// The progress summary line, e.g. `1/3 · 1 failed · 2 skipped · 420ms total ·
+/// done`. Only steps that actually **ran** count toward `ran/total`; a halted
+/// tail is surfaced separately as `N skipped` rather than being folded into
+/// "done".
 fn progress_line(state: &SequenceRunnerState) -> String {
     let total = state.steps.len();
-    let done = state
+    let ran = state.steps.iter().filter(|r| r.status.ran()).count();
+    let failed = state.steps.iter().filter(|r| r.status.is_failure()).count();
+    let skipped = state
         .steps
         .iter()
-        .filter(|r| !matches!(r.status, StepStatus::Pending | StepStatus::Running))
+        .filter(|r| r.status == StepStatus::Skipped)
         .count();
-    let failed = state.steps.iter().filter(|r| r.status.is_failure()).count();
     let total_ms: u128 = state
         .steps
         .iter()
         .filter_map(|r| r.timing.map(|t| t.as_millis()))
         .sum();
-    let mut parts = vec![format!("{done}/{total}")];
+    let mut parts = vec![format!("{ran}/{total}")];
     if failed > 0 {
         parts.push(format!("{failed} failed"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} skipped"));
     }
     if total_ms > 0 {
         parts.push(format!("{total_ms}ms total"));
@@ -397,14 +429,19 @@ fn progress_line(state: &SequenceRunnerState) -> String {
     parts.join(" · ")
 }
 
-/// Renders the sequence runner over `area`.
+/// Renders the sequence runner over `area`. Returns a [`HighlightJob`] for the
+/// selected step's response viewport on a cache miss, for the caller to enqueue
+/// into the highlight worker (mirrors the main response pane). The `cache` is the
+/// app's shared viewport-hash → highlighted-lines cache.
+#[must_use]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &mut SequenceRunnerState,
     tick_count: u64,
+    cache: &HashMap<u64, Vec<Line<'static>>>,
     theme: &Theme,
-) {
+) -> Option<HighlightJob> {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)
         .areas(area);
@@ -421,7 +458,7 @@ pub fn render(
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     if inner.width == 0 || inner.height == 0 {
-        return;
+        return None;
     }
 
     // Header (progress) + body + footer (key hints).
@@ -455,7 +492,7 @@ pub fn render(
         Layout::horizontal([Constraint::Length(left_width), Constraint::Fill(1)]).areas(body);
 
     render_step_list(frame, left, state, tick_count, theme);
-    render_response(frame, right, state, tick_count, theme);
+    let job = render_response(frame, right, state, tick_count, cache, theme);
     render_footer(frame, footer, state, theme);
 
     if state.confirming_close {
@@ -468,6 +505,7 @@ pub fn render(
             theme,
         );
     }
+    job
 }
 
 /// Renders the left step-list column.
@@ -545,19 +583,18 @@ fn render_step_list(
 }
 
 /// Renders the right response column: the selected step's response in the real
-/// viewer, or a status stub for a pending/running step.
+/// viewer, or a status stub for a pending/running step. Returns the highlight job
+/// the caller should enqueue (on a cache miss over a `Done` step).
 fn render_response(
     frame: &mut Frame,
     area: Rect,
     state: &mut SequenceRunnerState,
     tick_count: u64,
+    cache: &HashMap<u64, Vec<Line<'static>>>,
     theme: &Theme,
-) {
+) -> Option<HighlightJob> {
     let focused = state.focus == RunnerFocus::Response;
-    let Some(row) = state.steps.get(state.selected) else {
-        return;
-    };
-    let cache = std::collections::HashMap::new();
+    let row = state.steps.get(state.selected)?;
     let outcome = response::render(
         frame,
         area,
@@ -567,7 +604,7 @@ fn render_response(
             focused,
             scroll: state.resp_scroll,
             cursor: state.resp_cursor,
-            cache: &cache,
+            cache,
             theme,
             jump_label: None,
             tick_count,
@@ -578,6 +615,7 @@ fn render_response(
     state.resp_cursor = outcome.clamped_cursor;
     state.resp_total_rows = outcome.total_rows;
     state.resp_viewport_height = outcome.viewport_height;
+    outcome.job
 }
 
 /// Renders the footer key hints, contextual to focus.
@@ -703,5 +741,33 @@ mod tests {
     fn secret_named_extracted_value_is_masked() {
         assert_eq!(mask("token", "abc"), "••••••");
         assert_eq!(mask("user_id", "42"), "42");
+    }
+
+    #[test]
+    fn progress_counts_ran_and_skipped_honestly() {
+        let mut r = runner();
+        // A halt: step 0 failed (ran), steps 1 & 2 skipped.
+        r.steps[0].status = StepStatus::Failed(500);
+        r.steps[0].timing = Some(Duration::from_millis(40));
+        r.steps[1].status = StepStatus::Skipped;
+        r.steps[2].status = StepStatus::Skipped;
+        r.finished = true;
+        let line = progress_line(&r);
+        assert!(line.contains("1/3"), "ran count wrong: {line}");
+        assert!(line.contains("1 failed"), "{line}");
+        assert!(line.contains("2 skipped"), "{line}");
+        assert!(line.contains("done"), "{line}");
+        assert!(
+            !line.contains("3/3"),
+            "skipped must not count as done: {line}"
+        );
+    }
+
+    #[test]
+    fn next_view_gen_is_unique() {
+        let mut r = runner();
+        let a = r.next_view_gen();
+        let b = r.next_view_gen();
+        assert_ne!(a, b, "each step view must get a distinct generation");
     }
 }

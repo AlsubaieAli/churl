@@ -150,9 +150,30 @@ impl SequenceEditorState {
         (self.on_error, &self.steps) != (self.snapshot.0, &self.snapshot.1)
     }
 
-    /// Rebuilds the [`Sequence`] for saving, renumbering step `seq` by position.
-    pub fn to_sequence(&self) -> Sequence {
-        Sequence {
+    /// Validates and rebuilds the [`Sequence`] for saving, renumbering step `seq`
+    /// by position. Refuses (naming the step + var) when a step has two extraction
+    /// rules with the same trimmed non-empty name — collecting into a `BTreeMap`
+    /// would silently collapse them last-wins and lose a visible row (mirrors the
+    /// M7.3 duplicate-var-name gate). Empty-named rules are dropped from the saved
+    /// output (they bind no variable); [`mark_saved`] purges them from the working
+    /// copy so dirty reconciles.
+    pub fn to_sequence_checked(&self) -> Result<Sequence, String> {
+        for (si, step) in self.steps.iter().enumerate() {
+            let mut seen = std::collections::HashSet::new();
+            for (name, _) in &step.rules {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if !seen.insert(trimmed.to_owned()) {
+                    return Err(format!(
+                        "duplicate rule name '{trimmed}' in step {}",
+                        si + 1
+                    ));
+                }
+            }
+        }
+        Ok(Sequence {
             seq: self.seq,
             name: self.name.clone(),
             on_error: self.on_error,
@@ -171,11 +192,19 @@ impl SequenceEditorState {
                         .collect::<BTreeMap<_, _>>(),
                 })
                 .collect(),
-        }
+        })
     }
 
-    /// Refreshes the snapshot after a successful save (clears dirty).
+    /// Refreshes the snapshot after a successful save (clears dirty). Purges
+    /// empty-named rules from the working copy first, so what stays on screen
+    /// matches exactly what was written to disk (no dirty-after-save mismatch).
     pub fn mark_saved(&mut self) {
+        for step in &mut self.steps {
+            step.rules.retain(|(name, _)| !name.trim().is_empty());
+        }
+        self.selected_rule = self
+            .selected_rule
+            .min(self.current_rules_len().saturating_sub(1));
         self.snapshot = (self.on_error, self.steps.clone());
     }
 
@@ -773,8 +802,8 @@ mod tests {
         ed.handle_key(key(KeyCode::Char('K')));
         assert_eq!(ed.steps[0].endpoint, "b/two.toml");
         assert_eq!(ed.steps[1].endpoint, "a/one.toml");
-        // to_sequence renumbers by position.
-        let out = ed.to_sequence();
+        // to_sequence_checked renumbers by position.
+        let out = ed.to_sequence_checked().unwrap();
         assert_eq!(out.steps[0].seq, 0);
         assert_eq!(out.steps[0].endpoint, "b/two.toml");
         assert_eq!(out.steps[1].seq, 1);
@@ -803,7 +832,7 @@ mod tests {
         ed.handle_key(key(KeyCode::Enter)); // commit name → chain to expr
         typ(&mut ed, "$.data.token");
         ed.handle_key(key(KeyCode::Enter)); // commit expr
-        let out = ed.to_sequence();
+        let out = ed.to_sequence_checked().unwrap();
         assert_eq!(out.steps[0].extract.get("token").unwrap(), "$.data.token");
     }
 
@@ -844,5 +873,50 @@ mod tests {
         assert!(ed.is_dirty());
         ed.mark_saved();
         assert!(!ed.is_dirty());
+    }
+
+    #[test]
+    fn duplicate_rule_names_refuse_save() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('l'))); // focus rules of step 0
+        // Add rule "x" = $.a
+        ed.handle_key(key(KeyCode::Char('a')));
+        typ(&mut ed, "x");
+        ed.handle_key(key(KeyCode::Enter)); // name → chains to expr
+        typ(&mut ed, "$.a");
+        ed.handle_key(key(KeyCode::Enter));
+        // Add a second rule also named "x".
+        ed.handle_key(key(KeyCode::Char('a')));
+        typ(&mut ed, "x");
+        ed.handle_key(key(KeyCode::Enter));
+        typ(&mut ed, "$.b");
+        ed.handle_key(key(KeyCode::Enter));
+
+        let err = ed.to_sequence_checked().unwrap_err();
+        assert!(err.contains("duplicate rule name 'x'"), "{err}");
+        assert!(err.contains("step 1"), "{err}");
+    }
+
+    #[test]
+    fn empty_named_rule_reconciles_after_save() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('l'))); // focus rules
+        ed.handle_key(key(KeyCode::Char('a'))); // add rule → editing name (fresh)
+        // Commit an EMPTY name (Enter, not Esc) — keeps a ("", "") rule; then leave
+        // the chained expr edit untouched.
+        ed.handle_key(key(KeyCode::Enter));
+        ed.handle_key(key(KeyCode::Esc));
+        assert_eq!(ed.steps[0].rules.len(), 1, "empty-named rule is present");
+        assert!(ed.is_dirty(), "adding a rule dirties the working copy");
+        // to_sequence_checked drops the empty-named rule from output...
+        assert!(
+            ed.to_sequence_checked().unwrap().steps[0]
+                .extract
+                .is_empty()
+        );
+        // ...and mark_saved purges it so dirty reconciles (no working≠disk gap).
+        ed.mark_saved();
+        assert_eq!(ed.steps[0].rules.len(), 0, "empty rule purged on save");
+        assert!(!ed.is_dirty(), "no dirty-after-save discrepancy");
     }
 }

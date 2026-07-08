@@ -4,7 +4,7 @@ expression: render_runner(&mut state)
 ---
                                                                                           
      ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
-     ┃3/3 · 1 failed · 135ms total · done   on_error: halt                           ┃    
+     ┃2/3 · 1 failed · 1 skipped · 135ms total · done   on_error: halt               ┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ─────────────────────────────┐┃    
      ┃┃✓ POST auth/login.toml  200  90ms   ┃│request failed                         │┃    
      ┃┃✗ GET users/me.toml  500  45ms      ┃│error:                                 │┃    

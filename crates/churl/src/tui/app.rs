@@ -19,9 +19,7 @@ use churl_core::config::Config;
 use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
 use churl_core::http::ExecuteOptions;
 use churl_core::interchange::{self, JsonDialect};
-use churl_core::model::{
-    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, OnError, Param, Response,
-};
+use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Response};
 use churl_core::persistence::{self, OpenWorkspace, PersistenceError};
 use churl_core::template::{Resolver, Scope};
 use color_eyre::Result;
@@ -46,6 +44,8 @@ use super::components::line_editor::LineEditor;
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
+use churl_core::sequence::StepResult;
+
 use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
@@ -1879,13 +1879,12 @@ impl App {
         let step = row.step.clone();
         match churl_core::sequence::prepare_step(&root, &step, &runner.extracted, &scopes) {
             Err(err) => {
-                row.status = StepStatus::HttpError(err.to_string());
+                // A prepare failure is a transport-class failure for the step.
                 row.response = ResponseState::Failed {
                     error: err.to_string(),
                     meta: sequence_step_meta(&step.endpoint),
                 };
-                runner.selected = index;
-                self.after_sequence_step_failure(index);
+                self.finish_sequence_step(index, StepResult::HttpError(err.to_string()));
             }
             Ok(prepared) => {
                 row.method = prepared.method;
@@ -1938,21 +1937,20 @@ impl App {
             Some(row) => row.step.clone(),
             None => return,
         };
+        let view_gen = runner.next_view_gen();
 
-        let (status, extracted, timing, response) = match outcome {
+        // Classify with the shared core seam for the success branch; a transport
+        // error maps to `HttpError` exactly as `classify_step` does (the one line
+        // the TUI mirrors — guarded by `sequence_transition_matches_core`).
+        let (result, extracted, timing, response) = match outcome {
             Ok(response) => {
                 let (result, extracted) = churl_core::sequence::classify_response(&response, &step);
                 let timing = Some(response.timing.total);
-                let view = ResponseView::build(&response, run_generation);
-                (
-                    StepStatus::from_result(&result),
-                    extracted,
-                    timing,
-                    ResponseState::Done { view },
-                )
+                let view = ResponseView::build(&response, view_gen);
+                (result, extracted, timing, ResponseState::Done { view })
             }
             Err(error) => (
-                StepStatus::HttpError(error.clone()),
+                StepResult::HttpError(error.clone()),
                 BTreeMap::new(),
                 None,
                 ResponseState::Failed {
@@ -1962,44 +1960,39 @@ impl App {
             ),
         };
 
-        let is_failure = matches!(
-            status,
-            StepStatus::Failed(_) | StepStatus::HttpError(_) | StepStatus::ExtractError(_)
-        );
         // Merge extracted values into the accumulator (empty on any failure).
         for (name, value) in &extracted {
             runner.extracted.insert(name.clone(), value.clone());
         }
         if let Some(row) = runner.steps.get_mut(index) {
-            row.status = status;
             row.timing = timing;
             row.extracted = extracted;
             row.response = response;
         }
-        runner.selected = index;
-
-        if is_failure {
-            self.after_sequence_step_failure(index);
-        } else {
-            self.advance_sequence(index);
-        }
+        self.finish_sequence_step(index, result);
     }
 
-    /// Handles a failed step per `on_error`: halt marks the tail skipped and
-    /// finishes; continue advances to the next step.
-    fn after_sequence_step_failure(&mut self, index: usize) {
+    /// Applies a step's classified `result`: sets its display status, then makes
+    /// the halt/advance decision through the shared `should_halt` seam — the
+    /// single place the TUI mirrors core's per-step transition, so the two cannot
+    /// drift. Halt marks the remaining steps `Skipped` and finishes; otherwise the
+    /// run advances.
+    fn finish_sequence_step(&mut self, index: usize, result: churl_core::sequence::StepResult) {
         let Some(runner) = self.sequence_runner.as_mut() else {
             return;
         };
-        match runner.on_error {
-            OnError::Halt => {
-                for row in runner.steps.iter_mut().skip(index + 1) {
-                    row.status = StepStatus::Skipped;
-                }
-                runner.current = None;
-                runner.finished = true;
+        if let Some(row) = runner.steps.get_mut(index) {
+            row.status = StepStatus::from_result(&result);
+        }
+        runner.selected = index;
+        if churl_core::sequence::should_halt(&result, runner.on_error) {
+            for row in runner.steps.iter_mut().skip(index + 1) {
+                row.status = StepStatus::Skipped;
             }
-            OnError::Continue => self.advance_sequence(index),
+            runner.current = None;
+            runner.finished = true;
+        } else {
+            self.advance_sequence(index);
         }
     }
 
@@ -2166,7 +2159,15 @@ impl App {
             return Ok(false);
         };
         let path = editor.path().to_owned();
-        let sequence = editor.to_sequence();
+        // Validate first (duplicate rule names refuse the whole save — nothing is
+        // written and the editor stays open + dirty, mirroring the M7.3 gate).
+        let sequence = match editor.to_sequence_checked() {
+            Ok(sequence) => sequence,
+            Err(msg) => {
+                self.notify(msg);
+                return Ok(false);
+            }
+        };
         match persistence::save_sequence(&path, &sequence) {
             Ok(()) => {
                 if let Some(editor) = self.sequence_editor.as_mut() {
@@ -3923,8 +3924,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         Mode::SequenceRunner => {
             let tick = app.tick_count;
-            if let Some(runner) = app.sequence_runner.as_mut() {
-                sequence_runner::render(frame, main, runner, tick, &theme);
+            let job = {
+                let cache = &app.highlight_cache;
+                match app.sequence_runner.as_mut() {
+                    Some(runner) => {
+                        sequence_runner::render(frame, main, runner, tick, cache, &theme)
+                    }
+                    None => None,
+                }
+            };
+            if let Some(job) = job {
+                let dup = app.pending_highlight == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        app.pending_highlight = Some(hash);
+                    }
+                }
             }
         }
         Mode::SequenceEditor => {
@@ -4151,7 +4167,7 @@ fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use churl_core::model::Timing;
+    use churl_core::model::{OnError, Timing};
 
     #[test]
     fn export_target_stays_inside_workspace() {
@@ -4512,6 +4528,141 @@ mod tests {
         );
     }
 
+    /// Cross-check: the same scripted scenarios produce identical per-step
+    /// results + extracted maps through the core `run_sequence` path (real HTTP
+    /// via wiremock) AND the live TUI driver (`on_sequence_step`) — the guard
+    /// against the two drifting (the milestone's stated highest risk).
+    #[tokio::test]
+    async fn sequence_transition_matches_core() {
+        use churl_core::http::{DEFAULT_TIMEOUT, ExecuteOptions, build_client};
+        use churl_core::sequence::{RunScopes, StepResult, run_sequence};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // (label, on_error, [statuses], step0 extract expr or "")
+        let scenarios: [(&str, OnError, [u16; 3], &str); 4] = [
+            ("all-ok+extract", OnError::Halt, [200, 200, 200], "$.token"),
+            ("halt-on-500", OnError::Halt, [200, 500, 200], ""),
+            ("continue-past-500", OnError::Continue, [200, 500, 200], ""),
+            (
+                "extract-error-halts",
+                OnError::Halt,
+                [200, 200, 200],
+                "$.missing",
+            ),
+        ];
+
+        // Maps both result types to a comparable shape (kind tag, status).
+        fn norm_core(r: &StepResult) -> (u8, Option<u16>) {
+            match r {
+                StepResult::Ok { status } => (0, Some(*status)),
+                StepResult::Failed { status } => (1, Some(*status)),
+                StepResult::HttpError(_) => (2, None),
+                StepResult::ExtractError(_) => (3, None),
+                StepResult::Skipped => (4, None),
+            }
+        }
+        fn norm_tui(s: &StepStatus) -> (u8, Option<u16>) {
+            match s {
+                StepStatus::Ok(status) => (0, Some(*status)),
+                StepStatus::Failed(status) => (1, Some(*status)),
+                StepStatus::HttpError(_) => (2, None),
+                StepStatus::ExtractError(_) => (3, None),
+                StepStatus::Skipped => (4, None),
+                StepStatus::Pending | StepStatus::Running => (9, None),
+            }
+        }
+
+        for (label, on_error, statuses, extract) in scenarios {
+            let server = MockServer::start().await;
+            let bodies = [r#"{"token":"T"}"#, "{}", "{}"];
+            for (i, status) in statuses.iter().enumerate() {
+                Mock::given(method("GET"))
+                    .and(path(format!("/s{i}")))
+                    .respond_with(ResponseTemplate::new(*status).set_body_string(bodies[i]))
+                    .mount(&server)
+                    .await;
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+            let coll = root.join("api");
+            std::fs::create_dir(&coll).unwrap();
+            for i in 0..3 {
+                std::fs::write(
+                    coll.join(format!("s{i}.toml")),
+                    format!(
+                        "seq = 0\nname = \"s{i}\"\n\n[request]\nmethod = \"GET\"\nurl = \"{}/s{i}\"\n",
+                        server.uri()
+                    ),
+                )
+                .unwrap();
+            }
+            let extract_block = if extract.is_empty() {
+                String::new()
+            } else {
+                format!("[step.extract]\ntoken = \"{extract}\"\n")
+            };
+            let seq_dir = root.join("sequences");
+            std::fs::create_dir(&seq_dir).unwrap();
+            std::fs::write(
+                seq_dir.join("flow.toml"),
+                format!(
+                    "seq = 0\nname = \"Flow\"\non_error = \"{}\"\n\n[[step]]\nseq = 0\nendpoint = \"api/s0.toml\"\n{extract_block}\n[[step]]\nseq = 1\nendpoint = \"api/s1.toml\"\n\n[[step]]\nseq = 2\nendpoint = \"api/s2.toml\"\n",
+                    match on_error { OnError::Halt => "halt", OnError::Continue => "continue" }
+                ),
+            )
+            .unwrap();
+
+            // --- core path (real HTTP) ---
+            let client = build_client(DEFAULT_TIMEOUT).unwrap();
+            let file = seq_dir.join("flow.toml");
+            let sequence = churl_core::persistence::load_sequence(&file).unwrap();
+            let core_run = run_sequence(
+                &client,
+                root,
+                &sequence,
+                &RunScopes::default(),
+                &ExecuteOptions::default(),
+            )
+            .await;
+            let core_results: Vec<_> = core_run
+                .steps
+                .iter()
+                .map(|s| norm_core(&s.result))
+                .collect();
+            let core_extracted = core_run.steps[0].extracted.clone();
+
+            // --- TUI path (injected outcomes matching the mock) ---
+            let ws = open_workspace(root).unwrap();
+            let mut app = App::new(ws, KeyMap::default()).unwrap();
+            let seq2 = churl_core::persistence::load_sequence(&file).unwrap();
+            app.open_sequence_runner(super::super::components::explorer::SelectedSequence {
+                name: seq2.name.clone(),
+                file: file.clone(),
+                sequence: seq2,
+            });
+            // Feed each step that actually runs the same response the mock returned.
+            while let Some(i) = app.sequence_runner.as_ref().unwrap().current {
+                let g = app.sequence_runner.as_ref().unwrap().run_generation;
+                app.on_sequence_step(g, i, Ok(ok_resp(statuses[i], bodies[i])));
+            }
+            let runner = app.sequence_runner.as_ref().unwrap();
+            let tui_results: Vec<_> = runner.steps.iter().map(|s| norm_tui(&s.status)).collect();
+            let tui_extracted = runner.steps[0].extracted.clone();
+
+            assert_eq!(
+                core_results, tui_results,
+                "scenario {label}: core vs TUI step results diverged"
+            );
+            assert_eq!(
+                core_extracted, tui_extracted,
+                "scenario {label}: core vs TUI extracted maps diverged"
+            );
+        }
+    }
+
     #[test]
     fn sequence_rerun_resets_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -4573,6 +4724,80 @@ mod tests {
         assert_eq!(sequence.on_error, OnError::Continue);
         assert_eq!(sequence.steps.len(), 1);
         assert_eq!(sequence.steps[0].endpoint, "api/login.toml");
+    }
+
+    /// Two extraction rules with the same name on one step refuse the whole save:
+    /// the message names the duplicate, nothing is written, the editor stays open.
+    #[test]
+    fn sequence_editor_duplicate_rule_names_refuse_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        // A sequence with one step, no rules yet.
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        let seq_path = seq_dir.join("flow.toml");
+        std::fs::write(
+            &seq_path,
+            "seq = 0\nname = \"Flow\"\non_error = \"halt\"\n\n[[step]]\nseq = 0\nendpoint = \"api/one.toml\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&seq_path).unwrap();
+
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let sequence = churl_core::persistence::load_sequence(&seq_path).unwrap();
+        app.open_sequence_editor("Flow".to_owned(), seq_path.clone(), &sequence);
+
+        let ch = |app: &mut App, c: char| {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        };
+        let enter = |app: &mut App| {
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+        };
+        ch(&mut app, 'l'); // focus rules
+        // rule "x" = $.a
+        ch(&mut app, 'a');
+        ch(&mut app, 'x');
+        enter(&mut app);
+        for c in "$.a".chars() {
+            ch(&mut app, c);
+        }
+        enter(&mut app);
+        // second rule also "x"
+        ch(&mut app, 'a');
+        ch(&mut app, 'x');
+        enter(&mut app);
+        for c in "$.b".chars() {
+            ch(&mut app, c);
+        }
+        enter(&mut app);
+        // Save → refused.
+        ch(&mut app, 'w');
+
+        assert_eq!(
+            app.mode,
+            Mode::SequenceEditor,
+            "editor stays open on refusal"
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|m| m.text.contains("duplicate rule name 'x'")),
+            "expected a duplicate-name refusal message, got {:?}",
+            app.message.as_ref().map(|m| &m.text)
+        );
+        // Nothing was written — the file is byte-for-byte unchanged.
+        assert_eq!(std::fs::read_to_string(&seq_path).unwrap(), before);
     }
 
     /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.
