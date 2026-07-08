@@ -18,15 +18,15 @@
 | M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | **done** |
 | M7.2 | Quick-jump pickers (requests + workspaces) | **done** |
 | M7.3 | Environments & vars editor | **done** |
-| M7.4 | Request sequences (E2E testing) | planned |
-| M7.5 | Concurrent requests (throttle / load testing) | planned |
+| M7.4 | Request sequences (E2E testing) | **done** |
+| M7.5 | Concurrent requests (throttle / load testing) | **done** |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
 | M7.7 | Response formatting + help search (UX round) | planned |
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
 
-> M7.1–M7.5 scheduled 2026-07-07 (owner priority: "these features need to be ready before the plugin feature, right after release") — fractional numbers per the M6.5 precedent so baked-in M8/M9 references stay valid. They run after Ship 0.1 and before M8/M9; order within the block is a proposal, adjustable per session.
+> M7.1–M7.5 scheduled 2026-07-07 (owner priority: "these features need to be ready before the plugin feature, right after release") — fractional numbers per the M6.5 precedent so baked-in M8/M9 references stay valid. They run after Ship 0.1 and before M8/M9; order within the block is a proposal, adjustable per session. **The M7.1–M7.5 block is complete (all five done, 2026-07-08)** — M7.5 (concurrent load testing) closed it.
 
 > M7.6–M7.8 added 2026-07-08 from owner feature notes: interchange parity (churl-native JSON import, symmetric with export), a response-formatting/help UX round, and an install-lifecycle cluster (version pinning + self-update + uninstall). Same fractional scheme, same adjustable ordering, still before M8/M9. The M7.3 session also folds in the manifest-in-collection crash fix (see M7.3 deliverables).
 
@@ -554,6 +554,18 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - History: batch runs recorded in SQLite without flooding the per-endpoint history view (grouping decided in design).
 - Guardrail: this is a testing aid, not a load-cannon — sane default caps, loud confirmation above them.
 - Tests: wiremock concurrency suites (N-copy fan-out, cancel mid-batch, timing capture), results-view snapshots.
+
+**Status**: **done** (2026-07-08). **This closes the M7.1–M7.5 block.**
+
+**Delivered** (2026-07-08):
+- **Core load engine (`churl-core::load`, UI-free)** — `run_load(client, request, cfg, options)` fires `cfg.total` copies of an *already-resolved* request through the single `execute()` chokepoint, bounded to `cfg.concurrency` in flight via `futures`' `buffer_unordered` and paced by an **absolute-target** delay (copy `i` never launches before `start + i·interval`, so the run's wall-clock has a guaranteed lower bound). Pure `stats()` computes ok/failed/errored counts + **nearest-rank** min/median/p95/max/mean over completed-request timings (all-`None` on an empty/all-errored batch — no panic). `classify()` is the single `Ok`/`Failed`(≥400)/`Error`(transport) seam; `check_config()`/`LoadCaps`/`LoadCheck` classify a config against the guardrail caps. Wiremock-proven: exact N-copy fan-out with timings, **bounded concurrency never exceeds the cap** (an arrival-interval overlap gauge in the responder), 500→Failed, transport→Error, interval-pacing floor, total=0 no-op.
+- **History migration 3 — separate `load_batches` table (structural non-flooding)** — a completed (or cancelled) run writes exactly ONE `LoadBatchSummary` row to a NEW table via `insert_load_batch`, never to `history`. Load runs therefore **cannot** flood the per-endpoint history view (proven: after batches are recorded, the history query still returns only history rows). Migration applies cleanly from a v2 DB.
+- **`[load]` config caps** — an optional `[load]` table (`warn_total`/`warn_concurrency`/`max_total`/`max_concurrency`) folds over `LoadCaps::default()` (100/20/10 000/200) via `Config::load_caps()`; a malformed value fails the whole config parse loudly, like every other knob.
+- **TUI load runner** (`components/load_runner.rs`, `Mode::LoadRunner`, `Action::OpenLoadRunner` = `<leader>l` + palette "load test endpoint (concurrent)") — a large modal with an **editable config header** (total/concurrency/interval, edited via the M7.3 `LineEditor` field-row pattern, digits-only + clamp), a live **O(viewport)** results list (glyphs `·`/`◐`/`✓`/`✗`/`⚠`), the reused `response::render` viewer for any selected copy, and a live stats line (`12/50 done · 44 ok · 6 failed · min … p50 … p95 … max …`). Opens with the request resolved **once** exactly like an interactive send (endpoint clone + body editor + `build_resolver`/`substitute_request`); never auto-runs. `r` runs, `Ctrl-C` cancels, `q`/`Esc` closes (confirm while running).
+- **Single-launcher fan-out + real batch cancel** — `App` owns ONE launcher task whose `buffer_unordered` mirrors `run_load`; aborting its `AbortHandle` drops the fan-out and every in-flight reqwest future (there is **no** detached per-request `tokio::spawn` to escape cancellation). A per-run `run_generation` drops stale results after cancel/re-run. Proven live: a multi-thread wiremock test cancels mid-batch and asserts the server saw only a handful of the 20 copies (the un-launched ones never fired).
+- **Guardrail** — `check_config` Refuse blocks the run with a message; Warn shows a loud confirm **naming the target URL and count** (`Fire N requests at concurrency C against <url>?`), `y` proceeds / `n` aborts; Ok runs immediately. Caps are `[load]`-overridable.
+- **Non-negotiables honoured**: `churl-core` stays UI-free; `execute()` is the only HTTP chokepoint (both `run_load` and the TUI launcher go through it); the request is resolved once and cloned for all N copies; bounded concurrency actually bounds; cancel aborts all in-flight; stale results dropped by generation; never panics (total 0/1, huge N refused by the cap, all-errored, percentile of empty, unicode URL); the results list renders O(viewport), not O(N).
+- **Deviations** (recorded in DECISIONS.md): `buffer_unordered` instead of a manual `FuturesUnordered`+`Semaphore` (same bound, less code); absolute-target pacing; an added `LoadStarted` launcher message so a running copy shows its glyph honestly; a `cancelled` column added to `load_batches` (the DDL in the design omitted it but §1d/§2 require marking a cancelled run); `tokio`+`futures` promoted to `churl-core` direct deps (used only inside `run_load`; `execute` stays runtime-agnostic).
 
 **Next**: M7.6
 
