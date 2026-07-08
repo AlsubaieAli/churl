@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸┏ Environments & Variables ● ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   │
+│   ┃┌ Scopes ──────────────────┐┌ Workspace ─────────────────────────────┐┃───┘
+│   ┃│WORKSPACE                 ││api_token  •••••• ✓                     │┃───┐
+│   ┃│  Workspace               ││base_url   https://api.example.com/v2█  │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│COLLECTIONS               ││                                        │┃   │
+│   ┃│  users                   ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│PROFILES                  ││                                        │┃   │
+│   ┃│  dev                     ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃───┘
+│   ┃│                          ││                                        │┃───┐
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃└──────────────────────────┘└────────────────────────────────────────┘┃   │
+│   ┃ base_url: workspace ✓                                                ┃   │
+│   ┃ enter commit · tab name/value · esc cancel                           ┃   │
+│   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛   │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

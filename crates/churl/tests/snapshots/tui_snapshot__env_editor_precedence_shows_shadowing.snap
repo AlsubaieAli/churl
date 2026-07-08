@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: rendered
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸┏ Environments & Variables ● ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   │
+│   ┃┌ Scopes ──────────────────┐┌ Workspace ─────────────────────────────┐┃───┘
+│   ┃│WORKSPACE                 ││api_token  •••••• ✓                     │┃───┐
+│   ┃│  Workspace               ││base_url   https://api.example.com → pro│┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│COLLECTIONS               ││                                        │┃   │
+│   ┃│  users                   ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│PROFILES                  ││                                        │┃   │
+│   ┃│● dev                     ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃───┘
+│   ┃│                          ││                                        │┃───┐
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃└──────────────────────────┘└────────────────────────────────────────┘┃   │
+│   ┃ api_token: profile dev — · workspace ✓                               ┃   │
+│   ┃ ● unsaved · j/k move · l/enter edit vars · n new profile · r rename ·┃   │
+│   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛   │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

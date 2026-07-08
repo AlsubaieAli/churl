@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: rendered
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸┏ Environments & Variables ● ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   │
+│   ┃┌ Scopes ──────────────────┐┌ Workspace ─────────────────────────────┐┃───┘
+│   ┃│WORKSPACE                 ││api_token  •••••• ✓                     │┃───┐
+│   ┃│  Workspace               ││base_url   https://api.example.com ✓    │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│COLLECTIONS               ││                                        │┃   │
+│   ┃│  users                   ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│PROFILES                  ││                                        │┃   │
+│   ┃│  dev    ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓         │┃   │
+│   ┃│         ┃Save changes before closing?                    ┃         │┃   │
+│   ┃│         ┃s save · d discard · esc stay                   ┃         │┃───┘
+│   ┃│         ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛         │┃───┐
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃│                          ││                                        │┃   │
+│   ┃└──────────────────────────┘└────────────────────────────────────────┘┃   │
+│   ┃ api_token: workspace ✓                                               ┃   │
+│   ┃ s save · d discard · esc stay                                        ┃   │
+│   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛   │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

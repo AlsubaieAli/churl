@@ -375,6 +375,97 @@ fn malformed_endpoint_error_names_the_file() {
     );
 }
 
+// --- M7.3: crash bugfix (churl.toml in a collection dir) + load resilience. ---
+
+#[test]
+fn nested_workspace_manifest_is_ignored_not_parsed_as_endpoint() {
+    // Regression: a collection directory that is itself a nested workspace (it
+    // contains a `churl.toml`) must NOT have that manifest parsed as an endpoint
+    // (`missing field 'request'`), which used to abort the whole TUI load.
+    let dir = tempfile::tempdir().unwrap();
+    build_lazy_workspace(dir.path());
+    // Drop a nested manifest into the `users` collection dir.
+    fs::write(
+        dir.path().join("users").join("churl.toml"),
+        "name = \"nested-ws\"\n",
+    )
+    .unwrap();
+
+    let collection = Collection {
+        name: "users".into(),
+        path: dir.path().join("users"),
+    };
+
+    // Strict path: no error, manifest simply ignored (only the real endpoints).
+    let endpoints = collection.endpoints().unwrap();
+    let names: Vec<&str> = endpoints.iter().map(|(_, ep)| ep.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["create", "get"],
+        "churl.toml excluded like folder.toml"
+    );
+
+    // Lenient path: same endpoints, and zero warnings (the manifest is not a
+    // skipped/unparseable endpoint — it is simply not an endpoint file).
+    let load = collection.endpoints_lenient().unwrap();
+    let lenient_names: Vec<&str> = load
+        .endpoints
+        .iter()
+        .map(|(_, ep)| ep.name.as_str())
+        .collect();
+    assert_eq!(lenient_names, ["create", "get"]);
+    assert!(
+        load.warnings.is_empty(),
+        "a nested churl.toml must not produce a warning: {:?}",
+        load.warnings
+    );
+}
+
+#[test]
+fn lenient_load_degrades_one_bad_file_to_a_warning() {
+    // Resilience: one valid endpoint + one garbage `.toml` returns the valid
+    // endpoint and exactly one warning naming the bad file; the load does not error.
+    let dir = tempfile::tempdir().unwrap();
+    build_lazy_workspace(dir.path());
+    fs::write(
+        dir.path().join("users").join("garbage.toml"),
+        "seq = 0\nname = \"broken\"\n", // missing [request] table
+    )
+    .unwrap();
+
+    let collection = Collection {
+        name: "users".into(),
+        path: dir.path().join("users"),
+    };
+    let load = collection.endpoints_lenient().unwrap();
+    let names: Vec<&str> = load
+        .endpoints
+        .iter()
+        .map(|(_, ep)| ep.name.as_str())
+        .collect();
+    assert_eq!(names, ["create", "get"], "valid endpoints still returned");
+    assert_eq!(load.warnings.len(), 1, "exactly one skipped file");
+    assert!(
+        load.warnings[0].contains("garbage.toml"),
+        "warning names the bad file: {:?}",
+        load.warnings
+    );
+    // Strict path still fails on the same corpus (existing callers keep strictness).
+    assert!(collection.endpoints().is_err());
+}
+
+#[test]
+fn lenient_load_read_dir_error_is_still_hard() {
+    // A missing directory (a real IO failure, not a single bad file) stays a hard
+    // error — resilience covers bad files, not a vanished collection.
+    let dir = tempfile::tempdir().unwrap();
+    let collection = Collection {
+        name: "gone".into(),
+        path: dir.path().join("does-not-exist"),
+    };
+    assert!(collection.endpoints_lenient().is_err());
+}
+
 #[test]
 fn workspace_vars_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -416,6 +507,208 @@ fn workspace_vars_secret_literal_refused() {
     assert!(err.to_string().contains("vars.api_token"), "{err}");
     // Nothing was written.
     assert!(!dir.path().join("churl.toml").exists());
+}
+
+// --- M7.3: delete/rename must actually prune on disk (editor correctness gate). ---
+//
+// The format-preserving `merge_tables` removes keys present on disk but absent
+// from the saved struct (verified here end-to-end: an editor whose "delete"
+// silently left the value on disk would be broken). Surviving keys keep their
+// comments; a deleted `[[profiles]]` entry disappears entirely.
+
+#[test]
+fn deleting_a_workspace_var_key_removes_it_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    // Hand-written manifest with two vars and comments on the survivor.
+    fs::write(
+        dir.path().join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n\n",
+            "[vars]\n",
+            "# the base URL, keep this\n",
+            "base_url = \"https://api.example.com\"\n",
+            "page_size = \"50\"\n",
+        ),
+    )
+    .unwrap();
+
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    ws.vars.remove("page_size");
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("page_size"),
+        "deleted var key must be gone from disk:\n{text}"
+    );
+    assert!(
+        text.contains("base_url"),
+        "sibling var must survive:\n{text}"
+    );
+    assert!(
+        text.contains("# the base URL, keep this"),
+        "surviving key keeps its comment:\n{text}"
+    );
+    // And it is gone semantically on reload.
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert!(!back.vars.contains_key("page_size"));
+    assert_eq!(
+        back.vars.get("base_url").map(String::as_str),
+        Some("https://api.example.com")
+    );
+}
+
+#[test]
+fn deleting_a_profile_removes_its_table_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::new(),
+        profiles: vec![
+            Profile {
+                name: "dev".into(),
+                vars: BTreeMap::from([("host".to_string(), "dev.example.com".to_string())]),
+            },
+            Profile {
+                name: "prod".into(),
+                vars: BTreeMap::from([("host".to_string(), "prod.example.com".to_string())]),
+            },
+        ],
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    // Delete the `prod` profile and re-save.
+    let mut edited = load_workspace_manifest(dir.path()).unwrap();
+    edited.profiles.retain(|p| p.name != "prod");
+    save_workspace_manifest(dir.path(), &edited).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("prod") && !text.contains("prod.example.com"),
+        "deleted profile must be gone from disk:\n{text}"
+    );
+    assert!(text.contains("dev"), "surviving profile stays:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(back.profiles.len(), 1);
+    assert_eq!(back.profiles[0].name, "dev");
+}
+
+#[test]
+fn renaming_a_profile_leaves_no_old_name_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::new(),
+        profiles: vec![Profile {
+            name: "staging".into(),
+            vars: BTreeMap::from([("host".to_string(), "stg.example.com".to_string())]),
+        }],
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let mut edited = load_workspace_manifest(dir.path()).unwrap();
+    edited.profiles[0].name = "prod".into();
+    save_workspace_manifest(dir.path(), &edited).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("staging"),
+        "old profile name must be gone:\n{text}"
+    );
+    assert!(text.contains("prod"), "new profile name present:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(back.profiles.len(), 1);
+    assert_eq!(back.profiles[0].name, "prod");
+    assert_eq!(
+        back.profiles[0].vars.get("host").map(String::as_str),
+        Some("stg.example.com")
+    );
+}
+
+#[test]
+fn renaming_a_var_key_leaves_no_old_name_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("churl.toml"),
+        concat!("name = \"demo\"\n\n", "[vars]\n", "old_name = \"keepme\"\n",),
+    )
+    .unwrap();
+
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    let value = ws.vars.remove("old_name").unwrap();
+    ws.vars.insert("new_name".to_string(), value);
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("old_name"),
+        "old var name must be gone:\n{text}"
+    );
+    assert!(text.contains("new_name"), "renamed var present:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert!(!back.vars.contains_key("old_name"));
+    assert_eq!(
+        back.vars.get("new_name").map(String::as_str),
+        Some("keepme")
+    );
+}
+
+#[test]
+fn deleting_a_collection_var_key_removes_it_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("users");
+    fs::create_dir(&coll).unwrap();
+    fs::write(
+        coll.join("folder.toml"),
+        concat!(
+            "[vars]\n",
+            "# keep this default\n",
+            "base_path = \"/v1/users\"\n",
+            "page_size = \"50\"\n",
+        ),
+    )
+    .unwrap();
+
+    let mut meta = load_collection_meta(&coll).unwrap();
+    meta.vars.remove("page_size");
+    save_collection_meta(&coll, &meta).unwrap();
+
+    let text = fs::read_to_string(coll.join("folder.toml")).unwrap();
+    assert!(
+        !text.contains("page_size"),
+        "deleted collection var must be gone:\n{text}"
+    );
+    assert!(text.contains("base_path"), "sibling survives:\n{text}");
+    assert!(
+        text.contains("# keep this default"),
+        "surviving key keeps its comment:\n{text}"
+    );
+    let back = load_collection_meta(&coll).unwrap();
+    assert!(!back.vars.contains_key("page_size"));
+    assert_eq!(
+        back.vars.get("base_path").map(String::as_str),
+        Some("/v1/users")
+    );
+}
+
+#[test]
+fn deleting_the_last_var_removes_the_vars_table() {
+    // Emptying a scope's vars must drop the whole `[vars]` table (the struct
+    // skips serializing an empty map, and merge prunes the stale table).
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nonly = \"one\"\n",
+    )
+    .unwrap();
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    ws.vars.clear();
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("[vars]") && !text.contains("only"),
+        "empty vars table must be pruned:\n{text}"
+    );
 }
 
 #[test]

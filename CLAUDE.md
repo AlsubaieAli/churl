@@ -49,7 +49,9 @@ crates/
                            #   Auth/ApiKeyPlacement (internally-tagged [request.auth])
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
-      persistence.rs       # toml_edit load/save (format-preserving merge), lazy OpenWorkspace/Collection;
+      persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge), lazy OpenWorkspace/Collection;
+                           #   Collection::endpoints() strict + endpoints_lenient() -> CollectionLoad (skip one bad file →
+                           #   warning; both skip folder.toml AND churl.toml — M7.3 crash fix);
                            #   CollectionMeta (folder.toml [vars]) load/save (M6); CRUD seams (M6.6):
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
                            #   secrets refusal on every save path)
@@ -78,7 +80,7 @@ crates/
       tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
       tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
-        app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm)/AppMsg,
+        app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor)/AppMsg,
                            #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
                            #   lookup_ctx; in-app CRUD via core seams; tokio::select! loop, render; send-time {{var}}
                            #   resolution, profile switching, Theme; send/cancel, history, highlight cache
@@ -90,7 +92,10 @@ crates/
         components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
                            #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy),
-                           #   fold (JSON fold-region scanner), picker, method_menu, prompt (CRUD prompt + confirm overlays),
+                           #   fold (JSON fold-region scanner), env_editor (M7.3 environments & vars editor:
+                           #     EnvEditorState split-view over workspace/collection/profile scopes — profile CRUD,
+                           #     dirty/discard guard, secret mask+refuse, live precedence display; core stays UI-free),
+                           #   picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump, statusline,
                            #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors)
     tests/

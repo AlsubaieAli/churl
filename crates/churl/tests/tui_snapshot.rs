@@ -901,6 +901,8 @@ fn every_palette_command_dispatches() {
             Action::CopyAsCurl | Action::CopyAsCurlResolved => {
                 expect_status(&mut app, "no endpoint selected")
             }
+            // The env editor needs an open workspace; without one it warns.
+            Action::OpenEnvEditor => expect_status(&mut app, "open a workspace first"),
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
@@ -1504,4 +1506,287 @@ fn request_tab_bar_shows_digit_prefixes_when_focused() {
         "focused tab bar must show [1] digit prefix for tab 1: {rendered}"
     );
     insta::assert_snapshot!(rendered);
+}
+
+// --- M7.3: environments & variables editor ---
+
+/// A workspace with workspace vars (incl. a secret-named literal), a collection
+/// with vars, and a `dev` profile — the full three-scope surface the editor edits.
+fn env_fixture(root: &Path) {
+    std::fs::write(
+        root.join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n\n",
+            "[vars]\n",
+            "base_url = \"https://api.example.com\"\n",
+            "api_token = \"literal-secret-value\"\n\n",
+            "[[profiles]]\n",
+            "name = \"dev\"\n",
+            "[profiles.vars]\n",
+            "base_url = \"https://dev.example.com\"\n",
+            "host = \"dev.local\"\n",
+        ),
+    )
+    .unwrap();
+    let users = root.join("users");
+    std::fs::create_dir(&users).unwrap();
+    std::fs::write(users.join("folder.toml"), "[vars]\npage_size = \"50\"\n").unwrap();
+    std::fs::write(
+        users.join("list.toml"),
+        "seq = 0\nname = \"List users\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/users\"\n",
+    )
+    .unwrap();
+}
+
+fn app_with_env_fixture(root: &Path) -> App {
+    env_fixture(root);
+    let workspace = open_workspace(root).unwrap();
+    App::new(workspace, KeyMap::default()).unwrap()
+}
+
+/// Like [`env_fixture`] but with no pre-existing secret literal, so the manifest
+/// is saveable (the secrets gate refuses any manifest carrying a literal secret).
+fn app_with_clean_env_fixture(root: &Path) -> App {
+    std::fs::write(
+        root.join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n\n",
+            "[vars]\n",
+            "base_url = \"https://api.example.com\"\n\n",
+            "[[profiles]]\n",
+            "name = \"dev\"\n",
+            "[profiles.vars]\n",
+            "host = \"dev.local\"\n",
+        ),
+    )
+    .unwrap();
+    let users = root.join("users");
+    std::fs::create_dir(&users).unwrap();
+    std::fs::write(users.join("folder.toml"), "[vars]\npage_size = \"50\"\n").unwrap();
+    let workspace = open_workspace(root).unwrap();
+    App::new(workspace, KeyMap::default()).unwrap()
+}
+
+/// Opens the env editor via the `<leader>v` chord (Space then `v`).
+fn open_env(app: &mut App) {
+    press(app, KeyCode::Char(' '));
+    press(app, KeyCode::Char('v'));
+    assert_eq!(app.mode, Mode::EnvEditor, "editor must be open");
+}
+
+#[test]
+fn env_editor_opens_with_both_panes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn env_editor_masks_secret_named_literal() {
+    // Focus the workspace var rows: `api_token`'s literal value is masked.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // into the workspace var rows
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("••••••"),
+        "secret literal masked:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("literal-secret-value"),
+        "the literal must never render:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn env_editor_editing_a_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // rows (lands on api_token, the first row)
+    press(&mut app, KeyCode::Char('j')); // down to base_url
+    press(&mut app, KeyCode::Enter); // edit base_url value
+    type_str(&mut app, "/v2");
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+#[test]
+fn env_editor_precedence_shows_shadowing() {
+    // Activate `dev`, then view the workspace scope: base_url is shadowed by the
+    // profile, api_token (unique) wins.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Char('j')); // users
+    press(&mut app, KeyCode::Char('j')); // dev
+    press(&mut app, KeyCode::Char('x')); // activate dev
+    press(&mut app, KeyCode::Char('k')); // users
+    press(&mut app, KeyCode::Char('k')); // workspace
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("profile dev"),
+        "workspace base_url must show it is shadowed by profile dev:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn env_editor_discard_confirm() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // rows
+    press(&mut app, KeyCode::Enter); // edit value
+    type_str(&mut app, "X");
+    press(&mut app, KeyCode::Enter); // commit → dirty
+    press(&mut app, KeyCode::Char('q')); // close while dirty → confirm
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("Unsaved changes"),
+        "discard confirm shown:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn env_editor_save_writes_workspace_var() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_clean_env_fixture(dir.path());
+    open_env(&mut app);
+    // Edit workspace base_url value.
+    press(&mut app, KeyCode::Tab); // rows
+    press(&mut app, KeyCode::Enter); // edit base_url value
+    for _ in 0..40 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    type_str(&mut app, "https://changed.example");
+    press(&mut app, KeyCode::Enter); // commit
+    // Save.
+    press(&mut app, KeyCode::Char('w'));
+    // The editor stays open, dirty cleared; the manifest reflects the change.
+    let manifest = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        manifest.contains("https://changed.example"),
+        "workspace var saved:\n{manifest}"
+    );
+    // The secret-named literal was untouched (still present, unchanged) — it is a
+    // pre-existing hand-edited value the editor round-trips without gating loads.
+    // But editing+saving it as a literal would be refused; here we didn't touch it.
+    // Live-refresh: the app's workspace manifest now carries the new value.
+    assert_eq!(
+        app.workspace
+            .as_ref()
+            .unwrap()
+            .manifest()
+            .vars
+            .get("base_url")
+            .map(String::as_str),
+        Some("https://changed.example")
+    );
+}
+
+#[test]
+fn env_editor_new_profile_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_clean_env_fixture(dir.path());
+    open_env(&mut app);
+    // New profile from the scope list.
+    press(&mut app, KeyCode::Char('n'));
+    type_str(&mut app, "prod");
+    press(&mut app, KeyCode::Enter); // commit name → focuses new profile rows
+    // Add a var to it.
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "host");
+    press(&mut app, KeyCode::Enter); // name → value
+    type_str(&mut app, "prod.local");
+    press(&mut app, KeyCode::Enter); // commit row
+    press(&mut app, KeyCode::Char('w')); // save
+    let manifest = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        manifest.contains("prod"),
+        "new profile persisted:\n{manifest}"
+    );
+    assert!(
+        manifest.contains("prod.local"),
+        "profile var persisted:\n{manifest}"
+    );
+    // Re-load through the model to prove it round-trips.
+    let ws = churl_core::persistence::load_workspace_manifest(dir.path()).unwrap();
+    assert!(ws.profiles.iter().any(|p| p.name == "prod"));
+}
+
+#[test]
+fn env_editor_discard_leaves_disk_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    let before = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // rows
+    press(&mut app, KeyCode::Enter);
+    type_str(&mut app, "junk");
+    press(&mut app, KeyCode::Enter); // commit → dirty
+    press(&mut app, KeyCode::Char('q')); // confirm
+    press(&mut app, KeyCode::Char('d')); // discard
+    assert_eq!(app.mode, Mode::Normal, "editor closed");
+    let after = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert_eq!(before, after, "discard must not write anything");
+}
+
+#[test]
+fn env_editor_save_refuses_secret_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    let before = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // workspace rows
+    // Add a new secret-named var with a literal value.
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "session_token");
+    press(&mut app, KeyCode::Enter);
+    type_str(&mut app, "abc123");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('w')); // save → refused
+    assert_eq!(app.mode, Mode::EnvEditor, "editor stays open on refusal");
+    let after = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert_eq!(before, after, "refused save writes nothing");
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("secret") || rendered.contains("session_token"),
+        "refusal message shown:\n{rendered}"
+    );
+}
+
+#[test]
+fn env_editor_collection_override_marker_and_legend() {
+    // Fix 2 (visible): a workspace var also set in a collection renders `✓*` with
+    // a footer legend, so the winner marker never overstates the win.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nbase_url = \"https://api.example.com\"\n",
+    )
+    .unwrap();
+    let users = dir.path().join("users");
+    std::fs::create_dir(&users).unwrap();
+    std::fs::write(
+        users.join("folder.toml"),
+        "[vars]\nbase_url = \"https://users.example.com\"\n",
+    )
+    .unwrap();
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // into the workspace var rows (base_url selected)
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("✓*"),
+        "collection-override marker shown:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("also set in a collection"),
+        "footer legend shown:\n{rendered}"
+    );
 }

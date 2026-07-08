@@ -15,9 +15,9 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃└────────────────────────────────────────────────┘
-┃                            ┃┌ Response ──────────────────────────────────────┐
-┃                            ┃│no response yet     ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│                    ┃ c  cancel request         ┃
+┃                            ┃┌ Response ──────────┏ leader ━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│no response yet     ┃ c  cancel request         ┃
+┃                            ┃│                    ┃ v  Environments & vars    ┃
 ┃                            ┃│no endpoint selected┃ f  request picker         ┃
 ┃                            ┃│                    ┃ w  workspace picker       ┃
 ┃                            ┃│                    ┃ q  quit                   ┃
