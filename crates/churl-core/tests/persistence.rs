@@ -375,6 +375,97 @@ fn malformed_endpoint_error_names_the_file() {
     );
 }
 
+// --- M7.3: crash bugfix (churl.toml in a collection dir) + load resilience. ---
+
+#[test]
+fn nested_workspace_manifest_is_ignored_not_parsed_as_endpoint() {
+    // Regression: a collection directory that is itself a nested workspace (it
+    // contains a `churl.toml`) must NOT have that manifest parsed as an endpoint
+    // (`missing field 'request'`), which used to abort the whole TUI load.
+    let dir = tempfile::tempdir().unwrap();
+    build_lazy_workspace(dir.path());
+    // Drop a nested manifest into the `users` collection dir.
+    fs::write(
+        dir.path().join("users").join("churl.toml"),
+        "name = \"nested-ws\"\n",
+    )
+    .unwrap();
+
+    let collection = Collection {
+        name: "users".into(),
+        path: dir.path().join("users"),
+    };
+
+    // Strict path: no error, manifest simply ignored (only the real endpoints).
+    let endpoints = collection.endpoints().unwrap();
+    let names: Vec<&str> = endpoints.iter().map(|(_, ep)| ep.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["create", "get"],
+        "churl.toml excluded like folder.toml"
+    );
+
+    // Lenient path: same endpoints, and zero warnings (the manifest is not a
+    // skipped/unparseable endpoint — it is simply not an endpoint file).
+    let load = collection.endpoints_lenient().unwrap();
+    let lenient_names: Vec<&str> = load
+        .endpoints
+        .iter()
+        .map(|(_, ep)| ep.name.as_str())
+        .collect();
+    assert_eq!(lenient_names, ["create", "get"]);
+    assert!(
+        load.warnings.is_empty(),
+        "a nested churl.toml must not produce a warning: {:?}",
+        load.warnings
+    );
+}
+
+#[test]
+fn lenient_load_degrades_one_bad_file_to_a_warning() {
+    // Resilience: one valid endpoint + one garbage `.toml` returns the valid
+    // endpoint and exactly one warning naming the bad file; the load does not error.
+    let dir = tempfile::tempdir().unwrap();
+    build_lazy_workspace(dir.path());
+    fs::write(
+        dir.path().join("users").join("garbage.toml"),
+        "seq = 0\nname = \"broken\"\n", // missing [request] table
+    )
+    .unwrap();
+
+    let collection = Collection {
+        name: "users".into(),
+        path: dir.path().join("users"),
+    };
+    let load = collection.endpoints_lenient().unwrap();
+    let names: Vec<&str> = load
+        .endpoints
+        .iter()
+        .map(|(_, ep)| ep.name.as_str())
+        .collect();
+    assert_eq!(names, ["create", "get"], "valid endpoints still returned");
+    assert_eq!(load.warnings.len(), 1, "exactly one skipped file");
+    assert!(
+        load.warnings[0].contains("garbage.toml"),
+        "warning names the bad file: {:?}",
+        load.warnings
+    );
+    // Strict path still fails on the same corpus (existing callers keep strictness).
+    assert!(collection.endpoints().is_err());
+}
+
+#[test]
+fn lenient_load_read_dir_error_is_still_hard() {
+    // A missing directory (a real IO failure, not a single bad file) stays a hard
+    // error — resilience covers bad files, not a vanished collection.
+    let dir = tempfile::tempdir().unwrap();
+    let collection = Collection {
+        name: "gone".into(),
+        path: dir.path().join("does-not-exist"),
+    };
+    assert!(collection.endpoints_lenient().is_err());
+}
+
 #[test]
 fn workspace_vars_round_trip() {
     let dir = tempfile::tempdir().unwrap();

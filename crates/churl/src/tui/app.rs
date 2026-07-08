@@ -535,6 +535,35 @@ impl App {
         self.message = Some(Message::new(text));
     }
 
+    /// Drains any lenient-load warnings the explorer accumulated (skipped /
+    /// unparseable endpoint files) and, if there are any, surfaces an aggregate in
+    /// the message row. A single bad file never aborts the load, but it is never
+    /// swallowed silently either (Constitution: fail loudly).
+    fn surface_explorer_warnings(&mut self) {
+        let warnings = self.explorer.take_warnings();
+        if warnings.is_empty() {
+            return;
+        }
+        let n = warnings.len();
+        // Name up to two files inline; the rest are summarised by count.
+        let named: Vec<&str> = warnings
+            .iter()
+            .take(2)
+            .map(|w| {
+                w.trim_start_matches("skipped ")
+                    .split(':')
+                    .next()
+                    .unwrap_or(w)
+            })
+            .collect();
+        let detail = if n <= named.len() {
+            named.join(", ")
+        } else {
+            format!("{}, +{} more", named.join(", "), n - named.len())
+        };
+        self.notify(format!("{n} file(s) skipped (unparseable): {detail}"));
+    }
+
     /// Sets what `i`/`Enter` on the URL bar opens (inline vs popup).
     pub fn set_url_edit_mode(&mut self, mode: UrlEditMode) {
         self.url_edit_mode = mode;
@@ -961,7 +990,10 @@ impl App {
             Action::Top => self.explorer.top(),
             Action::Bottom => self.explorer.bottom(),
             Action::Collapse => self.explorer.collapse(),
-            Action::Expand => self.explorer.expand()?,
+            Action::Expand => {
+                self.explorer.expand()?;
+                self.surface_explorer_warnings();
+            }
             Action::Select => {
                 // Guarded seam: switching to a *different* endpoint while dirty
                 // prompts to save/discard first. A collection toggle (select()
@@ -1513,6 +1545,9 @@ impl App {
         self.picker = Some(items.picker);
         self.search_targets = items.targets;
         self.mode = Mode::Search;
+        // Opening search parses every collection eagerly — surface any files the
+        // lenient load skipped.
+        self.surface_explorer_warnings();
         Ok(())
     }
 
@@ -2339,8 +2374,9 @@ impl App {
             path: dir,
         };
         let endpoints = collection
-            .endpoints()
+            .endpoints_lenient()
             .ok()?
+            .endpoints
             .into_iter()
             .map(|(_, ep)| ep)
             .collect();
@@ -2727,6 +2763,7 @@ impl App {
     fn reload_explorer(&mut self) -> Result<()> {
         self.explorer.reload(self.workspace.as_ref())?;
         self.remap_selected();
+        self.surface_explorer_warnings();
         Ok(())
     }
 

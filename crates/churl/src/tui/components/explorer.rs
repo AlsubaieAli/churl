@@ -64,13 +64,22 @@ struct CollectionNode {
     endpoints: Option<Vec<(PathBuf, Endpoint)>>,
     /// Cached collection-level template vars from `folder.toml`; loaded lazily.
     vars: Option<BTreeMap<String, String>>,
+    /// Warnings from the last lenient load (one per skipped/unparseable file),
+    /// produced once when the collection is first parsed and drained by
+    /// [`ExplorerState::take_warnings`] so the app can surface them.
+    warnings: Vec<String>,
 }
 
 impl CollectionNode {
-    /// Parses the collection's endpoint files if not already loaded.
+    /// Parses the collection's endpoint files if not already loaded, using the
+    /// lenient load path: a single unparseable file is degraded to a warning
+    /// (stored on the node) instead of aborting the whole load. Only a directory
+    /// read error is a hard error.
     fn load(&mut self) -> Result<&[(PathBuf, Endpoint)], PersistenceError> {
         if self.endpoints.is_none() {
-            self.endpoints = Some(self.collection.endpoints()?);
+            let load = self.collection.endpoints_lenient()?;
+            self.warnings = load.warnings;
+            self.endpoints = Some(load.endpoints);
         }
         Ok(self.endpoints.as_deref().expect("just loaded"))
     }
@@ -117,6 +126,7 @@ impl ExplorerState {
                     collection,
                     endpoints: None,
                     vars: None,
+                    warnings: Vec::new(),
                 })
                 .collect(),
             None => Vec::new(),
@@ -349,6 +359,18 @@ impl ExplorerState {
         self.cursor = cursor;
         self.clamp_cursor();
         Ok(())
+    }
+
+    /// Drains and returns all pending load warnings accumulated across collections
+    /// (one per skipped/unparseable endpoint file, produced by the lenient load).
+    /// The app calls this after any operation that may have parsed endpoints and
+    /// surfaces the result in the message row (never silently swallowed).
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        let mut all = Vec::new();
+        for node in &mut self.collections {
+            all.append(&mut node.warnings);
+        }
+        all
     }
 
     /// The kind of the currently-selected row, if any.

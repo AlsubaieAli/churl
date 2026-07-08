@@ -441,38 +441,111 @@ pub struct Collection {
     pub path: PathBuf,
 }
 
+/// The outcome of a lenient collection load ([`Collection::endpoints_lenient`]):
+/// the successfully-parsed endpoints plus one warning per file that could not be
+/// parsed. A single unparseable endpoint never aborts the load — but it is never
+/// swallowed silently either (Constitution: fail loudly).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CollectionLoad {
+    /// Successfully parsed endpoints with their file paths, sorted by `seq` then
+    /// filename.
+    pub endpoints: Vec<(PathBuf, Endpoint)>,
+    /// Human-readable warnings, one per skipped/unparseable file, e.g.
+    /// `"skipped user.toml: missing field `request`"`.
+    pub warnings: Vec<String>,
+}
+
 impl Collection {
-    /// Parses every `*.toml` file in the collection directory (excluding
-    /// `folder.toml`) and returns the endpoints with their file paths, sorted by
-    /// `seq` then filename.
+    /// Lists the candidate endpoint files in the collection directory: every
+    /// `*.toml` that is not a reserved manifest (`folder.toml` or `churl.toml`).
     ///
-    /// A malformed endpoint file fails the whole call with an error carrying that
-    /// file's path — malformed files are never silently skipped.
-    pub fn endpoints(&self) -> Result<Vec<(PathBuf, Endpoint)>, PersistenceError> {
+    /// A `churl.toml` is skipped because a nested-workspace layout (a collection
+    /// dir that is itself a workspace root) would otherwise have its manifest
+    /// parsed as an [`Endpoint`] (`missing field 'request'`) and abort the whole
+    /// load. Directory (`read_dir`) IO errors are hard errors — a real failure,
+    /// not a single bad file.
+    fn endpoint_files(&self) -> Result<Vec<PathBuf>, PersistenceError> {
         let read_err = |source| PersistenceError::Read {
             path: self.path.clone(),
             source,
         };
-        let mut endpoints = Vec::new();
+        let mut files = Vec::new();
         for entry in std::fs::read_dir(&self.path).map_err(read_err)? {
             let entry = entry.map_err(read_err)?;
             let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str());
             if !path.is_file()
                 || path.extension().and_then(|e| e.to_str()) != Some("toml")
-                || path.file_name().and_then(|n| n.to_str()) == Some(FOLDER_FILENAME)
+                || name == Some(FOLDER_FILENAME)
+                || name == Some(MANIFEST_FILENAME)
             {
                 continue;
             }
+            files.push(path);
+        }
+        Ok(files)
+    }
+
+    /// Parses every `*.toml` file in the collection directory (excluding the
+    /// reserved `folder.toml` and `churl.toml`) and returns the endpoints with
+    /// their file paths, sorted by `seq` then filename.
+    ///
+    /// A malformed endpoint file fails the whole call with an error carrying that
+    /// file's path — malformed files are never silently skipped. Callers that
+    /// must survive one bad file (the TUI load path) use
+    /// [`Collection::endpoints_lenient`] instead.
+    pub fn endpoints(&self) -> Result<Vec<(PathBuf, Endpoint)>, PersistenceError> {
+        let mut endpoints = Vec::new();
+        for path in self.endpoint_files()? {
             let endpoint = load_endpoint(&path)?;
             endpoints.push((path, endpoint));
         }
-        endpoints.sort_by(|(path_a, ep_a), (path_b, ep_b)| {
-            ep_a.seq
-                .cmp(&ep_b.seq)
-                .then_with(|| path_a.file_name().cmp(&path_b.file_name()))
-        });
+        sort_endpoints(&mut endpoints);
         Ok(endpoints)
     }
+
+    /// Like [`Collection::endpoints`], but degrades a per-file parse failure to a
+    /// warning instead of aborting: the returned [`CollectionLoad`] carries the
+    /// successfully-parsed endpoints plus one warning naming each unparseable
+    /// file. Only the directory read itself is a hard error.
+    ///
+    /// This is the load path the TUI uses so a single hand-corrupted endpoint (or
+    /// a stray non-endpoint `.toml`) can never nuke the whole workspace load.
+    pub fn endpoints_lenient(&self) -> Result<CollectionLoad, PersistenceError> {
+        let mut endpoints = Vec::new();
+        let mut warnings = Vec::new();
+        for path in self.endpoint_files()? {
+            match load_endpoint(&path) {
+                Ok(endpoint) => endpoints.push((path, endpoint)),
+                Err(err) => {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<file>");
+                    let reason = match &err {
+                        PersistenceError::Parse { source, .. } => source.to_string(),
+                        other => other.to_string(),
+                    };
+                    warnings.push(format!("skipped {name}: {reason}"));
+                }
+            }
+        }
+        sort_endpoints(&mut endpoints);
+        Ok(CollectionLoad {
+            endpoints,
+            warnings,
+        })
+    }
+}
+
+/// Sorts endpoints by `seq`, then filename (the stable order used everywhere the
+/// explorer and search show endpoints).
+fn sort_endpoints(endpoints: &mut [(PathBuf, Endpoint)]) {
+    endpoints.sort_by(|(path_a, ep_a), (path_b, ep_b)| {
+        ep_a.seq
+            .cmp(&ep_b.seq)
+            .then_with(|| path_a.file_name().cmp(&path_b.file_name()))
+    });
 }
 
 /// Loads and deserializes a TOML file into `T`.
