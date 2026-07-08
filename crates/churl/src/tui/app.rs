@@ -1722,7 +1722,9 @@ impl App {
             self.close_jump();
             match target {
                 // Through set_focus, not a raw assignment — jumping into a
-                // collapsed pane must auto-unzoom (the set_focus invariant).
+                // collapsed pane transfers the zoom to it, so it becomes the
+                // zoomed pane rather than holding focus while collapsed (the
+                // set_focus invariant).
                 JumpTarget::Pane(pane) => self.set_focus(pane),
                 JumpTarget::Row(row) => {
                     self.set_focus(Pane::Explorer);
@@ -2720,16 +2722,19 @@ impl App {
     }
 
     /// Sets focus, honouring the M6.7 collapse/hide invariants: a collapsed pane
-    /// (zoom) cannot hold focus — targeting it auto-unzooms first — and focusing
-    /// the explorer auto-reopens it when hidden.
+    /// (zoom) cannot hold focus — targeting the counterpart transfers the zoom to
+    /// the newly focused pane, so a collapsed pane still never holds focus — and
+    /// focusing the explorer auto-reopens it when hidden.
     fn set_focus(&mut self, pane: Pane) {
         if pane == Pane::Explorer && self.explorer_hidden {
             self.explorer_hidden = false;
         }
-        // A collapsed (non-zoomed) pane cannot hold focus: auto-unzoom.
+        // Zoom follows focus: moving to the collapsed counterpart transfers the
+        // zoom to it, so exactly one pane is ever zoomed and a collapsed pane
+        // never holds focus.
         match (self.zoom, pane) {
-            (Some(ZoomPane::Request), Pane::Response) => self.zoom = None,
-            (Some(ZoomPane::Response), Pane::Request) => self.zoom = None,
+            (Some(ZoomPane::Request), Pane::Response) => self.zoom = Some(ZoomPane::Response),
+            (Some(ZoomPane::Response), Pane::Request) => self.zoom = Some(ZoomPane::Request),
             _ => {}
         }
         self.focus = pane;
@@ -5669,24 +5674,47 @@ mod tests {
         assert_eq!(app.zoom, None);
     }
 
-    /// Focusing the collapsed pane auto-unzooms first (a collapsed pane cannot
-    /// hold focus).
+    /// Focusing the collapsed counterpart transfers the zoom to it, so exactly
+    /// one pane is ever zoomed and a collapsed pane never holds focus (zoom
+    /// follows focus).
     #[test]
-    fn focus_collapsed_pane_auto_unzooms() {
+    fn focus_collapsed_pane_transfers_zoom() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         app.focus = Pane::Request;
         app.dispatch(Action::Zoom, None).unwrap(); // Response collapsed
         assert_eq!(app.zoom, Some(ZoomPane::Request));
         app.dispatch(Action::FocusResponse, None).unwrap();
-        assert_eq!(app.zoom, None, "focusing the collapsed pane unzooms");
+        assert_eq!(
+            app.zoom,
+            Some(ZoomPane::Response),
+            "focusing the collapsed pane transfers the zoom to it"
+        );
         assert_eq!(app.focus, Pane::Response);
     }
 
-    /// Jumping (jump-mode) into the collapsed pane auto-unzooms too — jump
+    /// Zoom follows focus in both directions: zoom Request then focus Response
+    /// leaves Response zoomed, and the reverse leaves Request zoomed.
+    #[test]
+    fn zoom_follows_focus_both_directions() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // Request zoomed → focus Response ⇒ Response zoomed.
+        app.focus = Pane::Request;
+        app.zoom = Some(ZoomPane::Request);
+        app.set_focus(Pane::Response);
+        assert_eq!(app.zoom, Some(ZoomPane::Response));
+        assert_eq!(app.focus, Pane::Response);
+        // Response zoomed → focus Request ⇒ Request zoomed.
+        app.zoom = Some(ZoomPane::Response);
+        app.set_focus(Pane::Request);
+        assert_eq!(app.zoom, Some(ZoomPane::Request));
+        assert_eq!(app.focus, Pane::Request);
+    }
+
+    /// Jumping (jump-mode) into the collapsed pane transfers the zoom too — jump
     /// dispatch must go through `set_focus`, not assign focus directly
     /// (review round 3, finding #4).
     #[test]
-    fn jump_into_collapsed_pane_auto_unzooms() {
+    fn jump_into_collapsed_pane_transfers_zoom() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         app.focus = Pane::Response;
         app.dispatch(Action::Zoom, None).unwrap(); // Request collapsed
@@ -5699,8 +5727,9 @@ mod tests {
             .unwrap();
         assert_eq!(app.focus, Pane::Request);
         assert_eq!(
-            app.zoom, None,
-            "jumping into the collapsed pane must unzoom"
+            app.zoom,
+            Some(ZoomPane::Request),
+            "jumping into the collapsed pane transfers the zoom to it"
         );
     }
 

@@ -1,7 +1,7 @@
 //! Concurrent-load runner overlay (`Mode::LoadRunner`, M7.5): a large modal that
 //! fires N copies of the selected endpoint concurrently and shows a live results
 //! list, a latency stats line, and any individual response in the real response
-//! viewer, atop an editable config header (total / concurrency / interval).
+//! viewer, atop an editable config header (total / concurrency / min gap).
 //!
 //! Like the sequence runner, this component is UI-only: it holds display state
 //! and the transient [`LoadConfig`], while `App` owns the HTTP client, the single
@@ -121,12 +121,14 @@ impl LoadField {
         }
     }
 
-    /// This field's label.
+    /// This field's display label. `Interval` reads "min gap" — its semantics
+    /// are the minimum gap between request launches (a rate floor), which
+    /// "interval" obscures. The enum variant + core field name stay `Interval`.
     fn label(self) -> &'static str {
         match self {
             LoadField::Total => "total",
             LoadField::Concurrency => "concurrency",
-            LoadField::Interval => "interval",
+            LoadField::Interval => "min gap",
         }
     }
 }
@@ -140,6 +142,26 @@ pub enum RunnerFocus {
     Results,
     /// The response viewer.
     Response,
+}
+
+impl RunnerFocus {
+    /// The next pane (ConfigHeader → Results → Response → ConfigHeader).
+    fn next(self) -> Self {
+        match self {
+            RunnerFocus::ConfigHeader => RunnerFocus::Results,
+            RunnerFocus::Results => RunnerFocus::Response,
+            RunnerFocus::Response => RunnerFocus::ConfigHeader,
+        }
+    }
+
+    /// The previous pane (ConfigHeader → Response → Results → ConfigHeader).
+    fn prev(self) -> Self {
+        match self {
+            RunnerFocus::ConfigHeader => RunnerFocus::Response,
+            RunnerFocus::Response => RunnerFocus::Results,
+            RunnerFocus::Results => RunnerFocus::ConfigHeader,
+        }
+    }
 }
 
 /// What a key press asks the App to do.
@@ -393,29 +415,15 @@ impl LoadRunnerState {
                 }
             }
             KeyCode::Char('r') => LoadOutcome::Run,
+            // Tab / Shift-Tab are the ONLY cross-pane traversal: Tab cycles
+            // forward (config → results → response → config), BackTab reverse.
+            // `h`/`j`/`k`/`l` are in-pane movement only.
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    RunnerFocus::ConfigHeader => RunnerFocus::Results,
-                    RunnerFocus::Results => RunnerFocus::Response,
-                    RunnerFocus::Response => RunnerFocus::ConfigHeader,
-                };
+                self.focus = self.focus.next();
                 LoadOutcome::Consumed
             }
-            // `l` moves focus right (config → results → response). In the response
-            // pane there is nowhere further right, so it falls through to the
-            // viewer (which ignores `l`).
-            KeyCode::Char('l') if self.focus != RunnerFocus::Response => {
-                self.focus = match self.focus {
-                    RunnerFocus::ConfigHeader => RunnerFocus::Results,
-                    RunnerFocus::Results | RunnerFocus::Response => RunnerFocus::Response,
-                };
-                LoadOutcome::Consumed
-            }
-            // `h` moves focus left when in the results list; in the config header
-            // there is nowhere further left, and in the response pane `h` is the
-            // viewer's headers toggle (handled in `handle_response_key`).
-            KeyCode::Char('h') if self.focus == RunnerFocus::Results => {
-                self.focus = RunnerFocus::ConfigHeader;
+            KeyCode::BackTab => {
+                self.focus = self.focus.prev();
                 LoadOutcome::Consumed
             }
             _ => {
@@ -429,13 +437,14 @@ impl LoadRunnerState {
         }
     }
 
-    /// Config-header keys: pick a field, or begin editing it.
+    /// Config-header keys: pick a field, or begin editing it. The fields render
+    /// as a horizontal row, so field nav is `h`/`l` + Left/Right (in-pane).
     fn handle_config_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Char(']') => {
+            KeyCode::Char('l') | KeyCode::Right => {
                 self.field = self.field.next();
             }
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::Char('[') => {
+            KeyCode::Char('h') | KeyCode::Left => {
                 self.field = self.field.prev();
             }
             KeyCode::Char('i') | KeyCode::Enter => self.begin_edit(),
@@ -598,9 +607,10 @@ fn stats_line(state: &LoadRunnerState) -> String {
     parts.join(" · ")
 }
 
-/// The editable config header spans, e.g. `total=10 · concurrency=5 ·
-/// interval=0ms` with the focused field highlighted (and its inline editor shown
-/// while editing).
+/// The editable config header spans, e.g. `total=10 · concurrency=5 · min
+/// gap=0ms · max rate` with the focused field highlighted (and its inline editor
+/// shown while editing). The gap field carries a compact derived rate suffix
+/// (` · ≈N req/s`, or ` · max rate` at gap=0).
 fn config_spans(state: &LoadRunnerState, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let header_focused = state.focus == RunnerFocus::ConfigHeader;
@@ -641,6 +651,27 @@ fn config_spans(state: &LoadRunnerState, theme: &Theme) -> Vec<Span<'static>> {
         };
         spans.push(Span::styled(format!("{}=", field.label()), label_style));
         spans.push(Span::styled(value, value_style));
+        // The min-gap field carries a compact derived-rate annotation, styled
+        // like the field separators (statusline) not the value, and omitted
+        // while the field is being edited. gap==0 ⇒ unthrottled; otherwise a
+        // req/s floor with adaptive precision so sub-1 rates don't read as 0.
+        if field == LoadField::Interval && !(focused && state.editing.is_some()) {
+            let gap_ms = state.cfg.interval.as_millis();
+            let suffix = if gap_ms == 0 {
+                " · max rate".to_string()
+            } else {
+                let rate = 1000.0 / gap_ms as f64;
+                let rate_str = if rate >= 10.0 {
+                    format!("{rate:.0}")
+                } else if rate >= 1.0 {
+                    format!("{rate:.1}")
+                } else {
+                    format!("{rate:.2}")
+                };
+                format!(" · ≈{rate_str} req/s")
+            };
+            spans.push(Span::styled(suffix, theme.statusline));
+        }
     }
     spans
 }
@@ -850,7 +881,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &LoadRunnerState, theme: 
     } else {
         match state.focus {
             RunnerFocus::ConfigHeader => {
-                "j/k field · enter edit · r run · tab results · ctrl-c cancel · q close"
+                "h/l field · enter edit · r run · tab results · ctrl-c cancel · q close"
             }
             RunnerFocus::Results => "j/k row · tab response · r re-run · ctrl-c cancel · q close",
             RunnerFocus::Response => "j/k scroll · W wrap · o/O fold · tab config · q close",
@@ -901,10 +932,66 @@ mod tests {
     }
 
     #[test]
+    fn backtab_cycles_focus_reverse() {
+        let mut r = runner();
+        assert_eq!(r.focus, RunnerFocus::ConfigHeader);
+        r.handle_key(key(KeyCode::BackTab));
+        assert_eq!(r.focus, RunnerFocus::Response);
+        r.handle_key(key(KeyCode::BackTab));
+        assert_eq!(r.focus, RunnerFocus::Results);
+        r.handle_key(key(KeyCode::BackTab));
+        assert_eq!(r.focus, RunnerFocus::ConfigHeader);
+    }
+
+    /// The derived req/s annotation reads honestly across gaps (review
+    /// finding #1): sub-1-req/s rates must not truncate to `≈0 req/s`.
+    #[test]
+    fn derived_rate_reads_honestly_across_gaps() {
+        let theme = Theme::default();
+        let text = |r: &LoadRunnerState| -> String {
+            config_spans(r, &theme)
+                .into_iter()
+                .map(|s| s.content.into_owned())
+                .collect()
+        };
+        let mut r = runner();
+        r.cfg.interval = Duration::from_millis(0);
+        assert!(text(&r).contains("min gap=0ms · max rate"));
+        r.cfg.interval = Duration::from_millis(500);
+        assert!(text(&r).contains("≈2.0 req/s"), "got: {}", text(&r));
+        r.cfg.interval = Duration::from_millis(1);
+        assert!(text(&r).contains("≈1000 req/s"), "got: {}", text(&r));
+        // gaps ≥ 1s were reading as ≈0 req/s under integer division.
+        r.cfg.interval = Duration::from_millis(2000);
+        let t = text(&r);
+        assert!(t.contains("≈0.50 req/s"), "got: {t}");
+        assert!(!t.contains("≈0 req/s"), "sub-1 rate truncated to zero: {t}");
+    }
+
+    #[test]
+    fn config_field_nav_is_h_l() {
+        let mut r = runner();
+        assert_eq!(r.field, LoadField::Total);
+        // l / Right advance; h / Left go back (fields are a horizontal row).
+        r.handle_key(ch('l'));
+        assert_eq!(r.field, LoadField::Concurrency);
+        r.handle_key(key(KeyCode::Right));
+        assert_eq!(r.field, LoadField::Interval);
+        r.handle_key(ch('h'));
+        assert_eq!(r.field, LoadField::Concurrency);
+        r.handle_key(key(KeyCode::Left));
+        assert_eq!(r.field, LoadField::Total);
+        // j/k no longer move the field in config.
+        r.handle_key(ch('j'));
+        r.handle_key(ch('k'));
+        assert_eq!(r.field, LoadField::Total);
+    }
+
+    #[test]
     fn config_field_pick_and_numeric_edit_clamps() {
         let mut r = runner();
         // Pick the concurrency field, edit it to 0 → clamps to 1.
-        r.handle_key(ch('j')); // Total → Concurrency
+        r.handle_key(ch('l')); // Total → Concurrency
         assert_eq!(r.field, LoadField::Concurrency);
         r.handle_key(ch('i')); // begin edit
         assert!(r.editing.is_some());
@@ -929,8 +1016,8 @@ mod tests {
     #[test]
     fn interval_edits_to_zero_allowed() {
         let mut r = runner();
-        r.handle_key(ch('j'));
-        r.handle_key(ch('j')); // → Interval
+        r.handle_key(ch('l'));
+        r.handle_key(ch('l')); // → Interval
         assert_eq!(r.field, LoadField::Interval);
         r.handle_key(ch('i'));
         r.handle_key(ch('2'));

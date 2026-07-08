@@ -4,7 +4,7 @@ expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
 "      ┏ Load · List users ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓      "
-"      ┃total=10 · concurrency=5 · interval=0ms                                                               ┃      "
+"      ┃total=10 · concurrency=5 · min gap=0ms · max rate                                                     ┃      "
 "      ┃→ https://api.test/users                                                                              ┃      "
 "      ┃0/0 done · 0 ok                                                                                       ┃      "
 "      ┃┌ Results ─────────────────────────────┐                                                              ┃      "
@@ -23,6 +23,6 @@ expression: snapshot(&mut r)
 "      ┃│                                      │                                                              ┃      "
 "      ┃│                                      │                                                              ┃      "
 "      ┃└──────────────────────────────────────┘                                                              ┃      "
-"      ┃j/k field · enter edit · r run · tab results · ctrl-c cancel · q close                                ┃      "
+"      ┃h/l field · enter edit · r run · tab results · ctrl-c cancel · q close                                ┃      "
 "      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛      "
 "                                                                                                                    "
