@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use churl_core::model::Endpoint;
+use churl_core::model::{Endpoint, Sequence};
 use churl_core::persistence::{Collection, OpenWorkspace, PersistenceError, load_collection_meta};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,12 +23,16 @@ pub enum RowKind {
     Collection,
     /// An endpoint file (leaf row).
     Endpoint,
+    /// The dim `SEQUENCES` section header (non-selectable, M7.4).
+    SequenceHeader,
+    /// A request sequence (leaf row, M7.4). Enter opens the runner.
+    Sequence,
 }
 
 /// One visible row of the flattened explorer tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// Nesting depth (collections 0, endpoints 1).
+    /// Nesting depth (collections 0, endpoints 1; sequence header 0, sequence 1).
     pub depth: usize,
     /// Container or leaf.
     pub kind: RowKind,
@@ -40,6 +44,19 @@ pub struct Row {
     pub collection: usize,
     /// Index of the endpoint within its collection, for leaf rows.
     pub endpoint: Option<usize>,
+    /// Index into the explorer's sequence list, for `Sequence` rows.
+    pub sequence: Option<usize>,
+}
+
+/// A request sequence the user selected in the explorer, ready to run or edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedSequence {
+    /// Display name.
+    pub name: String,
+    /// Path of the sequence's TOML file.
+    pub file: PathBuf,
+    /// The parsed sequence.
+    pub sequence: Sequence,
 }
 
 /// An endpoint the user selected in the explorer, ready to load into the
@@ -104,6 +121,12 @@ impl CollectionNode {
 #[derive(Debug)]
 pub struct ExplorerState {
     collections: Vec<CollectionNode>,
+    /// Request sequences (M7.4), loaded eagerly at open/reload (a small set).
+    sequences: Vec<(PathBuf, Sequence)>,
+    /// Warnings from the last lenient sequence load, drained by [`take_warnings`].
+    ///
+    /// [`take_warnings`]: ExplorerState::take_warnings
+    sequence_warnings: Vec<String>,
     expanded: HashSet<usize>,
     /// Cursor position as an index into [`ExplorerState::rows`].
     pub cursor: usize,
@@ -131,8 +154,19 @@ impl ExplorerState {
                 .collect(),
             None => Vec::new(),
         };
+        // Sequences load eagerly (a small, flat set); a single unparseable file
+        // degrades to a warning surfaced via `take_warnings`, never aborts.
+        let (sequences, sequence_warnings) = match workspace {
+            Some(ws) => {
+                let load = ws.sequences()?;
+                (load.sequences, load.warnings)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         Ok(Self {
             collections,
+            sequences,
+            sequence_warnings,
             expanded: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -178,6 +212,7 @@ impl ExplorerState {
                 expanded,
                 collection: ci,
                 endpoint: None,
+                sequence: None,
             });
             if expanded && let Some(endpoints) = &node.endpoints {
                 for (ei, (_, endpoint)) in endpoints.iter().enumerate() {
@@ -188,9 +223,37 @@ impl ExplorerState {
                         expanded: false,
                         collection: ci,
                         endpoint: Some(ei),
+                        sequence: None,
                     });
                 }
             }
+        }
+        // The SEQUENCES section (M7.4): a dim header followed by one row per
+        // sequence. Shown only when the workspace has sequences (a bare workspace
+        // stays uncluttered); creating the first one goes through the palette /
+        // `<leader>a` editor.
+        if self.sequences.is_empty() {
+            return rows;
+        }
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::SequenceHeader,
+            name: "SEQUENCES".to_owned(),
+            expanded: false,
+            collection: 0,
+            endpoint: None,
+            sequence: None,
+        });
+        for (si, (_, sequence)) in self.sequences.iter().enumerate() {
+            rows.push(Row {
+                depth: 1,
+                kind: RowKind::Sequence,
+                name: sequence.name.clone(),
+                expanded: false,
+                collection: 0,
+                endpoint: None,
+                sequence: Some(si),
+            });
         }
         rows
     }
@@ -237,7 +300,24 @@ impl ExplorerState {
                 Ok(None)
             }
             RowKind::Endpoint => Ok(self.selected_endpoint(&row)),
+            // Sequence rows and the section header don't load an endpoint; the app
+            // handles a sequence row (opens the runner) before reaching here.
+            RowKind::Sequence | RowKind::SequenceHeader => Ok(None),
         }
+    }
+
+    /// The sequence under the cursor, if a `Sequence` row is selected.
+    pub fn selected_sequence(&self) -> Option<SelectedSequence> {
+        let row = self.current_row()?;
+        if row.kind != RowKind::Sequence {
+            return None;
+        }
+        let (file, sequence) = self.sequences.get(row.sequence?)?;
+        Some(SelectedSequence {
+            name: sequence.name.clone(),
+            file: file.clone(),
+            sequence: sequence.clone(),
+        })
     }
 
     /// `h`: collapse the current collection, or jump from an endpoint to its
@@ -260,6 +340,15 @@ impl ExplorerState {
                     .position(|r| r.kind == RowKind::Collection && r.collection == row.collection)
                     .unwrap_or(0);
             }
+            RowKind::Sequence => {
+                // Jump to the SEQUENCES header (the pseudo-parent).
+                self.cursor = self
+                    .rows()
+                    .iter()
+                    .position(|r| r.kind == RowKind::SequenceHeader)
+                    .unwrap_or(self.cursor);
+            }
+            RowKind::SequenceHeader => {}
         }
     }
 
@@ -348,6 +437,8 @@ impl ExplorerState {
         let cursor = self.cursor;
         let rebuilt = Self::new(workspace)?;
         self.collections = rebuilt.collections;
+        self.sequences = rebuilt.sequences;
+        self.sequence_warnings = rebuilt.sequence_warnings;
         self.expanded.clear();
         // Re-expand collections whose names survived.
         for (ci, node) in self.collections.iter_mut().enumerate() {
@@ -370,6 +461,7 @@ impl ExplorerState {
         for node in &mut self.collections {
             all.append(&mut node.warnings);
         }
+        all.append(&mut self.sequence_warnings);
         all
     }
 
@@ -556,10 +648,19 @@ pub fn render(
         .skip(offset)
         .take(height)
         .map(|(i, row)| {
+            // The dim SEQUENCES header is a non-selectable label.
+            if row.kind == RowKind::SequenceHeader {
+                let indent = "  ".repeat(row.depth);
+                return Line::from(Span::styled(
+                    format!("  {indent}{}", row.name),
+                    theme.statusline,
+                ));
+            }
             let marker = match row.kind {
                 RowKind::Collection if row.expanded => "▾ ",
                 RowKind::Collection => "▸ ",
-                RowKind::Endpoint => "",
+                RowKind::Endpoint | RowKind::Sequence => "",
+                RowKind::SequenceHeader => unreachable!("handled above"),
             };
             let indent = "  ".repeat(row.depth);
             // The loaded-and-dirty endpoint's row gets an accent ● suffix,

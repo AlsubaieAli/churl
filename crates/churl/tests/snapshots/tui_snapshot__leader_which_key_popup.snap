@@ -13,14 +13,14 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃└────────────────────────────────────────────────┘
-┃                            ┃┌ Response ──────────┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│no response yet     ┃ c  cancel request         ┃
-┃                            ┃│                    ┃ v  Environments & vars    ┃
-┃                            ┃│no endpoint selected┃ f  request picker         ┃
-┃                            ┃│                    ┃ w  workspace picker       ┃
+┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃└────────────────────┃ c  cancel request         ┃
+┃                            ┃┌ Response ──────────┃ a  edit sequence          ┃
+┃                            ┃│no response yet     ┃ v  Environments & vars    ┃
+┃                            ┃│                    ┃ f  request picker         ┃
+┃                            ┃│no endpoint selected┃ w  workspace picker       ┃
 ┃                            ┃│                    ┃ q  quit                   ┃
+┃                            ┃│                    ┃ r  run sequence           ┃
 ┃                            ┃│                    ┃ s  send request           ┃
 ┃                            ┃│                    ┃ p  switch profile         ┃
 ┃                            ┃│                    ┃ e  toggle explorer sidebar┃

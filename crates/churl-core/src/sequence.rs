@@ -439,33 +439,45 @@ impl StepResult {
     }
 }
 
-/// Classifies an execution outcome and, on success, runs the step's extraction.
-/// This is the single classify+extract point shared by [`run_sequence`] and the
-/// live TUI runner — the guarantee that their run semantics can't drift.
-///
-/// Returns the [`StepResult`] and the values to merge into the accumulator (empty
-/// on any failure).
+/// Classifies a *successful* HTTP exchange (status ≥ 400 → `Failed`; else run the
+/// step's extraction → `Ok` or `ExtractError`) and returns the values to merge.
+/// This is the response-classification seam shared by [`classify_step`] and the
+/// live TUI runner (whose message carries a stringified transport error, so it
+/// handles the transport case itself and calls this for the `Ok` branch) — the
+/// guarantee that their run semantics can't drift.
+pub fn classify_response(
+    response: &Response,
+    step: &SequenceStep,
+) -> (StepResult, BTreeMap<String, String>) {
+    if response.status >= 400 {
+        return (
+            StepResult::Failed {
+                status: response.status,
+            },
+            BTreeMap::new(),
+        );
+    }
+    match extract_step(response, step) {
+        Ok(extracted) => (
+            StepResult::Ok {
+                status: response.status,
+            },
+            extracted,
+        ),
+        Err(err) => (StepResult::ExtractError(err.to_string()), BTreeMap::new()),
+    }
+}
+
+/// Classifies an execution outcome (transport error → `HttpError`; else
+/// [`classify_response`]) and returns the values to merge into the accumulator
+/// (empty on any failure). Used by [`run_sequence`].
 pub fn classify_step(
     result: &Result<Response, HttpError>,
     step: &SequenceStep,
 ) -> (StepResult, BTreeMap<String, String>) {
     match result {
         Err(err) => (StepResult::HttpError(err.to_string()), BTreeMap::new()),
-        Ok(response) if response.status >= 400 => (
-            StepResult::Failed {
-                status: response.status,
-            },
-            BTreeMap::new(),
-        ),
-        Ok(response) => match extract_step(response, step) {
-            Ok(extracted) => (
-                StepResult::Ok {
-                    status: response.status,
-                },
-                extracted,
-            ),
-            Err(err) => (StepResult::ExtractError(err.to_string()), BTreeMap::new()),
-        },
+        Ok(response) => classify_response(response, step),
     }
 }
 

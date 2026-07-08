@@ -903,6 +903,9 @@ fn every_palette_command_dispatches() {
             }
             // The env editor needs an open workspace; without one it warns.
             Action::OpenEnvEditor => expect_status(&mut app, "open a workspace first"),
+            // Sequences (M7.4): no workspace / no sequence selected → warn.
+            Action::RunSequence => expect_status(&mut app, "select a sequence"),
+            Action::EditSequence => expect_status(&mut app, "open a workspace first"),
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
@@ -1335,6 +1338,122 @@ fn url_popup_editor() {
         "footer must not duplicate the vim mode: {rendered}"
     );
     insta::assert_snapshot!(rendered);
+}
+
+/// Renders a sequence-runner state directly to a `TestBackend` string (no tokio;
+/// the component render is pure).
+fn render_runner(
+    state: &mut churl::tui::components::sequence_runner::SequenceRunnerState,
+) -> String {
+    use churl::tui::theme::Theme;
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            churl::tui::components::sequence_runner::render(frame, area, state, 0, &theme);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..24)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn runner_step(endpoint: &str) -> churl_core::model::SequenceStep {
+    churl_core::model::SequenceStep {
+        seq: 0,
+        endpoint: endpoint.to_owned(),
+        extract: std::collections::BTreeMap::new(),
+    }
+}
+
+/// A mid-run runner: step 0 done + extracted (a masked secret) + its response
+/// shown; step 1 running; step 2 pending.
+#[test]
+fn sequence_runner_midrun() {
+    use churl::tui::components::sequence_runner::{SequenceRunnerState, StepStatus};
+    use churl_core::model::{Method, OnError};
+    let mut state = SequenceRunnerState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        OnError::Halt,
+        vec![
+            runner_step("auth/login.toml"),
+            runner_step("users/me.toml"),
+            runner_step("users/by_id.toml"),
+        ],
+    );
+    let resp = Response {
+        status: 200,
+        headers: vec![Header {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            enabled: true,
+        }],
+        body: br#"{"data":{"token":"abc123"}}"#.to_vec(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(120),
+        },
+    };
+    state.steps[0].status = StepStatus::Ok(200);
+    state.steps[0].method = Method::Post;
+    state.steps[0].timing = Some(Duration::from_millis(120));
+    state.steps[0]
+        .extracted
+        .insert("token".to_owned(), "abc123".to_owned());
+    state.steps[0].response = ResponseState::Done {
+        view: ResponseView::build(&resp, 1),
+    };
+    state.steps[1].status = StepStatus::Running;
+    state.steps[1].method = Method::Get;
+    state.current = Some(1);
+    state.selected = 0;
+    insta::assert_snapshot!(render_runner(&mut state));
+}
+
+/// A finished run with a failed step and a skipped tail.
+#[test]
+fn sequence_runner_finished_with_failure() {
+    use churl::tui::components::sequence_runner::{SequenceRunnerState, StepStatus};
+    use churl_core::model::{Method, OnError};
+    let mut state = SequenceRunnerState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        OnError::Halt,
+        vec![
+            runner_step("auth/login.toml"),
+            runner_step("users/me.toml"),
+            runner_step("users/by_id.toml"),
+        ],
+    );
+    state.steps[0].status = StepStatus::Ok(200);
+    state.steps[0].method = Method::Post;
+    state.steps[0].timing = Some(Duration::from_millis(90));
+    state.steps[1].status = StepStatus::Failed(500);
+    state.steps[1].method = Method::Get;
+    state.steps[1].timing = Some(Duration::from_millis(45));
+    state.steps[1].response = ResponseState::Failed {
+        error: "HTTP 500".to_owned(),
+        meta: ResponseMeta {
+            method: String::new(),
+            url: "users/me.toml".to_owned(),
+            endpoint_path: Some("users/me.toml".to_owned()),
+            executed_at_ms: 0,
+        },
+    };
+    state.steps[2].status = StepStatus::Skipped;
+    state.selected = 1;
+    state.finished = true;
+    insta::assert_snapshot!(render_runner(&mut state));
 }
 
 /// The `?` help overlay renders the effective keymap, sectioned.

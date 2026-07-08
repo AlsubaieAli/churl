@@ -18,8 +18,8 @@ expression: snapshot(&mut app)
 │              ┃  delete                                        ┃──────────────┐
 │              ┃  switch profile                                ┃              │
 │              ┃  environments & vars                           ┃              │
-│              ┃  toggle response headers view                  ┃              │
-│              ┃  toggle response wrap                          ┃              │
+│              ┃  run sequence                                  ┃              │
+│              ┃  edit sequence                                 ┃              │
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
 │                            ││                                                │
 │                            ││                                                │

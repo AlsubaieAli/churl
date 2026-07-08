@@ -10,8 +10,9 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 |---|---|
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
 | `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
-| `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint) |
-| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06) |
+| `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint). Sequences (M7.4): `SEQUENCES_DIRNAME` reserved dir (excluded from `collections()`); `OpenWorkspace::sequences() -> SequenceLoad { sequences, warnings }` (lenient); `load/save/create/rename/delete_sequence` CRUD seams |
+| `sequence` | Request-sequence run engine (M7.4, UI-free): dependency-free extraction subset (`extract_value`: `status` / `header:<Name>` / JSON-path `$.a.b[0].c`) over `serde_json`; run primitives shared by tests and the live TUI — `prepare_step` (resolver with the extracted scope prepended highest), `extract_step`, `classify_step` (the single classify+extract seam), `ordered_steps`; `run_sequence` wiremock-tested convenience. Rejects `..`/absolute step endpoints; never panics |
+| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06). Sequences prepend an ephemeral highest-precedence `extracted` scope (M7.4) — one extra scope, resolution never forked |
 | `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
 | `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
 | `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. Auth injected via `auth::apply_auth` (M5): header effects skipped when an enabled user header with the same name exists (the user's header wins), query effects appended after enabled params. No `{{var}}` templating (M6); URL/headers/body/auth used verbatim |
@@ -78,6 +79,27 @@ Cursor and scroll are **display-row** indices (post-fold, post-wrap); the cursor
   <collection>/                 # a directory = a collection
     folder.toml?                # optional collection metadata + flat [vars] defaults (M6)
     <endpoint>.toml             # one file per endpoint; explicit `seq` for ordering
+  sequences/                    # reserved dir (M7.4) — request sequences, NOT a collection
+    <sequence>.toml             # one file per sequence; ordered [[step]]s + [step.extract] rules
+```
+
+Sequence file shape (M7.4):
+
+```toml
+seq = 0
+name = "Auth flow"
+on_error = "halt"               # halt (default) | continue
+
+[[step]]
+seq = 0
+endpoint = "auth/login.toml"    # workspace-relative endpoint path
+[step.extract]
+token = "$.data.token"          # var name -> extraction expression
+user_id = "$.data.user.id"
+
+[[step]]
+seq = 1
+endpoint = "users/me.toml"      # its request uses {{token}} — resolved from the extracted scope
 ```
 
 Endpoint file shape (M1):

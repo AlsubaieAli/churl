@@ -61,6 +61,10 @@ pub enum Action {
     SwitchProfile,
     /// Open the environments & variables editor (workspace/collection/profile vars).
     OpenEnvEditor,
+    /// Run the selected request sequence (opens the sequence runner).
+    RunSequence,
+    /// Edit the selected sequence, or create a new one (opens the sequence editor).
+    EditSequence,
     /// Focus the URL bar.
     FocusUrlBar,
     /// Edit the focused URL bar's URL inline.
@@ -181,6 +185,8 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Jump, "jump", "jump to pane / row"),
     (Action::SwitchProfile, "switch-profile", "switch profile"),
     (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
+    (Action::RunSequence, "run-sequence", "run sequence"),
+    (Action::EditSequence, "edit-sequence", "edit sequence"),
     (Action::FocusUrlBar, "focus-urlbar", "focus URL bar"),
     (Action::EditUrl, "edit-url", "edit URL"),
     (Action::MethodCycle, "method-cycle", "cycle method"),
@@ -506,6 +512,10 @@ impl Default for KeyMap {
         // overlay; `<leader>w` opens the recent-workspace picker.
         leader_bind(key!(f), Action::QuickJumpRequests);
         leader_bind(key!(w), Action::QuickJumpWorkspaces);
+        // Sequences (M7.4): `<leader>r` runs the selected sequence, `<leader>a`
+        // opens the sequence editor (create/edit). Both were free.
+        leader_bind(key!(r), Action::RunSequence);
+        leader_bind(key!(a), Action::EditSequence);
 
         Self {
             map,

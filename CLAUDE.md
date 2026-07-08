@@ -46,7 +46,8 @@ crates/
     src/
       lib.rs               # pub const VERSION + module exports
       model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace,
-                           #   Auth/ApiKeyPlacement (internally-tagged [request.auth])
+                           #   Auth/ApiKeyPlacement (internally-tagged [request.auth]);
+                           #   Sequence/SequenceStep/OnError (M7.4 request sequences)
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge), lazy OpenWorkspace/Collection;
@@ -54,9 +55,16 @@ crates/
                            #   warning; both skip folder.toml AND churl.toml — M7.3 crash fix);
                            #   CollectionMeta (folder.toml [vars]) load/save (M6); CRUD seams (M6.6):
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
-                           #   secrets refusal on every save path)
+                           #   secrets refusal on every save path);
+                           #   SEQUENCES_DIRNAME (excluded from collections()), OpenWorkspace::sequences() →
+                           #   SequenceLoad (lenient), load/save/create/rename/delete_sequence (M7.4)
+      sequence.rs          # M7.4 run engine (UI-free): extract_value (status/header:/JSON-path subset, no
+                           #   jsonpath dep), prepare_step (resolver + prepended extracted scope), extract_step,
+                           #   classify_step (single classify+extract seam), ordered_steps, run_sequence
+                           #   (wiremock-tested); rejects ../absolute step endpoints, never panics
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
-                           #   substitute / substitute_request (M6)
+                           #   substitute / substitute_request (M6); sequences prepend a highest-precedence
+                           #   `extracted` scope (M7.4) — resolution never forked
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
                            #   timeout_secs, max_body_bytes) + secrets heuristics (looks_like_secret_name,
                            #   is_template_placeholder, secret_violations incl. workspace [vars],
