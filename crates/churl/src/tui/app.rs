@@ -46,11 +46,12 @@ use super::components::line_editor::LineEditor;
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
+use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
     env_editor, explorer, help, message, method_menu, palette, picker, prompt, request, response,
-    sequence_runner, statusline, urlbar,
+    sequence_editor, sequence_runner, statusline, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -132,6 +133,9 @@ pub enum Mode {
     /// The sequence runner (M7.4): a large modal driving a request sequence and
     /// showing live per-step status + each step's response.
     SequenceRunner,
+    /// The in-app sequence editor (M7.4 §4): edit steps, extraction rules, and
+    /// `on_error`; saved through `save_sequence`.
+    SequenceEditor,
 }
 
 /// What a [`Mode::Prompt`] is collecting text for.
@@ -155,6 +159,8 @@ pub enum PromptPurpose {
     ExportWorkspace(JsonDialect),
     /// A curl command to import as a new endpoint in the selected collection.
     PasteCurl,
+    /// Name for a new request sequence (M7.4); opens the editor on the created file.
+    NewSequence,
 }
 
 impl PromptPurpose {
@@ -177,6 +183,7 @@ impl PromptPurpose {
             }
             PromptPurpose::ExportWorkspace(JsonDialect::Native) => "Export workspace · churl JSON",
             PromptPurpose::PasteCurl => "Paste curl",
+            PromptPurpose::NewSequence => "New sequence",
         }
     }
 }
@@ -393,6 +400,8 @@ pub struct App {
     sequence_runner: Option<SequenceRunnerState>,
     /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
     sequence_abort: Option<AbortHandle>,
+    /// The open sequence editor (M7.4 §4), when `Mode::SequenceEditor`.
+    sequence_editor: Option<SequenceEditorState>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -513,6 +522,7 @@ impl App {
             env_editor: None,
             sequence_runner: None,
             sequence_abort: None,
+            sequence_editor: None,
         })
     }
 
@@ -732,6 +742,7 @@ impl App {
             Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
             Mode::EnvEditor => self.handle_env_editor_key(key),
             Mode::SequenceRunner => self.handle_sequence_runner_key(key),
+            Mode::SequenceEditor => self.handle_sequence_editor_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -2059,15 +2070,123 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    /// Placeholder for the in-app sequence editor (M7.4 §4), wired in the editor
-    /// commit.
+    // ---- M7.4 sequence editor ----
+
+    /// `<leader>a` / palette: edit the sequence under the cursor, or prompt for a
+    /// name to create a new one.
     fn edit_selected_sequence(&mut self) -> Result<()> {
         if self.workspace.is_none() {
             self.notify("open a workspace first");
             return Ok(());
         }
-        self.notify("sequence editor: not yet available");
+        match self.explorer.selected_sequence() {
+            Some(selected) => {
+                self.open_sequence_editor(selected.name, selected.file, &selected.sequence);
+                Ok(())
+            }
+            None => {
+                self.open_prompt(PromptPurpose::NewSequence, "");
+                Ok(())
+            }
+        }
+    }
+
+    /// Workspace-relative endpoint paths for the editor's add-step picker.
+    fn endpoint_rel_paths(&mut self) -> Vec<String> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return Vec::new();
+        };
+        self.explorer
+            .all_endpoint_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| {
+                path.strip_prefix(&root)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Opens the editor over a loaded sequence.
+    fn open_sequence_editor(
+        &mut self,
+        name: String,
+        file: PathBuf,
+        sequence: &churl_core::model::Sequence,
+    ) {
+        let endpoints = self.endpoint_rel_paths();
+        self.sequence_editor = Some(SequenceEditorState::new(name, file, sequence, endpoints));
+        self.mode = Mode::SequenceEditor;
+    }
+
+    /// Commits the "new sequence" name prompt: creates the file and opens the
+    /// editor on it.
+    fn commit_new_sequence(&mut self, name: String) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace open");
+            return Ok(());
+        };
+        match persistence::create_sequence(&root, &name) {
+            Ok(path) => {
+                let sequence = persistence::load_sequence(&path)?;
+                self.reload_explorer()?;
+                self.open_sequence_editor(sequence.name.clone(), path, &sequence);
+            }
+            Err(err) => self.crud_error(err),
+        }
         Ok(())
+    }
+
+    /// Routes a key to the open sequence editor and acts on its outcome.
+    fn handle_sequence_editor_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(editor) = self.sequence_editor.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        match editor.handle_key(key) {
+            EditorOutcome::Consumed => {}
+            EditorOutcome::Save => {
+                self.save_sequence_editor()?;
+            }
+            EditorOutcome::SaveAndClose => {
+                if self.save_sequence_editor()? {
+                    self.close_sequence_editor();
+                }
+            }
+            EditorOutcome::Close => self.close_sequence_editor(),
+        }
+        Ok(())
+    }
+
+    /// Saves the editor's sequence through the format-preserving seam and reloads
+    /// the explorer so the change is visible. Returns whether the save took.
+    fn save_sequence_editor(&mut self) -> Result<bool> {
+        let Some(editor) = self.sequence_editor.as_ref() else {
+            return Ok(false);
+        };
+        let path = editor.path().to_owned();
+        let sequence = editor.to_sequence();
+        match persistence::save_sequence(&path, &sequence) {
+            Ok(()) => {
+                if let Some(editor) = self.sequence_editor.as_mut() {
+                    editor.mark_saved();
+                }
+                self.reload_explorer()?;
+                self.notify("sequence saved");
+                Ok(true)
+            }
+            Err(err) => {
+                self.crud_error(err);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Closes the editor and returns to normal mode.
+    fn close_sequence_editor(&mut self) {
+        self.sequence_editor = None;
+        self.mode = Mode::Normal;
     }
 
     fn close_overlay(&mut self) {
@@ -3051,6 +3170,7 @@ impl App {
                 self.commit_export(purpose, text)
             }
             PromptPurpose::PasteCurl => self.commit_paste_curl(text)?,
+            PromptPurpose::NewSequence => self.commit_new_sequence(text)?,
         }
         Ok(())
     }
@@ -3807,6 +3927,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 sequence_runner::render(frame, main, runner, tick, &theme);
             }
         }
+        Mode::SequenceEditor => {
+            if let Some(editor) = &app.sequence_editor {
+                sequence_editor::render(frame, main, editor, &theme);
+            }
+        }
         _ => {}
     }
 
@@ -4404,6 +4529,50 @@ mod tests {
                 .iter()
                 .all(|s| s.status == StepStatus::Pending)
         );
+    }
+
+    /// End-to-end: create a sequence via the prompt, add a step through the
+    /// picker, toggle on_error, save, and assert the file on disk.
+    #[test]
+    fn sequence_editor_create_add_step_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("login.toml"),
+            "seq = 0\nname = \"login\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/login\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+
+        // `<leader>a` with no sequence selected → new-sequence name prompt.
+        app.edit_selected_sequence().unwrap();
+        assert_eq!(app.mode, Mode::Prompt(PromptPurpose::NewSequence));
+        app.prompt_editor = LineEditor::new("Auth flow");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::SequenceEditor);
+
+        // Add a step: `a` opens the picker, Enter accepts the first endpoint.
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Toggle on_error to continue, then save with `w`.
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))
+            .unwrap();
+
+        let path = root.join("sequences").join("auth-flow.toml");
+        let sequence = churl_core::persistence::load_sequence(&path).unwrap();
+        assert_eq!(sequence.name, "Auth flow");
+        assert_eq!(sequence.on_error, OnError::Continue);
+        assert_eq!(sequence.steps.len(), 1);
+        assert_eq!(sequence.steps[0].endpoint, "api/login.toml");
     }
 
     /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.

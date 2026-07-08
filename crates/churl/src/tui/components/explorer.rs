@@ -409,6 +409,18 @@ impl ExplorerState {
             .unwrap_or_default()
     }
 
+    /// Loads every collection's endpoints and returns their file paths (for the
+    /// sequence editor's add-step picker, M7.4).
+    pub fn all_endpoint_files(&mut self) -> Result<Vec<PathBuf>, PersistenceError> {
+        let mut out = Vec::new();
+        for node in &mut self.collections {
+            for (path, _) in node.load()? {
+                out.push(path.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// Loads every collection's endpoints (for fuzzy search) and returns
     /// `(display path, collection index, endpoint index)` for each endpoint.
     pub fn all_endpoints(&mut self) -> Result<Vec<(String, usize, usize)>, PersistenceError> {

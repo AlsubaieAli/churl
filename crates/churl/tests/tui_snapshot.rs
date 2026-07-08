@@ -1456,6 +1456,56 @@ fn sequence_runner_finished_with_failure() {
     insta::assert_snapshot!(render_runner(&mut state));
 }
 
+/// The sequence editor modal: two steps, the first with extraction rules.
+#[test]
+fn sequence_editor_modal() {
+    use churl::tui::components::sequence_editor::{self, SequenceEditorState};
+    use churl::tui::theme::Theme;
+    use churl_core::model::{OnError, Sequence, SequenceStep};
+    let mut rules = std::collections::BTreeMap::new();
+    rules.insert("token".to_owned(), "$.data.token".to_owned());
+    rules.insert("user_id".to_owned(), "$.data.user.id".to_owned());
+    let sequence = Sequence {
+        seq: 0,
+        name: "Auth flow".to_owned(),
+        on_error: OnError::Halt,
+        steps: vec![
+            SequenceStep {
+                seq: 0,
+                endpoint: "auth/login.toml".to_owned(),
+                extract: rules,
+            },
+            SequenceStep {
+                seq: 1,
+                endpoint: "users/me.toml".to_owned(),
+                extract: std::collections::BTreeMap::new(),
+            },
+        ],
+    };
+    let state = SequenceEditorState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        &sequence,
+        vec!["auth/login.toml".to_owned(), "users/me.toml".to_owned()],
+    );
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    terminal
+        .draw(|frame| sequence_editor::render(frame, frame.area(), &state, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let rendered = (0..24)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
 /// The `?` help overlay renders the effective keymap, sectioned.
 #[test]
 fn help_overlay() {

@@ -1,0 +1,27 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: rendered
+---
+                                                                                          
+     ┏ Edit sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┃2 steps   on_error: halt                                                       ┃    
+     ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Extraction rules ─────────────────────┐┃    
+     ┃┃> 1. auth/login.toml  (2 rules)     ┃│> token = $.data.token                 │┃    
+     ┃┃  2. users/me.toml  (0 rules)       ┃│  user_id = $.data.user.id             │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│                                       │┃    
+     ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
+     ┃j/k step · a add · d delete · K/J move · o on_error · l rules · w save · q clos┃    
+     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

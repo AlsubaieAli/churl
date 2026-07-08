@@ -1,0 +1,848 @@
+//! In-app sequence editor (`Mode::SequenceEditor`, M7.4 §4): a modal to edit a
+//! sequence's steps, per-step extraction rules, and `on_error` policy, saved
+//! through the format-preserving `save_sequence` seam.
+//!
+//! Reuses the M7.3 env-editor patterns: an ordered working copy, derived dirty
+//! state, a discard-on-close guard, and a shared [`LineEditor`] for field edits.
+//! Adding a step picks from the workspace's endpoints via a small self-contained
+//! substring picker (no cross-modal dependency on the app's fuzzy overlay).
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use churl_core::model::{OnError, Sequence, SequenceStep};
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+
+use super::line_editor::LineEditor;
+use super::prompt;
+use crate::tui::theme::Theme;
+
+/// A step in the editor's working copy: an endpoint path plus ordered extraction
+/// rules (name → expression). Kept as a `Vec` (not a `BTreeMap`) for insertion
+/// order + in-place rename UX; the `BTreeMap` is rebuilt only on save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StepEdit {
+    endpoint: String,
+    rules: Vec<(String, String)>,
+}
+
+/// Which column has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    /// The step list.
+    Steps,
+    /// The selected step's extraction rules.
+    Rules,
+}
+
+/// What field a [`LineEditor`] is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditTarget {
+    /// An extraction rule's variable name.
+    RuleName,
+    /// An extraction rule's expression.
+    RuleExpr,
+}
+
+/// An in-progress field edit.
+#[derive(Debug)]
+struct FieldEdit {
+    target: EditTarget,
+    editor: LineEditor,
+    /// The rule index being edited.
+    rule: usize,
+    /// The pre-edit value, restored on cancel.
+    original: String,
+    /// True when this edit is for a freshly added rule (dropped whole on cancel).
+    fresh: bool,
+}
+
+/// The self-contained add-step endpoint picker (substring filter, no fuzzy dep).
+#[derive(Debug)]
+struct AddStepPicker {
+    query: LineEditor,
+    /// Indices into [`SequenceEditorState::endpoints`] matching the query.
+    filtered: Vec<usize>,
+    selected: usize,
+}
+
+/// What a key press asks the app to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorOutcome {
+    /// Handled internally.
+    Consumed,
+    /// Save the sequence (stay open).
+    Save,
+    /// Save then close.
+    SaveAndClose,
+    /// Close (discard already resolved).
+    Close,
+}
+
+/// The sequence editor's state.
+#[derive(Debug)]
+pub struct SequenceEditorState {
+    /// The sequence's `seq` ordering key (preserved on save).
+    seq: u32,
+    /// Sequence name (shown in the title; edited via rename at the app level).
+    name: String,
+    /// The sequence file on disk (already created).
+    path: PathBuf,
+    on_error: OnError,
+    steps: Vec<StepEdit>,
+    selected_step: usize,
+    focus: Focus,
+    selected_rule: usize,
+    edit: Option<FieldEdit>,
+    picker: Option<AddStepPicker>,
+    /// Available endpoint paths (workspace-relative) for the add-step picker.
+    endpoints: Vec<String>,
+    /// True while the discard-changes confirm is showing.
+    pending_close: bool,
+    /// Snapshot for dirty derivation.
+    snapshot: (OnError, Vec<StepEdit>),
+}
+
+impl SequenceEditorState {
+    /// Builds the editor from a loaded sequence and the workspace's endpoint
+    /// paths (for the add-step picker).
+    pub fn new(name: String, path: PathBuf, sequence: &Sequence, endpoints: Vec<String>) -> Self {
+        let steps: Vec<StepEdit> = churl_core::sequence::ordered_steps(sequence)
+            .into_iter()
+            .map(|step| StepEdit {
+                endpoint: step.endpoint.clone(),
+                rules: step
+                    .extract
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            })
+            .collect();
+        let snapshot = (sequence.on_error, steps.clone());
+        Self {
+            seq: sequence.seq,
+            name,
+            path,
+            on_error: sequence.on_error,
+            steps,
+            selected_step: 0,
+            focus: Focus::Steps,
+            selected_rule: 0,
+            edit: None,
+            picker: None,
+            endpoints,
+            pending_close: false,
+            snapshot,
+        }
+    }
+
+    /// The file path this editor saves to.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Whether the working copy differs from the snapshot.
+    pub fn is_dirty(&self) -> bool {
+        (self.on_error, &self.steps) != (self.snapshot.0, &self.snapshot.1)
+    }
+
+    /// Rebuilds the [`Sequence`] for saving, renumbering step `seq` by position.
+    pub fn to_sequence(&self) -> Sequence {
+        Sequence {
+            seq: self.seq,
+            name: self.name.clone(),
+            on_error: self.on_error,
+            steps: self
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, step)| SequenceStep {
+                    seq: i as u32,
+                    endpoint: step.endpoint.clone(),
+                    extract: step
+                        .rules
+                        .iter()
+                        .filter(|(name, _)| !name.trim().is_empty())
+                        .map(|(name, expr)| (name.clone(), expr.clone()))
+                        .collect::<BTreeMap<_, _>>(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Refreshes the snapshot after a successful save (clears dirty).
+    pub fn mark_saved(&mut self) {
+        self.snapshot = (self.on_error, self.steps.clone());
+    }
+
+    /// Routes a key, returning what (if any) app action to take.
+    pub fn handle_key(&mut self, key: KeyEvent) -> EditorOutcome {
+        // Sub-overlays intercept first.
+        if self.pending_close {
+            return self.handle_close_confirm(key);
+        }
+        if self.picker.is_some() {
+            self.handle_picker_key(key);
+            return EditorOutcome::Consumed;
+        }
+        if self.edit.is_some() {
+            self.handle_edit_key(key);
+            return EditorOutcome::Consumed;
+        }
+        match key.code {
+            KeyCode::Char('w') => {
+                return if self.is_dirty() {
+                    EditorOutcome::Save
+                } else {
+                    EditorOutcome::Consumed
+                };
+            }
+            KeyCode::Char('q') | KeyCode::Esc => {
+                return if self.is_dirty() {
+                    self.pending_close = true;
+                    EditorOutcome::Consumed
+                } else {
+                    EditorOutcome::Close
+                };
+            }
+            _ => {}
+        }
+        match self.focus {
+            Focus::Steps => self.handle_steps_key(key),
+            Focus::Rules => self.handle_rules_key(key),
+        }
+        EditorOutcome::Consumed
+    }
+
+    fn handle_close_confirm(&mut self, key: KeyEvent) -> EditorOutcome {
+        match key.code {
+            KeyCode::Char('s') => EditorOutcome::SaveAndClose,
+            KeyCode::Char('d') => EditorOutcome::Close,
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.pending_close = false;
+                EditorOutcome::Consumed
+            }
+            _ => EditorOutcome::Consumed,
+        }
+    }
+
+    fn handle_steps_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.selected_step + 1 < self.steps.len() {
+                    self.selected_step += 1;
+                    self.selected_rule = 0;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected_step = self.selected_step.saturating_sub(1);
+                self.selected_rule = 0;
+            }
+            KeyCode::Char('a') => self.open_add_step_picker(),
+            KeyCode::Char('d') => self.delete_step(),
+            // Reorder: K/J or [ / ].
+            KeyCode::Char('K') | KeyCode::Char('[') => self.move_step(true),
+            KeyCode::Char('J') | KeyCode::Char(']') => self.move_step(false),
+            KeyCode::Char('o') => {
+                self.on_error = match self.on_error {
+                    OnError::Halt => OnError::Continue,
+                    OnError::Continue => OnError::Halt,
+                };
+            }
+            KeyCode::Char('l') | KeyCode::Enter | KeyCode::Tab | KeyCode::Right
+                if !self.steps.is_empty() =>
+            {
+                self.focus = Focus::Rules;
+                self.selected_rule = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_rules_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Esc | KeyCode::Left | KeyCode::Tab => {
+                self.focus = Focus::Steps;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let n = self.current_rules_len();
+                if n > 0 && self.selected_rule + 1 < n {
+                    self.selected_rule += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected_rule = self.selected_rule.saturating_sub(1);
+            }
+            KeyCode::Char('a') => self.add_rule(),
+            KeyCode::Char('d') => self.delete_rule(),
+            KeyCode::Char('r') => self.begin_edit(EditTarget::RuleName, false),
+            KeyCode::Enter | KeyCode::Char('i') => self.begin_edit(EditTarget::RuleExpr, false),
+            _ => {}
+        }
+    }
+
+    fn current_rules_len(&self) -> usize {
+        self.steps
+            .get(self.selected_step)
+            .map(|s| s.rules.len())
+            .unwrap_or(0)
+    }
+
+    fn delete_step(&mut self) {
+        if self.steps.is_empty() {
+            return;
+        }
+        self.steps.remove(self.selected_step);
+        self.selected_step = self.selected_step.min(self.steps.len().saturating_sub(1));
+        self.selected_rule = 0;
+        if self.steps.is_empty() {
+            self.focus = Focus::Steps;
+        }
+    }
+
+    fn move_step(&mut self, up: bool) {
+        let i = self.selected_step;
+        if up && i > 0 {
+            self.steps.swap(i, i - 1);
+            self.selected_step -= 1;
+        } else if !up && i + 1 < self.steps.len() {
+            self.steps.swap(i, i + 1);
+            self.selected_step += 1;
+        }
+    }
+
+    fn add_rule(&mut self) {
+        let Some(step) = self.steps.get_mut(self.selected_step) else {
+            return;
+        };
+        step.rules.push((String::new(), String::new()));
+        self.selected_rule = step.rules.len() - 1;
+        self.begin_edit(EditTarget::RuleName, true);
+    }
+
+    fn delete_rule(&mut self) {
+        if let Some(step) = self.steps.get_mut(self.selected_step)
+            && self.selected_rule < step.rules.len()
+        {
+            step.rules.remove(self.selected_rule);
+            self.selected_rule = self.selected_rule.min(step.rules.len().saturating_sub(1));
+        }
+    }
+
+    fn begin_edit(&mut self, target: EditTarget, fresh: bool) {
+        let Some(step) = self.steps.get(self.selected_step) else {
+            return;
+        };
+        let Some((name, expr)) = step.rules.get(self.selected_rule) else {
+            return;
+        };
+        let original = match target {
+            EditTarget::RuleName => name.clone(),
+            EditTarget::RuleExpr => expr.clone(),
+        };
+        self.edit = Some(FieldEdit {
+            target,
+            editor: LineEditor::new(&original),
+            rule: self.selected_rule,
+            original,
+            fresh,
+        });
+    }
+
+    fn handle_edit_key(&mut self, key: KeyEvent) {
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                let value = edit.editor.text();
+                let (target, rule) = (edit.target, edit.rule);
+                self.edit = None;
+                if let Some(step) = self.steps.get_mut(self.selected_step)
+                    && let Some(slot) = step.rules.get_mut(rule)
+                {
+                    match target {
+                        EditTarget::RuleName => slot.0 = value,
+                        EditTarget::RuleExpr => slot.1 = value,
+                    }
+                }
+                // After naming a fresh rule, chain into editing its expression.
+                if target == EditTarget::RuleName {
+                    self.begin_edit(EditTarget::RuleExpr, false);
+                }
+            }
+            KeyCode::Esc => {
+                let (original, rule, fresh, target) =
+                    (edit.original.clone(), edit.rule, edit.fresh, edit.target);
+                self.edit = None;
+                if let Some(step) = self.steps.get_mut(self.selected_step) {
+                    // A fresh, still-unnamed rule is dropped whole on cancel.
+                    if fresh && target == EditTarget::RuleName {
+                        if rule < step.rules.len() {
+                            step.rules.remove(rule);
+                            self.selected_rule =
+                                self.selected_rule.min(step.rules.len().saturating_sub(1));
+                        }
+                    } else if let Some(slot) = step.rules.get_mut(rule) {
+                        match target {
+                            EditTarget::RuleName => slot.0 = original,
+                            EditTarget::RuleExpr => slot.1 = original,
+                        }
+                    }
+                }
+            }
+            _ => {
+                edit.editor.handle_key(key);
+            }
+        }
+    }
+
+    // ---- add-step picker ----
+
+    fn open_add_step_picker(&mut self) {
+        if self.endpoints.is_empty() {
+            return;
+        }
+        let filtered = (0..self.endpoints.len()).collect();
+        self.picker = Some(AddStepPicker {
+            query: LineEditor::new(""),
+            filtered,
+            selected: 0,
+        });
+    }
+
+    fn refilter_picker(&mut self) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let query = picker.query.text().to_lowercase();
+        picker.filtered = self
+            .endpoints
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| query.is_empty() || path.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect();
+        picker.selected = picker.selected.min(picker.filtered.len().saturating_sub(1));
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                if picker.selected + 1 < picker.filtered.len() {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(&idx) = picker.filtered.get(picker.selected) {
+                    let endpoint = self.endpoints[idx].clone();
+                    self.steps.push(StepEdit {
+                        endpoint,
+                        rules: Vec::new(),
+                    });
+                    self.selected_step = self.steps.len() - 1;
+                }
+                self.picker = None;
+            }
+            _ => {
+                if picker.query.handle_key(key) {
+                    self.refilter_picker();
+                }
+            }
+        }
+    }
+}
+
+/// Renders the sequence editor over `area`.
+pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
+    let [modal] = Layout::horizontal([Constraint::Percentage(90)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [modal] = Layout::vertical([Constraint::Percentage(90)])
+        .flex(Flex::Center)
+        .areas(modal);
+
+    frame.render_widget(Clear, modal);
+    let dirty = if state.is_dirty() { " ●" } else { "" };
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(theme.border_focused)
+        .title(format!(" Edit sequence · {}{dirty} ", state.name))
+        .title_style(theme.title);
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} steps", state.steps.len()), theme.title),
+            Span::styled(
+                format!(
+                    "   on_error: {}",
+                    match state.on_error {
+                        OnError::Halt => "halt",
+                        OnError::Continue => "continue",
+                    }
+                ),
+                theme.statusline,
+            ),
+        ])),
+        header,
+    );
+
+    let left_width = (inner.width.saturating_sub(2) / 2).clamp(1, 44);
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(left_width), Constraint::Fill(1)]).areas(body);
+    render_steps(frame, left, state, theme);
+    render_rules(frame, right, state, theme);
+    render_footer(frame, footer, state, theme);
+
+    if let Some(picker) = &state.picker {
+        render_picker(frame, modal, picker, &state.endpoints, theme);
+    } else if state.pending_close {
+        prompt::render_confirm(
+            frame,
+            modal,
+            "Unsaved changes",
+            "Save changes before closing?",
+            "s save · d discard · esc stay",
+            theme,
+        );
+    }
+}
+
+fn render_steps(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
+    let focused = state.focus == Focus::Steps && state.edit.is_none();
+    let block = bordered(theme, focused, " Steps ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    if state.steps.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no steps — press a to add",
+            theme.statusline,
+        )));
+    }
+    for (i, step) in state.steps.iter().enumerate() {
+        let marker = if i == state.selected_step { "> " } else { "  " };
+        let mut line = Line::from(format!(
+            "{marker}{}. {}  ({} rules)",
+            i + 1,
+            step.endpoint,
+            step.rules.len()
+        ));
+        if i == state.selected_step && focused {
+            line = line.style(theme.selection);
+        }
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
+    let focused = state.focus == Focus::Rules || state.edit.is_some();
+    let block = bordered(theme, focused, " Extraction rules ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let Some(step) = state.steps.get(state.selected_step) else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no step selected",
+                theme.statusline,
+            ))),
+            inner,
+        );
+        return;
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    if step.rules.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no rules — press a to add",
+            theme.statusline,
+        )));
+    }
+    for (i, (name, expr)) in step.rules.iter().enumerate() {
+        let selected = i == state.selected_rule;
+        // Show the live edit buffer for the row being edited.
+        let (name_s, expr_s) = match &state.edit {
+            Some(edit) if edit.rule == i => match edit.target {
+                EditTarget::RuleName => (edit.editor.text(), expr.clone()),
+                EditTarget::RuleExpr => (name.clone(), edit.editor.text()),
+            },
+            _ => (name.clone(), expr.clone()),
+        };
+        let marker = if selected { "> " } else { "  " };
+        let mut line = Line::from(vec![
+            Span::raw(marker),
+            Span::styled(
+                if name_s.is_empty() {
+                    "<name>".to_owned()
+                } else {
+                    name_s
+                },
+                theme.title,
+            ),
+            Span::raw(" = "),
+            Span::raw(if expr_s.is_empty() {
+                "<expr>".to_owned()
+            } else {
+                expr_s
+            }),
+        ]);
+        if selected && focused {
+            line = line.style(theme.selection);
+        }
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
+    let hint = if state.edit.is_some() {
+        "enter commit · esc cancel"
+    } else if state.picker.is_some() {
+        "type to filter · ↑/↓ select · enter add · esc cancel"
+    } else {
+        match state.focus {
+            Focus::Steps => {
+                "j/k step · a add · d delete · K/J move · o on_error · l rules · w save · q close"
+            }
+            Focus::Rules => {
+                "j/k rule · a add · enter expr · r name · d delete · h back · w save · q close"
+            }
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.statusline))),
+        area,
+    );
+}
+
+fn render_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &AddStepPicker,
+    endpoints: &[String],
+    theme: &Theme,
+) {
+    let [pop] = Layout::horizontal([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [pop] = Layout::vertical([Constraint::Percentage(60)])
+        .flex(Flex::Center)
+        .areas(pop);
+    frame.render_widget(Clear, pop);
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(theme.border_focused)
+        .title(format!(" Add step · {} ", picker.query.text()))
+        .title_style(theme.title);
+    let inner = block.inner(pop);
+    frame.render_widget(block, pop);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let lines: Vec<Line> = picker
+        .filtered
+        .iter()
+        .take(inner.height as usize)
+        .enumerate()
+        .map(|(row, &idx)| {
+            let marker = if row == picker.selected { "> " } else { "  " };
+            let mut line = Line::from(format!("{marker}{}", endpoints[idx]));
+            if row == picker.selected {
+                line = line.style(theme.selection);
+            }
+            line
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn bordered(theme: &Theme, focused: bool, title: &'static str) -> Block<'static> {
+    Block::bordered()
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if focused {
+            theme.border_focused
+        } else {
+            theme.border_unfocused
+        })
+        .title(title)
+        .title_style(theme.title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seq() -> Sequence {
+        Sequence {
+            seq: 0,
+            name: "Flow".to_owned(),
+            on_error: OnError::Halt,
+            steps: vec![
+                SequenceStep {
+                    seq: 0,
+                    endpoint: "a/one.toml".to_owned(),
+                    extract: BTreeMap::new(),
+                },
+                SequenceStep {
+                    seq: 1,
+                    endpoint: "b/two.toml".to_owned(),
+                    extract: BTreeMap::new(),
+                },
+            ],
+        }
+    }
+
+    fn editor() -> SequenceEditorState {
+        SequenceEditorState::new(
+            "Flow".to_owned(),
+            PathBuf::from("sequences/flow.toml"),
+            &seq(),
+            vec!["a/one.toml".to_owned(), "c/three.toml".to_owned()],
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn typ(ed: &mut SequenceEditorState, text: &str) {
+        for c in text.chars() {
+            ed.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn starts_clean() {
+        let ed = editor();
+        assert!(!ed.is_dirty());
+        assert_eq!(ed.steps.len(), 2);
+    }
+
+    #[test]
+    fn toggle_on_error_marks_dirty() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(ed.on_error, OnError::Continue);
+        assert!(ed.is_dirty());
+    }
+
+    #[test]
+    fn delete_step_removes_it() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(ed.steps.len(), 1);
+        assert!(ed.is_dirty());
+    }
+
+    #[test]
+    fn move_step_reorders() {
+        let mut ed = editor();
+        // Select second, move up.
+        ed.handle_key(key(KeyCode::Char('j')));
+        ed.handle_key(key(KeyCode::Char('K')));
+        assert_eq!(ed.steps[0].endpoint, "b/two.toml");
+        assert_eq!(ed.steps[1].endpoint, "a/one.toml");
+        // to_sequence renumbers by position.
+        let out = ed.to_sequence();
+        assert_eq!(out.steps[0].seq, 0);
+        assert_eq!(out.steps[0].endpoint, "b/two.toml");
+        assert_eq!(out.steps[1].seq, 1);
+    }
+
+    #[test]
+    fn add_step_via_picker() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('a'))); // open picker
+        assert!(ed.picker.is_some());
+        typ(&mut ed, "three"); // filter to c/three.toml
+        ed.handle_key(key(KeyCode::Enter));
+        assert!(ed.picker.is_none());
+        assert_eq!(ed.steps.len(), 3);
+        assert_eq!(ed.steps[2].endpoint, "c/three.toml");
+    }
+
+    #[test]
+    fn add_and_edit_extraction_rule() {
+        let mut ed = editor();
+        // Focus rules of step 0.
+        ed.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ed.focus, Focus::Rules);
+        ed.handle_key(key(KeyCode::Char('a'))); // add rule → editing name
+        typ(&mut ed, "token");
+        ed.handle_key(key(KeyCode::Enter)); // commit name → chain to expr
+        typ(&mut ed, "$.data.token");
+        ed.handle_key(key(KeyCode::Enter)); // commit expr
+        let out = ed.to_sequence();
+        assert_eq!(out.steps[0].extract.get("token").unwrap(), "$.data.token");
+    }
+
+    #[test]
+    fn cancel_fresh_rule_drops_it() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('l')));
+        ed.handle_key(key(KeyCode::Char('a'))); // add rule → editing name
+        typ(&mut ed, "abc");
+        ed.handle_key(key(KeyCode::Esc)); // cancel a fresh, unnamed rule
+        assert_eq!(ed.steps[0].rules.len(), 0);
+    }
+
+    #[test]
+    fn dirty_guard_on_close() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('o'))); // dirty
+        let outcome = ed.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(outcome, EditorOutcome::Consumed);
+        assert!(ed.pending_close);
+        // s → save+close
+        assert_eq!(
+            ed.handle_key(key(KeyCode::Char('s'))),
+            EditorOutcome::SaveAndClose
+        );
+    }
+
+    #[test]
+    fn clean_close_is_immediate() {
+        let mut ed = editor();
+        assert_eq!(ed.handle_key(key(KeyCode::Char('q'))), EditorOutcome::Close);
+    }
+
+    #[test]
+    fn save_round_trips_through_snapshot() {
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('o')));
+        assert!(ed.is_dirty());
+        ed.mark_saved();
+        assert!(!ed.is_dirty());
+    }
+}
