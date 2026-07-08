@@ -16,10 +16,13 @@ use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
-use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
+use churl_core::history::{HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path};
 use churl_core::http::ExecuteOptions;
 use churl_core::interchange::{self, JsonDialect};
-use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Response};
+use churl_core::load::{LoadCheck, LoadConfig, ReqOutcome};
+use churl_core::model::{
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Request, Response,
+};
 use churl_core::persistence::{self, OpenWorkspace, PersistenceError};
 use churl_core::template::{Resolver, Scope};
 use color_eyre::Result;
@@ -41,6 +44,7 @@ use super::components::env_editor::{EnvEditorState, EnvKeyOutcome, EnvSaveResult
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
+use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
@@ -50,8 +54,8 @@ use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, message, method_menu, palette, picker, prompt, request, response,
-    sequence_editor, sequence_runner, statusline, urlbar,
+    env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
+    request, response, sequence_editor, sequence_runner, statusline, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -136,6 +140,9 @@ pub enum Mode {
     /// The in-app sequence editor (M7.4 §4): edit steps, extraction rules, and
     /// `on_error`; saved through `save_sequence`.
     SequenceEditor,
+    /// The concurrent-load runner (M7.5): a large modal firing N copies of the
+    /// selected endpoint with live results + latency stats.
+    LoadRunner,
 }
 
 /// What a [`Mode::Prompt`] is collecting text for.
@@ -244,6 +251,25 @@ pub enum AppMsg {
         /// The run generation this step belonged to.
         run_generation: u64,
         /// The step index within the runner.
+        index: usize,
+        /// The response, or a stringified transport error.
+        outcome: Result<Response, String>,
+    },
+    /// One copy of a concurrent-load batch actually started executing (M7.5) —
+    /// sent by the launcher when the copy enters the concurrency window, so its
+    /// row shows the in-flight glyph honestly. `run_generation`-guarded.
+    LoadStarted {
+        /// The run generation this copy belonged to.
+        run_generation: u64,
+        /// The copy's index within the batch.
+        index: usize,
+    },
+    /// One copy of a concurrent-load batch completed (M7.5). `run_generation`
+    /// guards against results from a cancelled/superseded batch.
+    LoadResult {
+        /// The run generation this copy belonged to.
+        run_generation: u64,
+        /// The copy's index within the batch.
         index: usize,
         /// The response, or a stringified transport error.
         outcome: Result<Response, String>,
@@ -402,6 +428,16 @@ pub struct App {
     sequence_abort: Option<AbortHandle>,
     /// The open sequence editor (M7.4 §4), when `Mode::SequenceEditor`.
     sequence_editor: Option<SequenceEditorState>,
+    /// The open concurrent-load runner (M7.5), when `Mode::LoadRunner`.
+    load_runner: Option<LoadRunnerState>,
+    /// Abort handle for the single load-batch launcher task; aborting it drops
+    /// the launcher's `buffer_unordered`, cancelling ALL in-flight requests.
+    load_abort: Option<AbortHandle>,
+    /// Concurrent-load guardrail caps (from `[load]` config, or defaults).
+    load_caps: churl_core::load::LoadCaps,
+    /// The load runner's request, resolved ONCE at open time and cloned for every
+    /// copy in a run (consistent batch — no per-copy re-resolution).
+    load_request: Option<Request>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -411,6 +447,17 @@ fn sequence_step_meta(endpoint: &str) -> ResponseMeta {
         method: String::new(),
         url: endpoint.to_owned(),
         endpoint_path: Some(endpoint.to_owned()),
+        executed_at_ms: now_ms(),
+    }
+}
+
+/// A minimal [`ResponseMeta`] for a failed load-copy's response view (load runs
+/// write only the batch summary, so only the display URL matters).
+fn load_result_meta(url: &str) -> ResponseMeta {
+    ResponseMeta {
+        method: String::new(),
+        url: url.to_owned(),
+        endpoint_path: None,
         executed_at_ms: now_ms(),
     }
 }
@@ -523,6 +570,10 @@ impl App {
             sequence_runner: None,
             sequence_abort: None,
             sequence_editor: None,
+            load_runner: None,
+            load_abort: None,
+            load_caps: churl_core::load::LoadCaps::default(),
+            load_request: None,
         })
     }
 
@@ -651,6 +702,7 @@ impl App {
         self.execute_options = ExecuteOptions {
             max_body_bytes: config.max_body_bytes(),
         };
+        self.load_caps = config.load_caps();
         self.highlight_tx = Some(highlight::spawn(self.tx.clone(), self.theme.is_light()));
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
@@ -743,6 +795,7 @@ impl App {
             Mode::EnvEditor => self.handle_env_editor_key(key),
             Mode::SequenceRunner => self.handle_sequence_runner_key(key),
             Mode::SequenceEditor => self.handle_sequence_editor_key(key),
+            Mode::LoadRunner => self.handle_load_runner_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -949,6 +1002,7 @@ impl App {
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
+            Action::OpenLoadRunner => self.open_load_runner(),
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
             Action::Save => self.save_request(),
@@ -1535,6 +1589,15 @@ impl App {
                 index,
                 outcome,
             } => self.on_sequence_step(run_generation, index, outcome),
+            AppMsg::LoadStarted {
+                run_generation,
+                index,
+            } => self.on_load_started(run_generation, index),
+            AppMsg::LoadResult {
+                run_generation,
+                index,
+                outcome,
+            } => self.on_load_result(run_generation, index, outcome),
         }
     }
 
@@ -2060,6 +2123,323 @@ impl App {
             runner.run_generation += 1;
         }
         self.sequence_runner = None;
+        self.mode = Mode::Normal;
+    }
+
+    // ---- M7.5 concurrent-load runner ----
+
+    /// `<leader>l` / palette: open the load runner for the selected endpoint.
+    /// Builds the request EXACTLY as an interactive send would (clone the endpoint
+    /// request, fold in the live body editor, resolve `{{var}}`s ONCE) so the
+    /// batch hits the same URL/vars/auth as a normal send, and prefills the config
+    /// from the load defaults. Never auto-runs — the user reviews/edits first.
+    fn open_load_runner(&mut self) {
+        let Some(selected) = self.selected.clone() else {
+            self.notify("no endpoint selected — select one to load-test");
+            return;
+        };
+        let mut request = selected.endpoint.request.clone();
+        let body_text = String::from(self.editor.lines.clone());
+        match request.body.as_mut() {
+            Some(body) => body.content = body_text,
+            None if !body_text.is_empty() => {
+                request.body = Some(Body {
+                    kind: BodyKind::Text,
+                    content: body_text,
+                });
+            }
+            None => {}
+        }
+        // Resolve `{{var}}` on the clone ONCE; every copy reuses this resolved
+        // request (consistent batch, no N× re-resolution). `execute` stays
+        // substitution-free.
+        self.build_resolver(&selected)
+            .substitute_request(&mut request);
+        let url = request.url.clone();
+        let endpoint_path = self.endpoint_rel_path(&selected);
+        self.load_request = Some(request);
+        self.load_runner = Some(LoadRunnerState::new(
+            selected.endpoint.name.clone(),
+            url,
+            endpoint_path,
+            LoadConfig::default(),
+        ));
+        self.mode = Mode::LoadRunner;
+    }
+
+    /// `r` in the runner: classify the config against the guardrail caps and act.
+    /// Refuse → message (no run); Warn → loud confirm naming the target URL; Ok →
+    /// run immediately.
+    fn request_load_run(&mut self) {
+        let Some(runner) = self.load_runner.as_ref() else {
+            return;
+        };
+        let cfg = runner.cfg;
+        match churl_core::load::check_config(&cfg, &self.load_caps) {
+            LoadCheck::Refuse(reason) => self.notify(format!("load refused: {reason}")),
+            LoadCheck::Warn(reason) => {
+                let text = format!(
+                    "Fire {} requests at concurrency {} against {}?  ({reason})",
+                    cfg.total, cfg.concurrency, runner.url
+                );
+                if let Some(runner) = self.load_runner.as_mut() {
+                    runner.pending_confirm = Some(text);
+                }
+            }
+            LoadCheck::Ok => self.start_load_run(),
+        }
+    }
+
+    /// Starts (or restarts) the batch: aborts any prior launcher, resets rows,
+    /// bumps the run generation, and spawns ONE launcher task that owns a
+    /// `buffer_unordered` fan-out (bounded to `concurrency`, paced by `interval`).
+    /// Aborting that single task drops the fan-out and cancels ALL in-flight
+    /// requests — there is no detached per-request task to escape cancellation.
+    fn start_load_run(&mut self) {
+        // Interrupt any in-progress batch first — recording its partial summary
+        // (a re-run mid-batch must not silently lose the current run).
+        self.interrupt_running_batch();
+        let (Some(runner), Some(request)) = (self.load_runner.as_mut(), self.load_request.clone())
+        else {
+            return;
+        };
+        runner.reset_for_run();
+        let run_generation = runner.run_generation;
+        let cfg = runner.cfg;
+        if cfg.total == 0 {
+            runner.running = false;
+            runner.finished = true;
+            return;
+        }
+        // No client (snapshot tests): leave rows pending, runtime-free.
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let options = self.execute_options;
+        let total = cfg.total;
+        let concurrency = cfg.concurrency.max(1);
+        let interval = cfg.interval;
+        let handle = tokio::spawn(async move {
+            use futures::stream::StreamExt;
+            let start = Instant::now();
+            futures::stream::iter(0..total)
+                .map(|index| {
+                    let client = client.clone();
+                    let request = request.clone();
+                    let tx = tx.clone();
+                    async move {
+                        // Absolute-target pacing (mirrors `run_load`): a hard floor
+                        // on when copy `index` may launch.
+                        if !interval.is_zero() {
+                            let target =
+                                interval.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
+                            let elapsed = start.elapsed();
+                            if target > elapsed {
+                                tokio::time::sleep(target - elapsed).await;
+                            }
+                        }
+                        let _ = tx.send(AppMsg::LoadStarted {
+                            run_generation,
+                            index,
+                        });
+                        let outcome = churl_core::http::execute(&client, &request, &options)
+                            .await
+                            .map_err(|err| err.to_string());
+                        let _ = tx.send(AppMsg::LoadResult {
+                            run_generation,
+                            index,
+                            outcome,
+                        });
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .for_each(|()| async {})
+                .await;
+        });
+        self.load_abort = Some(handle.abort_handle());
+    }
+
+    /// Marks copy `index` as in flight when the launcher signals it started.
+    fn on_load_started(&mut self, run_generation: u64, index: usize) {
+        let Some(runner) = self.load_runner.as_mut() else {
+            return;
+        };
+        if run_generation != runner.run_generation {
+            return; // stale
+        }
+        if let Some(row) = runner.results.get_mut(index)
+            && matches!(row.status, LoadStatus::Pending)
+        {
+            row.status = LoadStatus::Running;
+            row.response = ResponseState::InFlight {
+                started: Instant::now(),
+            };
+        }
+    }
+
+    /// Lands a completed copy: drops stale results, classifies (mirroring the core
+    /// `classify` seam for the success branch, and mapping the stringified
+    /// transport error itself), records it + recomputes stats, and — when the last
+    /// copy lands — finishes the run and writes the batch summary.
+    fn on_load_result(
+        &mut self,
+        run_generation: u64,
+        index: usize,
+        outcome: Result<Response, String>,
+    ) {
+        let Some(runner) = self.load_runner.as_mut() else {
+            return;
+        };
+        if run_generation != runner.run_generation {
+            return; // stale — a cancel or re-run superseded this batch
+        }
+        let view_gen = runner.next_view_gen();
+        let url = runner.url.clone();
+        let (status, timing, response, req_outcome) = match outcome {
+            Ok(response) => {
+                let (status, req_outcome) = if response.status >= 400 {
+                    (
+                        LoadStatus::Failed(response.status),
+                        ReqOutcome::Failed {
+                            status: response.status,
+                        },
+                    )
+                } else {
+                    (
+                        LoadStatus::Ok(response.status),
+                        ReqOutcome::Ok {
+                            status: response.status,
+                        },
+                    )
+                };
+                let timing = Some(response.timing.total);
+                let view = ResponseView::build(&response, view_gen);
+                (status, timing, ResponseState::Done { view }, req_outcome)
+            }
+            Err(error) => (
+                LoadStatus::Error(error.clone()),
+                None,
+                ResponseState::Failed {
+                    error: error.clone(),
+                    meta: load_result_meta(&url),
+                },
+                ReqOutcome::Error(error),
+            ),
+        };
+        let done = runner.record_result(index, status, timing, response, req_outcome);
+        if done {
+            runner.running = false;
+            runner.finished = true;
+            self.load_abort = None;
+            self.write_load_summary(false);
+        }
+    }
+
+    /// The single interrupt seam shared by every batch-interrupt path (Ctrl-C
+    /// cancel, `r` re-run mid-batch, and close mid-batch): if a run is in
+    /// progress, record its partial summary marked cancelled (so a partial run is
+    /// never lost from `load_batches`), then abort the single launcher (dropping
+    /// the fan-out and every in-flight request) and bump the generation so
+    /// straggler results are dropped. Always bumps the generation, even for the
+    /// first run, so a fresh run starts on a distinct generation.
+    fn interrupt_running_batch(&mut self) {
+        let was_running = self
+            .load_runner
+            .as_ref()
+            .is_some_and(LoadRunnerState::is_running);
+        if was_running {
+            // Record the partial (whatever completed so far), marked cancelled.
+            self.write_load_summary(true);
+        }
+        if let Some(handle) = self.load_abort.take() {
+            handle.abort();
+        }
+        if let Some(runner) = self.load_runner.as_mut() {
+            runner.run_generation += 1;
+        }
+    }
+
+    /// Cancels the in-flight batch (Ctrl-C): records the partial summary + aborts
+    /// the launcher + bumps the generation via the shared interrupt seam, then
+    /// marks non-terminal rows cancelled and settles the runner's finished state.
+    fn cancel_load_run(&mut self) {
+        self.interrupt_running_batch();
+        let Some(runner) = self.load_runner.as_mut() else {
+            return;
+        };
+        for row in &mut runner.results {
+            if matches!(row.status, LoadStatus::Pending | LoadStatus::Running) {
+                row.status = LoadStatus::Cancelled;
+                if matches!(row.response, ResponseState::InFlight { .. }) {
+                    row.response = ResponseState::Cancelled;
+                }
+            }
+        }
+        runner.running = false;
+        runner.finished = true;
+        runner.cancelled = true;
+        runner.confirming_close = false;
+        self.notify("load run cancelled");
+    }
+
+    /// Persists the current run's one-row summary to the SEPARATE `load_batches`
+    /// table (never per-endpoint history). Best-effort; a write failure warns.
+    fn write_load_summary(&mut self, cancelled: bool) {
+        let Some(runner) = self.load_runner.as_ref() else {
+            return;
+        };
+        let stats = &runner.stats;
+        let ms = |d: Option<Duration>| d.map(|d| d.as_millis() as u64);
+        let summary = LoadBatchSummary {
+            executed_at_ms: now_ms(),
+            url: runner.url.clone(),
+            endpoint_path: runner.endpoint_path.clone(),
+            total: runner.results.len(),
+            concurrency: runner.cfg.concurrency,
+            ok_count: stats.ok,
+            fail_count: stats.failed,
+            error_count: stats.errored,
+            cancelled,
+            min_ms: ms(stats.min),
+            median_ms: ms(stats.median),
+            p95_ms: ms(stats.p95),
+            max_ms: ms(stats.max),
+            mean_ms: ms(stats.mean),
+        };
+        if let Some(Err(err)) = self
+            .history
+            .as_ref()
+            .map(|store| store.insert_load_batch(&summary))
+        {
+            self.notify(format!("load history write failed: {err}"));
+        }
+    }
+
+    /// Routes a key to the open load runner and acts on its outcome.
+    fn handle_load_runner_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(runner) = self.load_runner.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        match runner.handle_key(key) {
+            LoadOutcome::Consumed => {}
+            LoadOutcome::Run => self.request_load_run(),
+            LoadOutcome::ConfirmedRun => self.start_load_run(),
+            LoadOutcome::Cancel => self.cancel_load_run(),
+            LoadOutcome::Close => self.close_load_runner(),
+        }
+        Ok(())
+    }
+
+    /// Closes the runner. If a batch is still running (close was confirmed via the
+    /// runner's `q`→`y` guard), records its partial summary + aborts + bumps the
+    /// generation through the shared interrupt seam before dropping the runner —
+    /// so a run interrupted by closing is never lost from `load_batches`.
+    fn close_load_runner(&mut self) {
+        self.interrupt_running_batch();
+        self.load_runner = None;
+        self.load_request = None;
         self.mode = Mode::Normal;
     }
 
@@ -3948,6 +4328,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 sequence_editor::render(frame, main, editor, &theme);
             }
         }
+        Mode::LoadRunner => {
+            let tick = app.tick_count;
+            let job = {
+                let cache = &app.highlight_cache;
+                match app.load_runner.as_mut() {
+                    Some(runner) => load_runner::render(frame, main, runner, tick, cache, &theme),
+                    None => None,
+                }
+            };
+            if let Some(job) = job {
+                let dup = app.pending_highlight == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        app.pending_highlight = Some(hash);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 
@@ -5697,5 +6096,331 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
         assert!(app.selected.is_none());
+    }
+
+    // ---- M7.5 concurrent-load runner ----
+
+    /// Builds an app with one selected endpoint (targeting `url`) and opens the
+    /// load runner over it. Client is `None`, so a run resets rows to Pending and
+    /// leaves them (runtime-free); the state machine is exercised by injecting
+    /// `on_load_started`/`on_load_result`.
+    fn load_app(root: &Path, url: &str) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("ping.toml"),
+            format!("seq = 0\nname = \"Ping\"\n\n[request]\nmethod = \"GET\"\nurl = \"{url}\"\n"),
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("ping.toml")))
+            .unwrap();
+        app.open_load_runner();
+        app
+    }
+
+    fn load_gen(app: &App) -> u64 {
+        app.load_runner.as_ref().unwrap().run_generation
+    }
+
+    fn load_status(app: &App, i: usize) -> LoadStatus {
+        app.load_runner.as_ref().unwrap().results[i].status.clone()
+    }
+
+    #[test]
+    fn load_runner_opens_with_resolved_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = load_app(dir.path(), "https://api.test/ping");
+        assert_eq!(app.mode, Mode::LoadRunner);
+        let runner = app.load_runner.as_ref().unwrap();
+        assert_eq!(runner.url, "https://api.test/ping");
+        assert_eq!(runner.endpoint_path.as_deref(), Some("api/ping.toml"));
+        assert!(!runner.running, "must not auto-run");
+        assert!(runner.results.is_empty(), "no rows until a run starts");
+        assert!(app.load_request.is_some(), "request resolved once at open");
+    }
+
+    #[test]
+    fn load_run_injected_results_update_stats_and_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // total=3, then start (client None → 3 pending rows, running).
+        app.load_runner.as_mut().unwrap().cfg.total = 3;
+        app.start_load_run();
+        let g = load_gen(&app);
+        assert!(app.load_runner.as_ref().unwrap().running);
+        assert_eq!(load_status(&app, 0), LoadStatus::Pending);
+
+        app.on_load_started(g, 0);
+        assert_eq!(load_status(&app, 0), LoadStatus::Running);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.on_load_result(g, 1, Ok(ok_resp(500, "b")));
+        assert!(!app.load_runner.as_ref().unwrap().finished);
+        app.on_load_result(g, 2, Err("connection refused".to_owned()));
+
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.finished && !runner.running && !runner.cancelled);
+        assert_eq!(runner.completed, 3);
+        assert_eq!(runner.stats.ok, 1);
+        assert_eq!(runner.stats.failed, 1);
+        assert_eq!(runner.stats.errored, 1);
+        assert_eq!(load_status(&app, 0), LoadStatus::Ok(200));
+        assert_eq!(load_status(&app, 1), LoadStatus::Failed(500));
+        assert!(matches!(load_status(&app, 2), LoadStatus::Error(_)));
+
+        // Exactly one batch summary row, none in per-endpoint history.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].summary.total, 3);
+        assert_eq!(batches[0].summary.ok_count, 1);
+        assert!(!batches[0].summary.cancelled);
+        // mean latency is persisted (ok_resp timings are 5ms; error has none).
+        assert_eq!(batches[0].summary.mean_ms, Some(5));
+        assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn load_stale_result_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 2;
+        app.start_load_run();
+        let g = load_gen(&app);
+        // A result from a superseded generation must not land.
+        app.on_load_result(g + 99, 0, Ok(ok_resp(200, "x")));
+        assert_eq!(load_status(&app, 0), LoadStatus::Pending);
+        assert_eq!(app.load_runner.as_ref().unwrap().completed, 0);
+    }
+
+    #[test]
+    fn load_cancel_marks_pending_and_writes_partial_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.cancel_load_run();
+
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.finished && runner.cancelled && !runner.running);
+        assert_eq!(load_status(&app, 0), LoadStatus::Ok(200));
+        assert!(
+            runner.results[1..]
+                .iter()
+                .all(|r| r.status == LoadStatus::Cancelled),
+            "every non-terminal row is cancelled"
+        );
+        // The generation was bumped so a straggler result is dropped.
+        app.on_load_result(g, 1, Ok(ok_resp(200, "late")));
+        assert_eq!(load_status(&app, 1), LoadStatus::Cancelled);
+
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(
+            batches[0].summary.cancelled,
+            "partial summary marked cancelled"
+        );
+        assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    #[test]
+    fn load_rerun_while_running_writes_cancelled_summary_and_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g1 = load_gen(&app);
+        app.on_load_result(g1, 0, Ok(ok_resp(200, "a")));
+        assert!(app.load_runner.as_ref().unwrap().running);
+
+        // `r` while running: cancel-record the partial, then restart fresh.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.running, "a fresh run started");
+        assert!(!runner.finished && !runner.cancelled);
+        assert!(runner.run_generation > g1, "fresh run on a new generation");
+        assert_eq!(runner.completed, 0, "fresh rows");
+        assert!(
+            runner
+                .results
+                .iter()
+                .all(|r| r.status == LoadStatus::Pending),
+            "every row reset to pending"
+        );
+
+        // The interrupted run left exactly one cancelled summary capturing what
+        // completed so far — the partial is not lost.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "the interrupted run's partial was recorded"
+        );
+        assert!(batches[0].summary.cancelled);
+        assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    #[test]
+    fn load_close_while_running_writes_cancelled_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.on_load_result(g, 1, Ok(ok_resp(500, "b")));
+
+        // Close mid-run: `q` asks to confirm, `y` closes.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_runner.as_ref().unwrap().confirming_close);
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_runner.is_none(), "runner closed");
+        assert_eq!(app.mode, Mode::Normal);
+
+        // Closing mid-run recorded the partial (cancelled) summary.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1, "close mid-run recorded the partial");
+        assert!(batches[0].summary.cancelled);
+        assert_eq!(batches[0].summary.ok_count, 1);
+        assert_eq!(batches[0].summary.fail_count, 1);
+    }
+
+    #[test]
+    fn load_guardrail_refuse_blocks_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        // Above the hard cap (default max_total = 10_000).
+        app.load_runner.as_mut().unwrap().cfg.total = 20_000;
+        app.request_load_run();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(!runner.running, "a refused run never starts");
+        assert!(runner.pending_confirm.is_none(), "refuse does not prompt");
+        assert!(app.message.is_some(), "refusal is surfaced loudly");
+    }
+
+    #[test]
+    fn load_guardrail_warn_requires_confirm_then_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        // Above warn_total (default 100), below the hard cap.
+        app.load_runner.as_mut().unwrap().cfg.total = 500;
+        app.request_load_run();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(!runner.running, "warn does not run immediately");
+        let confirm = runner.pending_confirm.clone().expect("confirm shown");
+        assert!(
+            confirm.contains("500"),
+            "confirm names the count: {confirm}"
+        );
+        assert!(
+            confirm.contains("https://api.test/ping"),
+            "confirm shows the target URL: {confirm}"
+        );
+        // Accepting the confirm (`y`) starts the run.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.pending_confirm.is_none());
+        assert!(runner.running, "confirmed run started");
+        assert_eq!(runner.results.len(), 500);
+    }
+
+    /// A request-counting responder that holds each request open, so a cancel
+    /// mid-batch is observable as "the server never saw the un-launched copies".
+    struct CountingSlowResponder {
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl wiremock::Respond for CountingSlowResponder {
+        fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            wiremock::ResponseTemplate::new(200).set_delay(self.delay)
+        }
+    }
+
+    /// The batch-cancel non-negotiable, proven live: the runner owns a SINGLE
+    /// launcher task; cancelling aborts it, which drops the `buffer_unordered`
+    /// fan-out and every in-flight reqwest future — so the un-launched copies of a
+    /// large batch are never fired. With concurrency 2 and a slow server, a cancel
+    /// right after launch means the server sees only a handful of the copies, not
+    /// all of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_cancel_aborts_the_batch_live() {
+        use churl_core::http::{DEFAULT_TIMEOUT, build_client};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(CountingSlowResponder {
+                count: Arc::clone(&count),
+                delay: Duration::from_millis(400),
+            })
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), &format!("{}/slow", server.uri()));
+        app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        {
+            let cfg = &mut app.load_runner.as_mut().unwrap().cfg;
+            cfg.total = 20;
+            cfg.concurrency = 2;
+            cfg.interval = Duration::ZERO;
+        }
+        app.start_load_run();
+        assert!(app.load_abort.is_some(), "a launcher task is running");
+
+        // Let the first couple of copies actually reach the server, then cancel.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        app.cancel_load_run();
+
+        // Give any leaked / detached work ample time to hit the server.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let seen = count.load(Ordering::SeqCst);
+        assert!(
+            seen < 20,
+            "cancel must abort the batch: the server saw {seen}/20 copies (all fired → cancel leaked)"
+        );
+        assert!(
+            app.load_runner.as_ref().unwrap().cancelled,
+            "runner marked cancelled"
+        );
     }
 }

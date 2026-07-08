@@ -101,6 +101,31 @@ pub struct Config {
     /// [`Config::url_edit`] and fails loudly on an unknown value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_edit: Option<String>,
+    /// Concurrent-load guardrail caps under a `[load]` table (M7.5); absent →
+    /// [`crate::load::LoadCaps::default`]. A malformed value (e.g. a non-integer
+    /// `warn_total`) fails the whole config parse loudly, like every other knob.
+    /// Resolved via [`Config::load_caps`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<LoadSection>,
+}
+
+/// The `[load]` config table: optional per-field overrides of the load-run
+/// guardrail caps. A missing field falls back to the [`crate::load::LoadCaps`]
+/// default for that knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LoadSection {
+    /// Override for `warn_total`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_total: Option<usize>,
+    /// Override for `warn_concurrency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_concurrency: Option<usize>,
+    /// Override for `max_total`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total: Option<usize>,
+    /// Override for `max_concurrency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
 }
 
 /// Where the URL bar's `i`/`Enter` opens the editor: inline in the bar, or in a
@@ -155,6 +180,24 @@ impl Config {
         self.timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(crate::http::DEFAULT_TIMEOUT)
+    }
+
+    /// The resolved concurrent-load guardrail caps: the `[load]` overrides folded
+    /// over [`crate::load::LoadCaps::default`] (each absent field keeps its
+    /// default). An absent `[load]` table yields the defaults verbatim.
+    pub fn load_caps(&self) -> crate::load::LoadCaps {
+        let defaults = crate::load::LoadCaps::default();
+        match &self.load {
+            None => defaults,
+            Some(section) => crate::load::LoadCaps {
+                warn_total: section.warn_total.unwrap_or(defaults.warn_total),
+                warn_concurrency: section
+                    .warn_concurrency
+                    .unwrap_or(defaults.warn_concurrency),
+                max_total: section.max_total.unwrap_or(defaults.max_total),
+                max_concurrency: section.max_concurrency.unwrap_or(defaults.max_concurrency),
+            },
+        }
     }
 
     /// The resolved URL-edit mode. An unknown value is a hard error (fail loud,
@@ -464,6 +507,52 @@ mod tests {
         let err = config.url_edit().unwrap_err();
         assert!(err.to_string().contains("nope"), "{err}");
         assert!(err.to_string().contains("url_edit"), "{err}");
+    }
+
+    #[test]
+    fn config_load_caps_default_when_absent() {
+        let config = Config::default();
+        assert_eq!(config.load_caps(), crate::load::LoadCaps::default());
+    }
+
+    #[test]
+    fn config_parses_load_caps_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Override only two knobs; the rest keep their defaults.
+        std::fs::write(&path, "[load]\nwarn_total = 25\nmax_concurrency = 64\n").unwrap();
+        let config = load_config(&path).unwrap();
+        let caps = config.load_caps();
+        let defaults = crate::load::LoadCaps::default();
+        assert_eq!(caps.warn_total, 25);
+        assert_eq!(caps.max_concurrency, 64);
+        assert_eq!(caps.warn_concurrency, defaults.warn_concurrency);
+        assert_eq!(caps.max_total, defaults.max_total);
+    }
+
+    #[test]
+    fn config_parses_load_caps_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[load]\nwarn_total = 10\nwarn_concurrency = 4\nmax_total = 500\nmax_concurrency = 32\n",
+        )
+        .unwrap();
+        let caps = load_config(&path).unwrap().load_caps();
+        assert_eq!(caps.warn_total, 10);
+        assert_eq!(caps.warn_concurrency, 4);
+        assert_eq!(caps.max_total, 500);
+        assert_eq!(caps.max_concurrency, 32);
+    }
+
+    #[test]
+    fn config_load_caps_malformed_value_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[load]\nwarn_total = \"lots\"\n").unwrap();
+        let err = load_config(&path).unwrap_err();
+        assert!(err.to_string().contains("config.toml"), "{err}");
     }
 
     #[test]

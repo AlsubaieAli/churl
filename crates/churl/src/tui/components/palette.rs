@@ -26,6 +26,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("environments & vars", Action::OpenEnvEditor),
     ("run sequence", Action::RunSequence),
     ("edit sequence", Action::EditSequence),
+    ("load test endpoint (concurrent)", Action::OpenLoadRunner),
     ("toggle response headers view", Action::ToggleHeadersView),
     ("toggle response wrap", Action::ToggleWrap),
     ("import collection (JSON)", Action::ImportCollection),

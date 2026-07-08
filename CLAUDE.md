@@ -62,14 +62,22 @@ crates/
                            #   jsonpath dep), prepare_step (resolver + prepended extracted scope), extract_step,
                            #   classify_step (single classify+extract seam), ordered_steps, run_sequence
                            #   (wiremock-tested); rejects ../absolute step endpoints, never panics
+      load.rs              # M7.5 concurrent-load runner (UI-free): run_load (N copies through execute(),
+                           #   bounded by futures' buffer_unordered + absolute-target pacing), classify (single
+                           #   Ok/Failed/Error seam), pure stats (nearest-rank percentiles), check_config/LoadCaps
+                           #   guardrail; run_load is the wiremock-tested twin the TUI launcher mirrors
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
                            #   substitute / substitute_request (M6); sequences prepend a highest-precedence
                            #   `extracted` scope (M7.4) — resolution never forked
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
-                           #   timeout_secs, max_body_bytes) + secrets heuristics (looks_like_secret_name,
+                           #   timeout_secs, max_body_bytes, the M7.5 [load] guardrail caps → Config::load_caps())
+                           #   + secrets heuristics (looks_like_secret_name,
                            #   is_template_placeholder, secret_violations incl. workspace [vars],
                            #   collection_secret_violations, auth_secret_violations)
-      history.rs           # rusqlite HistoryStore, user_version migrations
+      history.rs           # rusqlite HistoryStore, user_version migrations (append-only); migration 3 (M7.5)
+                           #   adds a SEPARATE load_batches table (LoadBatchSummary) — load runs write one
+                           #   summary row there, never to history (structural non-flooding); migration 4 ALTERs
+                           #   in the mean_ms column
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
                            #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core);
                            #   applies AuthWire effects (enabled user header with the same name wins)
@@ -90,7 +98,8 @@ crates/
       tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
       tui/
         app.rs             # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor/
-                           #   SequenceRunner/SequenceEditor — M7.4)/AppMsg (incl. SequenceStep),
+                           #   SequenceRunner/SequenceEditor — M7.4 / LoadRunner — M7.5)/AppMsg (incl. SequenceStep,
+                           #   LoadStarted/LoadResult),
                            #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
                            #   lookup_ctx; in-app CRUD via core seams; tokio::select! loop, render; send-time {{var}}
                            #   resolution, profile switching, Theme; send/cancel, history, highlight cache
@@ -110,7 +119,10 @@ crates/
                            #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors),
                            #   sequence_runner (M7.4 run view: live per-step status/timing + reused response viewer,
                            #     masked extracted values; UI-only, App drives via core primitives),
-                           #   sequence_editor (M7.4 §4: steps + extraction-rule CRUD + reorder + on_error, save_sequence)
+                           #   sequence_editor (M7.4 §4: steps + extraction-rule CRUD + reorder + on_error, save_sequence),
+                           #   load_runner (M7.5 Mode::LoadRunner: editable config header + live O(viewport) results
+                           #     list + reused response viewer + stats line; UI-only, App owns the single
+                           #     buffer_unordered launcher + load_abort + generation guard + [load] guardrail)
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
       cli_import.rs        # `churl import` integration tests against the real binary

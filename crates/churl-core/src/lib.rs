@@ -8,6 +8,7 @@ pub mod history;
 pub mod http;
 pub mod import;
 pub mod interchange;
+pub mod load;
 pub mod model;
 pub mod persistence;
 pub mod sequence;

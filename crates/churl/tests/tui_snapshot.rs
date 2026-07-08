@@ -906,6 +906,9 @@ fn every_palette_command_dispatches() {
             // Sequences (M7.4): no workspace / no sequence selected → warn.
             Action::RunSequence => expect_status(&mut app, "select a sequence"),
             Action::EditSequence => expect_status(&mut app, "open a workspace first"),
+            // Load runner (M7.5): with no endpoint selected it warns rather than
+            // opening the modal.
+            Action::OpenLoadRunner => expect_status(&mut app, "no endpoint selected"),
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }

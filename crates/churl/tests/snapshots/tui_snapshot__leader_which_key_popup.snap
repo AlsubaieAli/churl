@@ -12,11 +12,11 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
 ┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃└────────────────────┃ c  cancel request         ┃
-┃                            ┃┌ Response ──────────┃ a  edit sequence          ┃
-┃                            ┃│no response yet     ┃ v  Environments & vars    ┃
+┃                            ┃│                    ┃ c  cancel request         ┃
+┃                            ┃└────────────────────┃ a  edit sequence          ┃
+┃                            ┃┌ Response ──────────┃ v  Environments & vars    ┃
+┃                            ┃│no response yet     ┃ l  load test endpoint     ┃
 ┃                            ┃│                    ┃ f  request picker         ┃
 ┃                            ┃│no endpoint selected┃ w  workspace picker       ┃
 ┃                            ┃│                    ┃ q  quit                   ┃

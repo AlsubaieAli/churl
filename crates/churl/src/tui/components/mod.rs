@@ -8,6 +8,7 @@ pub mod fold;
 pub mod help;
 pub mod jump;
 pub mod line_editor;
+pub mod load_runner;
 pub mod message;
 pub mod method_menu;
 pub mod palette;
