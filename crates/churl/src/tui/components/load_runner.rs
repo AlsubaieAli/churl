@@ -437,8 +437,9 @@ impl LoadRunnerState {
         }
     }
 
-    /// Config-header keys: pick a field, or begin editing it. The fields render
-    /// as a horizontal row, so field nav is `h`/`l` + Left/Right (in-pane).
+    /// Config-header keys: pick a field, step its value, or begin editing it. The
+    /// fields render as a horizontal row, so field nav is `h`/`l` + Left/Right
+    /// (in-pane); `k`/Up increments and `j`/Down decrements the focused value.
     fn handle_config_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('l') | KeyCode::Right => {
@@ -447,8 +448,31 @@ impl LoadRunnerState {
             KeyCode::Char('h') | KeyCode::Left => {
                 self.field = self.field.prev();
             }
+            // k/up = increase, j/down = decrease (matches vertical arrow sense).
+            KeyCode::Char('k') | KeyCode::Up => self.step_field(1),
+            KeyCode::Char('j') | KeyCode::Down => self.step_field(-1),
             KeyCode::Char('i') | KeyCode::Enter => self.begin_edit(),
             _ => {}
+        }
+    }
+
+    /// Steps the focused field's value by `delta` (in its own unit: interval in
+    /// ms), clamping exactly like [`Self::commit_edit`] (total ≥ 1, concurrency
+    /// ≥ 1, interval ≥ 0ms). No-op while editing or while a run is in progress
+    /// (mirrors [`Self::begin_edit`]).
+    fn step_field(&mut self, delta: i64) {
+        if self.is_running() || self.editing.is_some() {
+            return;
+        }
+        let step =
+            |value: usize, min: usize| -> usize { (value as i64 + delta).max(min as i64) as usize };
+        match self.field {
+            LoadField::Total => self.cfg.total = step(self.cfg.total, 1),
+            LoadField::Concurrency => self.cfg.concurrency = step(self.cfg.concurrency, 1),
+            LoadField::Interval => {
+                let ms = step(self.cfg.interval.as_millis() as usize, 0);
+                self.cfg.interval = Duration::from_millis(ms as u64);
+            }
         }
     }
 
@@ -578,8 +602,8 @@ impl LoadRunnerState {
     }
 }
 
-/// The live progress + stats line, e.g. `12/50 done · 44 ok · 6 failed · min
-/// 12ms · p50 45ms · p95 120ms · max 210ms`.
+/// The live progress + stats line, e.g. `12/50 done · 44 ok · 6 failed · range
+/// 12–210ms · p50/p95 45/120ms · avg 78ms`.
 fn stats_line(state: &LoadRunnerState) -> String {
     let total = state.results.len();
     let s = &state.stats;
@@ -598,11 +622,9 @@ fn stats_line(state: &LoadRunnerState) -> String {
     if let (Some(min), Some(p50), Some(p95), Some(max), Some(mean)) =
         (ms(s.min), ms(s.median), ms(s.p95), ms(s.max), ms(s.mean))
     {
-        parts.push(format!("min {min}ms"));
-        parts.push(format!("p50 {p50}ms"));
-        parts.push(format!("p95 {p95}ms"));
-        parts.push(format!("max {max}ms"));
-        parts.push(format!("mean {mean}ms"));
+        parts.push(format!("range {min}–{max}ms"));
+        parts.push(format!("p50/p95 {p50}/{p95}ms"));
+        parts.push(format!("avg {mean}ms"));
     }
     parts.join(" · ")
 }
@@ -851,12 +873,21 @@ fn render_response(
     theme: &Theme,
 ) -> Option<HighlightJob> {
     let focused = state.focus == RunnerFocus::Response;
-    let row = state.results.get(state.selected)?;
+    // Always render the bordered "Response" pane, from the moment the runner
+    // opens. When there is no selectable row yet (pre-run), delegate to
+    // `response::render` with an `Idle` state so the pane draws the same
+    // bordered block + dim placeholder it uses for an idle/no-response row —
+    // never a blank right half (M7.5.2 L1). A selected row with a real response
+    // delegates to the same renderer with its own state, unchanged.
+    let render_state = match state.results.get(state.selected) {
+        Some(row) => &row.response,
+        None => &ResponseState::Idle,
+    };
     let outcome = response::render(
         frame,
         area,
         RenderCtx {
-            state: &row.response,
+            state: render_state,
             request: None,
             focused,
             scroll: state.resp_scroll,
@@ -881,7 +912,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &LoadRunnerState, theme: 
     } else {
         match state.focus {
             RunnerFocus::ConfigHeader => {
-                "h/l field · enter edit · r run · tab results · ctrl-c cancel · q close"
+                "h/l field · j/k adjust · enter edit · r run · tab results · ctrl-c cancel · q close"
             }
             RunnerFocus::Results => "j/k row · tab response · r re-run · ctrl-c cancel · q close",
             RunnerFocus::Response => "j/k scroll · W wrap · o/O fold · tab config · q close",
@@ -981,10 +1012,68 @@ mod tests {
         assert_eq!(r.field, LoadField::Concurrency);
         r.handle_key(key(KeyCode::Left));
         assert_eq!(r.field, LoadField::Total);
-        // j/k no longer move the field in config.
+        // j/k step the value now, not the field (see step_focused_field_value).
         r.handle_key(ch('j'));
         r.handle_key(ch('k'));
         assert_eq!(r.field, LoadField::Total);
+    }
+
+    #[test]
+    fn step_focused_field_value() {
+        let mut r = runner(); // total=10, concurrency=5, interval=0ms
+        // k/Up increments the focused field; j/Down decrements it.
+        r.handle_key(ch('k'));
+        assert_eq!(r.cfg.total, 11);
+        r.handle_key(key(KeyCode::Up));
+        assert_eq!(r.cfg.total, 12);
+        r.handle_key(ch('j'));
+        assert_eq!(r.cfg.total, 11);
+        r.handle_key(key(KeyCode::Down));
+        assert_eq!(r.cfg.total, 10);
+        // Concurrency steps too.
+        r.handle_key(ch('l')); // → Concurrency
+        r.handle_key(ch('k'));
+        assert_eq!(r.cfg.concurrency, 6);
+        // Interval steps by 1ms.
+        r.handle_key(ch('l')); // → Interval
+        r.handle_key(ch('k'));
+        assert_eq!(r.cfg.interval, Duration::from_millis(1));
+        r.handle_key(ch('j'));
+        assert_eq!(r.cfg.interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn step_field_clamps_at_minimums() {
+        let mut r = runner();
+        r.cfg.total = 1;
+        r.handle_key(ch('j')); // can't go below 1
+        assert_eq!(r.cfg.total, 1);
+        r.handle_key(ch('l')); // → Concurrency
+        r.cfg.concurrency = 1;
+        r.handle_key(ch('j'));
+        assert_eq!(r.cfg.concurrency, 1);
+        r.handle_key(ch('l')); // → Interval
+        r.cfg.interval = Duration::ZERO;
+        r.handle_key(ch('j')); // interval down-clamps at 0ms
+        assert_eq!(r.cfg.interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn step_field_is_noop_while_editing_or_running() {
+        // While editing, j/k feed the editor (digits ignored), not the stepper.
+        let mut r = runner();
+        r.handle_key(ch('i')); // begin edit of total (seed "10")
+        assert!(r.editing.is_some());
+        r.handle_key(ch('k'));
+        r.handle_key(ch('j'));
+        assert_eq!(r.cfg.total, 10, "stepping is disabled while editing");
+        // While running, config is locked entirely.
+        let mut r = runner();
+        r.reset_for_run();
+        let before = r.cfg.total;
+        r.handle_key(ch('k'));
+        r.handle_key(ch('j'));
+        assert_eq!(r.cfg.total, before, "stepping is disabled during a run");
     }
 
     #[test]
@@ -1163,7 +1252,13 @@ mod tests {
         assert!(line.contains("2/2 done"), "{line}");
         assert!(line.contains("1 ok"), "{line}");
         assert!(line.contains("1 failed"), "{line}");
-        assert!(line.contains("p95"), "{line}");
+        // Grouped latency parts (L3): range (en dash), p50/p95, avg.
+        assert!(line.contains("range 10–30ms"), "{line}");
+        assert!(line.contains("p50/p95"), "{line}");
+        assert!(line.contains("avg "), "{line}");
+        // Old separate labels are gone.
+        assert!(!line.contains("min "), "{line}");
+        assert!(!line.contains("mean "), "{line}");
     }
 
     // ---- render snapshots (TestBackend → deterministic plain text) ----
@@ -1206,6 +1301,24 @@ mod tests {
     fn snapshot_config_header_pre_run() {
         let mut r = runner();
         insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    /// L1: the Response pane must be a bordered, titled pane with a placeholder
+    /// from the moment the runner opens — never a blank right half — even though
+    /// there is no selectable results row yet (`results` is empty pre-run).
+    #[test]
+    fn response_pane_renders_pre_run() {
+        let mut r = runner();
+        assert!(r.results.is_empty(), "no rows before the first run");
+        let out = snapshot(&mut r);
+        assert!(
+            out.contains("Response"),
+            "titled Response pane missing pre-run:\n{out}"
+        );
+        assert!(
+            out.contains("no response yet"),
+            "idle placeholder missing pre-run:\n{out}"
+        );
     }
 
     #[test]

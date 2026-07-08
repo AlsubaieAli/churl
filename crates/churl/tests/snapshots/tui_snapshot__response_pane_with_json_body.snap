@@ -15,7 +15,7 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┏ Response ━━━━━ 200 OK · 142 ms · 30 B · 1 hdrs ┓
+│                            │┏ Respons 200 OK · 142 ms · 30 B · 1 header  [h] ┓
 │                            │┃{                                               ┃
 │                            │┃  "id": 1,                                      ┃
 │                            │┃  "name": "Ada"                                 ┃
