@@ -11,13 +11,14 @@
 //!    through to edtui when the request pane is focused.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
 use churl_core::history::{HistoryStore, NewHistoryEntry, default_state_path};
 use churl_core::http::ExecuteOptions;
+use churl_core::interchange::{self, JsonDialect};
 use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Response};
 use churl_core::persistence::{self, OpenWorkspace, PersistenceError};
 use churl_core::template::{Resolver, Scope};
@@ -134,6 +135,16 @@ pub enum PromptPurpose {
     Rename,
     /// Typed-name confirmation to delete the selected collection.
     DeleteCollectionConfirm,
+    /// Path of a JSON collection file to import into the workspace.
+    ImportCollection,
+    /// Destination path (inside the workspace) for a collection export in the
+    /// carried dialect.
+    ExportCollection(JsonDialect),
+    /// Destination path (inside the workspace) for a workspace export in the
+    /// carried dialect.
+    ExportWorkspace(JsonDialect),
+    /// A curl command to import as a new endpoint in the selected collection.
+    PasteCurl,
 }
 
 impl PromptPurpose {
@@ -144,6 +155,18 @@ impl PromptPurpose {
             PromptPurpose::NewCollection => "New collection",
             PromptPurpose::Rename => "Rename",
             PromptPurpose::DeleteCollectionConfirm => "Delete collection",
+            PromptPurpose::ImportCollection => "Import collection (JSON path)",
+            PromptPurpose::ExportCollection(JsonDialect::Postman) => {
+                "Export collection · Postman v2.1"
+            }
+            PromptPurpose::ExportCollection(JsonDialect::Native) => {
+                "Export collection · churl JSON"
+            }
+            PromptPurpose::ExportWorkspace(JsonDialect::Postman) => {
+                "Export workspace · Postman v2.1"
+            }
+            PromptPurpose::ExportWorkspace(JsonDialect::Native) => "Export workspace · churl JSON",
+            PromptPurpose::PasteCurl => "Paste curl",
         }
     }
 }
@@ -887,6 +910,14 @@ impl App {
             // `<leader>f` reuses the endpoint-search overlay as the request picker.
             Action::QuickJumpRequests => self.open_search()?,
             Action::QuickJumpWorkspaces => self.open_workspace_picker(),
+            Action::ImportCollection => self.begin_import_collection(),
+            Action::ExportCollectionPostman => self.begin_export_collection(JsonDialect::Postman),
+            Action::ExportCollectionNative => self.begin_export_collection(JsonDialect::Native),
+            Action::ExportWorkspacePostman => self.begin_export_workspace(JsonDialect::Postman),
+            Action::ExportWorkspaceNative => self.begin_export_workspace(JsonDialect::Native),
+            Action::PasteCurl => self.begin_paste_curl(),
+            Action::CopyAsCurl => self.copy_as_curl(false),
+            Action::CopyAsCurlResolved => self.copy_as_curl(true),
             Action::Up
             | Action::Down
             | Action::Select
@@ -2252,6 +2283,242 @@ impl App {
         self.mode = Mode::Prompt(purpose);
     }
 
+    // ---- M7.1 collection interchange ----
+
+    /// Palette: prompt for a JSON collection file path to import.
+    fn begin_import_collection(&mut self) {
+        if self.workspace.is_none() {
+            self.notify("no workspace open");
+            return;
+        }
+        self.open_prompt(PromptPurpose::ImportCollection, "");
+    }
+
+    /// Palette: prompt for an export destination for the selected collection.
+    fn begin_export_collection(&mut self, dialect: JsonDialect) {
+        let Some(name) = self.selected_collection_name() else {
+            self.notify("select a collection first");
+            return;
+        };
+        let seed = default_export_path(&name);
+        self.open_prompt(PromptPurpose::ExportCollection(dialect), &seed);
+    }
+
+    /// Palette: prompt for an export destination for the whole workspace.
+    fn begin_export_workspace(&mut self, dialect: JsonDialect) {
+        let Some(ws) = self.workspace.as_ref() else {
+            self.notify("no workspace open");
+            return;
+        };
+        let seed = default_export_path(&ws.manifest().name);
+        self.open_prompt(PromptPurpose::ExportWorkspace(dialect), &seed);
+    }
+
+    /// Palette: prompt for a curl command to import as a new endpoint.
+    fn begin_paste_curl(&mut self) {
+        if self.explorer.selected_collection_dir().is_none() {
+            self.notify("select a collection first");
+            return;
+        }
+        self.open_prompt(PromptPurpose::PasteCurl, "");
+    }
+
+    /// The display name of the collection the selection belongs to (a collection
+    /// row itself, or the collection owning the selected endpoint).
+    fn selected_collection_name(&self) -> Option<String> {
+        let dir = self.explorer.selected_collection_dir()?;
+        dir.file_name().and_then(|n| n.to_str()).map(str::to_owned)
+    }
+
+    /// Loads the selected collection's endpoints from disk (name + endpoints).
+    fn selected_collection_endpoints(&self) -> Option<(String, Vec<Endpoint>)> {
+        let dir = self.explorer.selected_collection_dir()?;
+        let name = dir.file_name()?.to_str()?.to_owned();
+        let collection = persistence::Collection {
+            name: name.clone(),
+            path: dir,
+        };
+        let endpoints = collection
+            .endpoints()
+            .ok()?
+            .into_iter()
+            .map(|(_, ep)| ep)
+            .collect();
+        Some((name, endpoints))
+    }
+
+    /// `C` / palette: copy the loaded request as a curl one-liner. `resolved`
+    /// substitutes `{{var}}`s first (secrets caution — the explicit opt-in).
+    fn copy_as_curl(&mut self, resolved: bool) {
+        let Some(selected) = self.selected.clone() else {
+            self.notify("no endpoint selected");
+            return;
+        };
+        let mut endpoint = selected.endpoint.clone();
+        // Fold in any unsaved edtui body edits so the copy matches what's shown.
+        let body_text = String::from(self.editor.lines.clone());
+        match endpoint.request.body.as_mut() {
+            Some(body) => body.content = body_text,
+            None if !body_text.is_empty() => {
+                endpoint.request.body = Some(Body {
+                    kind: BodyKind::Text,
+                    content: body_text,
+                });
+            }
+            None => {}
+        }
+        if resolved {
+            self.build_resolver(&selected)
+                .substitute_request(&mut endpoint.request);
+        }
+        let curl = churl_core::export::export_curl(&endpoint);
+        self.enqueue_clipboard(&curl);
+        if resolved {
+            self.notify("copied curl (vars resolved — may contain secrets)");
+        } else {
+            self.notify("copied curl");
+        }
+    }
+
+    /// Commits an import-collection prompt: read the file, map it, and write the
+    /// endpoints into the workspace (shared core `write_import`).
+    fn commit_import_collection(&mut self, path: String) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace open");
+            return Ok(());
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            self.notify("no path given");
+            return Ok(());
+        }
+        let json = match std::fs::read_to_string(path) {
+            Ok(json) => json,
+            Err(err) => {
+                self.notify(format!("import failed: cannot read {path}: {err}"));
+                return Ok(());
+            }
+        };
+        let import = match interchange::import_postman_v21(&json) {
+            Ok(import) => import,
+            Err(err) => {
+                self.notify(format!("import failed: {err}"));
+                return Ok(());
+            }
+        };
+        match interchange::write_import(&root, &import) {
+            Ok(summary) => {
+                self.reload_explorer()?;
+                let mut msg = format!(
+                    "imported {} endpoint(s) into {} collection(s)",
+                    summary.endpoints, summary.collections
+                );
+                if !summary.warnings.is_empty() {
+                    msg.push_str(&format!(" ({} warning(s))", summary.warnings.len()));
+                }
+                self.notify(msg);
+            }
+            Err(err) => self.notify(format!("import failed: {err}")),
+        }
+        Ok(())
+    }
+
+    /// Commits an export prompt for the given `scope`+`dialect` to `path` (which
+    /// must resolve inside the workspace root).
+    fn commit_export(&mut self, purpose: PromptPurpose, path: String) {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace open");
+            return;
+        };
+        let target = match export_target(&root, &path) {
+            Ok(target) => target,
+            Err(err) => {
+                self.notify(format!("export failed: {err}"));
+                return;
+            }
+        };
+        // Build the export string per scope + dialect.
+        let contents = match purpose {
+            PromptPurpose::ExportCollection(dialect) => {
+                let Some((name, endpoints)) = self.selected_collection_endpoints() else {
+                    self.notify("select a collection first");
+                    return;
+                };
+                interchange::export_collection(&name, &endpoints, dialect)
+            }
+            PromptPurpose::ExportWorkspace(dialect) => {
+                let ws = self
+                    .workspace
+                    .as_ref()
+                    .expect("root came from the workspace");
+                interchange::export_workspace(ws, dialect)
+            }
+            _ => return,
+        };
+        let contents = match contents {
+            Ok(contents) => contents,
+            Err(err) => {
+                self.notify(format!("export failed: {err}"));
+                return;
+            }
+        };
+        if let Some(parent) = target.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            self.notify(format!("export failed: {err}"));
+            return;
+        }
+        match std::fs::write(&target, contents) {
+            Ok(()) => {
+                let shown = target.strip_prefix(&root).unwrap_or(&target);
+                self.notify(format!("exported to {}", shown.display()));
+            }
+            Err(err) => self.notify(format!("export failed: {err}")),
+        }
+    }
+
+    /// Commits a paste-curl prompt: import the curl command and create an
+    /// endpoint in the selected collection.
+    fn commit_paste_curl(&mut self, curl: String) -> Result<()> {
+        let Some(dir) = self.explorer.selected_collection_dir() else {
+            self.notify("select a collection first");
+            return Ok(());
+        };
+        let result = match churl_core::import::import_curl(&curl) {
+            Ok(result) => result,
+            Err(err) => {
+                self.notify(format!("curl import failed: {err}"));
+                return Ok(());
+            }
+        };
+        let path = match persistence::create_endpoint(&dir, &result.endpoint.name) {
+            Ok(path) => path,
+            Err(err) => {
+                self.crud_error(err);
+                return Ok(());
+            }
+        };
+        // Overwrite the default endpoint with the imported request, keeping the
+        // collection-assigned seq.
+        let mut endpoint = result.endpoint;
+        endpoint.seq = persistence::load_endpoint(&path)
+            .map(|e| e.seq)
+            .unwrap_or(0);
+        if let Err(err) = persistence::save_endpoint(&path, &endpoint) {
+            self.crud_error(err);
+            return Ok(());
+        }
+        self.reload_explorer()?;
+        let mut msg = format!("pasted curl → {}", endpoint.name);
+        if !result.warnings.is_empty() {
+            msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
+        }
+        self.notify(msg);
+        // Guarded: loading the new endpoint must not silently discard dirty edits.
+        self.guarded_load(PendingLoad::File(path))?;
+        Ok(())
+    }
+
     /// Handles one key in a text-prompt overlay.
     fn handle_prompt_key(&mut self, key: KeyEvent, purpose: PromptPurpose) -> Result<()> {
         match key.code {
@@ -2321,6 +2588,11 @@ impl App {
                     Err(err) => self.crud_error(err),
                 }
             }
+            PromptPurpose::ImportCollection => self.commit_import_collection(text)?,
+            PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
+                self.commit_export(purpose, text)
+            }
+            PromptPurpose::PasteCurl => self.commit_paste_curl(text)?,
         }
         Ok(())
     }
@@ -3181,8 +3453,92 @@ fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
             .explorer
             .selected_name()
             .map(|name| format!("type \"{name}\" to confirm")),
+        PromptPurpose::ImportCollection => Some("path to a Postman v2.1 JSON file".to_owned()),
+        PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
+            Some("destination path (must stay inside the workspace)".to_owned())
+        }
+        PromptPurpose::PasteCurl => Some("paste a curl command".to_owned()),
         _ => None,
     }
+}
+
+/// A sensible default export destination inside the workspace: `exports/<slug>.json`.
+fn default_export_path(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "export" } else { slug };
+    format!("exports/{slug}.json")
+}
+
+/// Resolves a user-typed export path against the workspace `root`, refusing any
+/// path that escapes the root (`..` traversal or an absolute path outside it).
+/// The `root` is canonicalized (it exists); the target is normalized lexically
+/// (it may not exist yet, so `Path::canonicalize` cannot be used on it).
+fn export_target(root: &Path, input: &str) -> Result<PathBuf, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("no path given".to_owned());
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let joined = if Path::new(input).is_absolute() {
+        PathBuf::from(input)
+    } else {
+        root.join(input)
+    };
+    let normalized = lexical_normalize(&joined);
+    if !normalized.starts_with(&root) {
+        return Err("path escapes the workspace root".to_owned());
+    }
+    // The lexical check above can be fooled by a symlinked component *inside* the
+    // root that points elsewhere (the subsequent write follows symlinks).
+    // Canonicalize the deepest existing ancestor of the target and re-check it
+    // against the root, so an `exports -> /etc` symlink can't tunnel out.
+    if let Some(real) = existing_ancestor_canonical(&normalized)
+        && !real.starts_with(&root)
+    {
+        return Err("path escapes the workspace root (symlinked component)".to_owned());
+    }
+    Ok(normalized)
+}
+
+/// Canonicalizes the deepest ancestor of `path` that actually exists on disk
+/// (the target itself usually does not exist yet). Returns `None` if nothing up
+/// the chain resolves.
+fn existing_ancestor_canonical(path: &Path) -> Option<PathBuf> {
+    let mut probe = path;
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            return Some(real);
+        }
+        probe = probe.parent()?;
+    }
+}
+
+/// Resolves `.`/`..` components without touching the filesystem. A leading `..`
+/// that would climb above the path root simply pops nothing further (so an
+/// escaping path fails the later `starts_with` check).
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// The (title, question, key-hint) for a confirmation overlay.
@@ -3201,6 +3557,51 @@ fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'stati
 mod tests {
     use super::*;
     use churl_core::model::Timing;
+
+    #[test]
+    fn export_target_stays_inside_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A relative path resolves under the (canonicalized) root.
+        let target = export_target(root, "exports/api.json").unwrap();
+        let canon_root = root.canonicalize().unwrap();
+        assert!(target.starts_with(&canon_root), "{target:?}");
+        assert!(target.ends_with("exports/api.json"));
+        // A nested `..` that stays inside is fine.
+        let ok = export_target(root, "exports/../api.json").unwrap();
+        assert_eq!(ok, canon_root.join("api.json"));
+    }
+
+    #[test]
+    fn export_target_rejects_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(export_target(root, "../escape.json").is_err());
+        assert!(export_target(root, "exports/../../escape.json").is_err());
+        assert!(export_target(root, "/etc/passwd").is_err());
+        assert!(export_target(root, "   ").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_target_rejects_symlinked_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        // A symlinked dir inside the root that points elsewhere: lexically the
+        // target is "under" the root, but the write would follow the link out.
+        std::os::unix::fs::symlink(outside.path(), root.join("exports")).unwrap();
+        assert!(
+            export_target(root, "exports/leak.json").is_err(),
+            "a symlinked component must not tunnel out of the workspace"
+        );
+    }
+
+    #[test]
+    fn default_export_path_slugifies() {
+        assert_eq!(default_export_path("My API"), "exports/my-api.json");
+        assert_eq!(default_export_path("  "), "exports/export.json");
+    }
 
     fn meta() -> ResponseMeta {
         ResponseMeta {

@@ -131,6 +131,22 @@ pub enum Action {
     /// Open the quick-jump workspace picker (recently-opened workspaces). Bound
     /// to `<leader>w`.
     QuickJumpWorkspaces,
+    /// Import a JSON collection (path prompt) into the workspace.
+    ImportCollection,
+    /// Export the selected collection as Postman v2.1 JSON.
+    ExportCollectionPostman,
+    /// Export the selected collection as churl-native JSON.
+    ExportCollectionNative,
+    /// Export the whole workspace as Postman v2.1 JSON.
+    ExportWorkspacePostman,
+    /// Export the whole workspace as churl-native JSON.
+    ExportWorkspaceNative,
+    /// Paste a curl command as a new endpoint (path/curl prompt).
+    PasteCurl,
+    /// Copy the selected request as a curl one-liner (`{{var}}` verbatim).
+    CopyAsCurl,
+    /// Copy the selected request as a curl one-liner with `{{var}}`s resolved.
+    CopyAsCurlResolved,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -220,6 +236,42 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::QuickJumpWorkspaces,
         "quick-jump-workspaces",
         "workspace picker",
+    ),
+    (
+        Action::ImportCollection,
+        "import-collection",
+        "import collection (JSON)",
+    ),
+    (
+        Action::ExportCollectionPostman,
+        "export-collection-postman",
+        "export collection · Postman v2.1",
+    ),
+    (
+        Action::ExportCollectionNative,
+        "export-collection-native",
+        "export collection · churl JSON",
+    ),
+    (
+        Action::ExportWorkspacePostman,
+        "export-workspace-postman",
+        "export workspace · Postman v2.1",
+    ),
+    (
+        Action::ExportWorkspaceNative,
+        "export-workspace-native",
+        "export workspace · churl JSON",
+    ),
+    (
+        Action::PasteCurl,
+        "paste-curl",
+        "paste curl as new endpoint",
+    ),
+    (Action::CopyAsCurl, "copy-as-curl", "copy request as curl"),
+    (
+        Action::CopyAsCurlResolved,
+        "copy-as-curl-resolved",
+        "copy request as curl (resolved vars)",
     ),
 ];
 
@@ -415,6 +467,11 @@ impl Default for KeyMap {
         // `t` so Space stays free everywhere (DECISIONS.md).
         overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
+        // Copy the loaded request as a curl one-liner. `C` (shift-c) is free in
+        // the Request overlay and globally (M7.1); the resolved-vars variant and
+        // all interchange import/export actions stay palette-only (rare, and a
+        // path prompt is the natural entry point).
+        overlay(PaneCtx::Request, key!(shift - c), Action::CopyAsCurl);
         // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
         overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
         // Response pane (M7): body/headers, wrap, search, match nav, folding,
