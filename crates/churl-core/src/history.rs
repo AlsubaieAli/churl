@@ -49,10 +49,15 @@ const MIGRATIONS: &[&str] = &[
         min_ms INTEGER,
         median_ms INTEGER,
         p95_ms INTEGER,
-        max_ms INTEGER,
-        mean_ms INTEGER
+        max_ms INTEGER
     );
     CREATE INDEX idx_load_batches_executed_at ON load_batches(executed_at_ms DESC);",
+    // 4: add the mean-latency column to load_batches (M7.5 fix round). Appended
+    // as an ALTER rather than editing migration 3's CREATE (migrations are
+    // append-only): a DB already at v3 — e.g. from an earlier dev build of this
+    // branch — skips migration 3 forever, so the column must arrive via its own
+    // migration to land on both fresh (v2→v3→v4) and already-v3 (→v4) databases.
+    "ALTER TABLE load_batches ADD COLUMN mean_ms INTEGER;",
 ];
 
 /// Error opening or querying the history store.
@@ -579,6 +584,101 @@ mod tests {
             .insert_load_batch(&batch(9, "https://api.test/x", false))
             .unwrap();
         assert_eq!(store.recent_load_batches(10).unwrap().len(), 1);
+    }
+
+    /// The number of columns named `mean_ms` on `load_batches` (must be exactly 1
+    /// — regression guard against `mean_ms` living in both migration 3's CREATE
+    /// and migration 4's ALTER, which would double-add on a fresh DB and fail).
+    fn mean_ms_column_count(store: &HistoryStore) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('load_batches') WHERE name = 'mean_ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_db_reaches_latest_with_mean_column_once() {
+        // A fresh DB runs every migration v0→latest; `mean_ms` must be present
+        // exactly once (only in migration 4's ALTER, never in migration 3).
+        let store = HistoryStore::in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(
+            mean_ms_column_count(&store),
+            1,
+            "mean_ms added exactly once"
+        );
+        store
+            .insert_load_batch(&batch(1, "https://api.test/x", false))
+            .unwrap();
+        assert_eq!(
+            store.recent_load_batches(1).unwrap()[0].summary.mean_ms,
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn old_v3_db_without_mean_ms_migrates_to_add_it() {
+        // Reproduces the real-binary bug: a DB already at the OLD user_version = 3
+        // (a `load_batches` table WITHOUT `mean_ms`, the pre-fix DDL). Opening it
+        // must run migration 4's ALTER so `insert_load_batch` (which writes
+        // `mean_ms`) succeeds — editing migration 3 in place would NOT have fixed
+        // this, since a v3 DB skips migration 3 forever.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Migrations 1 + 2 verbatim, then the OLD migration-3 load_batches DDL
+            // (no `mean_ms` column), and stamp user_version = 3.
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch(MIGRATIONS[1]).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE load_batches (
+                    id INTEGER PRIMARY KEY,
+                    executed_at_ms INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    endpoint_path TEXT,
+                    total INTEGER NOT NULL,
+                    concurrency INTEGER NOT NULL,
+                    ok_count INTEGER NOT NULL,
+                    fail_count INTEGER NOT NULL,
+                    error_count INTEGER NOT NULL,
+                    cancelled INTEGER NOT NULL DEFAULT 0,
+                    min_ms INTEGER,
+                    median_ms INTEGER,
+                    p95_ms INTEGER,
+                    max_ms INTEGER
+                );
+                CREATE INDEX idx_load_batches_executed_at ON load_batches(executed_at_ms DESC);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+            // Confirm the starting DB genuinely lacks the column.
+            let cols: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('load_batches') WHERE name = 'mean_ms'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(cols, 0, "the old v3 DB must not have mean_ms yet");
+        }
+
+        // Opening applies migration 4 (only) → mean_ms exists and inserts work.
+        let store = HistoryStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(mean_ms_column_count(&store), 1);
+        // The insert that broke the real binary now succeeds and round-trips mean.
+        store
+            .insert_load_batch(&batch(7, "https://api.test/y", false))
+            .unwrap();
+        assert_eq!(
+            store.recent_load_batches(1).unwrap()[0].summary.mean_ms,
+            Some(60)
+        );
     }
 
     #[test]

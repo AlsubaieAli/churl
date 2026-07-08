@@ -74,9 +74,10 @@ crates/
                            #   + secrets heuristics (looks_like_secret_name,
                            #   is_template_placeholder, secret_violations incl. workspace [vars],
                            #   collection_secret_violations, auth_secret_violations)
-      history.rs           # rusqlite HistoryStore, user_version migrations; migration 3 (M7.5) adds a
-                           #   SEPARATE load_batches table (LoadBatchSummary) — load runs write one summary
-                           #   row there, never to history (structural non-flooding)
+      history.rs           # rusqlite HistoryStore, user_version migrations (append-only); migration 3 (M7.5)
+                           #   adds a SEPARATE load_batches table (LoadBatchSummary) — load runs write one
+                           #   summary row there, never to history (structural non-flooding); migration 4 ALTERs
+                           #   in the mean_ms column
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
                            #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core);
                            #   applies AuthWire effects (enabled user header with the same name wins)
