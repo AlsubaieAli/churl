@@ -509,6 +509,208 @@ fn workspace_vars_secret_literal_refused() {
     assert!(!dir.path().join("churl.toml").exists());
 }
 
+// --- M7.3: delete/rename must actually prune on disk (editor correctness gate). ---
+//
+// The format-preserving `merge_tables` removes keys present on disk but absent
+// from the saved struct (verified here end-to-end: an editor whose "delete"
+// silently left the value on disk would be broken). Surviving keys keep their
+// comments; a deleted `[[profiles]]` entry disappears entirely.
+
+#[test]
+fn deleting_a_workspace_var_key_removes_it_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    // Hand-written manifest with two vars and comments on the survivor.
+    fs::write(
+        dir.path().join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n\n",
+            "[vars]\n",
+            "# the base URL, keep this\n",
+            "base_url = \"https://api.example.com\"\n",
+            "page_size = \"50\"\n",
+        ),
+    )
+    .unwrap();
+
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    ws.vars.remove("page_size");
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("page_size"),
+        "deleted var key must be gone from disk:\n{text}"
+    );
+    assert!(
+        text.contains("base_url"),
+        "sibling var must survive:\n{text}"
+    );
+    assert!(
+        text.contains("# the base URL, keep this"),
+        "surviving key keeps its comment:\n{text}"
+    );
+    // And it is gone semantically on reload.
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert!(!back.vars.contains_key("page_size"));
+    assert_eq!(
+        back.vars.get("base_url").map(String::as_str),
+        Some("https://api.example.com")
+    );
+}
+
+#[test]
+fn deleting_a_profile_removes_its_table_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::new(),
+        profiles: vec![
+            Profile {
+                name: "dev".into(),
+                vars: BTreeMap::from([("host".to_string(), "dev.example.com".to_string())]),
+            },
+            Profile {
+                name: "prod".into(),
+                vars: BTreeMap::from([("host".to_string(), "prod.example.com".to_string())]),
+            },
+        ],
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    // Delete the `prod` profile and re-save.
+    let mut edited = load_workspace_manifest(dir.path()).unwrap();
+    edited.profiles.retain(|p| p.name != "prod");
+    save_workspace_manifest(dir.path(), &edited).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("prod") && !text.contains("prod.example.com"),
+        "deleted profile must be gone from disk:\n{text}"
+    );
+    assert!(text.contains("dev"), "surviving profile stays:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(back.profiles.len(), 1);
+    assert_eq!(back.profiles[0].name, "dev");
+}
+
+#[test]
+fn renaming_a_profile_leaves_no_old_name_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        vars: BTreeMap::new(),
+        profiles: vec![Profile {
+            name: "staging".into(),
+            vars: BTreeMap::from([("host".to_string(), "stg.example.com".to_string())]),
+        }],
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let mut edited = load_workspace_manifest(dir.path()).unwrap();
+    edited.profiles[0].name = "prod".into();
+    save_workspace_manifest(dir.path(), &edited).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("staging"),
+        "old profile name must be gone:\n{text}"
+    );
+    assert!(text.contains("prod"), "new profile name present:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(back.profiles.len(), 1);
+    assert_eq!(back.profiles[0].name, "prod");
+    assert_eq!(
+        back.profiles[0].vars.get("host").map(String::as_str),
+        Some("stg.example.com")
+    );
+}
+
+#[test]
+fn renaming_a_var_key_leaves_no_old_name_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("churl.toml"),
+        concat!("name = \"demo\"\n\n", "[vars]\n", "old_name = \"keepme\"\n",),
+    )
+    .unwrap();
+
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    let value = ws.vars.remove("old_name").unwrap();
+    ws.vars.insert("new_name".to_string(), value);
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("old_name"),
+        "old var name must be gone:\n{text}"
+    );
+    assert!(text.contains("new_name"), "renamed var present:\n{text}");
+    let back = load_workspace_manifest(dir.path()).unwrap();
+    assert!(!back.vars.contains_key("old_name"));
+    assert_eq!(
+        back.vars.get("new_name").map(String::as_str),
+        Some("keepme")
+    );
+}
+
+#[test]
+fn deleting_a_collection_var_key_removes_it_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("users");
+    fs::create_dir(&coll).unwrap();
+    fs::write(
+        coll.join("folder.toml"),
+        concat!(
+            "[vars]\n",
+            "# keep this default\n",
+            "base_path = \"/v1/users\"\n",
+            "page_size = \"50\"\n",
+        ),
+    )
+    .unwrap();
+
+    let mut meta = load_collection_meta(&coll).unwrap();
+    meta.vars.remove("page_size");
+    save_collection_meta(&coll, &meta).unwrap();
+
+    let text = fs::read_to_string(coll.join("folder.toml")).unwrap();
+    assert!(
+        !text.contains("page_size"),
+        "deleted collection var must be gone:\n{text}"
+    );
+    assert!(text.contains("base_path"), "sibling survives:\n{text}");
+    assert!(
+        text.contains("# keep this default"),
+        "surviving key keeps its comment:\n{text}"
+    );
+    let back = load_collection_meta(&coll).unwrap();
+    assert!(!back.vars.contains_key("page_size"));
+    assert_eq!(
+        back.vars.get("base_path").map(String::as_str),
+        Some("/v1/users")
+    );
+}
+
+#[test]
+fn deleting_the_last_var_removes_the_vars_table() {
+    // Emptying a scope's vars must drop the whole `[vars]` table (the struct
+    // skips serializing an empty map, and merge prunes the stale table).
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nonly = \"one\"\n",
+    )
+    .unwrap();
+    let mut ws = load_workspace_manifest(dir.path()).unwrap();
+    ws.vars.clear();
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+    let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("[vars]") && !text.contains("only"),
+        "empty vars table must be pruned:\n{text}"
+    );
+}
+
 #[test]
 fn collection_meta_round_trip_preserves_comments() {
     let dir = tempfile::tempdir().unwrap();
