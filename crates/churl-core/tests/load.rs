@@ -68,11 +68,12 @@ async fn fires_exactly_total_copies_with_timings() {
 }
 
 /// A responder that records each request's arrival [`Instant`]. wiremock matches
-/// + calls `respond` under an internal lock (so arrivals are recorded serially
-/// and briefly), then applies the async `set_delay` OUTSIDE that lock — so the
+/// then calls `respond` under an internal lock (so arrivals are recorded serially
+/// and briefly), then applies the async `set_delay` outside that lock — so the
 /// holds genuinely overlap and the true peak in-flight count is recoverable from
-/// the arrival timestamps: request `i` is in flight over `[arrival_i, arrival_i +
-/// hold]`, and the maximum number of overlapping such intervals is the peak.
+/// the arrival timestamps: request `i` is in flight over the interval from
+/// `arrival_i` to `arrival_i` plus the hold, and the maximum number of
+/// overlapping such intervals is the peak concurrency.
 struct ArrivalRecorder {
     arrivals: Arc<Mutex<Vec<Instant>>>,
     hold: Duration,

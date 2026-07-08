@@ -65,6 +65,8 @@ pub enum Action {
     RunSequence,
     /// Edit the selected sequence, or create a new one (opens the sequence editor).
     EditSequence,
+    /// Open the concurrent-load runner for the selected endpoint (M7.5).
+    OpenLoadRunner,
     /// Focus the URL bar.
     FocusUrlBar,
     /// Edit the focused URL bar's URL inline.
@@ -187,6 +189,7 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
     (Action::RunSequence, "run-sequence", "run sequence"),
     (Action::EditSequence, "edit-sequence", "edit sequence"),
+    (Action::OpenLoadRunner, "load-runner", "load test endpoint"),
     (Action::FocusUrlBar, "focus-urlbar", "focus URL bar"),
     (Action::EditUrl, "edit-url", "edit URL"),
     (Action::MethodCycle, "method-cycle", "cycle method"),
@@ -516,6 +519,8 @@ impl Default for KeyMap {
         // opens the sequence editor (create/edit). Both were free.
         leader_bind(key!(r), Action::RunSequence);
         leader_bind(key!(a), Action::EditSequence);
+        // Concurrent-load runner (M7.5): `<leader>l` (l was free).
+        leader_bind(key!(l), Action::OpenLoadRunner);
 
         Self {
             map,
