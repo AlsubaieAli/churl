@@ -707,10 +707,6 @@ pub struct RenderCtx<'a> {
     pub jump_label: Option<char>,
     /// Monotonic tick counter for the spinner animation (tests can set to 0).
     pub tick_count: u64,
-    /// Overrides the idle-state body hint. `None` uses the main-viewer default
-    /// ("press ctrl-s to send" / "no endpoint selected"); the load runner sets
-    /// `Some("press r to run")` since it always has an endpoint and runs with `r`.
-    pub idle_hint: Option<&'a str>,
 }
 
 /// The result of a response-pane render: a highlight job to enqueue (on a cache
@@ -748,7 +744,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
 
     // For Done state, embed the stats as a right-aligned block title.
     let stats_title: Option<String> = if let ResponseState::Done { view } = ctx.state {
-        Some(status_summary(view, ctx.focused))
+        Some(status_summary(view))
     } else {
         None
     };
@@ -793,18 +789,13 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             let status_area = status_area_opt.unwrap();
             let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("no response yet")), status_area);
-            let body = match ctx.idle_hint {
-                // A caller-supplied hint (e.g. the load runner, which always has
-                // an endpoint and runs with `r`) replaces the main-viewer copy.
-                Some(hint) => vec![Line::from(""), Line::from(hint.to_owned())],
-                None => match ctx.request {
-                    Some(request) => vec![
-                        Line::from(format!("{} {}", request.method, request.url)),
-                        Line::from(""),
-                        Line::from("press ctrl-s to send"),
-                    ],
-                    None => vec![Line::from(""), Line::from("no endpoint selected")],
-                },
+            let body = match ctx.request {
+                Some(request) => vec![
+                    Line::from(format!("{} {}", request.method, request.url)),
+                    Line::from(""),
+                    Line::from("press ctrl-s to send"),
+                ],
+                None => vec![Line::from(""), Line::from("no endpoint selected")],
             };
             frame.render_widget(Paragraph::new(body), body_area);
         }
@@ -1134,7 +1125,7 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
         ResponseState::InFlight { .. } => "sending…".to_owned(),
         ResponseState::Cancelled => "cancelled".to_owned(),
         ResponseState::Failed { .. } => "request failed".to_owned(),
-        ResponseState::Done { view } => status_summary(view, false),
+        ResponseState::Done { view } => status_summary(view),
     };
     Line::from(text)
 }
@@ -1143,7 +1134,7 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
 /// `200 OK · 142 ms · 4.1 KB · 3 headers`), with view-mode markers (`· headers`,
 /// `· wrap`), search feedback, and a ` · truncated at <size>` suffix when the
 /// body hit the configured cap.
-fn status_summary(view: &ResponseView, focused: bool) -> String {
+fn status_summary(view: &ResponseView) -> String {
     let phrase = reason_phrase(view.status);
     let status = if phrase.is_empty() {
         view.status.to_string()
@@ -1156,11 +1147,9 @@ fn status_summary(view: &ResponseView, focused: bool) -> String {
         format!("{} headers", view.header_count)
     };
     // In body view, append a `[h]` affordance hinting the full-headers key so the
-    // count earns its spot (owner call) — but only while the pane is focused, for
-    // consistency with the request-tab digit prefixes that appear only on focus.
-    // In headers view the `· headers` marker below already shows the state, so
-    // omit the hint there.
-    let headers = if focused && view.view_mode == ViewMode::Body {
+    // count earns its spot (owner call). In headers view the `· headers` marker
+    // below already shows the state, so omit the hint there.
+    let headers = if view.view_mode == ViewMode::Body {
         format!("{count}  [h]")
     } else {
         count
@@ -1336,36 +1325,22 @@ mod tests {
     fn status_summary_markers() {
         let mut v = view("body");
         // The `· headers` view-mode marker (distinct from the `N headers` count).
-        assert!(!status_summary(&v, true).contains("· headers"));
-        assert!(!status_summary(&v, true).contains("wrap"));
+        assert!(!status_summary(&v).contains("· headers"));
+        assert!(!status_summary(&v).contains("wrap"));
         v.toggle_wrap();
-        assert!(status_summary(&v, true).contains("· wrap"));
+        assert!(status_summary(&v).contains("· wrap"));
         v.view_mode = ViewMode::Headers;
-        assert!(status_summary(&v, true).contains("· headers"));
-    }
-
-    #[test]
-    fn status_summary_gates_headers_hint_on_focus() {
-        // In body view the `[h]` affordance shows only while the pane is focused.
-        let v = view("body");
-        assert!(status_summary(&v, true).contains("[h]"));
-        assert!(!status_summary(&v, false).contains("[h]"));
-        // In headers view the hint is omitted regardless of focus.
-        let mut h = view("body");
-        h.view_mode = ViewMode::Headers;
-        assert!(!status_summary(&h, true).contains("[h]"));
-        assert!(!status_summary(&h, false).contains("[h]"));
+        assert!(status_summary(&v).contains("· headers"));
     }
 
     #[test]
     fn status_summary_appends_truncated_marker() {
         let mut v = view("body");
-        assert!(!status_summary(&v, true).contains("truncated"));
+        assert!(!status_summary(&v).contains("truncated"));
         v.truncated = true;
         v.byte_size = 10 * 1024 * 1024;
-        // Focused body view, so the `[h]` affordance is present.
         assert_eq!(
-            status_summary(&v, true),
+            status_summary(&v),
             "200 OK · 5 ms · 10.0 MB · 0 headers  [h] · truncated at 10.0 MB"
         );
     }
@@ -1379,16 +1354,16 @@ mod tests {
         };
         // 0 headers → plural.
         let zero = response_with("body", Vec::new(), false);
-        assert!(status_summary(&zero, true).contains("· 0 headers"));
+        assert!(status_summary(&zero).contains("· 0 headers"));
         // 1 header → singular.
         let one = response_with("body", vec![header("A")], false);
-        assert!(status_summary(&one, true).contains("· 1 header"));
-        assert!(!status_summary(&one, true).contains("1 headers"));
+        assert!(status_summary(&one).contains("· 1 header"));
+        assert!(!status_summary(&one).contains("1 headers"));
         // 2 headers → plural.
         let two = response_with("body", vec![header("A"), header("B")], false);
-        assert!(status_summary(&two, true).contains("· 2 headers"));
-        // Focused body view appends the `[h]` full-headers affordance after the count.
-        assert!(status_summary(&two, true).contains("2 headers  [h]"));
+        assert!(status_summary(&two).contains("· 2 headers"));
+        // Body view appends the `[h]` full-headers affordance after the count.
+        assert!(status_summary(&two).contains("2 headers  [h]"));
     }
 
     #[test]
@@ -1601,7 +1576,7 @@ mod tests {
         v.set_search("zzz".to_owned());
         assert_eq!(v.search().unwrap().count(), 0);
         assert!(v.search().is_some());
-        assert!(status_summary(&v, true).contains("no matches"));
+        assert!(status_summary(&v).contains("no matches"));
     }
 
     #[test]

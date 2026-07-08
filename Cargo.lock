@@ -330,6 +330,7 @@ dependencies = [
 name = "churl"
 version = "0.1.3"
 dependencies = [
+ "arboard",
  "base64",
  "churl-core",
  "clap",

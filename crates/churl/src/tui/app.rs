@@ -295,6 +295,15 @@ struct InFlightRequest {
     meta: ResponseMeta,
 }
 
+/// A clipboard copy queued by a key handler and flushed by the run loop (see
+/// [`App::pending_clipboard`]). Carries the capped payload plus the message to
+/// show **iff** a clipboard path succeeds — on total failure the loop reports
+/// "copy failed" instead, so the UI never claims a copy that did not happen.
+struct PendingCopy {
+    payload: String,
+    success_msg: String,
+}
+
 /// The whole TUI state. Constructible without a tokio runtime so snapshot
 /// tests can drive [`render`] through a `TestBackend`.
 pub struct App {
@@ -365,9 +374,12 @@ pub struct App {
     /// The highlight hash last enqueued but not yet returned; guards against
     /// re-enqueueing the same viewport twice (M7 highlight micro-nit).
     pending_highlight: Option<u64>,
-    /// A clipboard payload to flush to the terminal via OSC 52 after the next
-    /// key is handled (dispatch has no terminal handle; the run loop owns it).
-    pending_clipboard: Option<String>,
+    /// A clipboard copy queued by a key handler, flushed by the run loop after
+    /// the key is handled (native copy needs no terminal, but the OSC 52
+    /// fallback writes to the terminal backend, which dispatch has no handle
+    /// to). The success message is deferred until the copy actually runs so it
+    /// reflects reality (Constitution: fail loudly, never fake success).
+    pending_clipboard: Option<PendingCopy>,
     /// The incremental body-search input editor while `Mode::BodySearch` is open.
     body_search_editor: LineEditor,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
@@ -636,6 +648,16 @@ impl App {
         self.message = Some(Message::new(text));
     }
 
+    /// The success message of a queued-but-not-yet-flushed clipboard copy, if
+    /// any. Exposed for tests: the actual copy (and its real success/fail
+    /// message) runs in the terminal-owning run loop, which drives a real
+    /// clipboard — tests assert on the queued intent instead.
+    pub fn pending_copy_message(&self) -> Option<&str> {
+        self.pending_clipboard
+            .as_ref()
+            .map(|p| p.success_msg.as_str())
+    }
+
     /// Drains any lenient-load warnings the explorer accumulated (skipped /
     /// unparseable endpoint files) and, if there are any, surfaces an aggregate in
     /// the message row. A single bad file never aborts the load, but it is never
@@ -737,12 +759,23 @@ impl App {
                 maybe_event = events.next() => match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         self.handle_key(key)?;
-                        // Flush any clipboard payload a copy action queued: OSC 52
-                        // goes straight to the terminal's backend writer (dispatch
-                        // has no terminal handle). A write error is non-fatal — the
-                        // copy silently no-ops on terminals that reject it anyway.
-                        if let Some(payload) = self.pending_clipboard.take() {
-                            let _ = clipboard::copy_osc52(payload.as_str(), terminal.backend_mut());
+                        // Flush any clipboard copy a key handler queued. The
+                        // layered copy tries the native OS clipboard first, then
+                        // falls back to OSC 52 (with tmux/screen passthrough) on
+                        // the terminal's backend writer — which dispatch has no
+                        // handle to, so the run loop owns this step. The message
+                        // reports the real outcome (Constitution: fail loudly).
+                        if let Some(pending) = self.pending_clipboard.take() {
+                            let outcome = clipboard::copy(
+                                pending.payload.as_str(),
+                                terminal.backend_mut(),
+                            );
+                            let msg = if outcome.succeeded() {
+                                pending.success_msg
+                            } else {
+                                "copy failed".to_owned()
+                            };
+                            self.notify(msg);
                         }
                     }
                     Some(Ok(_)) => {} // resize etc. — redraw happens next iteration
@@ -1520,7 +1553,7 @@ impl App {
         self.copy_to_clipboard_view(&full, truncated);
     }
 
-    /// `Y`: copy the response cursor's logical line via OSC 52.
+    /// `Y`: copy the response cursor's logical line via the layered clipboard.
     fn response_copy_line(&mut self) {
         let Some(logical) = self.response_cursor_logical() else {
             return;
@@ -1529,48 +1562,47 @@ impl App {
             return;
         };
         let line = view.copy_line(logical);
-        self.enqueue_clipboard(&line);
-        self.notify("copied line");
+        self.enqueue_clipboard(&line, "copied line");
     }
 
     /// Copies the full-view text, reporting its size (with a `(truncated)` note
     /// when the body hit the size cap, and a `copied first X of Y` note when the
-    /// 1 MB OSC 52 cap kicked in).
+    /// 1 MB copy cap kicked in). The message is the *success* message; the run
+    /// loop swaps it for "copy failed" if no clipboard path works.
     fn copy_to_clipboard_view(&mut self, text: &str, body_truncated: bool) {
         let full_len = text.len();
-        let payload = self.enqueue_clipboard(text);
-        let capped = full_len > payload;
+        let (payload, queued) = clipboard::cap_payload(text);
+        let capped = full_len > queued;
         let mut msg = if capped {
             format!(
                 "copied first {} of {}",
-                response::fmt_bytes(payload),
+                response::fmt_bytes(queued),
                 response::fmt_bytes(full_len)
             )
         } else {
-            format!("copied {}", response::fmt_bytes(payload))
+            format!("copied {}", response::fmt_bytes(queued))
         };
         // The body-truncation note stacks with the cap note — both facts matter.
         if body_truncated {
             msg.push_str(" (truncated)");
         }
-        self.notify(msg);
+        self.pending_clipboard = Some(PendingCopy {
+            payload,
+            success_msg: msg,
+        });
     }
 
     /// Queues `text` (capped at [`clipboard::MAX_COPY_BYTES`], on a char
-    /// boundary) for an OSC 52 write on the next loop iteration. Returns the
-    /// number of bytes actually queued.
-    fn enqueue_clipboard(&mut self, text: &str) -> usize {
-        let payload = if text.len() > clipboard::MAX_COPY_BYTES {
-            let mut end = clipboard::MAX_COPY_BYTES;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text[..end].to_owned()
-        } else {
-            text.to_owned()
-        };
-        let len = payload.len();
-        self.pending_clipboard = Some(payload);
+    /// boundary) for a layered clipboard write on the next loop iteration.
+    /// `success_msg` is shown only if a clipboard path plausibly succeeded;
+    /// otherwise the run loop reports "copy failed". Returns the queued byte
+    /// count for callers that report it.
+    fn enqueue_clipboard(&mut self, text: &str, success_msg: impl Into<String>) -> usize {
+        let (payload, len) = clipboard::cap_payload(text);
+        self.pending_clipboard = Some(PendingCopy {
+            payload,
+            success_msg: success_msg.into(),
+        });
         len
     }
 
@@ -3335,12 +3367,12 @@ impl App {
                 .substitute_request(&mut endpoint.request);
         }
         let curl = churl_core::export::export_curl(&endpoint);
-        self.enqueue_clipboard(&curl);
-        if resolved {
-            self.notify("copied curl (vars resolved — may contain secrets)");
+        let success_msg = if resolved {
+            "copied curl (vars resolved — may contain secrets)"
         } else {
-            self.notify("copied curl");
-        }
+            "copied curl"
+        };
+        self.enqueue_clipboard(&curl, success_msg);
     }
 
     /// Commits an import-collection prompt: read the file, map it, and write the
@@ -4183,7 +4215,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         .as_ref()
                         .and_then(|j| j.label_for_pane(Pane::Response)),
                     tick_count: app.tick_count,
-                    idle_hint: None,
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
@@ -4234,7 +4265,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                         .as_ref()
                         .and_then(|j| j.label_for_pane(Pane::Response)),
                     tick_count: app.tick_count,
-                    idle_hint: None,
                 },
             );
             app.response_scroll = outcome.clamped_scroll;
