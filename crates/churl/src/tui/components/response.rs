@@ -1131,7 +1131,7 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
 }
 
 /// The one-line status summary for a completed response (e.g.
-/// `200 OK · 142 ms · 4.1 KB · 3 hdrs`), with view-mode markers (`· headers`,
+/// `200 OK · 142 ms · 4.1 KB · 3 headers`), with view-mode markers (`· headers`,
 /// `· wrap`), search feedback, and a ` · truncated at <size>` suffix when the
 /// body hit the configured cap.
 fn status_summary(view: &ResponseView) -> String {
@@ -1141,11 +1141,23 @@ fn status_summary(view: &ResponseView) -> String {
     } else {
         format!("{} {}", view.status, phrase)
     };
+    let count = if view.header_count == 1 {
+        "1 header".to_owned()
+    } else {
+        format!("{} headers", view.header_count)
+    };
+    // In body view, append a `[h]` affordance hinting the full-headers key so the
+    // count earns its spot (owner call). In headers view the `· headers` marker
+    // below already shows the state, so omit the hint there.
+    let headers = if view.view_mode == ViewMode::Body {
+        format!("{count}  [h]")
+    } else {
+        count
+    };
     let mut summary = format!(
-        "{status} · {} · {} · {} hdrs",
+        "{status} · {} · {} · {headers}",
         fmt_ms(view.timing.total),
         fmt_bytes(view.byte_size),
-        view.header_count
     );
     if view.view_mode == ViewMode::Headers {
         summary.push_str(" · headers");
@@ -1312,7 +1324,8 @@ mod tests {
     #[test]
     fn status_summary_markers() {
         let mut v = view("body");
-        assert!(!status_summary(&v).contains("headers"));
+        // The `· headers` view-mode marker (distinct from the `N headers` count).
+        assert!(!status_summary(&v).contains("· headers"));
         assert!(!status_summary(&v).contains("wrap"));
         v.toggle_wrap();
         assert!(status_summary(&v).contains("· wrap"));
@@ -1328,8 +1341,29 @@ mod tests {
         v.byte_size = 10 * 1024 * 1024;
         assert_eq!(
             status_summary(&v),
-            "200 OK · 5 ms · 10.0 MB · 0 hdrs · truncated at 10.0 MB"
+            "200 OK · 5 ms · 10.0 MB · 0 headers  [h] · truncated at 10.0 MB"
         );
+    }
+
+    #[test]
+    fn status_summary_pluralizes_header_count() {
+        let header = |name: &str| Header {
+            name: name.to_owned(),
+            value: "x".to_owned(),
+            enabled: true,
+        };
+        // 0 headers → plural.
+        let zero = response_with("body", Vec::new(), false);
+        assert!(status_summary(&zero).contains("· 0 headers"));
+        // 1 header → singular.
+        let one = response_with("body", vec![header("A")], false);
+        assert!(status_summary(&one).contains("· 1 header"));
+        assert!(!status_summary(&one).contains("1 headers"));
+        // 2 headers → plural.
+        let two = response_with("body", vec![header("A"), header("B")], false);
+        assert!(status_summary(&two).contains("· 2 headers"));
+        // Body view appends the `[h]` full-headers affordance after the count.
+        assert!(status_summary(&two).contains("2 headers  [h]"));
     }
 
     #[test]

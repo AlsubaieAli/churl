@@ -6,7 +6,7 @@ expression: snapshot(&mut r)
 "      ┏ Load · List users ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓      "
 "      ┃total=8 · concurrency=5 · min gap=0ms · max rate                                                      ┃      "
 "      ┃→ https://api.test/users                                                                              ┃      "
-"      ┃3/8 done · 1 ok · 1 failed · 1 errored · min 12ms · p50 12ms · p95 88ms · max 88ms · mean 50ms  runnin┃      "
+"      ┃3/8 done · 1 ok · 1 failed · 1 errored · range 12–88ms · p50/p95 12/88ms · avg 50ms  running          ┃      "
 "      ┃┏ Results ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ──────────────────────────────────────────────────┐┃      "
 "      ┃┃✓ #1    200  12ms                     ┃│no response yet                                             │┃      "
 "      ┃┃✗ #2    503  88ms                     ┃│                                                            │┃      "

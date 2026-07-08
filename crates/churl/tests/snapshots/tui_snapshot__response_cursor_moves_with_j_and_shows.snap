@@ -15,7 +15,7 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┏ Response ━━━━━ 200 OK · 142 ms · 22 B · 1 hdrs ┓
+│                            │┏ Respons 200 OK · 142 ms · 22 B · 1 header  [h] ┓
 │                            │┃{                                               ┃
 │                            │┃  "a": 1,                                       ┃
 │                            │┃  "b": 2                                        ┃
