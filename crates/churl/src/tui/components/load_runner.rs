@@ -1074,4 +1074,136 @@ mod tests {
         assert!(line.contains("1 failed"), "{line}");
         assert!(line.contains("p95"), "{line}");
     }
+
+    // ---- render snapshots (TestBackend → deterministic plain text) ----
+
+    use churl_core::model::{Header, Response, Timing};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn snapshot(state: &mut LoadRunnerState) -> String {
+        let backend = TestBackend::new(104, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        let cache = HashMap::new();
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, frame.area(), state, 0, &cache, &theme);
+            })
+            .expect("draw");
+        format!("{}", terminal.backend())
+    }
+
+    fn json_response(status: u16, body: &str) -> Response {
+        Response {
+            status,
+            headers: vec![Header {
+                name: "Content-Type".into(),
+                value: "application/json".into(),
+                enabled: true,
+            }],
+            body: body.as_bytes().to_vec(),
+            truncated: false,
+            timing: Timing {
+                connect: None,
+                total: Duration::from_millis(42),
+            },
+        }
+    }
+
+    #[test]
+    fn snapshot_config_header_pre_run() {
+        let mut r = runner();
+        insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    #[test]
+    fn snapshot_mid_run_live_stats_mixed_glyphs() {
+        let mut r = runner();
+        r.cfg.total = 8;
+        r.reset_for_run();
+        r.record_result(
+            0,
+            LoadStatus::Ok(200),
+            Some(Duration::from_millis(12)),
+            ResponseState::Idle,
+            ReqOutcome::Ok { status: 200 },
+        );
+        r.record_result(
+            1,
+            LoadStatus::Failed(503),
+            Some(Duration::from_millis(88)),
+            ResponseState::Idle,
+            ReqOutcome::Failed { status: 503 },
+        );
+        r.record_result(
+            2,
+            LoadStatus::Error("connection refused".into()),
+            None,
+            ResponseState::Idle,
+            ReqOutcome::Error("connection refused".into()),
+        );
+        // Two copies still in flight; the rest pending.
+        r.results[3].status = LoadStatus::Running;
+        r.results[4].status = LoadStatus::Running;
+        r.focus = RunnerFocus::Results;
+        insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    #[test]
+    fn snapshot_finished_with_failures_stats_line() {
+        let mut r = runner();
+        r.cfg.total = 5;
+        r.reset_for_run();
+        for (i, (status, outcome, ms)) in [
+            (LoadStatus::Ok(200), ReqOutcome::Ok { status: 200 }, 10u64),
+            (LoadStatus::Ok(200), ReqOutcome::Ok { status: 200 }, 20),
+            (
+                LoadStatus::Failed(500),
+                ReqOutcome::Failed { status: 500 },
+                30,
+            ),
+            (LoadStatus::Ok(200), ReqOutcome::Ok { status: 200 }, 40),
+            (
+                LoadStatus::Failed(500),
+                ReqOutcome::Failed { status: 500 },
+                50,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            r.record_result(
+                i,
+                status,
+                Some(Duration::from_millis(ms)),
+                ResponseState::Idle,
+                outcome,
+            );
+        }
+        r.running = false;
+        r.finished = true;
+        insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    #[test]
+    fn snapshot_selected_response_shown() {
+        let mut r = runner();
+        r.cfg.total = 2;
+        r.reset_for_run();
+        let view =
+            response::ResponseView::build(&json_response(200, "{\"ok\":true}"), r.next_view_gen());
+        r.record_result(
+            0,
+            LoadStatus::Ok(200),
+            Some(Duration::from_millis(42)),
+            ResponseState::Done { view },
+            ReqOutcome::Ok { status: 200 },
+        );
+        r.running = false;
+        r.finished = true;
+        r.selected = 0;
+        r.focus = RunnerFocus::Response;
+        insta::assert_snapshot!(snapshot(&mut r));
+    }
 }

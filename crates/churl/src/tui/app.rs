@@ -6081,4 +6081,251 @@ mod tests {
         assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
         assert!(app.selected.is_none());
     }
+
+    // ---- M7.5 concurrent-load runner ----
+
+    /// Builds an app with one selected endpoint (targeting `url`) and opens the
+    /// load runner over it. Client is `None`, so a run resets rows to Pending and
+    /// leaves them (runtime-free); the state machine is exercised by injecting
+    /// `on_load_started`/`on_load_result`.
+    fn load_app(root: &Path, url: &str) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("ping.toml"),
+            format!("seq = 0\nname = \"Ping\"\n\n[request]\nmethod = \"GET\"\nurl = \"{url}\"\n"),
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("ping.toml")))
+            .unwrap();
+        app.open_load_runner();
+        app
+    }
+
+    fn load_gen(app: &App) -> u64 {
+        app.load_runner.as_ref().unwrap().run_generation
+    }
+
+    fn load_status(app: &App, i: usize) -> LoadStatus {
+        app.load_runner.as_ref().unwrap().results[i].status.clone()
+    }
+
+    #[test]
+    fn load_runner_opens_with_resolved_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = load_app(dir.path(), "https://api.test/ping");
+        assert_eq!(app.mode, Mode::LoadRunner);
+        let runner = app.load_runner.as_ref().unwrap();
+        assert_eq!(runner.url, "https://api.test/ping");
+        assert_eq!(runner.endpoint_path.as_deref(), Some("api/ping.toml"));
+        assert!(!runner.running, "must not auto-run");
+        assert!(runner.results.is_empty(), "no rows until a run starts");
+        assert!(app.load_request.is_some(), "request resolved once at open");
+    }
+
+    #[test]
+    fn load_run_injected_results_update_stats_and_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // total=3, then start (client None → 3 pending rows, running).
+        app.load_runner.as_mut().unwrap().cfg.total = 3;
+        app.start_load_run();
+        let g = load_gen(&app);
+        assert!(app.load_runner.as_ref().unwrap().running);
+        assert_eq!(load_status(&app, 0), LoadStatus::Pending);
+
+        app.on_load_started(g, 0);
+        assert_eq!(load_status(&app, 0), LoadStatus::Running);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.on_load_result(g, 1, Ok(ok_resp(500, "b")));
+        assert!(!app.load_runner.as_ref().unwrap().finished);
+        app.on_load_result(g, 2, Err("connection refused".to_owned()));
+
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.finished && !runner.running && !runner.cancelled);
+        assert_eq!(runner.completed, 3);
+        assert_eq!(runner.stats.ok, 1);
+        assert_eq!(runner.stats.failed, 1);
+        assert_eq!(runner.stats.errored, 1);
+        assert_eq!(load_status(&app, 0), LoadStatus::Ok(200));
+        assert_eq!(load_status(&app, 1), LoadStatus::Failed(500));
+        assert!(matches!(load_status(&app, 2), LoadStatus::Error(_)));
+
+        // Exactly one batch summary row, none in per-endpoint history.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].summary.total, 3);
+        assert_eq!(batches[0].summary.ok_count, 1);
+        assert!(!batches[0].summary.cancelled);
+        assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn load_stale_result_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 2;
+        app.start_load_run();
+        let g = load_gen(&app);
+        // A result from a superseded generation must not land.
+        app.on_load_result(g + 99, 0, Ok(ok_resp(200, "x")));
+        assert_eq!(load_status(&app, 0), LoadStatus::Pending);
+        assert_eq!(app.load_runner.as_ref().unwrap().completed, 0);
+    }
+
+    #[test]
+    fn load_cancel_marks_pending_and_writes_partial_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.cancel_load_run();
+
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.finished && runner.cancelled && !runner.running);
+        assert_eq!(load_status(&app, 0), LoadStatus::Ok(200));
+        assert!(
+            runner.results[1..]
+                .iter()
+                .all(|r| r.status == LoadStatus::Cancelled),
+            "every non-terminal row is cancelled"
+        );
+        // The generation was bumped so a straggler result is dropped.
+        app.on_load_result(g, 1, Ok(ok_resp(200, "late")));
+        assert_eq!(load_status(&app, 1), LoadStatus::Cancelled);
+
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(
+            batches[0].summary.cancelled,
+            "partial summary marked cancelled"
+        );
+        assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    #[test]
+    fn load_guardrail_refuse_blocks_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        // Above the hard cap (default max_total = 10_000).
+        app.load_runner.as_mut().unwrap().cfg.total = 20_000;
+        app.request_load_run();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(!runner.running, "a refused run never starts");
+        assert!(runner.pending_confirm.is_none(), "refuse does not prompt");
+        assert!(app.message.is_some(), "refusal is surfaced loudly");
+    }
+
+    #[test]
+    fn load_guardrail_warn_requires_confirm_then_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        // Above warn_total (default 100), below the hard cap.
+        app.load_runner.as_mut().unwrap().cfg.total = 500;
+        app.request_load_run();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(!runner.running, "warn does not run immediately");
+        let confirm = runner.pending_confirm.clone().expect("confirm shown");
+        assert!(
+            confirm.contains("500"),
+            "confirm names the count: {confirm}"
+        );
+        assert!(
+            confirm.contains("https://api.test/ping"),
+            "confirm shows the target URL: {confirm}"
+        );
+        // Accepting the confirm (`y`) starts the run.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.pending_confirm.is_none());
+        assert!(runner.running, "confirmed run started");
+        assert_eq!(runner.results.len(), 500);
+    }
+
+    /// A request-counting responder that holds each request open, so a cancel
+    /// mid-batch is observable as "the server never saw the un-launched copies".
+    struct CountingSlowResponder {
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl wiremock::Respond for CountingSlowResponder {
+        fn respond(&self, _req: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            wiremock::ResponseTemplate::new(200).set_delay(self.delay)
+        }
+    }
+
+    /// The batch-cancel non-negotiable, proven live: the runner owns a SINGLE
+    /// launcher task; cancelling aborts it, which drops the `buffer_unordered`
+    /// fan-out and every in-flight reqwest future — so the un-launched copies of a
+    /// large batch are never fired. With concurrency 2 and a slow server, a cancel
+    /// right after launch means the server sees only a handful of the copies, not
+    /// all of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_cancel_aborts_the_batch_live() {
+        use churl_core::http::{DEFAULT_TIMEOUT, build_client};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(CountingSlowResponder {
+                count: Arc::clone(&count),
+                delay: Duration::from_millis(400),
+            })
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), &format!("{}/slow", server.uri()));
+        app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        {
+            let cfg = &mut app.load_runner.as_mut().unwrap().cfg;
+            cfg.total = 20;
+            cfg.concurrency = 2;
+            cfg.interval = Duration::ZERO;
+        }
+        app.start_load_run();
+        assert!(app.load_abort.is_some(), "a launcher task is running");
+
+        // Let the first couple of copies actually reach the server, then cancel.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        app.cancel_load_run();
+
+        // Give any leaked / detached work ample time to hit the server.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let seen = count.load(Ordering::SeqCst);
+        assert!(
+            seen < 20,
+            "cancel must abort the batch: the server saw {seen}/20 copies (all fired → cancel leaked)"
+        );
+        assert!(
+            app.load_runner.as_ref().unwrap().cancelled,
+            "runner marked cancelled"
+        );
+    }
 }
