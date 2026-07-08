@@ -17,7 +17,7 @@
 | M7 | Polish + perf + release | **done** |
 | M7.1 | Collection interchange (JSON import/export, in-TUI curl paste/copy) | **done** |
 | M7.2 | Quick-jump pickers (requests + workspaces) | **done** |
-| M7.3 | Environments & vars editor | planned |
+| M7.3 | Environments & vars editor | **done** |
 | M7.4 | Request sequences (E2E testing) | planned |
 | M7.5 | Concurrent requests (throttle / load testing) | planned |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
@@ -508,6 +508,11 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
 - Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
 - **Crash bugfix (folded in, owner 2026-07-08)**: opening a workspace aborts if a collection dir contains a `churl.toml`. `Collection::endpoints()` (persistence.rs) skips `FOLDER_FILENAME` (`folder.toml`) but **not** `MANIFEST_FILENAME` (`churl.toml`), so a nested workspace manifest is parsed as an `Endpoint` (`missing field 'request'`) and `load_endpoint(&path)?` propagates, killing the whole TUI load (surfaced at `app.rs:2821`). Repro: `churl --import-collection X.json` from a dir whose subdirs are themselves churl workspaces (the demo root). Fix: (1) skip `MANIFEST_FILENAME` in endpoint enumeration like `FOLDER_FILENAME`; (2) robustness — degrade a single unparseable endpoint file to a warning instead of aborting the load, and/or don't treat a subdir that is itself a workspace as a collection. Regression test on the nested-workspace layout.
+
+**Delivered** (2026-07-08):
+- **Crash fix + load resilience** — `Collection::endpoints()` now also skips `MANIFEST_FILENAME`; a new `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades a single unparseable endpoint to a warning instead of aborting. The TUI explorer/search load paths use the lenient variant and surface skipped files in the M6.7 message row (never crash, never silent). `read_dir` IO errors stay hard errors. Regression + resilience tests in `churl-core/tests/persistence.rs`.
+- **Save-prune correctness gate** — verified the format-preserving `merge_tables` already **prunes** keys/profiles absent from the saved struct (deleted var key gone, deleted `[[profiles]]` entry gone, renamed old name gone, emptied scope's `[vars]` table gone); no save-path change was needed. Proven end-to-end by new round-trip tests that re-read the file and assert the removal, with surviving keys' comments intact.
+- **Environments & variables editor** — a near-full-screen split-view modal (`<leader>v` / palette "environments & vars"): left column selects the scope (workspace / each collection / each profile, grouped, active profile marked `●`); right column edits its vars (`a` add, `enter`/`i` value, `r` name, `d` delete). Profile CRUD in the same view (`n` new, `r` rename, `d` delete, `x` set active). Explicit `w` save through the core persistence writers, dirty marker + discard confirm (`s`/`d`/`esc`). Secret-named literals are masked (`••••••`) and refused on save (placeholders pass). Live **precedence display**: each row is tagged ` ✓` (this scope wins) or ` → profile dev` (shadowed), with the full chain in the footer. Save live-refreshes the workspace + explorer so edits take effect without restart. State lives entirely in `churl` (`components/env_editor.rs`); `churl-core` gained nothing UI. Deviations recorded in DECISIONS.md.
 
 **Next**: M7.4
 
