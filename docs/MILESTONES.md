@@ -20,10 +20,15 @@
 | M7.3 | Environments & vars editor | planned |
 | M7.4 | Request sequences (E2E testing) | planned |
 | M7.5 | Concurrent requests (throttle / load testing) | planned |
+| M7.6 | Interchange parity (churl-native JSON import) | planned |
+| M7.7 | Response formatting + help search (UX round) | planned |
+| M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
 
 > M7.1–M7.5 scheduled 2026-07-07 (owner priority: "these features need to be ready before the plugin feature, right after release") — fractional numbers per the M6.5 precedent so baked-in M8/M9 references stay valid. They run after Ship 0.1 and before M8/M9; order within the block is a proposal, adjustable per session.
+
+> M7.6–M7.8 added 2026-07-08 from owner feature notes: interchange parity (churl-native JSON import, symmetric with export), a response-formatting/help UX round, and an install-lifecycle cluster (version pinning + self-update + uninstall). Same fractional scheme, same adjustable ordering, still before M8/M9. The M7.3 session also folds in the manifest-in-collection crash fix (see M7.3 deliverables).
 
 > Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
 
@@ -502,6 +507,7 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - Secrets rules unchanged: name-marker enforcement on save, masked display.
 - Resolver chain (cli > profile > collection > workspace > env) is *displayed*, not changed — the editor should make the winning value for a var name visible so precedence stops being a file-reading exercise.
 - Tests: editor state machine, save round-trip per scope, dirty-guard paths, snapshots.
+- **Crash bugfix (folded in, owner 2026-07-08)**: opening a workspace aborts if a collection dir contains a `churl.toml`. `Collection::endpoints()` (persistence.rs) skips `FOLDER_FILENAME` (`folder.toml`) but **not** `MANIFEST_FILENAME` (`churl.toml`), so a nested workspace manifest is parsed as an `Endpoint` (`missing field 'request'`) and `load_endpoint(&path)?` propagates, killing the whole TUI load (surfaced at `app.rs:2821`). Repro: `churl --import-collection X.json` from a dir whose subdirs are themselves churl workspaces (the demo root). Fix: (1) skip `MANIFEST_FILENAME` in endpoint enumeration like `FOLDER_FILENAME`; (2) robustness — degrade a single unparseable endpoint file to a warning instead of aborting the load, and/or don't treat a subdir that is itself a workspace as a collection. Regression test on the nested-workspace layout.
 
 **Next**: M7.4
 
@@ -533,6 +539,47 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - History: batch runs recorded in SQLite without flooding the per-endpoint history view (grouping decided in design).
 - Guardrail: this is a testing aid, not a load-cannon — sane default caps, loud confirmation above them.
 - Tests: wiremock concurrency suites (N-copy fan-out, cancel mid-batch, timing capture), results-view snapshots.
+
+**Next**: M7.6
+
+---
+
+## M7.6 — Interchange parity (churl-native JSON import)
+
+**Scope**: Close the import/export asymmetry from M7.1 (owner note 2026-07-08). M7.1 shipped Postman v2.1 JSON import + selectable-dialect export (incl. a churl-native JSON dialect), but import only accepts Postman — a file `churl export` produces in the native dialect can't be re-imported. Import should accept **every dialect export can produce**.
+
+**Deliverables**:
+- **churl-native JSON import** alongside the existing Postman v2.1 importer; dialect detected from the payload (or an explicit flag), routed through the shared collection-build seam from M7.1.
+- Symmetry contract: any file emitted by `churl export` (collection or workspace scope, any dialect) round-trips back through import. Add a round-trip corpus test asserting export→import→export stability, mirroring the M4 curl round-trip corpus.
+- Reuse the M7.1 F1/F4/F5 guarantees (writes a `churl.toml` so the TUI shows the import; slug-collision handling is explicit, not silent-merge).
+
+**Next**: M7.7
+
+---
+
+## M7.7 — Response formatting + help search (UX / viewer round)
+
+**Scope**: A focused viewer/overlay UX round (owner notes 2026-07-08). Two independent polish items that both live in the response viewer / overlay code, grouped like the earlier M6.x UX rounds.
+
+**Deliverables** (design session first):
+- **Response pretty-printer / reformatter**: re-indent structured bodies for readability — not just soft-wrap. Minified/single-line JSON (e.g. httpbin's) renders on one line today and `W` wrap doesn't help. Raw↔pretty toggle; pretty-by-default for known content-types. Covers **JSON**, **HTML**, and **XML**. Must interact cleanly with the existing display pipeline (syntect highlighting, JSON folding `o`/`O`, wrap, body search) — reformat is a transform *before* the fold/wrap/viewport stages, keeping the single content-type→formatter mapping point (`SyntaxToken::from_content_type`, M7-viewer plugin guardrail) rather than forking per-format paths.
+- **Help-overlay `/` quick-search**: `/` inside the `?` help pane filters/jumps to a binding, reusing the response body-search pattern (`/` `n` `N`, smart-case). Keeps the live-KeyMap-driven help from M6.7.
+- Tests: reformat round-trip + idempotence per content-type, pretty↔raw toggle preserves search/fold state, help-search filter/jump snapshots.
+
+**Next**: M7.8
+
+---
+
+## M7.8 — Lifecycle & distribution (version pinning, self-update, uninstall)
+
+**Scope**: Install/version/lifecycle cluster (owner notes 2026-07-08; `churl update` elevated from the post-release backlog). Three items that cohere around "what happens to an installed binary over time" and pair with the M7 installer.
+
+**Deliverables** (design session first):
+- **Per-project version pinning**: `churl.toml` declares a compatible churl version (a `churl_version`/compat field). On workspace open, compare against the running binary — **older** pin → warn and run (assume backward-compatible); **newer** pin → prompt to update (or refuse to open). Manifest field + open-time check; masks nothing about the resolver/persistence behaviour.
+- **`churl update` / `churl upgrade` self-update**: update the installed binary in place (fetch the latest release artifact matching the platform, verify, atomic-replace). Pairs with the version-pin prompt and the M7 `install.sh` release layout.
+- **Uninstall path**: a `churl uninstall` subcommand (and/or an `uninstall.sh`) that removes the binary and optionally state/config in the OS data dir, with a README "Uninstalling" section. Counterpart to `install.sh`.
+- Tests: manifest compat parse + older/newer/equal decision matrix, self-update artifact-resolution + replace (mocked), uninstall dry-run enumeration.
+- Note: package-manager distribution (Homebrew tap / AUR) stays in the backlog — this milestone is the built-in lifecycle commands, not third-party channels.
 
 **Next**: M8
 
