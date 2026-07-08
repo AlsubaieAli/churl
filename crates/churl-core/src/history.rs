@@ -49,7 +49,8 @@ const MIGRATIONS: &[&str] = &[
         min_ms INTEGER,
         median_ms INTEGER,
         p95_ms INTEGER,
-        max_ms INTEGER
+        max_ms INTEGER,
+        mean_ms INTEGER
     );
     CREATE INDEX idx_load_batches_executed_at ON load_batches(executed_at_ms DESC);",
 ];
@@ -143,6 +144,8 @@ pub struct LoadBatchSummary {
     pub p95_ms: Option<u64>,
     /// Maximum completed-request latency in ms.
     pub max_ms: Option<u64>,
+    /// Arithmetic-mean completed-request latency in ms.
+    pub mean_ms: Option<u64>,
 }
 
 /// A stored load-batch summary, as returned by [`HistoryStore::recent_load_batches`].
@@ -282,8 +285,8 @@ impl HistoryStore {
             "INSERT INTO load_batches
                (executed_at_ms, url, endpoint_path, total, concurrency,
                 ok_count, fail_count, error_count, cancelled,
-                min_ms, median_ms, p95_ms, max_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                min_ms, median_ms, p95_ms, max_ms, mean_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 summary.executed_at_ms,
                 summary.url,
@@ -298,6 +301,7 @@ impl HistoryStore {
                 ms_i64(summary.median_ms),
                 ms_i64(summary.p95_ms),
                 ms_i64(summary.max_ms),
+                ms_i64(summary.mean_ms),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -308,7 +312,7 @@ impl HistoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, executed_at_ms, url, endpoint_path, total, concurrency,
                     ok_count, fail_count, error_count, cancelled,
-                    min_ms, median_ms, p95_ms, max_ms
+                    min_ms, median_ms, p95_ms, max_ms, mean_ms
              FROM load_batches
              ORDER BY executed_at_ms DESC, id DESC
              LIMIT ?1",
@@ -332,6 +336,7 @@ impl HistoryStore {
                     median_ms: to_ms(row.get(11)?),
                     p95_ms: to_ms(row.get(12)?),
                     max_ms: to_ms(row.get(13)?),
+                    mean_ms: to_ms(row.get(14)?),
                 },
             })
         })?;
@@ -462,6 +467,7 @@ mod tests {
             median_ms: Some(45),
             p95_ms: Some(120),
             max_ms: Some(210),
+            mean_ms: Some(60),
         }
     }
 
@@ -479,6 +485,8 @@ mod tests {
             got[0].summary,
             batch(1_000, "https://api.test/users", false)
         );
+        // mean_ms round-trips (regression guard: added after the initial DDL).
+        assert_eq!(got[0].summary.mean_ms, Some(60));
     }
 
     #[test]
@@ -499,11 +507,13 @@ mod tests {
             median_ms: None,
             p95_ms: None,
             max_ms: None,
+            mean_ms: None,
         };
         store.insert_load_batch(&summary).unwrap();
         let got = &store.recent_load_batches(1).unwrap()[0].summary;
         assert_eq!(got, &summary);
         assert_eq!(got.min_ms, None);
+        assert_eq!(got.mean_ms, None);
         assert_eq!(got.endpoint_path, None);
     }
 

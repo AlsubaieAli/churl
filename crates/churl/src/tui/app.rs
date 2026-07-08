@@ -2196,14 +2196,13 @@ impl App {
     /// Aborting that single task drops the fan-out and cancels ALL in-flight
     /// requests — there is no detached per-request task to escape cancellation.
     fn start_load_run(&mut self) {
-        if let Some(handle) = self.load_abort.take() {
-            handle.abort();
-        }
+        // Interrupt any in-progress batch first — recording its partial summary
+        // (a re-run mid-batch must not silently lose the current run).
+        self.interrupt_running_batch();
         let (Some(runner), Some(request)) = (self.load_runner.as_mut(), self.load_request.clone())
         else {
             return;
         };
-        runner.run_generation += 1;
         runner.reset_for_run();
         let run_generation = runner.run_generation;
         let cfg = runner.cfg;
@@ -2337,18 +2336,38 @@ impl App {
         }
     }
 
-    /// Cancels the in-flight batch: aborts the single launcher (which drops the
-    /// fan-out and every in-flight request), bumps the generation so straggler
-    /// results are dropped, marks non-terminal rows cancelled, and writes the
-    /// partial summary (marked cancelled).
-    fn cancel_load_run(&mut self) {
+    /// The single interrupt seam shared by every batch-interrupt path (Ctrl-C
+    /// cancel, `r` re-run mid-batch, and close mid-batch): if a run is in
+    /// progress, record its partial summary marked cancelled (so a partial run is
+    /// never lost from `load_batches`), then abort the single launcher (dropping
+    /// the fan-out and every in-flight request) and bump the generation so
+    /// straggler results are dropped. Always bumps the generation, even for the
+    /// first run, so a fresh run starts on a distinct generation.
+    fn interrupt_running_batch(&mut self) {
+        let was_running = self
+            .load_runner
+            .as_ref()
+            .is_some_and(LoadRunnerState::is_running);
+        if was_running {
+            // Record the partial (whatever completed so far), marked cancelled.
+            self.write_load_summary(true);
+        }
         if let Some(handle) = self.load_abort.take() {
             handle.abort();
         }
+        if let Some(runner) = self.load_runner.as_mut() {
+            runner.run_generation += 1;
+        }
+    }
+
+    /// Cancels the in-flight batch (Ctrl-C): records the partial summary + aborts
+    /// the launcher + bumps the generation via the shared interrupt seam, then
+    /// marks non-terminal rows cancelled and settles the runner's finished state.
+    fn cancel_load_run(&mut self) {
+        self.interrupt_running_batch();
         let Some(runner) = self.load_runner.as_mut() else {
             return;
         };
-        runner.run_generation += 1;
         for row in &mut runner.results {
             if matches!(row.status, LoadStatus::Pending | LoadStatus::Running) {
                 row.status = LoadStatus::Cancelled;
@@ -2361,7 +2380,6 @@ impl App {
         runner.finished = true;
         runner.cancelled = true;
         runner.confirming_close = false;
-        self.write_load_summary(true);
         self.notify("load run cancelled");
     }
 
@@ -2387,6 +2405,7 @@ impl App {
             median_ms: ms(stats.median),
             p95_ms: ms(stats.p95),
             max_ms: ms(stats.max),
+            mean_ms: ms(stats.mean),
         };
         if let Some(Err(err)) = self
             .history
@@ -2413,15 +2432,12 @@ impl App {
         Ok(())
     }
 
-    /// Closes the runner, aborting any in-flight batch.
+    /// Closes the runner. If a batch is still running (close was confirmed via the
+    /// runner's `q`→`y` guard), records its partial summary + aborts + bumps the
+    /// generation through the shared interrupt seam before dropping the runner —
+    /// so a run interrupted by closing is never lost from `load_batches`.
     fn close_load_runner(&mut self) {
-        if let Some(handle) = self.load_abort.take() {
-            handle.abort();
-        }
-        // Bump the generation so a straggler result is dropped after close.
-        if let Some(runner) = self.load_runner.as_mut() {
-            runner.run_generation += 1;
-        }
+        self.interrupt_running_batch();
         self.load_runner = None;
         self.load_request = None;
         self.mode = Mode::Normal;
@@ -6166,6 +6182,8 @@ mod tests {
         assert_eq!(batches[0].summary.total, 3);
         assert_eq!(batches[0].summary.ok_count, 1);
         assert!(!batches[0].summary.cancelled);
+        // mean latency is persisted (ok_resp timings are 5ms; error has none).
+        assert_eq!(batches[0].summary.mean_ms, Some(5));
         assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 0);
     }
 
@@ -6218,6 +6236,83 @@ mod tests {
             "partial summary marked cancelled"
         );
         assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    #[test]
+    fn load_rerun_while_running_writes_cancelled_summary_and_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g1 = load_gen(&app);
+        app.on_load_result(g1, 0, Ok(ok_resp(200, "a")));
+        assert!(app.load_runner.as_ref().unwrap().running);
+
+        // `r` while running: cancel-record the partial, then restart fresh.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+        let runner = app.load_runner.as_ref().unwrap();
+        assert!(runner.running, "a fresh run started");
+        assert!(!runner.finished && !runner.cancelled);
+        assert!(runner.run_generation > g1, "fresh run on a new generation");
+        assert_eq!(runner.completed, 0, "fresh rows");
+        assert!(
+            runner
+                .results
+                .iter()
+                .all(|r| r.status == LoadStatus::Pending),
+            "every row reset to pending"
+        );
+
+        // The interrupted run left exactly one cancelled summary capturing what
+        // completed so far — the partial is not lost.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "the interrupted run's partial was recorded"
+        );
+        assert!(batches[0].summary.cancelled);
+        assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    #[test]
+    fn load_close_while_running_writes_cancelled_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        app.load_runner.as_mut().unwrap().cfg.total = 4;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
+        app.on_load_result(g, 1, Ok(ok_resp(500, "b")));
+
+        // Close mid-run: `q` asks to confirm, `y` closes.
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_runner.as_ref().unwrap().confirming_close);
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_runner.is_none(), "runner closed");
+        assert_eq!(app.mode, Mode::Normal);
+
+        // Closing mid-run recorded the partial (cancelled) summary.
+        let batches = app
+            .history
+            .as_ref()
+            .unwrap()
+            .recent_load_batches(10)
+            .unwrap();
+        assert_eq!(batches.len(), 1, "close mid-run recorded the partial");
+        assert!(batches[0].summary.cancelled);
+        assert_eq!(batches[0].summary.ok_count, 1);
+        assert_eq!(batches[0].summary.fail_count, 1);
     }
 
     #[test]

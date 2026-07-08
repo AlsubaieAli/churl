@@ -583,13 +583,17 @@ fn stats_line(state: &LoadRunnerState) -> String {
         parts.push(format!("{} errored", s.errored));
     }
     let ms = |d: Option<Duration>| d.map(|d| d.as_millis());
-    if let (Some(min), Some(p50), Some(p95), Some(max)) =
-        (ms(s.min), ms(s.median), ms(s.p95), ms(s.max))
+    // All latency fields are `Some` together (they derive from the same
+    // completed-request timings), so one guard covers them — no mean shown when
+    // nothing has completed.
+    if let (Some(min), Some(p50), Some(p95), Some(max), Some(mean)) =
+        (ms(s.min), ms(s.median), ms(s.p95), ms(s.max), ms(s.mean))
     {
         parts.push(format!("min {min}ms"));
         parts.push(format!("p50 {p50}ms"));
         parts.push(format!("p95 {p95}ms"));
         parts.push(format!("max {max}ms"));
+        parts.push(format!("mean {mean}ms"));
     }
     parts.join(" · ")
 }
@@ -1082,7 +1086,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot(state: &mut LoadRunnerState) -> String {
-        let backend = TestBackend::new(104, 24);
+        let backend = TestBackend::new(116, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let theme = Theme::default();
         let cache = HashMap::new();
