@@ -374,51 +374,39 @@ impl std::fmt::Display for Action {
 }
 
 /// A nested-leader submenu: `<leader><prefix>` descends into one of these, and a
-/// second key selects an action within it. New submenus (e.g. a future `Tabs`)
-/// slot in here + `all()` and get their default binds in [`KeyMap::default`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LeaderMenu {
-    /// `<leader>s`: sequence actions (add / open / run).
-    Sequences,
-    /// `<leader>l`: load-test actions (current endpoint / pick endpoint).
-    Load,
-    /// `<leader>t`: buffer/tab actions (next / prev / close / close-all).
-    Tabs,
+/// second key selects an action within it. Submenus are fully data-driven — the
+/// built-in three (sequences/load/tabs) are seeded as default data in
+/// [`KeyMap::default`], and a config `[keys.leader.<name>]` table creates or
+/// extends any submenu by name (M7.10). No closed enum of submenu kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submenu {
+    /// The which-key label shown next to the submenu prefix (e.g. `"sequences"`).
+    pub title: String,
+    /// The second-key continuations inside this submenu.
+    pub binds: HashMap<KeyCombination, Action>,
 }
 
-impl LeaderMenu {
-    /// The root key that descends into this submenu.
-    pub fn prefix_key(self) -> char {
-        match self {
-            LeaderMenu::Sequences => 's',
-            LeaderMenu::Load => 'l',
-            LeaderMenu::Tabs => 't',
+impl Submenu {
+    /// A new, empty submenu with the given which-key title.
+    fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            binds: HashMap::new(),
         }
-    }
-
-    /// The which-key label shown next to the submenu prefix.
-    pub fn label(self) -> &'static str {
-        match self {
-            LeaderMenu::Sequences => "sequences",
-            LeaderMenu::Load => "load",
-            LeaderMenu::Tabs => "tabs",
-        }
-    }
-
-    /// Every submenu, in a stable order.
-    pub fn all() -> [LeaderMenu; 3] {
-        [LeaderMenu::Sequences, LeaderMenu::Load, LeaderMenu::Tabs]
     }
 }
 
-/// A root-level leader binding: either a direct action or a descent into a
-/// submenu. Populated from the built-in root map + the `[keys.leader]` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A root-level leader binding: either a direct action or a descent into a named
+/// submenu. Populated from the built-in root map + the `[keys.leader]` table. The
+/// submenu is carried by name (not an enum variant) so config can wire arbitrary
+/// submenus (M7.10 dynamic leader submenus).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderEntry {
     /// A direct action dispatched from the root which-key popup.
     Act(Action),
-    /// A descent into a nested submenu.
-    Submenu(LeaderMenu),
+    /// A descent into a nested submenu, keyed by its name (the
+    /// [`KeyMap::submenus`] map key).
+    Submenu(String),
 }
 
 /// Error parsing an [`Action`] from its config name.
@@ -504,15 +492,14 @@ pub struct KeyMap {
     /// state and shows the which-key popup. Remappable via `leader_key` config.
     leader: KeyCombination,
     /// Root leader continuations: the second key of a `<leader>x` chord → a
-    /// direct action or a descent into a submenu. Populated from the built-in
-    /// root map + the `[keys.leader]` sub-table.
+    /// direct action or a descent into a named submenu. Populated from the
+    /// built-in root map + the `[keys.leader]` sub-table.
     leader_root: HashMap<KeyCombination, LeaderEntry>,
-    /// `<leader>s <key>` → action (sequences submenu).
-    sub_sequences: HashMap<KeyCombination, Action>,
-    /// `<leader>l <key>` → action (load submenu).
-    sub_load: HashMap<KeyCombination, Action>,
-    /// `<leader>t <key>` → action (tabs/buffers submenu).
-    sub_tabs: HashMap<KeyCombination, Action>,
+    /// Named leader submenus (M7.10 dynamic submenus): submenu name → its
+    /// `(title, binds)`. The built-in `sequences`/`load`/`tabs` are seeded in
+    /// [`Self::default`]; a config `[keys.leader.<name>]` table creates or
+    /// extends any submenu.
+    submenus: HashMap<String, Submenu>,
 }
 
 impl Default for KeyMap {
@@ -640,41 +627,65 @@ impl Default for KeyMap {
         // Copy the loaded request as a curl one-liner (`y` was free). Moved off
         // the Request-overlay `C` so it can't shadow body-editor text input.
         root_bind(key!(y), LeaderEntry::Act(Action::CopyAsCurl));
-        // Submenu descents (two-level which-key).
-        root_bind(key!(s), LeaderEntry::Submenu(LeaderMenu::Sequences));
-        root_bind(key!(l), LeaderEntry::Submenu(LeaderMenu::Load));
+        // Submenu descents (two-level which-key). The submenu names match the
+        // seeded `submenus` keys below; config can point new keys at them or
+        // create fresh submenus.
+        root_bind(key!(s), LeaderEntry::Submenu("sequences".to_owned()));
+        root_bind(key!(l), LeaderEntry::Submenu("load".to_owned()));
         // `<leader>t` descends into the tabs/buffers submenu. `t` is free at root.
-        root_bind(key!(t), LeaderEntry::Submenu(LeaderMenu::Tabs));
+        root_bind(key!(t), LeaderEntry::Submenu("tabs".to_owned()));
+
+        // The built-in submenus, seeded as default data (M7.10). Behaviour is
+        // byte-identical to the former hardcoded `sub_*` maps.
+        let mut submenus: HashMap<String, Submenu> = HashMap::new();
 
         // `<leader>s …`: sequence actions (add / open / run).
-        let mut sub_sequences = HashMap::new();
-        sub_sequences.insert(key!(a).normalized(), Action::EditSequence);
-        sub_sequences.insert(key!(o).normalized(), Action::OpenSequencePicker);
+        let mut sequences = Submenu::new("sequences");
+        sequences
+            .binds
+            .insert(key!(a).normalized(), Action::EditSequence);
+        sequences
+            .binds
+            .insert(key!(o).normalized(), Action::OpenSequencePicker);
+        // `<leader>s f` is the canonical "find/open a sequence" picker (M7.10),
+        // mirroring `<leader>f` for endpoints; `<leader>s o` is retained as an
+        // alias to the same action (one key for one job, but muscle memory kept).
+        sequences
+            .binds
+            .insert(key!(f).normalized(), Action::OpenSequencePicker);
         // D1: `<leader>s r` routes to a run-flavored chooser (pick which sequence
         // to run) instead of silently running `sequences[seq_cursor]`. The direct
         // `RunSequence` action stays reachable via the in-pane `r` + palette.
-        sub_sequences.insert(key!(r).normalized(), Action::RunSequencePick);
+        sequences
+            .binds
+            .insert(key!(r).normalized(), Action::RunSequencePick);
+        submenus.insert("sequences".to_owned(), sequences);
+
         // `<leader>l …`: load-test actions. `s` (load-a-sequence) is reserved for
         // a later composable-runs wave — do NOT bind it here.
-        let mut sub_load = HashMap::new();
-        sub_load.insert(key!(c).normalized(), Action::OpenLoadRunner);
-        sub_load.insert(key!(f).normalized(), Action::OpenLoadRunnerPick);
+        let mut load = Submenu::new("load");
+        load.binds
+            .insert(key!(c).normalized(), Action::OpenLoadRunner);
+        load.binds
+            .insert(key!(f).normalized(), Action::OpenLoadRunnerPick);
+        submenus.insert("load".to_owned(), load);
+
         // `<leader>t …`: buffer/tab actions. `n` next · `p` prev · `x` close ·
         // `X` (shift-x) close all. Do NOT touch `Tab`/`Shift-Tab` (cross-pane).
-        let mut sub_tabs = HashMap::new();
-        sub_tabs.insert(key!(n).normalized(), Action::BufferNext);
-        sub_tabs.insert(key!(p).normalized(), Action::BufferPrev);
-        sub_tabs.insert(key!(x).normalized(), Action::BufferClose);
-        sub_tabs.insert(key!(shift - x).normalized(), Action::BufferCloseAll);
+        let mut tabs = Submenu::new("tabs");
+        tabs.binds.insert(key!(n).normalized(), Action::BufferNext);
+        tabs.binds.insert(key!(p).normalized(), Action::BufferPrev);
+        tabs.binds.insert(key!(x).normalized(), Action::BufferClose);
+        tabs.binds
+            .insert(key!(shift - x).normalized(), Action::BufferCloseAll);
+        submenus.insert("tabs".to_owned(), tabs);
 
         Self {
             map,
             overlays,
             leader: key!(space).normalized(),
             leader_root,
-            sub_sequences,
-            sub_load,
-            sub_tabs,
+            submenus,
         }
     }
 }
@@ -698,30 +709,29 @@ impl KeyMap {
         KeyCombination::from(key) == self.leader
     }
 
-    /// The submenu map for `menu`.
-    fn submenu(&self, menu: LeaderMenu) -> &HashMap<KeyCombination, Action> {
-        match menu {
-            LeaderMenu::Sequences => &self.sub_sequences,
-            LeaderMenu::Load => &self.sub_load,
-            LeaderMenu::Tabs => &self.sub_tabs,
-        }
+    /// The submenu named `name`, if it exists.
+    fn submenu(&self, name: &str) -> Option<&Submenu> {
+        self.submenus.get(name)
     }
 
     /// Looks up a *root* leader continuation (a direct action or a descent).
     pub fn leader_root_lookup(&self, key: KeyEvent) -> Option<LeaderEntry> {
-        self.leader_root.get(&KeyCombination::from(key)).copied()
+        self.leader_root.get(&KeyCombination::from(key)).cloned()
     }
 
-    /// Looks up a leader continuation inside `menu` (the third key of a
-    /// `<leader><prefix><key>` chord).
-    pub fn leader_sub_lookup(&self, menu: LeaderMenu, key: KeyEvent) -> Option<Action> {
-        self.submenu(menu).get(&KeyCombination::from(key)).copied()
+    /// Looks up a leader continuation inside the submenu named `menu` (the third
+    /// key of a `<leader><prefix><key>` chord).
+    pub fn leader_sub_lookup(&self, menu: &str, key: KeyEvent) -> Option<Action> {
+        self.submenu(menu)?
+            .binds
+            .get(&KeyCombination::from(key))
+            .copied()
     }
 
     /// Every `(key combination, action)` binding reachable through the leader —
-    /// root direct actions AND both submenu maps, unordered. Submenu actions are
-    /// keyed by their *second* key only; callers wanting the full chord string
-    /// use [`Self::leader_combos_for`].
+    /// root direct actions AND every submenu's binds, unordered. Submenu actions
+    /// are keyed by their *second* key only; callers wanting the full chord
+    /// string use [`Self::leader_combos_for`].
     pub fn iter_leader(&self) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
         let root = self
             .leader_root
@@ -730,11 +740,10 @@ impl KeyMap {
                 LeaderEntry::Act(action) => Some((*combo, *action)),
                 LeaderEntry::Submenu(_) => None,
             });
-        let subs = LeaderMenu::all().into_iter().flat_map(move |menu| {
-            self.submenu(menu)
-                .iter()
-                .map(|(combo, action)| (*combo, *action))
-        });
+        let subs = self
+            .submenus
+            .values()
+            .flat_map(|menu| menu.binds.iter().map(|(combo, action)| (*combo, *action)));
         root.chain(subs)
     }
 
@@ -749,24 +758,32 @@ impl KeyMap {
             })
     }
 
-    /// Every `(key combination, action)` bind inside `menu`, unordered — for the
-    /// which-key submenu popup.
-    pub fn iter_submenu(
-        &self,
-        menu: LeaderMenu,
-    ) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
+    /// Every `(key combination, action)` bind inside the submenu named `menu`,
+    /// unordered — for the which-key submenu popup. An unknown name yields an
+    /// empty iterator.
+    pub fn iter_submenu(&self, menu: &str) -> impl Iterator<Item = (KeyCombination, Action)> + '_ {
         self.submenu(menu)
-            .iter()
-            .map(|(combo, action)| (*combo, *action))
+            .into_iter()
+            .flat_map(|menu| menu.binds.iter().map(|(combo, action)| (*combo, *action)))
     }
 
-    /// The `(prefix key, label)` of every leader submenu, sorted by prefix.
-    pub fn leader_menu_combos(&self) -> Vec<(String, &'static str)> {
-        let mut out: Vec<(String, &'static str)> = self
+    /// The which-key title of the submenu named `menu`, or the name itself when
+    /// the submenu has no explicit title (a config-created submenu with no seed).
+    pub fn submenu_title(&self, menu: &str) -> String {
+        self.submenu(menu)
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|| menu.to_owned())
+    }
+
+    /// The `(prefix key, label)` of every reachable leader submenu, sorted by
+    /// prefix. A descent whose submenu is missing (dangling) falls back to the
+    /// name as its label so which-key still shows the row.
+    pub fn leader_menu_combos(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
             .leader_root
             .iter()
             .filter_map(|(combo, entry)| match entry {
-                LeaderEntry::Submenu(menu) => Some((combo.to_string(), menu.label())),
+                LeaderEntry::Submenu(name) => Some((combo.to_string(), self.submenu_title(name))),
                 LeaderEntry::Act(_) => None,
             })
             .collect();
@@ -776,7 +793,9 @@ impl KeyMap {
 
     /// All leader chords bound to `action`, sorted. Root actions render as the
     /// second key (e.g. `"c"`); submenu actions as the full chord (e.g. `"s r"`)
-    /// so `?` help and `churl keymaps` show the complete path.
+    /// so `?` help and `churl keymaps` show the complete path. A submenu's prefix
+    /// is the root key that descends into it (looked up live, so config-renamed
+    /// descents render correctly).
     pub fn leader_combos_for(&self, action: Action) -> Vec<String> {
         let mut combos: Vec<String> = self
             .leader_root
@@ -786,11 +805,21 @@ impl KeyMap {
                 _ => None,
             })
             .collect();
-        for menu in LeaderMenu::all() {
-            let prefix = menu.prefix_key();
-            for (combo, bound) in self.submenu(menu).iter() {
+        // Map each submenu name to the root prefix keys that descend into it.
+        for (name, menu) in &self.submenus {
+            let prefixes: Vec<String> = self
+                .leader_root
+                .iter()
+                .filter_map(|(combo, entry)| match entry {
+                    LeaderEntry::Submenu(n) if n == name => Some(combo.to_string()),
+                    _ => None,
+                })
+                .collect();
+            for (combo, bound) in &menu.binds {
                 if *bound == action {
-                    combos.push(format!("{prefix} {combo}"));
+                    for prefix in &prefixes {
+                        combos.push(format!("{prefix} {combo}"));
+                    }
                 }
             }
         }
@@ -832,28 +861,20 @@ impl KeyMap {
                 }
                 continue;
             }
-            // `[keys.leader.sequences]` / `[keys.leader.load]`: submenu tables
-            // whose values are action names. Handled BEFORE the PaneCtx lookup so
-            // they are not rejected as unknown tables.
+            // `[keys.leader.<name>]`: a submenu table whose values are action
+            // names. Handled BEFORE the PaneCtx lookup so it is not rejected as an
+            // unknown table. The submenu is created on first mention (M7.10
+            // dynamic submenus), so `g = "+git"` + `[keys.leader.git]` wires a
+            // brand-new working submenu; the built-in three are extended in place.
             if let Some(menu_name) = table.strip_prefix("leader.") {
-                let menu = LeaderMenu::all()
-                    .into_iter()
-                    .find(|m| m.label() == menu_name)
-                    .ok_or_else(|| {
-                        eyre!(
-                            "unknown leader submenu [keys.leader.{menu_name}] \
-                             (expected one of: sequences, load, tabs)"
-                        )
-                    })?;
                 let label = format!("[keys.leader.{menu_name}]");
+                let submenu = keymap
+                    .submenus
+                    .entry(menu_name.to_owned())
+                    .or_insert_with(|| Submenu::new(menu_name));
                 for (combo_str, action_str) in bindings {
                     let (combo, action) = parse_binding(combo_str, action_str, &label)?;
-                    let combo = combo.normalized();
-                    match menu {
-                        LeaderMenu::Sequences => keymap.sub_sequences.insert(combo, action),
-                        LeaderMenu::Load => keymap.sub_load.insert(combo, action),
-                        LeaderMenu::Tabs => keymap.sub_tabs.insert(combo, action),
-                    };
+                    submenu.binds.insert(combo.normalized(), action);
                 }
                 continue;
             }
@@ -864,7 +885,7 @@ impl KeyMap {
                     eyre!(
                         "unknown keymap table [keys.{table}] (expected one of: \
                          explorer, urlbar, request, response, leader, \
-                         leader.sequences, leader.load, leader.tabs)"
+                         or a leader submenu [keys.leader.<name>])"
                     )
                 })?;
             for (combo_str, action_str) in bindings {
@@ -878,6 +899,115 @@ impl KeyMap {
             }
         }
         Ok(keymap)
+    }
+
+    /// Load-time conflict/shadow validator (M7.10). Runs on the final keymap and
+    /// returns human-readable warnings for **genuine defects only** — documented
+    /// intentional single-pane overlay shadows (Response `h`/`/`, Request `1`–`4`,
+    /// …) produce ZERO warnings. Surfaced loudly but non-blocking (stderr + a
+    /// first-frame toast + a `churl keymaps` section).
+    ///
+    /// Takes the raw config tables (not just the collapsed keymap) so it can spot
+    /// two combo *strings* that normalize to the same key within one scope — a
+    /// silent last-wins the [`HashMap`] has already hidden by the time we hold a
+    /// built [`KeyMap`].
+    ///
+    /// Defect classes:
+    /// - (a) the leader key is also bound as a normal global/pane action (the dead
+    ///   `space=` case — the normal bind can never fire);
+    /// - (b) a `"+name"` descent whose `[keys.leader.name]` table does not exist
+    ///   (a dangling menu — descending shows an empty popup);
+    /// - (c) a `[keys.leader.name]` table that no descent points to (an orphan /
+    ///   unreachable menu);
+    /// - (d) two combo strings normalizing to the same key within one scope
+    ///   (silent last-wins);
+    /// - (e) a global bind shadowed in **every** pane overlay (globally
+    ///   unreachable).
+    pub fn validate(
+        &self,
+        global: &BTreeMap<String, String>,
+        overlays: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        // (a) The leader key is also a normal action bind — the normal bind is
+        // dead because the leader intercepts the key first.
+        if let Some(action) = self.map.get(&self.leader) {
+            warnings.push(format!(
+                "leader key `{}` is also bound as a global action ({}) — the action \
+                 can never fire because the leader intercepts the key first",
+                self.leader,
+                action.name(),
+            ));
+        }
+        for (ctx, overlay) in &self.overlays {
+            if let Some(action) = overlay.get(&self.leader) {
+                warnings.push(format!(
+                    "leader key `{}` is also bound in the {} overlay ({}) — the pane \
+                     bind can never fire because the leader intercepts the key first",
+                    self.leader,
+                    ctx.header(),
+                    action.name(),
+                ));
+            }
+        }
+
+        // (b) Dangling descents: a `"+name"` root descent with no submenu behind
+        // it. (c) Orphan menus: a submenu no descent reaches. Compute the set of
+        // descended-into names once.
+        let mut descended: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for entry in self.leader_root.values() {
+            if let LeaderEntry::Submenu(name) = entry {
+                descended.insert(name.as_str());
+                if !self.submenus.contains_key(name) {
+                    warnings.push(format!(
+                        "leader descent `+{name}` has no `[keys.leader.{name}]` table \
+                         — descending into it shows an empty menu"
+                    ));
+                }
+            }
+        }
+        for name in self.submenus.keys() {
+            if !descended.contains(name.as_str()) {
+                warnings.push(format!(
+                    "leader submenu `{name}` is unreachable — no `[keys.leader]` key \
+                     descends into it (add e.g. `<key> = \"+{name}\"`)"
+                ));
+            }
+        }
+
+        // (d) Two combo strings normalizing to the same key within one config
+        // scope — a silent last-wins the map has already collapsed.
+        warnings.extend(duplicate_combo_warnings("[keys]", global));
+        for (table, bindings) in overlays {
+            warnings.extend(duplicate_combo_warnings(
+                &format!("[keys.{table}]"),
+                bindings,
+            ));
+        }
+
+        // (e) A global bind shadowed in EVERY pane overlay — globally
+        // unreachable. Only flag combos that exist in all four overlays and are
+        // rebound (to any other action) in each, so a single-pane documented
+        // shadow (Response `h`) never trips this.
+        for (combo, global_action) in &self.map {
+            let shadowed_everywhere = PaneCtx::all().into_iter().all(|ctx| {
+                self.overlays
+                    .get(&ctx)
+                    .and_then(|o| o.get(combo))
+                    .is_some_and(|a| a != global_action)
+            });
+            if shadowed_everywhere {
+                warnings.push(format!(
+                    "global bind `{combo}` ({}) is shadowed in every pane overlay — \
+                     it is globally unreachable",
+                    global_action.name(),
+                ));
+            }
+        }
+
+        warnings.sort();
+        warnings
     }
 
     /// Looks up the action bound to a key event in the *global* map only.
@@ -930,6 +1060,29 @@ impl KeyMap {
     }
 }
 
+/// Warns about two combo *strings* in `bindings` that normalize to the same key
+/// (a silent last-wins). `where_` tags the scope. Bad combos are skipped here —
+/// they are a hard parse error elsewhere.
+fn duplicate_combo_warnings(where_: &str, bindings: &BTreeMap<String, String>) -> Vec<String> {
+    let mut seen: HashMap<KeyCombination, String> = HashMap::new();
+    let mut out = Vec::new();
+    for combo_str in bindings.keys() {
+        let Ok(combo) = KeyCombination::from_str(combo_str) else {
+            continue;
+        };
+        let combo = combo.normalized();
+        if let Some(first) = seen.get(&combo) {
+            out.push(format!(
+                "keys `{first}` and `{combo_str}` in {where_} both resolve to `{combo}` \
+                 — the later binding silently wins"
+            ));
+        } else {
+            seen.insert(combo, combo_str.clone());
+        }
+    }
+    out
+}
+
 /// Parses a `"combo" = "action"` config pair, tagging errors with `where_` (the
 /// config table name).
 fn parse_binding(
@@ -945,19 +1098,19 @@ fn parse_binding(
 }
 
 /// Parses a `[keys.leader]` root value: either an action name or a
-/// `"+<submenu>"` descent token (e.g. `"+sequences"`). `combo_str` tags errors.
+/// `"+<submenu>"` descent token (e.g. `"+sequences"`, `"+git"`). `combo_str` tags
+/// errors. Any non-empty name is accepted as a descent — a config may name a
+/// brand-new submenu; the load-time validator (not this parser) flags a descent
+/// with no matching `[keys.leader.<name>]` table (a dangling menu).
 fn parse_leader_entry(combo_str: &str, value: &str) -> Result<LeaderEntry> {
     if let Some(name) = value.strip_prefix('+') {
-        let menu = LeaderMenu::all()
-            .into_iter()
-            .find(|m| m.label() == name)
-            .ok_or_else(|| {
-                eyre!(
-                    "bad leader descent {value:?} for key {combo_str:?} in [keys.leader] \
-                     (expected one of: +sequences, +load, +tabs)"
-                )
-            })?;
-        return Ok(LeaderEntry::Submenu(menu));
+        if name.is_empty() {
+            return Err(eyre!(
+                "empty leader descent {value:?} for key {combo_str:?} in [keys.leader] \
+                 (expected a submenu name, e.g. +sequences)"
+            ));
+        }
+        return Ok(LeaderEntry::Submenu(name.to_owned()));
     }
     let action = Action::from_str(value)
         .map_err(|err| eyre!("bad action for key {combo_str:?} in [keys.leader]: {err}"))?;
@@ -1304,11 +1457,11 @@ mod tests {
         // Submenu descents.
         assert_eq!(
             keymap.leader_root_lookup(press(KeyCode::Char('s'), KeyModifiers::NONE)),
-            Some(LeaderEntry::Submenu(LeaderMenu::Sequences))
+            Some(LeaderEntry::Submenu("sequences".to_owned()))
         );
         assert_eq!(
             keymap.leader_root_lookup(press(KeyCode::Char('l'), KeyModifiers::NONE)),
-            Some(LeaderEntry::Submenu(LeaderMenu::Load))
+            Some(LeaderEntry::Submenu("load".to_owned()))
         );
         // An unbound root continuation returns None (the popup dismisses).
         assert_eq!(
@@ -1321,47 +1474,39 @@ mod tests {
     fn leader_submenu_lookups() {
         let keymap = KeyMap::default();
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Sequences,
-                press(KeyCode::Char('r'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('r'), KeyModifiers::NONE)),
             // D1: `<leader>s r` routes to the run-flavored chooser.
             Some(Action::RunSequencePick)
         );
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Sequences,
-                press(KeyCode::Char('a'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::EditSequence)
         );
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Sequences,
-                press(KeyCode::Char('o'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(Action::OpenSequencePicker)
+        );
+        // M7.10: `<leader>s f` is the canonical sequence finder (mirrors <leader>f).
+        assert_eq!(
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('f'), KeyModifiers::NONE)),
             Some(Action::OpenSequencePicker)
         );
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Load,
-                press(KeyCode::Char('c'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("load", press(KeyCode::Char('c'), KeyModifiers::NONE)),
             Some(Action::OpenLoadRunner)
         );
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Load,
-                press(KeyCode::Char('f'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("load", press(KeyCode::Char('f'), KeyModifiers::NONE)),
             Some(Action::OpenLoadRunnerPick)
         );
         // `<leader>l s` is reserved (composable-runs) — must stay unbound.
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Load,
-                press(KeyCode::Char('s'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("load", press(KeyCode::Char('s'), KeyModifiers::NONE)),
+            None
+        );
+        // An unknown submenu name yields no action.
+        assert_eq!(
+            keymap.leader_sub_lookup("nope", press(KeyCode::Char('a'), KeyModifiers::NONE)),
             None
         );
     }
@@ -1372,7 +1517,7 @@ mod tests {
         // `<leader>s` descends into the sequences submenu — it is NOT Send.
         assert_eq!(
             keymap.leader_root_lookup(press(KeyCode::Char('s'), KeyModifiers::NONE)),
-            Some(LeaderEntry::Submenu(LeaderMenu::Sequences))
+            Some(LeaderEntry::Submenu("sequences".to_owned()))
         );
         // Send is nowhere in the leader tree; Ctrl-S still sends.
         assert!(
@@ -1438,18 +1583,12 @@ mod tests {
         )]);
         let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Sequences,
-                press(KeyCode::Char('z'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('z'), KeyModifiers::NONE)),
             Some(Action::RunSequence)
         );
         // Defaults in the submenu survive.
         assert_eq!(
-            keymap.leader_sub_lookup(
-                LeaderMenu::Sequences,
-                press(KeyCode::Char('a'), KeyModifiers::NONE)
-            ),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::EditSequence)
         );
     }
@@ -1464,7 +1603,7 @@ mod tests {
         let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
         assert_eq!(
             keymap.leader_root_lookup(press(KeyCode::Char('g'), KeyModifiers::NONE)),
-            Some(LeaderEntry::Submenu(LeaderMenu::Load))
+            Some(LeaderEntry::Submenu("load".to_owned()))
         );
     }
 
@@ -1479,23 +1618,79 @@ mod tests {
     }
 
     #[test]
-    fn bad_leader_descent_token_errors() {
+    fn leader_descent_to_new_submenu_parses() {
+        // M7.10: any non-empty `"+name"` descent is valid — submenus are dynamic.
+        // A dangling one (no matching table) parses fine and is caught later by
+        // the load-time validator, not the parser.
         let overlays = BTreeMap::from([(
             "leader".to_string(),
             BTreeMap::from([("x".to_string(), "+bogus".to_string())]),
         )]);
-        let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
-        assert!(err.to_string().contains("bogus"), "{err}");
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        assert_eq!(
+            keymap.leader_root_lookup(press(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(LeaderEntry::Submenu("bogus".to_owned()))
+        );
     }
 
     #[test]
-    fn bad_leader_submenu_table_errors() {
+    fn empty_leader_descent_token_errors() {
+        // A bare `"+"` (no submenu name) is still a hard error.
         let overlays = BTreeMap::from([(
-            "leader.bogus".to_string(),
-            BTreeMap::from([("x".to_string(), "run-sequence".to_string())]),
+            "leader".to_string(),
+            BTreeMap::from([("x".to_string(), "+".to_string())]),
         )]);
         let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
-        assert!(err.to_string().contains("bogus"), "{err}");
+        assert!(err.to_string().contains("empty leader descent"), "{err}");
+    }
+
+    #[test]
+    fn leader_submenu_table_creates_new_submenu() {
+        // M7.10: `[keys.leader.git]` creates a brand-new submenu (dynamic).
+        let overlays = BTreeMap::from([
+            (
+                "leader".to_string(),
+                BTreeMap::from([("g".to_string(), "+git".to_string())]),
+            ),
+            (
+                "leader.git".to_string(),
+                BTreeMap::from([("s".to_string(), "save".to_string())]),
+            ),
+        ]);
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        assert_eq!(
+            keymap.leader_root_lookup(press(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Some(LeaderEntry::Submenu("git".to_owned()))
+        );
+        assert_eq!(
+            keymap.leader_sub_lookup("git", press(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(Action::Save)
+        );
+        // The new submenu appears in the which-key submenu list, reachable via `g`.
+        assert!(
+            keymap
+                .leader_menu_combos()
+                .iter()
+                .any(|(k, l)| k == "g" && l == "git")
+        );
+        // And a clean end-to-end config produces no validator warnings.
+        let overlays_config = overlays.clone();
+        assert!(
+            keymap
+                .validate(&BTreeMap::new(), &overlays_config)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bad_leader_submenu_table_action_errors() {
+        // The submenu name is now free, but a bad action inside it still fails.
+        let overlays = BTreeMap::from([(
+            "leader.git".to_string(),
+            BTreeMap::from([("x".to_string(), "explode".to_string())]),
+        )]);
+        let err = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap_err();
+        assert!(err.to_string().contains("explode"), "{err}");
     }
 
     #[test]
@@ -1505,6 +1700,102 @@ mod tests {
         assert!(keymap.is_leader(press(KeyCode::Char('b'), KeyModifiers::CONTROL)));
         assert!(!keymap.is_leader(press(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert!(keymap.set_leader("ctrl-").is_err());
+    }
+
+    #[test]
+    fn validate_clean_default_config_has_no_warnings() {
+        // The out-of-the-box keymap must produce ZERO warnings — documented
+        // single-pane shadows (Response `h`/`/`, Request `1`–`4`) are lawful.
+        let keymap = KeyMap::default();
+        assert!(
+            keymap
+                .validate(&BTreeMap::new(), &BTreeMap::new())
+                .is_empty(),
+            "default keymap warnings: {:?}",
+            keymap.validate(&BTreeMap::new(), &BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn validate_flags_leader_key_bound_as_action() {
+        // The dead `space=…` case: the leader key also bound as a global action.
+        let global = BTreeMap::from([("space".to_string(), "save".to_string())]);
+        let keymap = KeyMap::with_all_overrides(&global, &BTreeMap::new()).unwrap();
+        let warnings = keymap.validate(&global, &BTreeMap::new());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("leader key"), "{warnings:?}");
+    }
+
+    #[test]
+    fn validate_flags_dangling_descent() {
+        // A `"+name"` descent with no matching `[keys.leader.name]` table.
+        let overlays = BTreeMap::from([(
+            "leader".to_string(),
+            BTreeMap::from([("g".to_string(), "+git".to_string())]),
+        )]);
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        let warnings = keymap.validate(&BTreeMap::new(), &overlays);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("git"), "{warnings:?}");
+        assert!(
+            warnings[0].contains("no `[keys.leader.git]`"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_orphan_submenu() {
+        // A `[keys.leader.name]` table that no descent points to.
+        let overlays = BTreeMap::from([(
+            "leader.git".to_string(),
+            BTreeMap::from([("s".to_string(), "save".to_string())]),
+        )]);
+        let keymap = KeyMap::with_all_overrides(&BTreeMap::new(), &overlays).unwrap();
+        let warnings = keymap.validate(&BTreeMap::new(), &overlays);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("unreachable"), "{warnings:?}");
+    }
+
+    #[test]
+    fn validate_flags_duplicate_combo_in_scope() {
+        // Two combo strings normalizing to the same key within one scope
+        // (modifier order differs, but they resolve to the same combination).
+        let global = BTreeMap::from([
+            ("ctrl-shift-a".to_string(), "quit".to_string()),
+            ("shift-ctrl-a".to_string(), "save".to_string()),
+        ]);
+        let keymap = KeyMap::with_all_overrides(&global, &BTreeMap::new()).unwrap();
+        let warnings = keymap.validate(&global, &BTreeMap::new());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("silently wins"), "{warnings:?}");
+    }
+
+    #[test]
+    fn validate_flags_global_shadowed_in_every_overlay() {
+        // A global bind rebound in all four pane overlays — globally unreachable.
+        let global = BTreeMap::from([("ctrl-g".to_string(), "quit".to_string())]);
+        let overlays = BTreeMap::from([
+            (
+                "explorer".to_string(),
+                BTreeMap::from([("ctrl-g".to_string(), "save".to_string())]),
+            ),
+            (
+                "urlbar".to_string(),
+                BTreeMap::from([("ctrl-g".to_string(), "save".to_string())]),
+            ),
+            (
+                "request".to_string(),
+                BTreeMap::from([("ctrl-g".to_string(), "save".to_string())]),
+            ),
+            (
+                "response".to_string(),
+                BTreeMap::from([("ctrl-g".to_string(), "save".to_string())]),
+            ),
+        ]);
+        let keymap = KeyMap::with_all_overrides(&global, &overlays).unwrap();
+        let warnings = keymap.validate(&global, &overlays);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("globally unreachable"), "{warnings:?}");
     }
 
     #[test]

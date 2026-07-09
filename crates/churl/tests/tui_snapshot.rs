@@ -1459,7 +1459,9 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// The sequences submenu popup: `Space s` shows add / open / run.
+/// The sequences submenu popup: `Space s` shows add / find (`f`) / open (`o`) /
+/// run. `f` and `o` are aliases for the same sequence-finder picker (M7.10 —
+/// `<leader>s f` mirrors `<leader>f` for endpoints; `o` kept for muscle memory).
 #[test]
 fn leader_sequences_submenu_popup() {
     let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1469
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -19,9 +20,9 @@ expression: snapshot(&mut app)
 ┃                            ┃│no response yet                                 │
 ┃                            ┃│                                                │
 ┃                            ┃│no endpoint selected                            │
-┃                            ┃│                                                │
 ┃                            ┃│                        ┏ leader · sequences ━━━┓
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                        ┃ a  add sequence       ┃
+┃                            ┃│                        ┃ a  add sequence       ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                        ┃ f  open sequence      ┃
 ┌ Sequences ─────────────────┐│                        ┃ o  open sequence      ┃
 │<leader>s a to add          ││                        ┃ r  run sequence (pick)┃
 └────────────────────────────┘└────────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━┛

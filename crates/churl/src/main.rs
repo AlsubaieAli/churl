@@ -128,6 +128,8 @@ fn run_keymaps() -> Result<()> {
     let config = churl_core::config::load_global_config()?;
     let effective = KeyMap::with_all_overrides(&config.keys, &config.key_overlays)?;
     let default = KeyMap::default();
+    // Load-time conflict/shadow warnings (M7.10) — printed as a trailing section.
+    let warnings = effective.validate(&config.keys, &config.key_overlays);
 
     let mut actions: Vec<Action> = Action::all().collect();
     actions.sort_by_key(|a| a.name());
@@ -211,6 +213,14 @@ fn run_keymaps() -> Result<()> {
                 combos = fmt_combos(combos),
                 label = action.label(),
             );
+        }
+    }
+
+    // Conflict/shadow warnings (M7.10), if any — a trailing loud section.
+    if !warnings.is_empty() {
+        println!("\n⚠ Conflicts");
+        for warning in &warnings {
+            println!("  {warning}");
         }
     }
     Ok(())

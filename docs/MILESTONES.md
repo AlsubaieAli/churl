@@ -127,6 +127,11 @@ Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in p
 
 **Scope**: The coherent navigation model the owner circled across rounds 2–6, plus the full data-driven keymap. Absorbs the demo nav findings and the deferred nav notes. **Design session first.**
 
+**Staging** (three reviewable PRs — A ships alone as the riskiest refactor):
+- **Stage A — keymap (dynamic submenus + conflict warnings): DONE** (branch `feat/m7.10a-keymap`). Removed the closed `LeaderMenu` enum + hardcoded `sub_*` fields for data-driven `submenus: HashMap<String, Submenu>` + `LeaderEntry::Submenu(String)`; built-in three seeded as defaults (default config byte-identical); `[keys.leader.<name>]` creates/extends any submenu. Added `KeyMap::validate` load-time conflict/shadow warnings (5 defect classes, genuine defects only) surfaced in three non-blocking channels (stderr pre-raw-mode · first-frame toast · `churl keymaps` `⚠ Conflicts` section). Added `<leader>s f` sequence finder (aliases `s o`). Verified + tested picker uniformity (no silent run-last). See the 2026-07-09 M7.10 Stage A ADRs in DECISIONS.md.
+- **Stage B — nav model**: 4-region Tab, `cycle-region` (unbound), `<leader>S` removal, `f`-jump pane-only, hover-fallback. *Pending.*
+- **Stage C — legibility**: sequence/runner header convention + load-runner reorg. *Pending (may fold into B).*
+
 **Deliverables**:
 - **4-region Tab model** (decision 6): `Left column → URL → Request → Response`, Shift-Tab reverses; left column is one stop showing the active sub-pane; returning restores last-active sub-pane + zoom.
 - **`f` jump-to-pane addresses all five** (Explorer, Sequences, URL, Request, Response) — precise access including the peeking Sequences pane (reverses the PR-2b deferral in DECISIONS.md).
