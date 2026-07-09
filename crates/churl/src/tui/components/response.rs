@@ -89,6 +89,12 @@ pub enum ResponseState {
     },
 }
 
+impl ResponseState {
+    /// The idle default, as a `const` so `&self`-returning accessors can hand
+    /// back a `'static` reference when nothing is loaded.
+    pub const IDLE: ResponseState = ResponseState::Idle;
+}
+
 /// A literal-substring search over the current view's logical lines. Matches are
 /// stored as `(logical line, byte range within that line)`.
 #[derive(Debug, Default, Clone)]

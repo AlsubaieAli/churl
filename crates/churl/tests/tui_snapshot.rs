@@ -223,7 +223,7 @@ fn response_pane_with_json_body() {
     let mut app = app_with_fixture(dir.path());
     app.focus = Pane::Response;
     let body = "{\n  \"id\": 1,\n  \"name\": \"Ada\"\n}";
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&json_response(body), 1),
     };
     // No highlight worker under TestBackend → deterministic plain text.
@@ -239,7 +239,7 @@ fn response_pane_truncated_status_line() {
     // so the full status line (with the truncated marker) fits the pane.
     let mut response = json_response(&"x".repeat(10 * 1024 * 1024));
     response.truncated = true;
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&response, 1),
     };
     let backend = TestBackend::new(180, 24);
@@ -266,7 +266,7 @@ fn response_pane_in_flight() {
     // Backdate `started` by 1 s so the elapsed readout is always four digits —
     // the digit count shifts where the status line truncates at the pane edge,
     // so the regex filter alone cannot make the snapshot deterministic.
-    app.response = ResponseState::InFlight {
+    *app.response_mut() = ResponseState::InFlight {
         started: Instant::now() - Duration::from_secs(1),
     };
     // Elapsed ms is non-deterministic; scrub it.
@@ -280,7 +280,7 @@ fn response_pane_failed() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     app.focus = Pane::Response;
-    app.response = ResponseState::Failed {
+    *app.response_mut() = ResponseState::Failed {
         error: "request failed: error sending request".to_owned(),
         meta: meta(),
     };
@@ -303,7 +303,7 @@ fn response_pane_draws_one_megabyte_body_under_50ms() {
         ));
         i += 1;
     }
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&json_response(&body), 1),
     };
 
@@ -326,7 +326,7 @@ fn response_pane_draws_one_megabyte_body_under_50ms() {
 fn json_done_app(root: &Path, body: &str) -> App {
     let mut app = app_with_fixture(root);
     app.focus = Pane::Response;
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&json_response(body), 1),
     };
     app
@@ -362,7 +362,7 @@ fn response_headers_view_toggle() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     app.focus = Pane::Response;
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&headered_response("{\n  \"id\": 1\n}"), 1),
     };
     // `h` in the Response overlay toggles to the headers view.
@@ -413,7 +413,7 @@ fn response_fold_non_json_notifies() {
             total: Duration::from_millis(5),
         },
     };
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&response, 1),
     };
     press(&mut app, KeyCode::Char('o'));
@@ -539,7 +539,7 @@ fn response_search_esc_clears() {
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.mode, Mode::Normal);
     // Esc clears the live search.
-    if let ResponseState::Done { view } = &app.response {
+    if let ResponseState::Done { view } = app.response() {
         assert!(view.search().is_none(), "esc must clear the search");
     } else {
         panic!("expected Done");
@@ -593,7 +593,7 @@ fn response_view_toggle_resets_cursor_and_search() {
     type_str(&mut app, "z");
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('h')); // → headers view
-    if let ResponseState::Done { view } = &app.response {
+    if let ResponseState::Done { view } = app.response() {
         assert!(view.search().is_none(), "view toggle clears search");
     }
     // Cursor reset to 0 is asserted indirectly: no panic + headers render.
@@ -1060,7 +1060,7 @@ fn discard_changes_switches_endpoint() {
     press(&mut app, KeyCode::Char('d'));
     // The endpoint actually switched…
     assert_eq!(app.mode, Mode::Normal);
-    let selected = app.selected.as_ref().expect("an endpoint is loaded");
+    let selected = app.selected().expect("an endpoint is loaded");
     assert!(
         selected.file.ends_with("users/create.toml"),
         "must have switched to Create user, got {:?}",
@@ -1099,19 +1099,15 @@ fn search_switch_while_dirty_is_guarded() {
     // Guard must fire; nothing switched yet.
     assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
     assert!(
-        app.selected.as_ref().unwrap().file.ends_with("list.toml"),
+        app.selected().unwrap().file.ends_with("list.toml"),
         "still on List users while the confirm is open"
     );
     // Discard → the search target loads.
     press(&mut app, KeyCode::Char('d'));
     assert!(
-        app.selected
-            .as_ref()
-            .unwrap()
-            .file
-            .ends_with("users/get.toml"),
+        app.selected().unwrap().file.ends_with("users/get.toml"),
         "search target must load after discard, got {:?}",
-        app.selected.as_ref().unwrap().file
+        app.selected().unwrap().file
     );
     let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(!contents.contains("ZZZ"), "edit must not persist");
@@ -1142,13 +1138,9 @@ fn jump_switch_while_dirty_guards_and_saves() {
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(app.mode, Mode::Normal);
     assert!(
-        app.selected
-            .as_ref()
-            .unwrap()
-            .file
-            .ends_with("users/create.toml"),
+        app.selected().unwrap().file.ends_with("users/create.toml"),
         "must switch after a successful save, got {:?}",
-        app.selected.as_ref().unwrap().file
+        app.selected().unwrap().file
     );
     let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(
@@ -1166,7 +1158,7 @@ fn save_failure_blocks_discard_changes_switch() {
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users
     // A dirty edit that cannot be saved: literal bearer token.
-    app.selected.as_mut().unwrap().endpoint.request.auth = Some(Auth::Bearer {
+    app.selected_mut().unwrap().endpoint.request.auth = Some(Auth::Bearer {
         token: "ghp_literal_secret".to_owned(),
     });
     // Attempt to switch → confirm → 's'.
@@ -1177,7 +1169,7 @@ fn save_failure_blocks_discard_changes_switch() {
     press(&mut app, KeyCode::Char('s'));
     // Still on the same endpoint, still dirty, error on the statusline.
     assert_eq!(app.mode, Mode::Normal);
-    let selected = app.selected.as_ref().expect("endpoint still loaded");
+    let selected = app.selected().expect("endpoint still loaded");
     assert!(
         selected.file.ends_with("users/list.toml"),
         "must NOT switch when the save failed, got {:?}",
@@ -1221,7 +1213,7 @@ fn rename_collection_repoints_loaded_endpoint_file() {
     app.prompt_editor = LineEditor::new("members");
     press(&mut app, KeyCode::Enter);
     // The loaded endpoint's file now points into the renamed directory.
-    let selected_file = app.selected.as_ref().unwrap().file.clone();
+    let selected_file = app.selected().unwrap().file.clone();
     assert!(
         selected_file.ends_with("members/list.toml"),
         "selected.file must follow the renamed collection, got {selected_file:?}"
@@ -1264,7 +1256,7 @@ fn placement_row_enter_toggles() {
     for _ in 0..3 {
         press(&mut app, KeyCode::Char('j')); // down to the placement row (3)
     }
-    let placement = |app: &App| match &app.selected.as_ref().unwrap().endpoint.request.auth {
+    let placement = |app: &App| match &app.selected().unwrap().endpoint.request.auth {
         Some(Auth::ApiKey { placement, .. }) => *placement,
         other => panic!("expected apikey auth, got {other:?}"),
     };
@@ -1300,7 +1292,7 @@ fn new_endpoint_while_dirty_is_guarded() {
     // Esc: stay on the dirty endpoint, edits intact.
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.mode, Mode::Normal);
-    let selected = app.selected.as_ref().unwrap();
+    let selected = app.selected().unwrap();
     assert!(selected.file.ends_with("users/list.toml"), "must stay put");
     assert!(
         selected.endpoint.request.url.contains("ZZZ"),
@@ -1320,13 +1312,7 @@ fn ghost_row_removed_on_escape() {
     press(&mut app, KeyCode::Char('a'));
     press(&mut app, KeyCode::Esc);
     assert!(
-        app.selected
-            .as_ref()
-            .unwrap()
-            .endpoint
-            .request
-            .params
-            .is_empty(),
+        app.selected().unwrap().endpoint.request.params.is_empty(),
         "cancelled add must remove the empty row"
     );
     // a + name + Enter + Esc on the value → the row is kept (named).
@@ -1334,7 +1320,7 @@ fn ghost_row_removed_on_escape() {
     type_str(&mut app, "limit");
     press(&mut app, KeyCode::Enter); // commit name → value edit
     press(&mut app, KeyCode::Esc); // cancel the value edit only
-    let params = &app.selected.as_ref().unwrap().endpoint.request.params;
+    let params = &app.selected().unwrap().endpoint.request.params;
     assert_eq!(params.len(), 1, "a named row must survive Esc");
     assert_eq!(params[0].name, "limit");
     assert_eq!(params[0].value, "");
@@ -1361,7 +1347,7 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
         Mode::Normal,
         "same-endpoint reselect needs no confirm"
     );
-    let selected = app.selected.as_ref().unwrap();
+    let selected = app.selected().unwrap();
     assert!(
         selected.endpoint.request.url.contains("ZZZ"),
         "edits must survive"
@@ -1371,15 +1357,7 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
     press(&mut app, KeyCode::Enter); // collapse
     press(&mut app, KeyCode::Enter); // expand
     assert_eq!(app.mode, Mode::Normal);
-    assert!(
-        app.selected
-            .as_ref()
-            .unwrap()
-            .endpoint
-            .request
-            .url
-            .contains("ZZZ")
-    );
+    assert!(app.selected().unwrap().endpoint.request.url.contains("ZZZ"));
 }
 
 // ---- M6.7 snapshots + round-trips ----
@@ -1751,7 +1729,7 @@ fn url_commit_explode_toml_round_trip() {
     let ws = open_workspace(dir.path()).unwrap();
     let mut app2 = App::new(ws, KeyMap::default()).unwrap();
     load_first_users_endpoint(&mut app2);
-    let req = &app2.selected.as_ref().unwrap().endpoint.request;
+    let req = &app2.selected().unwrap().endpoint.request;
     assert_eq!(req.params.len(), 2);
     assert!(
         req.params
@@ -1783,7 +1761,7 @@ fn zoom_response_collapsed_summary() {
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app);
     // Put the response into a Done state so the summary is meaningful.
-    app.response = ResponseState::Done {
+    *app.response_mut() = ResponseState::Done {
         view: ResponseView::build(&json_response("{}"), 1),
     };
     app.focus = Pane::Response;
