@@ -1,0 +1,29 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 2266
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐ List users ●                                     
+│  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
+│  ▾ users                   ││GET  https://api.test/usersZZZ              ●   │
+│>   List users ●            │└────────────────────────────────────────────────┘
+│    Create user             │┌ Request ───────────────────────────────────────┐
+│    Get user                ││ Params(0)   Headers(0)   Auth   Body           │
+│                            ││  (no params — a to add)                        │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│              ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
+│              ┃Save changes before switching?                  ┃              │
+│              ┃s save · d discard · esc stay                   ┃──────────────┘
+│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
+│                            ││no response yet                                 │
+│                            ││GET https://api.test/usersZZZ                   │
+│                            ││                                                │
+│                            ││press ctrl-s to send                            │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ● unsaved · w save · ? help · space leader · / search · : pal

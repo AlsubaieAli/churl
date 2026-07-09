@@ -2136,3 +2136,132 @@ fn env_editor_collection_override_marker_and_legend() {
         "footer legend shown:\n{rendered}"
     );
 }
+
+// ---- PR 3b: tab strip (multi-buffer) ----
+
+/// One open buffer: the strip renders one tab (the endpoint name), no dirty dot.
+#[test]
+fn tab_strip_one_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("List users"),
+        "strip shows the buffer name:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// Two open buffers with the SECOND active: both tabs show, the active one is
+/// the freshly-focused endpoint.
+#[test]
+fn tab_strip_two_buffers_active_second() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    // Open List users, then Get user (both under the expanded users collection).
+    press(&mut app, KeyCode::Char('j')); // onto users
+    press(&mut app, KeyCode::Enter); // expand
+    press(&mut app, KeyCode::Char('j')); // List users
+    press(&mut app, KeyCode::Enter); // open buffer 0
+    press(&mut app, KeyCode::Char('j')); // Create user
+    press(&mut app, KeyCode::Char('j')); // Get user
+    press(&mut app, KeyCode::Enter); // open buffer 1 (active)
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("List users") && rendered.contains("Get user"),
+        "both tabs shown:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// A dirty buffer's tab carries the accent ● marker.
+#[test]
+fn tab_strip_dirty_tab_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    // Dirty the URL so the buffer is unsaved.
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    app.focus = Pane::Explorer;
+    let rendered = snapshot(&mut app);
+    // The strip shares the topmost row (right of the explorer) and carries a ●.
+    let strip_row = rendered.lines().next().unwrap_or("");
+    assert!(
+        strip_row.contains('●'),
+        "dirty tab shows ● on the strip: {strip_row:?}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// Overflow: many open buffers scroll to keep the active one visible, with edge
+/// markers when clipped.
+#[test]
+fn tab_strip_overflow_edge_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("api");
+    std::fs::create_dir(&coll).unwrap();
+    for i in 0..8 {
+        std::fs::write(
+            coll.join(format!("ep{i}.toml")),
+            format!(
+                "seq = {i}\nname = \"Endpoint number {i}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{i}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    press(&mut app, KeyCode::Enter); // expand api
+    // Open all 8 endpoints (rows 1..=8).
+    for _ in 0..8 {
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+    }
+    let rendered = snapshot(&mut app);
+    let strip_row = rendered.lines().next().unwrap_or("");
+    assert!(
+        strip_row.contains('‹') || strip_row.contains('›'),
+        "overflow shows an edge marker: {strip_row:?}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// Zero buffers: NO strip — the render must be byte-identical to the pre-tabs
+/// empty-workspace state (the strip is `Length(0)`).
+#[test]
+fn tab_strip_absent_with_zero_buffers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    // A workspace is open but nothing loaded -> no buffers, no strip.
+    let rendered = snapshot(&mut app);
+    let strip_row = rendered.lines().next().unwrap_or("");
+    assert!(
+        strip_row.starts_with("┌ Explorer") || strip_row.starts_with("┏ Explorer"),
+        "top row is the panes, not a strip: {strip_row:?}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// The discard-changes confirm shown when closing a dirty buffer (`<leader>t x`).
+#[test]
+fn tab_strip_close_dirty_confirm() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    load_first_users_endpoint(&mut app); // List users
+    app.focus = Pane::UrlBar;
+    press(&mut app, KeyCode::Char('i'));
+    type_str(&mut app, "ZZZ");
+    press(&mut app, KeyCode::Enter);
+    app.focus = Pane::Explorer;
+    // <leader>t x
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('x'));
+    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    insta::assert_snapshot!(snapshot(&mut app));
+}

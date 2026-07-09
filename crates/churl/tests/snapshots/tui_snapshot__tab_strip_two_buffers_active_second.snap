@@ -1,0 +1,29 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 2175
+expression: rendered
+---
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users  Get user                             
+┃  ▸ orders                  ┃┌ URL ───────────────────────────────────────────┐
+┃  ▾ users                   ┃│GET  https://api.test/users/{{id}}        {{1}} │
+┃    List users              ┃└────────────────────────────────────────────────┘
+┃    Create user             ┃┌ Request ───────────────────────────────────────┐
+┃>   Get user                ┃│ Params(0)   Headers(0)   Auth   Body           │
+┃                            ┃│  (no params — a to add)                        │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│GET https://api.test/users/{{id}}               │
+┃                            ┃│                                                │
+┃                            ┃│press ctrl-s to send                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

@@ -8477,6 +8477,220 @@ mod tests {
         assert!(!app.is_dirty(), "reverting the edit clears dirty");
     }
 
+    /// Distinct buffers keep independent editor state: editing A, switching to B
+    /// and back leaves A's edit intact (each buffer owns its editor).
+    #[test]
+    fn distinct_buffers_keep_independent_editor_state() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("A")));
+        app.open_or_focus_buffer(selected_with("b.toml", Some("B")));
+        assert_eq!(app.buffers.len(), 2);
+        // Edit A (index 0).
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("A edited"));
+        // Switch to B, then back to A.
+        app.active = 1;
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "B"
+        );
+        app.active = 0;
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "A edited",
+            "A's edit survived the round-trip"
+        );
+    }
+
+    /// `buffer_cycle` wraps forward/backward and no-ops on an empty list.
+    #[test]
+    fn buffer_cycle_wraps_and_noops_on_empty() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.buffer_cycle(true); // no panic on empty
+        assert_eq!(app.active, 0);
+
+        for f in ["a.toml", "b.toml", "c.toml"] {
+            app.open_or_focus_buffer(selected_with(f, None));
+        }
+        app.active = 0;
+        app.buffer_cycle(true);
+        assert_eq!(app.active, 1);
+        app.buffer_cycle(true);
+        app.buffer_cycle(true);
+        assert_eq!(app.active, 0, "forward wraps 2 -> 0");
+        app.buffer_cycle(false);
+        assert_eq!(app.active, 2, "backward wraps 0 -> 2");
+    }
+
+    /// `new_active_after_close` neighbour rule across the closed-vs-active matrix.
+    #[test]
+    fn close_clean_new_active_matrix() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        let reopen = |app: &mut App| {
+            app.buffers.clear();
+            for f in ["a.toml", "b.toml", "c.toml"] {
+                app.open_or_focus_buffer(selected_with(f, None));
+            }
+        };
+
+        // closed < active: active shifts left.
+        reopen(&mut app);
+        app.active = 2;
+        app.close_buffer(0);
+        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.active, 1, "closed<active shifts active left");
+
+        // closed == active (middle): right neighbour takes the slot.
+        reopen(&mut app);
+        app.active = 1;
+        app.close_buffer(1);
+        assert_eq!(app.active, 1, "closed==active picks the right neighbour");
+
+        // closed > active: active unchanged.
+        reopen(&mut app);
+        app.active = 0;
+        app.close_buffer(2);
+        assert_eq!(app.active, 0, "closed>active leaves active");
+
+        // close the tail while active is the tail: clamps to new last.
+        reopen(&mut app);
+        app.active = 2;
+        app.close_buffer(2);
+        assert_eq!(app.active, 1, "closing the active tail clamps to new last");
+
+        // close the last remaining buffer -> empty, active 0.
+        app.buffers.clear();
+        app.open_or_focus_buffer(selected_with("only.toml", None));
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty());
+        assert_eq!(app.active, 0);
+    }
+
+    /// Closing a DIRTY buffer opens the discard confirm with `pending_close`
+    /// parked; `d` closes it, `Esc` keeps it.
+    #[test]
+    fn close_dirty_buffer_confirm_discard_and_cancel() {
+        // d closes.
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("orig")));
+        *app.test_editor() = EditorState::new(Lines::from("edited"));
+        assert!(app.is_dirty());
+        app.close_buffer(0);
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert!(matches!(app.pending_close, Some(PendingClose::One(_))));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.buffers.is_empty(), "d discards + closes");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+
+        // Esc keeps the buffer.
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("orig")));
+        *app.test_editor() = EditorState::new(Lines::from("edited"));
+        app.close_buffer(0);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "Esc keeps the dirty buffer");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// Closing a CLEAN buffer skips the confirm entirely.
+    #[test]
+    fn close_clean_buffer_no_confirm() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", None));
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty());
+        assert_eq!(app.mode, Mode::Normal, "clean close needs no confirm");
+    }
+
+    /// close-all with two dirty buffers prompts one at a time; `d` on each drains
+    /// to empty. Clean buffers close immediately.
+    #[test]
+    fn close_all_two_dirty_sequential_prompts() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // A dirty, B clean, C dirty.
+        app.open_or_focus_buffer(selected_with("a.toml", Some("a")));
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("a edited"));
+        app.open_or_focus_buffer(selected_with("b.toml", None));
+        app.open_or_focus_buffer(selected_with("c.toml", Some("c")));
+        app.active = 2;
+        *app.test_editor() = EditorState::new(Lines::from("c edited"));
+
+        app.close_all_buffers();
+        // Clean B closed immediately; A + C queued behind the confirm.
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert!(matches!(app.pending_close, Some(PendingClose::All(_))));
+        assert_eq!(app.buffers.len(), 2, "B closed immediately");
+
+        // Discard first dirty (A) -> prompt for C.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert_eq!(app.buffers.len(), 1, "A closed, C remains");
+        // Discard C -> empty.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.buffers.is_empty(), "queue drained");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// Esc mid close-all queue aborts the rest: the already-closed clean/discarded
+    /// buffers stay closed, the still-dirty ones stay open.
+    #[test]
+    fn close_all_esc_mid_queue_aborts_remaining() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("a")));
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("a edited"));
+        app.open_or_focus_buffer(selected_with("c.toml", Some("c")));
+        app.active = 1;
+        *app.test_editor() = EditorState::new(Lines::from("c edited"));
+
+        app.close_all_buffers();
+        assert_eq!(app.buffers.len(), 2, "both dirty, both queued");
+        // Discard A -> prompt for C.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "A closed");
+        // Esc aborts: C stays open.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "C stays open after Esc");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// `leader_sub_lookup(Tabs, …)` resolves the buffer actions.
+    #[test]
+    fn leader_tabs_submenu_binds() {
+        let km = KeyMap::default();
+        let lk = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('n')),
+            Some(Action::BufferNext)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('p')),
+            Some(Action::BufferPrev)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('x')),
+            Some(Action::BufferClose)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(
+                LeaderMenu::Tabs,
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)
+            ),
+            Some(Action::BufferCloseAll)
+        );
+    }
+
     /// `send_request`'s in-flight guard reads the ACTIVE buffer: with an
     /// in-flight already on it, a second send reports "already in flight" and
     /// does not overwrite the slot.
@@ -8541,6 +8755,30 @@ mod tests {
         // An unknown generation is dropped without touching any buffer.
         app.on_response(42, Ok(response()), meta());
         assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
+    }
+
+    /// Closing a clean buffer aborts its in-flight request before removal (no
+    /// history row written — silent, per the design).
+    #[tokio::test]
+    async fn close_buffer_aborts_its_in_flight() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", None));
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let aborted = handle.abort_handle();
+        app.active_endpoint_buffer_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: aborted.clone(),
+            generation: 1,
+            meta: meta(),
+        });
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty(), "clean buffer closed");
+        tokio::task::yield_now().await;
+        assert!(
+            aborted.is_finished(),
+            "the in-flight task was aborted on close"
+        );
     }
 
     /// `switch_workspace` drops every buffer (clearing all editor/response/dirty
