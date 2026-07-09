@@ -1,27 +1,28 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 840
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
 │                            │┌ Request ───────────────────────────────────────┐
-│                            ││                                                │
-│              ┏ Commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
-│              ┃> █                                             ┃              │
-│              ┃> send request                                  ┃              │
-│              ┃  cancel request                                ┃              │
-│              ┃  save request                                  ┃              │
-│              ┃  new endpoint                                  ┃              │
-│              ┃  new collection                                ┃              │
-│              ┃  rename                                        ┃──────────────┘
-│              ┃  delete                                        ┃──────────────┐
-│              ┃  switch profile                                ┃              │
-│              ┃  environments & vars                           ┃              │
-│              ┃  run sequence                                  ┃              │
-│              ┃  edit sequence                                 ┃              │
-│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛              │
-│                            ││                                                │
+│           ┏ Commands ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓           │
+│           ┃> █                                                   ┃           │
+│           ┃> send request                                        ┃           │
+│           ┃  cancel request                                      ┃           │
+│           ┃  save request                                        ┃           │
+│           ┃  new endpoint                                        ┃           │
+│           ┃  new collection                                      ┃           │
+│           ┃  rename                                              ┃           │
+│           ┃  delete                                              ┃───────────┘
+│           ┃  switch profile                                      ┃───────────┐
+│           ┃  environments & vars                                 ┃           │
+│           ┃  run sequence                                        ┃           │
+│           ┃  edit sequence                                       ┃           │
+│           ┃  load test endpoint (concurrent)                     ┃           │
+│           ┃  toggle response headers view                        ┃           │
+│           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

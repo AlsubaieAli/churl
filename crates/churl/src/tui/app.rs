@@ -2655,6 +2655,8 @@ impl App {
             KeyCode::Down => picker.move_down(),
             KeyCode::Char('p') if ctrl => picker.move_up(),
             KeyCode::Char('n') if ctrl => picker.move_down(),
+            KeyCode::Char('k') if ctrl => picker.move_up(),
+            KeyCode::Char('j') if ctrl => picker.move_down(),
             KeyCode::Backspace => picker.backspace(&mut self.finder),
             KeyCode::Char(c) if !ctrl => picker.push_char(c, &mut self.finder),
             _ => {}
