@@ -21,18 +21,172 @@
 | M7.4 | Request sequences (E2E testing) | **done** |
 | M7.5 | Concurrent requests (throttle / load testing) | **done** |
 | M7.5.3 | Clipboard cross-platform compat (native + OSC-52 passthrough) | **done** |
+| **D1** | Demo-stabilize (regression fixes) | **next** |
+| **R0** | Cheap-P0 durability (atomic writes · load-runner memory bound) | planned |
+| **M7.10** | Navigation & keymap unification (design-first) | planned |
+| M7.7 | Response formatting + help search (+ control-char sanitize) | planned |
+| **R1** | Durability & concurrency (reserved-names · merge-comments · SQLite WAL · pruning · buffer/channel bounds) | planned |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
-| M7.7 | Response formatting + help search (UX round) | planned |
+| **R2** | Cross-platform proof (CI macOS+Windows · MSRV · cargo-deny · install.ps1 · Wayland) | planned |
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
+| **R3** | Secret & request safety (placeholder-gate · redirect policy · env grandfather+warn) | planned |
 | M7.9 | Unified creation flow (`<leader>n`: collection/endpoint/sequence; endpoint from curl) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
+
+> **Re-planning 2026-07-09 — hardening pivot.** Owner + agent ran a full-codebase regression sweep (6 parallel audits) plus an owner demo drive-test. Roadmap re-sequenced to bake **regression (R)** and **debug (D)** milestones in as first-class, scheduled work instead of reactive patch-batches — see the "Milestone taxonomy & re-sequence" section below for the F/R/D model, standing rules, and the D1 → R0 → M7.10 → interleaved order. M7.6–M7.9 keep their scope; only their ordering changed.
 
 > M7.1–M7.5 scheduled 2026-07-07 (owner priority: "these features need to be ready before the plugin feature, right after release") — fractional numbers per the M6.5 precedent so baked-in M8/M9 references stay valid. They run after Ship 0.1 and before M8/M9; order within the block is a proposal, adjustable per session. **The M7.1–M7.5 block is complete (all five done, 2026-07-08)** — M7.5 (concurrent load testing) closed it.
 
 > M7.6–M7.8 added 2026-07-08 from owner feature notes: interchange parity (churl-native JSON import, symmetric with export), a response-formatting/help UX round, and an install-lifecycle cluster (version pinning + self-update + uninstall). Same fractional scheme, same adjustable ordering, still before M8/M9. The M7.3 session also folds in the manifest-in-collection crash fix (see M7.3 deliverables).
 
 > Renumbered after the M3 plan review (2026-07-05): Auth was promoted from the post-release backlog to its own milestone M5; the former M5 (themes/templating) and M6 (polish/release) shifted to M6/M7. Sections below M4 use the new numbers.
+
+---
+
+## Milestone taxonomy & re-sequence (2026-07-09 hardening pivot)
+
+Until now hardening was reactive (M7.5.1/.2/.3 patch-batches squeezed between features) and durability was invisible until it bit. This pivot makes three milestone **classes** explicit and interleaves them by rule:
+
+- **F — feature.** New user-facing capability (M7.6, M7.7, …).
+- **R — regression / hardening.** Durability, concurrency, cross-platform, security-correctness. Scheduled up front, never a reactive patch.
+- **D — debug / drive-test.** Owner drives the freshly-built binary; the findings *are* the milestone scope.
+
+**Standing rules (the structural change):**
+1. **F → D always** — every feature milestone is followed by an owner drive-test + fix pass before the next feature.
+2. **R cadence** — ≥1 hardening milestone per 2–3 features; R work is planned, not discovered under fire.
+3. **Same-commit docs + tests** — every milestone updates ARCHITECTURE/DECISIONS/MILESTONES/CLAUDE **and** adds regression tests for what it touched, in the milestone commit. (The doc drift found in the 07-09 sweep is the tax on skipping this.)
+4. **Living regression checklist** — the demo drive-script becomes a committed, growing checklist so "full regression" is repeatable, not re-discovered each round.
+5. **Demo is rebuilt from master in every D** — the 07-09 sweep found the owner drove a *stale* demo binary (picker Up/Down "broken" was actually fixed on master, pre-#23). Rebuild + re-sign is a checklist step, not a ritual to remember.
+
+**Linear sequence:** `D1 → R0 → M7.10 → M7.7 →(D)→ R1 → M7.6 →(D)→ R2 → M7.8 →(D)→ R3 → M7.9 →(D)→ M8 →(D)→ M9`.
+
+### Provenance — the 07-09 regression sweep
+
+Six read-only audit agents (core security/correctness · persistence/data-integrity · concurrency/memory · TUI state-machine · TUI rendering · cross-cutting conventions/tests), each finding verified in the main session. Headline findings and where they land:
+
+| Finding | Severity | Lands in |
+|---|---|---|
+| Load runner retains every response body (`total × body` → OOM; `on_load_result` builds a full `ResponseView` per row) | **P0** | R0 |
+| Saves are non-atomic (`persistence.rs` `std::fs::write` truncate-in-place → crash mid-write destroys the source-of-truth file) | **P0** | R0 |
+| Reserved-name collisions (`create_endpoint`/`create_collection` slug to `churl.toml`/`folder.toml`/`sequences/` → written but invisible, no error) | **P0** | R1 |
+| SQLite has no `busy_timeout`/WAL + migration loop can race across processes | **P0** | R1 |
+| `merge_tables` replaces an array-of-tables wholesale on length change → drops `# comments` on surviving siblings (breaks the format-preserving promise) | P1 | R1 |
+| CI is Linux-only; Windows/macOS binaries shipped untested | **P0** | R2 |
+| `is_template_placeholder` accepts `{{a}}secret{{b}}`; secret-marker list misses `cookie`/`session`/`signature`/`pwd` | P1 | R3 |
+| Redirects followed 10 hops by default; custom-header / query api-keys may forward cross-origin | P1 (verify vs reqwest) | R3 |
+| Minified single-line body re-materialized every frame (perf cliff — the M7.7 formatter issue) + unsanitized ANSI/control chars + tab-width-0 | P1 | M7.7 |
+| Unbounded app channel · no history pruning · buffers never evicted (long-session growth) | P1 | R1 |
+| Global `[keys]` bind silently shadowed by pane overlays; `[keys] space=…` silently dead; leader submenus/leader-key/vim-motions not remappable | P1 | M7.10 |
+| Docs drift: `interchange.rs` absent from module tables; ARCHITECTURE clipboard section stale (says "no native dep" post-arboard) | P2 | folded into R1/M7.7 commits |
+
+Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in production code (all in test modules) · `cargo audit` in CI · reused HTTP client (no FD churn) · defensive geometry (no panic on 1×1) · well-tested stats/template/fold/search/clipboard-framing.
+
+### Locked owner decisions (2026-07-09 re-planning)
+
+1. **Sequencing** = cheap-P0s → nav → rest (R0 before the feature stream; the two catastrophic-but-cheap P0s first).
+2. **Env-editor secret gate** = **grandfather + warn**: churl never *writes* a new literal secret (stays hard-blocked), but a pre-existing hand-authored literal no longer dead-ends an unrelated save — it saves with a warning + an inline `!` marker on the offending row so it's findable. (Fixes the demo dead-end where editing one field was refused over a pre-existing `vars.bearer` literal.)
+3. **Keymap scope** = **full data-driven**: churl's *entire* binding surface (leader key + submenu keys/membership + pane + global) becomes remappable via `[keys.*]`, with loud conflict/shadow warnings at load and a fully-generated which-key + `churl keymaps` effective-binding view. **Excludes** edtui's in-editor vim motions (`f`/`t`/`w` inside the Body editor — forking edtui's key register is out of scope).
+4. **Sequences pane** = symmetric peek/zoom **exactly like Request/Response**. The current impl fully *hides* the Sequences sub-pane when Explorer is focused (asymmetric bug); fix = it collapses to a peeking header both directions, never disappears. **Explorer zoomed by default** (Sequences peeking). Zero-sequences workspace shows a peeking `Sequences · <leader>s a to add` affordance.
+5. **`<leader>S` removed** — once Sequences is always visible + reachable by the uniform `f` jump, a show/hide toggle has no job. (`<leader>s` submenu stays.)
+6. **Tab / focus model** = **4 regions**, matching what's actually a distinct visible region: `Left column → URL bar → Request → Response → (wrap)`, Shift-Tab reverses. Returning to the left column restores the last-active sub-pane + its zoom. Rationale: the right column is 3 simultaneously-visible rows (3 stops), the left column shows one sub-pane at a time (1 stop) — Tab stops map to visible regions, not to every focusable pane.
+7. **Within-region cycling** = a first-class region-aware action `cycle-region-fwd`/`back` (left = sub-panes, right = buffers/tabs), **shipped unbound by default**, mapped later once a portable key is chosen. `Ctrl-Tab` deliberately **not** hardcoded — it is terminal-unreliable (same class as the Ctrl-J picker caveat: needs the Kitty keyboard protocol; dead on Terminal.app/Windows) and iTerm2/browsers/tmux already claim it. Enhanced-keyboard-protocol support (crossterm `PushKeyboardEnhancementFlags`, which also unlocks reliable Ctrl-J) is a **tracked sub-item of M7.10**, layered over portable defaults — never the only path.
+
+---
+
+## D1 — Demo-stabilize (regression fixes)
+
+**Scope**: The pure bugs + cheap consistency fixes from the owner demo drive-test, so further drive-testing runs on an honest binary. Small; no design session.
+
+**Deliverables**:
+- **Sequences pane peek-symmetry** — collapses to a peeking header when Explorer is focused (never vanishes), symmetric with Request/Response; **Explorer zoomed by default**. (The full nav model — `f`-jump, `<leader>S` removal, Tab regions — is M7.10; this is just the render/collapse fix.)
+- **`<leader>s r` routes to a chooser** instead of silently running `sequences[seq_cursor]` (the "won't let me choose / runs the last one" report).
+- **Cancelled load requests show time-to-cancel** (currently `timing = None` for cancelled → blank duration).
+- **Verify picker Up/Down on master + rebuild the demo** — Up/Down/Ctrl-p/n/j/k already route through `handle_overlay_key` for all four picker modes; the demo binary was stale. Rebuild + re-sign; add the rebuild step to the regression checklist.
+- **Env-editor interim message** — on a pre-existing literal-secret refusal, a clearer message that points at the offending var (the full grandfather+warn behavior is R3).
+- Start the **living regression checklist** (`docs/` or repo) from the demo drive-script.
+
+**Next**: R0
+
+---
+
+## R0 — Cheap-P0 durability (atomic writes · load-runner memory bound)
+
+**Scope**: The two catastrophic-but-invisible P0s from the sweep — both self-contained, both foundational, ~1 session.
+
+**Deliverables**:
+- **Atomic saves** — every `save_*` writes to a sibling temp file → `fsync` → atomic `rename` (+ dir fsync). One helper covers `save_endpoint`/`save_sequence`/`save_workspace_manifest`/`save_collection_meta`. Kills the crash-mid-write data-loss on the sole source of truth.
+- **Load-runner memory bound** — stop retaining a full `ResponseView`/body per completed copy. Keep only status/timing per row for the list + stats; retain bodies for a bounded window (last-K or the selected row, rebuilt lazily). Memory becomes O(concurrency), not O(total).
+- Tests: crash/torn-write recovery (a partial file never replaces a good one); a high-`total` load run holds bounded memory (assert the retained-body count is capped).
+
+**Next**: M7.10
+
+---
+
+## M7.10 — Navigation & keymap unification (design-first)
+
+**Scope**: The coherent navigation model the owner circled across rounds 2–6, plus the full data-driven keymap. Absorbs the demo nav findings and the deferred nav notes. **Design session first.**
+
+**Deliverables**:
+- **4-region Tab model** (decision 6): `Left column → URL → Request → Response`, Shift-Tab reverses; left column is one stop showing the active sub-pane; returning restores last-active sub-pane + zoom.
+- **`f` jump-to-pane addresses all five** (Explorer, Sequences, URL, Request, Response) — precise access including the peeking Sequences pane (reverses the PR-2b deferral in DECISIONS.md).
+- **`cycle-region-fwd`/`back` action** (decision 7) — region-aware within-region cycling, shipped **unbound**; plus **enhanced-keyboard-protocol** support as a tracked sub-item (unlocks a layered Ctrl-Tab / reliable Ctrl-J over portable defaults).
+- **Remove `<leader>S`** (decision 5); keep left-column sub-pane switch on `s`/`f`.
+- **Picker semantics unified** — `<leader>s o`/`s r` behave like `<leader>f`/`<leader>l f` (always choose via picker, never silently run-last).
+- **Full data-driven keymap** (decision 3) — leader key + submenu keys/membership + pane + global all in `[keys.*]`; **loud conflict/shadow warnings** at load; which-key fully generated; `churl keymaps` shows effective binds. (Excludes edtui in-editor motions.) This is the M9 plugin-command foundation.
+- **Hover-vs-selection resolution** (round-6): one-shot open-y actions fall back to the hovered endpoint when nothing is loaded.
+- **Sequence-surface header convention** — top row `Mode: EDIT/RUN`, shortcuts moved to the footer (currently `EDIT (^R run)` in the header with shortcuts at the bottom).
+- **Runner/sequence pane legibility** — load-runner top-left reorg (name→url→config→stats), pane spacing + a one-line functionality description on the sequence + load panes (the deferred #4D crowding).
+- Tests: Tab-cycle order + region focus-restore, peek-symmetry both directions, conflict-warning on a shadowed bind, `f`-jump reaches Sequences, picker-choose paths.
+
+**Next**: M7.7
+
+---
+
+## R1 — Durability & concurrency (persistence + state)
+
+**Scope**: The rest of the durability backbone from the sweep (R0 took the two cheapest P0s).
+
+**Deliverables**:
+- **Reserved-name guards** — `create_endpoint`/`create_collection`/`rename_*` reject/suffix a slug equal to `MANIFEST_FILENAME`/`FOLDER_FILENAME`/`SEQUENCES_DIRNAME` (fixes the silent "written but invisible" data-loss).
+- **Merge-comment preservation** — array-of-tables merge does a longest-common-prefix element-wise merge (append/truncate the tail) instead of wholesale replace, so `# comments` on surviving siblings survive a length change.
+- **SQLite concurrency** — `busy_timeout` + `journal_mode=WAL` on open; wrap the migration loop in `BEGIN IMMEDIATE` (guards the cross-process migration race); + a concurrent-writer test.
+- **History pruning** — age/count-capped retention prune for `history`/`load_batches` (mirrors the vault's `runs prune`).
+- **Buffer eviction + bounded channel** — LRU-cap open buffers (or drop non-active buffer bodies); bound (or body-strip) the app channel so a fast load can't flood it with 10 MB `Response` messages.
+- Docs: add `interchange` to the ARCHITECTURE/CLAUDE module tables; fix the stale clipboard section.
+- Tests: reserved-name collision, comment-survival on array add/remove, concurrent SQLite writers, pruning, long-session buffer growth.
+
+**Next**: M7.6
+
+---
+
+## R2 — Cross-platform proof
+
+**Scope**: Make "works on any machine" *true*, not assumed. Mostly CI/infra; can overlap other work.
+
+**Deliverables**:
+- **CI matrix** adds `macos-latest` + `windows-latest` to the fmt/clippy/test job (Windows binary is shipped but never tested today).
+- **MSRV pin** (`rust-version`) + an MSRV CI job (edition 2024 already needs a recent compiler).
+- **`cargo-deny`** (license + banned-source + duplicate-dep gating) alongside the existing `cargo audit`.
+- **`install.ps1`** — a PowerShell installer so Windows has a one-liner path (parity with `install.sh`).
+- **Wayland clipboard** — enable arboard `wayland-data-control` (or document the OSC-52 fallback in the README platform matrix, not just DECISIONS).
+- **Cross-platform path tests** — Windows separators / drive-letter absolutes through persistence + sequence path guards.
+
+**Next**: M7.8
+
+---
+
+## R3 — Secret & request safety
+
+**Scope**: The security-correctness findings + the full env-editor secret policy.
+
+**Deliverables**:
+- **Tighten `is_template_placeholder`** — accept only exactly-one-well-formed-placeholder (reuse the template parser), closing `{{a}}secret{{b}}`; **broaden secret markers** (`cookie`, `session`, `signature`, `sig`, `pwd`, `access_key`) + a value-entropy fallback for unknown-named secrets.
+- **Redirect policy** — verify reqwest 0.13's cross-origin header-strip list; if custom-header / query-placed api-keys forward across origin, tighten the default (limited hops / drop on cross-origin) + a test per auth placement.
+- **Env-editor grandfather+warn** (decision 2) — save proceeds over pre-existing literals with a warning + inline `!` marker; only *new* churl-written literals are hard-blocked.
+- Tests: placeholder-gate rejects mixed literal+placeholder, marker negative-coverage, cross-origin redirect auth-forwarding per placement, grandfathered save + new-literal block.
+
+**Next**: M7.9
 
 ---
 
@@ -599,7 +753,7 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - Symmetry contract: any file emitted by `churl export` (collection or workspace scope, any dialect) round-trips back through import. Add a round-trip corpus test asserting export→import→export stability, mirroring the M4 curl round-trip corpus.
 - Reuse the M7.1 F1/F4/F5 guarantees (writes a `churl.toml` so the TUI shows the import; slug-collision handling is explicit, not silent-merge).
 
-**Next**: M7.7
+**Next**: R2 (per the 2026-07-09 re-sequence)
 
 ---
 
@@ -611,8 +765,9 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - **Response pretty-printer / reformatter**: re-indent structured bodies for readability — not just soft-wrap. Minified/single-line JSON (e.g. httpbin's) renders on one line today and `W` wrap doesn't help. Raw↔pretty toggle; pretty-by-default for known content-types. Covers **JSON**, **HTML**, and **XML**. Must interact cleanly with the existing display pipeline (syntect highlighting, JSON folding `o`/`O`, wrap, body search) — reformat is a transform *before* the fold/wrap/viewport stages, keeping the single content-type→formatter mapping point (`SyntaxToken::from_content_type`, M7-viewer plugin guardrail) rather than forking per-format paths.
 - **Help-overlay `/` quick-search**: `/` inside the `?` help pane filters/jumps to a binding, reusing the response body-search pattern (`/` `n` `N`, smart-case). Keeps the live-KeyMap-driven help from M6.7.
 - Tests: reformat round-trip + idempotence per content-type, pretty↔raw toggle preserves search/fold state, help-search filter/jump snapshots.
+- Also fold in (from the 07-09 sweep): **control-char / ANSI sanitize** + explicit tab-width in the viewer, and the **horizontal-window slice** for unwrapped long lines (the minified-line perf cliff — reformat addresses the common case, the window slice bounds the rest).
 
-**Next**: M7.8
+**Next**: R1 (per the 2026-07-09 re-sequence)
 
 ---
 
@@ -626,8 +781,9 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - **Uninstall path**: a `churl uninstall` subcommand (and/or an `uninstall.sh`) that removes the binary and optionally state/config in the OS data dir, with a README "Uninstalling" section. Counterpart to `install.sh`.
 - Tests: manifest compat parse + older/newer/equal decision matrix, self-update artifact-resolution + replace (mocked), uninstall dry-run enumeration.
 - Note: package-manager distribution (Homebrew tap / AUR) stays in the backlog — this milestone is the built-in lifecycle commands, not third-party channels.
+- Note: `churl update` self-update must reuse R0's atomic-replace helper.
 
-**Next**: M7.9
+**Next**: R3 (per the 2026-07-09 re-sequence)
 
 ---
 
