@@ -24,6 +24,7 @@
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
 | M7.7 | Response formatting + help search (UX round) | planned |
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
+| M7.9 | Unified creation flow (`<leader>n`: collection/endpoint/sequence; endpoint from curl) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
 
@@ -625,6 +626,20 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - **Uninstall path**: a `churl uninstall` subcommand (and/or an `uninstall.sh`) that removes the binary and optionally state/config in the OS data dir, with a README "Uninstalling" section. Counterpart to `install.sh`.
 - Tests: manifest compat parse + older/newer/equal decision matrix, self-update artifact-resolution + replace (mocked), uninstall dry-run enumeration.
 - Note: package-manager distribution (Homebrew tap / AUR) stays in the backlog — this milestone is the built-in lifecycle commands, not third-party channels.
+
+**Next**: M7.9
+
+---
+
+## M7.9 — Unified creation flow (`<leader>n`)
+
+**Scope**: Owner notes 2026-07-09. Consolidate creating a collection / endpoint / sequence under one `<leader>n` submenu (builds on the nested-leader infra shipped in the leader-submenus PR), and make endpoint creation richer. Replaces today's scattered creation entry points (`n`/`N` in the explorer, `<leader>s a` for sequences) with one discoverable, noun-first menu.
+
+**Deliverables** (design session first):
+- **`<leader>n` creation submenu**: opens a which-key submenu to create a **collection**, an **endpoint**, or a **sequence**.
+- **Endpoint creation picks a collection**: creating an endpoint prompts for a target collection (reuse the picker); if none is chosen, create it at the **workspace root**.
+- **Endpoint from curl**: creating an endpoint can start from a **pasted curl command** — parse it into an endpoint (reuse the `churl-core::import` curl parser + the in-TUI curl-paste seam from M7.1).
+- Tests: submenu routing; endpoint-create in a chosen collection vs. root; curl-paste → endpoint round-trip.
 
 **Next**: M8
 
