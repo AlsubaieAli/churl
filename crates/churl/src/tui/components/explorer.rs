@@ -803,7 +803,9 @@ pub fn render_sequences_pane(
 /// sequences, or an empty-state note).
 pub fn sequences_stub_summary(state: &ExplorerState, theme: &Theme) -> Line<'static> {
     let text = match state.sequences.len() {
-        0 => "no sequences".to_owned(),
+        // D1: a zero-sequence peek shows an add affordance, not a dead "no
+        // sequences" — matches the `<leader>` glyph convention used elsewhere.
+        0 => "<leader>s a to add".to_owned(),
         1 => "1 sequence".to_owned(),
         n => format!("{n} sequences"),
     };

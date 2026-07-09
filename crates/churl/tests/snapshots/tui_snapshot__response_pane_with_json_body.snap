@@ -21,8 +21,8 @@ expression: snapshot(&mut app)
 │                            │┃  "name": "Ada"                                 ┃
 │                            │┃}                                               ┃
 │                            │┃                                                ┃
-│                            │┃                                                ┃
-│                            │┃                                                ┃
-│                            │┃                                                ┃
+└────────────────────────────┘┃                                                ┃
+┌ Sequences ─────────────────┐┃                                                ┃
+│<leader>s a to add          │┃                                                ┃
 └────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  RESPONSE · demo · ? help · space leader · / search · : palette

@@ -21,8 +21,8 @@ expression: snapshot(&mut app)
 │                            ││no endpoint selected                            │
 │                            ││                                                │
 │                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
+└────────────────────────────┘│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

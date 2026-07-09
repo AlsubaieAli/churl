@@ -1,29 +1,28 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 346
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
-┃    Endpoint 19             ┃│no endpoint selected                            │
-┃    Endpoint 20             ┃└────────────────────────────────────────────────┘
-┃    Endpoint 21             ┃┌ Request ───────────────────────────────────────┐
-┃    Endpoint 22             ┃│                                                │
-┃    Endpoint 23             ┃│no endpoint selected                            │
-┃    Endpoint 24             ┃│                                                │
+┃    Endpoint 22             ┃│no endpoint selected                            │
+┃    Endpoint 23             ┃└────────────────────────────────────────────────┘
+┃    Endpoint 24             ┃┌ Request ───────────────────────────────────────┐
 ┃    Endpoint 25             ┃│                                                │
-┃    Endpoint 26             ┃│                                                │
+┃    Endpoint 26             ┃│no endpoint selected                            │
 ┃    Endpoint 27             ┃│                                                │
 ┃    Endpoint 28             ┃│                                                │
 ┃    Endpoint 29             ┃│                                                │
-┃    Endpoint 30             ┃└────────────────────────────────────────────────┘
-┃    Endpoint 31             ┃┌ Response ──────────────────────────────────────┐
-┃    Endpoint 32             ┃│no response yet                                 │
-┃    Endpoint 33             ┃│                                                │
-┃    Endpoint 34             ┃│no endpoint selected                            │
-┃    Endpoint 35             ┃│                                                │
+┃    Endpoint 30             ┃│                                                │
+┃    Endpoint 31             ┃│                                                │
+┃    Endpoint 32             ┃│                                                │
+┃    Endpoint 33             ┃└────────────────────────────────────────────────┘
+┃    Endpoint 34             ┃┌ Response ──────────────────────────────────────┐
+┃    Endpoint 35             ┃│no response yet                                 │
 ┃    Endpoint 36             ┃│                                                │
-┃    Endpoint 37             ┃│                                                │
+┃    Endpoint 37             ┃│no endpoint selected                            │
 ┃    Endpoint 38             ┃│                                                │
 ┃>   Endpoint 39             ┃│                                                │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1681
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users                                       
@@ -21,9 +20,9 @@ expression: snapshot(&mut app)
 ┃                            ┃│GET https://api.test/users                      │
 ┃                            ┃│                                                │
 ┃                            ┃│press ctrl-s to send                            │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
  Saved List users                                                               
  EXPLORER · demo · ? help · space leader · / search · : palette

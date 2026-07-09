@@ -631,8 +631,11 @@ impl EnvEditorState {
             }
         }
         if !violations.is_empty() {
+            // D1 (interim): name the offending var(s) and signal they're
+            // pre-existing so the refusal doesn't read as a silent dead-end. The
+            // actual grandfather+warn / save-anyway behavior is R3.
             let msg = format!(
-                "won't save secret-named var(s) with literal values: {} — secrets belong in env, not workspace files",
+                "pre-existing secret-named var(s) with literal values not saved: {} — move them to env (grandfathering coming soon)",
                 violations.join(", ")
             );
             self.message = Some(msg.clone());
@@ -1470,7 +1473,21 @@ mod tests {
         // Add a secret-named literal to the workspace.
         s.scopes[0].vars.push(("api_token".into(), "leaked".into()));
         let result = s.save(dir.path(), "demo");
-        assert!(matches!(result, EnvSaveResult::Refused(_)));
+        let EnvSaveResult::Refused(msg) = &result else {
+            panic!("expected Refused, got {result:?}");
+        };
+        // D1: the interim message names the offending var and signals it's
+        // pre-existing (the full grandfather+warn behavior is R3).
+        assert!(
+            msg.contains("api_token"),
+            "refusal names the offending var: {msg}"
+        );
+        assert!(
+            msg.contains("pre-existing"),
+            "refusal signals the value is pre-existing: {msg}"
+        );
+        // The same message is surfaced to the user via `self.message`.
+        assert_eq!(s.message.as_deref(), Some(msg.as_str()));
         // Nothing written: the manifest still has only its original line.
         let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
         assert!(

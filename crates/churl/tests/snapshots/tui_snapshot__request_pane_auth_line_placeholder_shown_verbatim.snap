@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 156
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐ Private rep…                                     
@@ -22,8 +21,8 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
 │                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
+└────────────────────────────┘│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  REQUEST · demo · ? help · space leader · / search · : palette
