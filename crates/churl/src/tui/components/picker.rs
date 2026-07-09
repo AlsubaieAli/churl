@@ -81,7 +81,7 @@ impl PickerState {
 /// 1x1 terminal, `w_hi = 1`, so `clamp(50.min(1)=1, 1) = 1`; likewise
 /// `h_hi = max(1, 1-4)=1`, so `clamp(14.min(1)=1, 1) = 1`.
 fn modal_size(area: Rect) -> (u16, u16) {
-    let w_hi = area.width.min(120).max(1);
+    let w_hi = area.width.clamp(1, 120);
     let w_prop = (u32::from(area.width) * 70 / 100) as u16;
     let width = w_prop.clamp(50.min(w_hi), w_hi);
 

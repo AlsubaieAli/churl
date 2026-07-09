@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1324
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -11,9 +12,9 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
 ┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
 ┃                            ┃│                    ┃ c  cancel request         ┃
+┃                            ┃│                    ┃ y  copy request as curl   ┃
 ┃                            ┃└────────────────────┃ a  edit sequence          ┃
 ┃                            ┃┌ Response ──────────┃ v  Environments & vars    ┃
 ┃                            ┃│no response yet     ┃ l  load test endpoint     ┃
