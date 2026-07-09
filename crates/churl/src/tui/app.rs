@@ -582,6 +582,10 @@ pub struct App {
     /// the load runner (`<leader>l f`). Set on open, consumed + cleared when the
     /// pick lands (the endpoint loads, then the load runner opens over it).
     load_runner_after_pick: bool,
+    /// One-shot flag mirroring `load_runner_after_pick`: the sequence picker was
+    /// opened to RUN the chosen sequence (`<leader>s r`) rather than edit it
+    /// (`<leader>s o`). Set on open, consumed + cleared on accept / close.
+    sequence_pick_runs: bool,
     /// Active jump-mode state, when `mode` is [`Mode::Jump`].
     pub jump: Option<JumpState>,
     keymap: KeyMap,
@@ -781,6 +785,7 @@ impl App {
             workspace_choices: Vec::new(),
             sequence_choices: Vec::new(),
             load_runner_after_pick: false,
+            sequence_pick_runs: false,
             jump: None,
             keymap,
             theme: Theme::default(),
@@ -807,7 +812,11 @@ impl App {
             zoom: None,
             explorer_hidden: false,
             left_active: LeftPane::Endpoints,
-            sequences_shown: false,
+            // D1: the Sequences sub-pane is always present (peek-symmetric with
+            // Explorer). It defaults on so the left column always splits; whichever
+            // sub-pane is not `left_active` collapses to a peeking stub, never
+            // vanishes. `<leader>S` is an interim focus-switch, not a hide-toggle.
+            sequences_shown: true,
             focus_before_explorer: None,
             leader: None,
             help_open: false,
@@ -1542,7 +1551,8 @@ impl App {
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
-            Action::OpenSequencePicker => self.open_sequence_picker(),
+            Action::OpenSequencePicker => self.open_sequence_picker(false),
+            Action::RunSequencePick => self.open_sequence_picker(true),
             Action::OpenLoadRunner => self.open_load_runner(),
             Action::OpenLoadRunnerPick => self.open_load_runner_pick()?,
             Action::Send => self.send_request(),
@@ -2636,9 +2646,11 @@ impl App {
         self.open_sequence_runner(selected);
     }
 
-    /// `<leader>s o` / palette: opens a fuzzy picker over every sequence name.
-    /// Accepting one opens the unified sequence surface in the Edit face.
-    fn open_sequence_picker(&mut self) {
+    /// Opens a fuzzy picker over every sequence name. `run == false` (`<leader>s o`
+    /// / palette) opens the chosen sequence in the Edit face; `run == true`
+    /// (`<leader>s r`) loads + runs it instead (D1 — mirrors the
+    /// `load_runner_after_pick` one-shot-intent pattern).
+    fn open_sequence_picker(&mut self, run: bool) {
         if self.workspace.is_none() {
             self.notify("open a workspace first");
             return;
@@ -2655,8 +2667,31 @@ impl App {
             choices.push(file);
         }
         self.sequence_choices = choices;
-        self.picker = Some(picker::PickerState::new(" Open sequence ", items));
+        self.sequence_pick_runs = run;
+        let title = if run {
+            " Run sequence "
+        } else {
+            " Open sequence "
+        };
+        self.picker = Some(picker::PickerState::new(title, items));
         self.mode = Mode::SequencePicker;
+    }
+
+    /// Loads the sequence at `path` and opens the RUNNER over it (D1 `<leader>s r`
+    /// chooser accept path). Mirrors `open_picked_sequence` but hands to the
+    /// runner instead of the editor.
+    fn run_sequence_at(&mut self, path: PathBuf) {
+        match persistence::load_sequence(&path) {
+            Ok(sequence) => {
+                self.explorer.select_sequence_file(&path);
+                self.open_sequence_runner(super::components::explorer::SelectedSequence {
+                    name: sequence.name.clone(),
+                    file: path,
+                    sequence,
+                });
+            }
+            Err(err) => self.crud_error(err),
+        }
     }
 
     /// Loads the sequence at `path` and opens the unified surface (Edit face).
@@ -3255,10 +3290,16 @@ impl App {
         };
         for row in &mut runner.results {
             if matches!(row.status, LoadStatus::Pending | LoadStatus::Running) {
-                row.status = LoadStatus::Cancelled;
-                if matches!(row.response, ResponseState::InFlight { .. }) {
+                // D1: a launched-then-cancelled row carries a real time-to-cancel.
+                // The launch `Instant` already lives in `InFlight { started }`
+                // (set by `on_load_started`); read it out before overwriting the
+                // response. Never-launched `Pending` rows have no `InFlight` and
+                // keep `timing = None` — honest: they never started.
+                if let ResponseState::InFlight { started } = row.response {
+                    row.timing = Some(started.elapsed()); // Instant is Copy
                     row.response = ResponseState::Cancelled;
                 }
+                row.status = LoadStatus::Cancelled;
             }
         }
         runner.running = false;
@@ -3451,6 +3492,8 @@ impl App {
         // Clear the one-shot `<leader>l f` intent so an Esc-cancelled pick never
         // leaks into the NEXT plain `<leader>f` / `/` search.
         self.load_runner_after_pick = false;
+        // Same for the `<leader>s r` run-vs-edit sequence-picker intent.
+        self.sequence_pick_runs = false;
         self.mode = Mode::Normal;
     }
 
@@ -3518,6 +3561,8 @@ impl App {
         // clears it, so an empty-result Enter (early-return below) still drops the
         // flag while a real pick can act on it.
         let after_pick = std::mem::take(&mut self.load_runner_after_pick);
+        // Same one-shot capture for the `<leader>s r` run-vs-edit sequence intent.
+        let sequence_runs = std::mem::take(&mut self.sequence_pick_runs);
         let auth_picker = self.auth_picker;
         self.close_overlay();
         let Some(index) = current else {
@@ -3555,7 +3600,14 @@ impl App {
             }
             Mode::SequencePicker => {
                 if let Some(path) = sequence_choices.get(index).cloned() {
-                    self.open_picked_sequence(path)?;
+                    // `sequence_runs` (captured above, always cleared) carries the
+                    // `<leader>s r` run-vs-edit intent: run the chosen sequence, or
+                    // open it for editing.
+                    if sequence_runs {
+                        self.run_sequence_at(path);
+                    } else {
+                        self.open_picked_sequence(path)?;
+                    }
                 }
             }
             Mode::Palette => {
@@ -3682,17 +3734,14 @@ impl App {
         }
     }
 
-    /// `<leader>S`: toggles the sequences sub-pane on/off. Turning it on shows +
-    /// focuses the new sub-pane (`left_active = Sequences`); turning it off never
-    /// leaves a hidden sub-pane focused (falls back to `Endpoints`).
+    /// `<leader>S`: interim focus-switch (D1). The Sequences sub-pane is always
+    /// present now (peek-symmetric with Explorer), so there is nothing to
+    /// hide-toggle — pressing this flips `left_active` between Endpoints⇄Sequences
+    /// and focuses the left column, never setting `sequences_shown = false`. It
+    /// delegates to `focus_sequences_toggle` so the Sequences pane never vanishes
+    /// mid-demo. (Full `<leader>S` removal / nav-model rework is M7.10.)
     fn toggle_sequences_pane(&mut self) {
-        self.sequences_shown = !self.sequences_shown;
-        if self.sequences_shown {
-            self.left_active = LeftPane::Sequences;
-            self.set_focus(Pane::Explorer);
-        } else {
-            self.left_active = LeftPane::Endpoints;
-        }
+        self.focus_sequences_toggle();
     }
 
     /// Explorer overlay `s`: switches focus/zoom between the endpoints tree and
@@ -4888,10 +4937,11 @@ impl App {
         self.active_profile = None;
         self.pending_load = None;
         self.zoom = None;
-        // Clean slate for the sequences sub-pane: the new workspace may have no
-        // sequences, and its list is unrelated to the old one. Reset to off +
-        // endpoints; set_focus below re-runs the invariant after the reload.
-        self.sequences_shown = false;
+        // Clean slate for the sequences sub-pane: the new workspace's list is
+        // unrelated to the old one. D1: the sub-pane is always present, so reset
+        // to shown + endpoints-zoomed; `set_focus` below re-runs the invariant
+        // (which forces Endpoints when the new workspace has no sequences).
+        self.sequences_shown = true;
         self.left_active = LeftPane::Endpoints;
         self.focus_before_explorer = None;
         // set_focus(Explorer) also un-hides the explorer if it was hidden.
@@ -6999,16 +7049,21 @@ mod tests {
         assert_eq!(String::from(app.test_editor().lines.clone()), " ");
     }
 
-    /// The `?` help / `churl keymaps` traversal: RunSequence is reachable only
-    /// through the sequences submenu, so its combo must render as `s r`. Guards
-    /// the `leader_combos_for`/`iter_leader` submenu traversal (the help-guard
-    /// test alone can't catch a missing traversal).
+    /// The `?` help / `churl keymaps` traversal: the `<leader>s r` chooser
+    /// (`RunSequencePick`, D1) is reachable only through the sequences submenu, so
+    /// its combo must render as `s r`. Guards the `leader_combos_for`/`iter_leader`
+    /// submenu traversal (the help-guard test alone can't catch a missing one).
     #[test]
     fn run_sequence_shows_submenu_chord() {
         let keymap = KeyMap::default();
-        assert_eq!(keymap.leader_combos_for(Action::RunSequence), vec!["s r"]);
+        assert_eq!(
+            keymap.leader_combos_for(Action::RunSequencePick),
+            vec!["s r"]
+        );
         assert!(
-            keymap.iter_leader().any(|(_, a)| a == Action::RunSequence),
+            keymap
+                .iter_leader()
+                .any(|(_, a)| a == Action::RunSequencePick),
             "iter_leader must traverse the submenu maps"
         );
     }
@@ -7293,19 +7348,26 @@ mod tests {
         App::new(ws, KeyMap::default()).unwrap()
     }
 
+    /// D1: `<leader>S` is now an interim focus-switch, never a hide-toggle. The
+    /// Sequences sub-pane defaults on (always present) and `<leader>S` only flips
+    /// `left_active` Endpoints⇄Sequences — `sequences_shown` never goes false.
     #[test]
-    fn toggle_sequences_pane_shows_and_focuses_sequences() {
+    fn toggle_sequences_pane_is_a_focus_switch_never_hides() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        assert!(!app.sequences_shown);
-        assert_eq!(app.left_active, LeftPane::Endpoints);
+        assert!(app.sequences_shown, "sub-pane defaults on (always present)");
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "Explorer zoomed default"
+        );
         app.dispatch(Action::ToggleSequencesPane, None).unwrap();
-        assert!(app.sequences_shown, "toggle shows the sub-pane");
-        assert_eq!(app.left_active, LeftPane::Sequences, "and focuses it");
+        assert!(app.sequences_shown, "still shown");
+        assert_eq!(app.left_active, LeftPane::Sequences, "focus switched to it");
         assert_eq!(app.focus, Pane::Explorer);
-        // Toggling off never leaves a hidden sub-pane focused.
+        // Pressing again switches back — it never hides the sub-pane.
         app.dispatch(Action::ToggleSequencesPane, None).unwrap();
-        assert!(!app.sequences_shown);
+        assert!(app.sequences_shown, "never hidden");
         assert_eq!(app.left_active, LeftPane::Endpoints);
     }
 
@@ -7368,6 +7430,55 @@ mod tests {
         app.dispatch(Action::Select, None).unwrap();
         assert_eq!(app.mode, Mode::Sequence);
         assert_eq!(app.sequence_view, SeqView::Edit);
+    }
+
+    /// D1: `<leader>s r` (`RunSequencePick`) opens a run-flavored chooser and the
+    /// accepted index RUNS the chosen sequence — not sequence #0. Mirrors the
+    /// `open_load_runner_pick` tests.
+    #[test]
+    fn run_sequence_pick_runs_the_chosen_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        let ordering = app.explorer.all_sequences();
+        assert!(ordering.len() >= 2, "fixture has ≥2 sequences");
+
+        // `<leader>s r` opens the picker with the run intent armed.
+        app.dispatch(Action::RunSequencePick, None).unwrap();
+        assert_eq!(app.mode, Mode::SequencePicker);
+        assert!(app.sequence_pick_runs, "run intent armed on the picker");
+
+        // Highlight the SECOND sequence and accept it.
+        app.picker.as_mut().unwrap().move_down();
+        let chosen = ordering[1].0.clone();
+        app.accept_overlay().unwrap();
+
+        // The runner opened over the CHOSEN sequence (index 1), not sequences[0].
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Run);
+        let runner = app.sequence_runner.as_ref().expect("runner opened");
+        assert_eq!(runner.name, chosen, "ran the chosen sequence, not #0");
+        assert!(
+            !app.sequence_pick_runs,
+            "one-shot intent cleared after accept"
+        );
+    }
+
+    /// D1: `<leader>s o` (`OpenSequencePicker`) still opens the chosen sequence
+    /// for EDITING — the run intent stays false so the accept path edits.
+    #[test]
+    fn open_sequence_pick_edits_not_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::OpenSequencePicker, None).unwrap();
+        assert_eq!(app.mode, Mode::SequencePicker);
+        assert!(!app.sequence_pick_runs, "edit path: run intent not armed");
+        app.accept_overlay().unwrap();
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(
+            app.sequence_view,
+            SeqView::Edit,
+            "picker opens the Edit face"
+        );
     }
 
     #[test]
@@ -7503,9 +7614,11 @@ mod tests {
 
         app.switch_workspace(dir_b.path().to_path_buf()).unwrap();
         assert_eq!(app.explorer.sequences_len(), 0);
+        // D1: the sub-pane stays present (always-on); the invariant instead forces
+        // `left_active` back to Endpoints so focus never strands on an empty pane.
         assert!(
-            !app.sequences_shown,
-            "sub-pane resets off for the new workspace"
+            app.sequences_shown,
+            "sub-pane stays present for the new workspace (D1 always-on)"
         );
         assert_eq!(
             app.left_active,
@@ -8345,6 +8458,38 @@ mod tests {
             "partial summary marked cancelled"
         );
         assert_eq!(batches[0].summary.ok_count, 1);
+    }
+
+    /// D1: a launched-then-cancelled row carries a real time-to-cancel (read out
+    /// of `InFlight { started }`), while a never-launched pending row keeps
+    /// `timing = None` — no fabricated zero.
+    #[test]
+    fn load_cancel_records_time_to_cancel_for_launched_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 3;
+        app.start_load_run();
+        let g = load_gen(&app);
+        // Mark rows 0 and 1 launched (InFlight); leave row 2 never-launched.
+        app.on_load_started(g, 0);
+        app.on_load_started(g, 1);
+        app.cancel_load_run();
+
+        let runner = app.load_runner.as_ref().unwrap();
+        assert_eq!(runner.results[0].status, LoadStatus::Cancelled);
+        assert!(
+            runner.results[0].timing.is_some(),
+            "launched-then-cancelled row shows a time-to-cancel"
+        );
+        assert!(
+            runner.results[1].timing.is_some(),
+            "second launched row also times"
+        );
+        assert_eq!(runner.results[2].status, LoadStatus::Cancelled);
+        assert!(
+            runner.results[2].timing.is_none(),
+            "never-launched pending row keeps timing None (no fabricated zero)"
+        );
     }
 
     #[test]

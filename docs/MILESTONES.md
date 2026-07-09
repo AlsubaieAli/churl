@@ -21,7 +21,7 @@
 | M7.4 | Request sequences (E2E testing) | **done** |
 | M7.5 | Concurrent requests (throttle / load testing) | **done** |
 | M7.5.3 | Clipboard cross-platform compat (native + OSC-52 passthrough) | **done** |
-| **D1** | Demo-stabilize (regression fixes) | **next** |
+| **D1** | Demo-stabilize (regression fixes) | **done** |
 | **R0** | Cheap-P0 durability (atomic writes · load-runner memory bound) | planned |
 | **M7.10** | Navigation & keymap unification (design-first) | planned |
 | M7.7 | Response formatting + help search (+ control-char sanitize) | planned |
@@ -96,15 +96,15 @@ Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in p
 
 ## D1 — Demo-stabilize (regression fixes)
 
-**Scope**: The pure bugs + cheap consistency fixes from the owner demo drive-test, so further drive-testing runs on an honest binary. Small; no design session.
+**Scope**: The pure bugs + cheap consistency fixes from the owner demo drive-test, so further drive-testing runs on an honest binary. Small; no design session. **Shipped 2026-07-09.**
 
-**Deliverables**:
-- **Sequences pane peek-symmetry** — collapses to a peeking header when Explorer is focused (never vanishes), symmetric with Request/Response; **Explorer zoomed by default**. (The full nav model — `f`-jump, `<leader>S` removal, Tab regions — is M7.10; this is just the render/collapse fix.)
-- **`<leader>s r` routes to a chooser** instead of silently running `sequences[seq_cursor]` (the "won't let me choose / runs the last one" report).
-- **Cancelled load requests show time-to-cancel** (currently `timing = None` for cancelled → blank duration).
-- **Verify picker Up/Down on master + rebuild the demo** — Up/Down/Ctrl-p/n/j/k already route through `handle_overlay_key` for all four picker modes; the demo binary was stale. Rebuild + re-sign; add the rebuild step to the regression checklist.
-- **Env-editor interim message** — on a pre-existing literal-secret refusal, a clearer message that points at the offending var (the full grandfather+warn behavior is R3).
-- Start the **living regression checklist** (`docs/` or repo) from the demo drive-script.
+**Deliverables** (all done):
+- **Sequences pane peek-symmetry** — `sequences_shown` now defaults on so the left column always splits; the sub-pane not holding `left_active` collapses to a peeking stub (never vanishes), symmetric with Request/Response; **Explorer zoomed by default**. `<leader>S` is repointed to an interim focus-switch (delegates to `focus_sequences_toggle`) so it can never hide the pane; a zero-sequence workspace's stub shows the `<leader>s a to add` affordance. (Full nav model — `f`-jump, `<leader>S` removal, Tab regions — is M7.10; this is just the render/collapse + interim-keymap fix.)
+- **`<leader>s r` routes to a chooser** — new `RunSequencePick` action + `sequence_pick_runs` one-shot intent (mirrors `load_runner_after_pick`); the picker accept path runs the chosen sequence instead of editing it. `run_selected_sequence` stays reachable via in-pane `r` + palette.
+- **Cancelled load requests show time-to-cancel** — `cancel_load_run` reads `started` out of `InFlight` and records `row.timing = started.elapsed()` for launched rows; never-launched pending rows keep `timing = None` (no fabricated zero).
+- **Verify picker Up/Down on master + rebuild the demo** — no picker code change needed (Up/Down/Ctrl-p/n/j/k already route through `handle_overlay_key`); the demo binary was stale. The rebuild + re-sign is a main-session step. Rebuild-from-master is now item 1 of the regression checklist.
+- **Env-editor interim message** — the literal-secret refusal now names the offending var(s) and signals they're pre-existing ("…not saved: {names} — move them to env (grandfathering coming soon)"). The full grandfather+warn/`!`-marker behavior is R3.
+- **Living regression checklist** — seeded `docs/REGRESSION.md` from the demo drive-script (grouped by Explorer/Sequences · Picker · Load runner · Env editor · Response · Import/export · Clipboard, with a "record the built commit" header).
 
 **Next**: R0
 

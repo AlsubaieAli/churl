@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 840
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -22,8 +21,8 @@ expression: snapshot(&mut app)
 │           ┃  add sequence                                        ┃           │
 │           ┃  open sequence                                       ┃           │
 │           ┃  load test endpoint (concurrent)                     ┃           │
-│           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
-│                            ││                                                │
-│                            ││                                                │
+└───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

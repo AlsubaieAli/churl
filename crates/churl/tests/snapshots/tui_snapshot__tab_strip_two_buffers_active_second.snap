@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 2175
 expression: rendered
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users  Get user                             
@@ -22,8 +21,8 @@ expression: rendered
 ┃                            ┃│                                                │
 ┃                            ┃│press ctrl-s to send                            │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

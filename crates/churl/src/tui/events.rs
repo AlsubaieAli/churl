@@ -67,6 +67,9 @@ pub enum Action {
     EditSequence,
     /// Open a picker over all sequence names and open the chosen one (Edit face).
     OpenSequencePicker,
+    /// Open a picker over all sequence names and RUN the chosen one (D1 —
+    /// `<leader>s r`, so the user can choose which sequence to run).
+    RunSequencePick,
     /// Open the concurrent-load runner for the selected endpoint (M7.5).
     OpenLoadRunner,
     /// Pick an endpoint, then open the concurrent-load runner over it.
@@ -212,6 +215,11 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::OpenSequencePicker,
         "open-sequence-picker",
         "open sequence",
+    ),
+    (
+        Action::RunSequencePick,
+        "run-sequence-pick",
+        "run sequence (pick)",
     ),
     (Action::OpenLoadRunner, "load-runner", "load test endpoint"),
     (
@@ -642,7 +650,10 @@ impl Default for KeyMap {
         let mut sub_sequences = HashMap::new();
         sub_sequences.insert(key!(a).normalized(), Action::EditSequence);
         sub_sequences.insert(key!(o).normalized(), Action::OpenSequencePicker);
-        sub_sequences.insert(key!(r).normalized(), Action::RunSequence);
+        // D1: `<leader>s r` routes to a run-flavored chooser (pick which sequence
+        // to run) instead of silently running `sequences[seq_cursor]`. The direct
+        // `RunSequence` action stays reachable via the in-pane `r` + palette.
+        sub_sequences.insert(key!(r).normalized(), Action::RunSequencePick);
         // `<leader>l …`: load-test actions. `s` (load-a-sequence) is reserved for
         // a later composable-runs wave — do NOT bind it here.
         let mut sub_load = HashMap::new();
@@ -1314,7 +1325,8 @@ mod tests {
                 LeaderMenu::Sequences,
                 press(KeyCode::Char('r'), KeyModifiers::NONE)
             ),
-            Some(Action::RunSequence)
+            // D1: `<leader>s r` routes to the run-flavored chooser.
+            Some(Action::RunSequencePick)
         );
         assert_eq!(
             keymap.leader_sub_lookup(
@@ -1387,7 +1399,11 @@ mod tests {
             }
         }
         // leader_combos_for reports the full chord path for submenu actions.
-        assert_eq!(keymap.leader_combos_for(Action::RunSequence), vec!["s r"]);
+        // D1: `<leader>s r` now maps to the run-flavored chooser.
+        assert_eq!(
+            keymap.leader_combos_for(Action::RunSequencePick),
+            vec!["s r"]
+        );
         assert_eq!(
             keymap.leader_combos_for(Action::OpenLoadRunner),
             vec!["l c"]

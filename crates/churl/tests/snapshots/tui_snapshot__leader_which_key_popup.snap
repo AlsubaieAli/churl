@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1372
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -22,8 +21,8 @@ expression: snapshot(&mut app)
 ┃                            ┃│no endpoint ┃ v  Environments & vars            ┃
 ┃                            ┃│            ┃ w  workspace picker               ┃
 ┃                            ┃│            ┃ y  copy request as curl           ┃
-┃                            ┃│            ┃ l  ▸ load                         ┃
-┃                            ┃│            ┃ s  ▸ sequences                    ┃
-┃                            ┃│            ┃ t  ▸ tabs                         ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│            ┃ l  ▸ load                         ┃
+┌ Sequences ─────────────────┐│            ┃ s  ▸ sequences                    ┃
+│<leader>s a to add          ││            ┃ t  ▸ tabs                         ┃
+└────────────────────────────┘└────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

@@ -693,14 +693,68 @@ fn sequences_subpane_on_endpoints_focused() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// Regression: with the sub-pane OFF (default), the explorer column renders
-/// endpoints full-height exactly as before PR 2b — even when the workspace HAS
-/// sequences. Proves sequences left the tree without churning the column.
+/// D1 peek-symmetry: the Sequences sub-pane is ALWAYS present now (defaults on),
+/// and the left column is symmetric — whichever sub-pane is not `left_active`
+/// collapses to a peeking stub, the other fills. In BOTH focus states both
+/// sub-panes are visible (the "Explorer" and "Sequences" titles both render), so
+/// neither ever vanishes. Explorer is the zoomed default on launch.
 #[test]
-fn sequences_subpane_off_matches_plain_explorer() {
+fn sequences_subpane_peek_symmetry_both_present() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = fixture_with_sequences(dir.path());
-    insta::assert_snapshot!(snapshot(&mut app));
+
+    // Launch default: Explorer zoomed, Sequences peeks as a stub. Both present.
+    let launch = snapshot(&mut app);
+    assert!(
+        launch.contains("Sequences"),
+        "Sequences stub must be present on launch (Explorer zoomed): {launch}"
+    );
+    // The endpoints tree fills — its collection rows are visible.
+    assert!(
+        launch.contains("users") || launch.contains("orders"),
+        "endpoints tree visible on launch: {launch}"
+    );
+
+    // Focus-switch to Sequences: now Explorer collapses to a stub, Sequences
+    // fills. Both titles still render — neither pane vanished.
+    press(&mut app, KeyCode::Char(' ')); // leader
+    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+        .unwrap();
+    let switched = snapshot(&mut app);
+    assert!(
+        switched.contains("Explorer"),
+        "Explorer stub must be present when Sequences is focused: {switched}"
+    );
+    assert!(
+        switched.contains("Sequences") || switched.contains("Login flow"),
+        "Sequences sub-pane fills when focused: {switched}"
+    );
+
+    // Pressing `<leader>S` again never hides — it switches focus back.
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+        .unwrap();
+    let back = snapshot(&mut app);
+    assert!(
+        back.contains("Sequences"),
+        "Sequences pane still present after switching back — never hidden: {back}"
+    );
+}
+
+/// D1: a zero-sequence workspace launches Explorer-zoomed with a peeking
+/// Sequences stub whose summary is the add affordance, not a dead "no sequences".
+#[test]
+fn zero_sequence_workspace_shows_add_affordance() {
+    let dir = tempfile::tempdir().unwrap();
+    // `fixture` builds a workspace with endpoints but NO sequences dir.
+    fixture(dir.path());
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("<leader>s a to add"),
+        "zero-sequence Sequences stub shows the add affordance: {rendered}"
+    );
 }
 
 /// The URL bar shows `METHOD  url` + right-aligned indicators when an endpoint

@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 850
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐ List users                                       
@@ -22,8 +21,8 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
 │                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
+└────────────────────────────┘│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  URL · demo · ? help · space leader · / search · : palette
