@@ -165,6 +165,15 @@ pub enum Action {
     CopyAsCurl,
     /// Copy the selected request as a curl one-liner with `{{var}}`s resolved.
     CopyAsCurlResolved,
+    /// Focus the next open buffer/tab (wraps). Distinct from the request-pane
+    /// `TabNext` (which cycles Params/Headers/Auth/Body).
+    BufferNext,
+    /// Focus the previous open buffer/tab (wraps).
+    BufferPrev,
+    /// Close the active buffer/tab (dirty prompts to discard).
+    BufferClose,
+    /// Close all open buffers/tabs (each dirty one prompts in turn).
+    BufferCloseAll,
 }
 
 /// `(action, config name, palette label)` for every action, in palette order.
@@ -315,6 +324,14 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         "copy-as-curl-resolved",
         "copy request as curl (resolved vars)",
     ),
+    (Action::BufferNext, "buffer-next", "next buffer"),
+    (Action::BufferPrev, "buffer-prev", "previous buffer"),
+    (Action::BufferClose, "buffer-close", "close buffer"),
+    (
+        Action::BufferCloseAll,
+        "buffer-close-all",
+        "close all buffers",
+    ),
 ];
 
 impl Action {
@@ -357,6 +374,8 @@ pub enum LeaderMenu {
     Sequences,
     /// `<leader>l`: load-test actions (current endpoint / pick endpoint).
     Load,
+    /// `<leader>t`: buffer/tab actions (next / prev / close / close-all).
+    Tabs,
 }
 
 impl LeaderMenu {
@@ -365,6 +384,7 @@ impl LeaderMenu {
         match self {
             LeaderMenu::Sequences => 's',
             LeaderMenu::Load => 'l',
+            LeaderMenu::Tabs => 't',
         }
     }
 
@@ -373,12 +393,13 @@ impl LeaderMenu {
         match self {
             LeaderMenu::Sequences => "sequences",
             LeaderMenu::Load => "load",
+            LeaderMenu::Tabs => "tabs",
         }
     }
 
     /// Every submenu, in a stable order.
-    pub fn all() -> [LeaderMenu; 2] {
-        [LeaderMenu::Sequences, LeaderMenu::Load]
+    pub fn all() -> [LeaderMenu; 3] {
+        [LeaderMenu::Sequences, LeaderMenu::Load, LeaderMenu::Tabs]
     }
 }
 
@@ -482,6 +503,8 @@ pub struct KeyMap {
     sub_sequences: HashMap<KeyCombination, Action>,
     /// `<leader>l <key>` → action (load submenu).
     sub_load: HashMap<KeyCombination, Action>,
+    /// `<leader>t <key>` → action (tabs/buffers submenu).
+    sub_tabs: HashMap<KeyCombination, Action>,
 }
 
 impl Default for KeyMap {
@@ -612,6 +635,8 @@ impl Default for KeyMap {
         // Submenu descents (two-level which-key).
         root_bind(key!(s), LeaderEntry::Submenu(LeaderMenu::Sequences));
         root_bind(key!(l), LeaderEntry::Submenu(LeaderMenu::Load));
+        // `<leader>t` descends into the tabs/buffers submenu. `t` is free at root.
+        root_bind(key!(t), LeaderEntry::Submenu(LeaderMenu::Tabs));
 
         // `<leader>s …`: sequence actions (add / open / run).
         let mut sub_sequences = HashMap::new();
@@ -623,6 +648,13 @@ impl Default for KeyMap {
         let mut sub_load = HashMap::new();
         sub_load.insert(key!(c).normalized(), Action::OpenLoadRunner);
         sub_load.insert(key!(f).normalized(), Action::OpenLoadRunnerPick);
+        // `<leader>t …`: buffer/tab actions. `n` next · `p` prev · `x` close ·
+        // `X` (shift-x) close all. Do NOT touch `Tab`/`Shift-Tab` (cross-pane).
+        let mut sub_tabs = HashMap::new();
+        sub_tabs.insert(key!(n).normalized(), Action::BufferNext);
+        sub_tabs.insert(key!(p).normalized(), Action::BufferPrev);
+        sub_tabs.insert(key!(x).normalized(), Action::BufferClose);
+        sub_tabs.insert(key!(shift - x).normalized(), Action::BufferCloseAll);
 
         Self {
             map,
@@ -631,6 +663,7 @@ impl Default for KeyMap {
             leader_root,
             sub_sequences,
             sub_load,
+            sub_tabs,
         }
     }
 }
@@ -659,6 +692,7 @@ impl KeyMap {
         match menu {
             LeaderMenu::Sequences => &self.sub_sequences,
             LeaderMenu::Load => &self.sub_load,
+            LeaderMenu::Tabs => &self.sub_tabs,
         }
     }
 
@@ -797,7 +831,7 @@ impl KeyMap {
                     .ok_or_else(|| {
                         eyre!(
                             "unknown leader submenu [keys.leader.{menu_name}] \
-                             (expected one of: sequences, load)"
+                             (expected one of: sequences, load, tabs)"
                         )
                     })?;
                 let label = format!("[keys.leader.{menu_name}]");
@@ -807,6 +841,7 @@ impl KeyMap {
                     match menu {
                         LeaderMenu::Sequences => keymap.sub_sequences.insert(combo, action),
                         LeaderMenu::Load => keymap.sub_load.insert(combo, action),
+                        LeaderMenu::Tabs => keymap.sub_tabs.insert(combo, action),
                     };
                 }
                 continue;
@@ -818,7 +853,7 @@ impl KeyMap {
                     eyre!(
                         "unknown keymap table [keys.{table}] (expected one of: \
                          explorer, urlbar, request, response, leader, \
-                         leader.sequences, leader.load)"
+                         leader.sequences, leader.load, leader.tabs)"
                     )
                 })?;
             for (combo_str, action_str) in bindings {
@@ -908,7 +943,7 @@ fn parse_leader_entry(combo_str: &str, value: &str) -> Result<LeaderEntry> {
             .ok_or_else(|| {
                 eyre!(
                     "bad leader descent {value:?} for key {combo_str:?} in [keys.leader] \
-                     (expected one of: +sequences, +load)"
+                     (expected one of: +sequences, +load, +tabs)"
                 )
             })?;
         return Ok(LeaderEntry::Submenu(menu));

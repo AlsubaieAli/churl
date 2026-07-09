@@ -21,5 +21,6 @@ pub mod search;
 pub mod sequence_editor;
 pub mod sequence_runner;
 pub mod statusline;
+pub mod tab_strip;
 pub mod urlbar;
 pub mod vim_ext;

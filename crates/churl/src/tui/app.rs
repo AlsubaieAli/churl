@@ -55,7 +55,7 @@ use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, Ste
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
     env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
-    request, response, sequence_editor, sequence_runner, statusline, urlbar,
+    request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, LeaderMenu, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -232,6 +232,18 @@ enum PendingLoad {
     /// Switch to the workspace rooted at this path (quick-jump workspace picker).
     /// Always treated as "other" by the dirty guard.
     Workspace(std::path::PathBuf),
+}
+
+/// A deferred buffer-close awaiting the discard-changes confirm. Buffers are
+/// keyed by **path**, not index — closing/removing a buffer shifts the indices
+/// of everything after it, so an index parked across a confirm would go stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingClose {
+    /// A single dirty buffer close (`<leader>t x`).
+    One(std::path::PathBuf),
+    /// A close-all (`<leader>t X`) working through its dirty buffers one prompt
+    /// at a time (front = the one currently prompting).
+    All(std::collections::VecDeque<std::path::PathBuf>),
 }
 
 /// Messages delivered to the event loop over the app channel. No longer `Copy`
@@ -630,6 +642,11 @@ pub struct App {
     /// [`ConfirmPurpose::DiscardChanges`] overlay; resolved by `s`/`d`, dropped
     /// by `Esc`.
     pending_load: Option<PendingLoad>,
+    /// The buffer-close intent deferred behind an open
+    /// [`ConfirmPurpose::DiscardChanges`] overlay (a dirty tab close). Keyed by
+    /// path, resolved by `s`/`d`, aborted by `Esc`. Mutually exclusive with
+    /// `pending_load` — only one is `Some` while the confirm is up.
+    pending_close: Option<PendingClose>,
     /// Which pane is zoomed (M6.7 deliverable 4), or `None` for the normal split.
     zoom: Option<ZoomPane>,
     /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
@@ -786,6 +803,7 @@ impl App {
             prompt_editor: LineEditor::default(),
             auth_picker: false,
             pending_load: None,
+            pending_close: None,
             zoom: None,
             explorer_hidden: false,
             left_active: LeftPane::Endpoints,
@@ -1595,6 +1613,10 @@ impl App {
             Action::PasteCurl => self.begin_paste_curl(),
             Action::CopyAsCurl => self.copy_as_curl(false),
             Action::CopyAsCurlResolved => self.copy_as_curl(true),
+            Action::BufferNext => self.buffer_cycle(true),
+            Action::BufferPrev => self.buffer_cycle(false),
+            Action::BufferClose => self.close_buffer(self.active),
+            Action::BufferCloseAll => self.close_all_buffers(),
             Action::Up
             | Action::Down
             | Action::Select
@@ -1688,18 +1710,140 @@ impl App {
         Ok(())
     }
 
-    /// Opens `selected` into a buffer (was `load_endpoint`). Stage 1 keeps
-    /// behaviour single-buffer: any existing buffer is dropped and replaced so
-    /// `buffers.len() <= 1` and `active = 0`. Stage 2 turns this into
-    /// dedup-or-push (focus an already-open buffer, else push a new one) — the
-    /// dedup key is already reachable via [`App::buffer_index_for_path`], so that
-    /// change is small. `EndpointBuffer::new` folds today's body/vim/snapshot
-    /// setup.
+    /// Opens `selected` into a buffer (was `load_endpoint`). Dedup-or-push: if a
+    /// buffer for the same endpoint file is already open, focus it (keeping its
+    /// in-memory edits/response); otherwise push a fresh buffer and focus it.
+    /// Never replaces another buffer — each endpoint keeps its own edit/response/
+    /// dirty state. `EndpointBuffer::new` folds today's body/vim/snapshot setup.
     fn open_or_focus_buffer(&mut self, selected: SelectedEndpoint) {
-        // Stage 2: `if let Some(i) = self.buffer_index_for_path(&selected.file)
-        // { self.active = i; return; }` then push instead of replace.
-        self.buffers = vec![Buffer::endpoint(selected)];
+        if let Some(i) = self.buffer_index_for_path(&selected.file) {
+            self.active = i;
+            return;
+        }
+        self.buffers.push(Buffer::endpoint(selected));
+        self.active = self.buffers.len() - 1;
+    }
+
+    /// Cycles the active buffer to the next (`forward`) or previous buffer,
+    /// wrapping. No-op on an empty buffer list.
+    fn buffer_cycle(&mut self, forward: bool) {
+        let len = self.buffers.len();
+        if len == 0 {
+            return;
+        }
+        self.active = if forward {
+            (self.active + 1) % len
+        } else {
+            (self.active + len - 1) % len
+        };
+    }
+
+    /// The active buffer index that should be selected after the buffer at
+    /// `closed` is removed. Empty → `0`; a close before `active` shifts it left;
+    /// closing the active buffer picks its right neighbour (clamped to the new
+    /// last); a close after `active` leaves it unchanged. Assumes `closed` has
+    /// already been removed, i.e. `self.buffers.len()` is the post-removal len.
+    fn new_active_after_close(&self, closed: usize) -> usize {
+        let len = self.buffers.len();
+        if len == 0 {
+            return 0;
+        }
+        if closed < self.active {
+            self.active - 1
+        } else if closed == self.active {
+            closed.min(len - 1)
+        } else {
+            self.active
+        }
+    }
+
+    /// Closes the buffer at `i`. A dirty buffer defers behind a
+    /// [`ConfirmPurpose::DiscardChanges`] prompt (its path parked in
+    /// `pending_close`); a clean buffer aborts any in-flight request (silently —
+    /// no cancelled history row) and is removed immediately, with `active`
+    /// clamped via [`App::new_active_after_close`]. No-op on an out-of-range `i`.
+    fn close_buffer(&mut self, i: usize) {
+        if i >= self.buffers.len() {
+            return;
+        }
+        if self.buffers[i].is_dirty() {
+            let path = self.buffers[i].file().to_path_buf();
+            self.pending_close = Some(PendingClose::One(path));
+            self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
+            return;
+        }
+        self.remove_buffer_at(i);
+    }
+
+    /// Removes the buffer at `i` (already known clean or discarded), aborting its
+    /// in-flight request first, and clamps `active`. Callers guarantee `i` is in
+    /// range.
+    fn remove_buffer_at(&mut self, i: usize) {
+        if let Some(in_flight) = self.buffers[i]
+            .as_endpoint_mut()
+            .and_then(|b| b.in_flight.take())
+        {
+            in_flight.handle.abort();
+        }
+        self.buffers.remove(i);
+        self.active = self.new_active_after_close(i);
+    }
+
+    /// Closes every buffer. Clean buffers close immediately; dirty buffers enter
+    /// a one-at-a-time discard-confirm queue (keyed by path so removals don't
+    /// shift the queue). When no dirty buffer remains the list is cleared.
+    fn close_all_buffers(&mut self) {
+        // Close clean buffers now; collect dirty paths for the confirm queue.
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        let mut i = 0;
+        while i < self.buffers.len() {
+            if self.buffers[i].is_dirty() {
+                queue.push_back(self.buffers[i].file().to_path_buf());
+                i += 1;
+            } else {
+                self.remove_buffer_at(i);
+                // `remove_buffer_at` shifts everything after `i` left, so revisit
+                // the same index.
+            }
+        }
+        if queue.is_empty() {
+            self.buffers.clear();
+            self.active = 0;
+            return;
+        }
+        self.pending_close = Some(PendingClose::All(queue));
+        self.prompt_next_close_in_queue();
+    }
+
+    /// Advances the close-all queue: skips paths whose buffer is already gone,
+    /// and opens the discard-confirm for the next still-dirty buffer. When the
+    /// queue drains, clears any remaining (all-clean) buffers and returns to
+    /// Normal.
+    fn prompt_next_close_in_queue(&mut self) {
+        loop {
+            let front = match self.pending_close.as_ref() {
+                Some(PendingClose::All(q)) => q.front().cloned(),
+                _ => return,
+            };
+            let Some(front) = front else { break };
+            match self.buffer_index_for_path(&front) {
+                Some(idx) if self.buffers[idx].is_dirty() => {
+                    self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
+                    return;
+                }
+                // Front is gone or no longer dirty — drop it and continue.
+                _ => {
+                    if let Some(PendingClose::All(q)) = self.pending_close.as_mut() {
+                        q.pop_front();
+                    }
+                }
+            }
+        }
+        // Queue drained: clear whatever clean buffers remain.
+        self.pending_close = None;
+        self.buffers.clear();
         self.active = 0;
+        self.mode = Mode::Normal;
     }
 
     /// The live request currently loaded (with any in-memory edits), or `None`.
@@ -1724,6 +1868,33 @@ impl App {
     /// nothing is loaded.
     fn is_dirty(&self) -> bool {
         self.active_buffer().is_some_and(Buffer::is_dirty)
+    }
+
+    /// Whether ANY open buffer has unsaved changes (not just the active one).
+    /// Drives the workspace-switch guard + its save-all resolution, so a
+    /// non-active dirty buffer still prompts and is never silently destroyed.
+    fn any_buffer_dirty(&self) -> bool {
+        self.buffers.iter().any(Buffer::is_dirty)
+    }
+
+    /// Saves EVERY dirty buffer through the normal save path (each buffer becomes
+    /// active in turn so `save_request` operates on it). Restores the original
+    /// active index afterward. A refused save (e.g. literal-secret auth) leaves
+    /// its buffer dirty and surfaces the error — callers gate the switch on
+    /// [`App::any_buffer_dirty`] being clear afterward. No-op when nothing dirty.
+    fn save_all_dirty_buffers(&mut self) {
+        let restore = self.active;
+        let mut i = 0;
+        while i < self.buffers.len() {
+            if self.buffers[i].is_dirty() {
+                self.active = i;
+                self.save_request();
+            }
+            i += 1;
+        }
+        // Clamp the restore target in case the buffer list shrank (it never does
+        // here, but stay defensive).
+        self.active = restore.min(self.buffers.len().saturating_sub(1));
     }
 
     /// Sends the selected endpoint's request with the live edtui body text.
@@ -4293,7 +4464,7 @@ impl App {
             msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
         }
         self.notify(msg);
-        // Guarded: loading the new endpoint must not silently discard dirty edits.
+        // Open the new endpoint as its own buffer (File target — no confirm).
         self.guarded_load(PendingLoad::File(path))?;
         Ok(())
     }
@@ -4325,8 +4496,8 @@ impl App {
                     Ok(path) => {
                         self.reload_explorer()?;
                         self.message = Some(Message::new(format!("created {text}")));
-                        // Guarded: loading the new endpoint must not silently
-                        // discard dirty edits on the currently-loaded one.
+                        // Open the new endpoint as its own buffer (File target —
+                        // no cross-endpoint confirm in the multi-buffer model).
                         self.guarded_load(PendingLoad::File(path))?;
                     }
                     Err(err) => self.crud_error(err),
@@ -4465,15 +4636,24 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Normal,
                 _ => {}
             },
+            // The discard-changes confirm serves TWO deferred ops (mutually
+            // exclusive — only one is `Some`): an endpoint/workspace switch
+            // (`pending_load`) or a dirty buffer close (`pending_close`).
+            ConfirmPurpose::DiscardChanges if self.pending_close.is_some() => {
+                self.handle_close_confirm_key(key)?;
+            }
             ConfirmPurpose::DiscardChanges => match key.code {
                 KeyCode::Char('s') => {
                     self.mode = Mode::Normal;
-                    self.save_request();
-                    // Only switch when the save actually took: a refused save
-                    // (e.g. literal secret auth) leaves the request dirty and
-                    // the error on the statusline — switching anyway would
-                    // destroy the unsaved edits it just refused to write.
-                    if !self.is_dirty() {
+                    // The switch destroys ALL buffers, so "save changes before
+                    // switching" must save EVERY dirty buffer — not just the
+                    // active one (else a non-active dirty buffer is lost silently).
+                    self.save_all_dirty_buffers();
+                    // Only switch once every buffer is clean: a refused save
+                    // (e.g. literal secret auth) leaves that buffer dirty and the
+                    // error on the statusline — switching anyway would destroy the
+                    // unsaved edits it just refused to write.
+                    if !self.any_buffer_dirty() {
                         if let Some(target) = self.pending_load.take() {
                             self.perform_load(target)?;
                         }
@@ -4500,6 +4680,83 @@ impl App {
             },
         }
         Ok(())
+    }
+
+    /// Resolves a dirty-buffer-close discard-confirm (`pending_close` is `Some`).
+    /// `s` saves the target buffer then closes it iff the save took; `d` discards
+    /// its edits and closes; `Esc` aborts the whole close op (already-closed clean
+    /// buffers stay closed). For a close-all queue, resolving the front re-opens
+    /// the confirm for the next still-dirty buffer.
+    fn handle_close_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
+        // The buffer path currently prompting (front of the queue, or the single).
+        let path = match self.pending_close.as_ref() {
+            Some(PendingClose::One(p)) => p.clone(),
+            Some(PendingClose::All(q)) => match q.front() {
+                Some(p) => p.clone(),
+                None => {
+                    // Queue empty — nothing to prompt; finish the op.
+                    self.pending_close = None;
+                    self.mode = Mode::Normal;
+                    return Ok(());
+                }
+            },
+            None => return Ok(()),
+        };
+        let Some(idx) = self.buffer_index_for_path(&path) else {
+            // The target vanished (e.g. reload removed it) — treat as resolved.
+            self.advance_close(true);
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char('s') => {
+                // Save operates on the active buffer, so focus the target first.
+                self.active = idx;
+                self.save_request();
+                if !self.is_dirty() {
+                    // Save took — close it and advance.
+                    let i = self.active;
+                    self.remove_buffer_at(i);
+                    self.advance_close(true);
+                } else {
+                    // Refused save (e.g. literal secret) — abort the whole op,
+                    // error visible on the statusline.
+                    self.pending_close = None;
+                    self.mode = Mode::Normal;
+                }
+            }
+            KeyCode::Char('d') => {
+                self.remove_buffer_at(idx);
+                self.advance_close(true);
+            }
+            KeyCode::Esc => {
+                // Abort the remaining close op; already-closed clean buffers stay
+                // closed. The still-open dirty buffers are untouched.
+                self.pending_close = None;
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Advances a resolved close-confirm: for a single close, finishes; for a
+    /// close-all queue, drops the resolved front and prompts the next dirty
+    /// buffer (or finishes the op when the queue drains). `resolved` marks the
+    /// current front as handled (pop it).
+    fn advance_close(&mut self, resolved: bool) {
+        match self.pending_close.as_mut() {
+            Some(PendingClose::One(_)) => {
+                self.pending_close = None;
+                self.mode = Mode::Normal;
+            }
+            Some(PendingClose::All(q)) => {
+                if resolved {
+                    q.pop_front();
+                }
+                self.prompt_next_close_in_queue();
+            }
+            None => self.mode = Mode::Normal,
+        }
     }
 
     /// Surfaces a CRUD [`PersistenceError`] on the statusline (fail-loud).
@@ -4557,55 +4814,24 @@ impl App {
         Ok(())
     }
 
-    /// The single guarded endpoint-switch seam: every path that replaces the
-    /// loaded endpoint (explorer Enter, jump-mode row, search overlay, CRUD
-    /// reselect) goes through here. When the loaded endpoint has unsaved changes
-    /// and the target is a *different* endpoint, the load is deferred behind a
-    /// [`ConfirmPurpose::DiscardChanges`] overlay with the target parked in
-    /// `pending_load`; otherwise it loads immediately.
+    /// The endpoint-switch seam: every path that opens/focuses an endpoint
+    /// (explorer Enter, jump-mode row, search overlay, CRUD reselect) or switches
+    /// workspace goes through here. Multi-buffer removed the cross-endpoint
+    /// discard guard: opening endpoint Y no longer destroys X (each keeps its own
+    /// buffer), so `Row`/`File` targets open-or-focus directly with NO confirm.
+    /// Only a `Workspace` switch destroys every buffer, so a dirty workspace
+    /// switch still defers behind a single [`ConfirmPurpose::DiscardChanges`]
+    /// (discard-all) overlay with the target parked in `pending_load`.
     fn guarded_load(&mut self, target: PendingLoad) -> Result<()> {
-        if self.is_dirty() {
-            if self.target_is_other(&target) {
-                self.pending_load = Some(target);
-                self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
-                return Ok(());
-            }
-            // Reselecting the loaded endpoint while dirty must not silently
-            // revert it from disk — keep the in-memory edits. (Collection rows
-            // fall through: toggling expansion needs no guard.)
-            if self.target_is_same_endpoint(&target) {
-                return Ok(());
-            }
+        // The guard fires when ANY buffer is dirty (not just the active one) — a
+        // switch destroys every buffer, so a non-active dirty buffer must still
+        // prompt (else its unsaved edits vanish silently).
+        if matches!(target, PendingLoad::Workspace(_)) && self.any_buffer_dirty() {
+            self.pending_load = Some(target);
+            self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
+            return Ok(());
         }
         self.perform_load(target)
-    }
-
-    /// Whether `target` refers to the endpoint that is already loaded.
-    fn target_is_same_endpoint(&self, target: &PendingLoad) -> bool {
-        let Some(selected) = self.selected() else {
-            return false;
-        };
-        match target {
-            PendingLoad::Row(_) => self
-                .explorer
-                .selected_endpoint_file()
-                .is_some_and(|file| file == selected.file),
-            PendingLoad::File(file) => *file == selected.file,
-            // A workspace switch is never "the same endpoint".
-            PendingLoad::Workspace(_) => false,
-        }
-    }
-
-    /// Whether `target` refers to a different endpoint than the loaded one. A
-    /// collection row is never "other" (toggling needs no guard).
-    fn target_is_other(&self, target: &PendingLoad) -> bool {
-        match target {
-            PendingLoad::Row(_) => self.explorer.cursor_is_other_endpoint(self.selected()),
-            PendingLoad::File(file) => self.selected().is_none_or(|s| &s.file != file),
-            // A workspace switch always replaces the loaded endpoint's context, so
-            // a dirty switch must defer to the discard-changes confirm.
-            PendingLoad::Workspace(_) => true,
-        }
     }
 
     /// Performs a (possibly previously deferred) endpoint load.
@@ -4900,7 +5126,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (border top + summary line + border bottom) keeping its title and
     // tab-bar/stats content visible.
     const COLLAPSED_HEIGHT: u16 = 3;
-    let remaining = right_area.height.saturating_sub(urlbar::HEIGHT);
+    // The tab strip occupies a single row at the very top of column B, ONLY when
+    // at least one buffer is open. `Length(0)` renders nothing so the zero-buffer
+    // layout stays byte-identical to the pre-tabs one; a strip shifts the URL
+    // bar / request / response down by exactly one row.
+    let strip_h: u16 = u16::from(!app.buffers.is_empty());
+    let remaining = right_area.height.saturating_sub(urlbar::HEIGHT + strip_h);
     let (req_height, resp_height) = match app.zoom {
         Some(ZoomPane::Request) => (remaining.saturating_sub(COLLAPSED_HEIGHT), COLLAPSED_HEIGHT),
         Some(ZoomPane::Response) => (COLLAPSED_HEIGHT, remaining.saturating_sub(COLLAPSED_HEIGHT)),
@@ -4909,7 +5140,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             (req, remaining - req)
         }
     };
-    let [urlbar_area, request_area, response_area] = Layout::vertical([
+    let [strip_area, urlbar_area, request_area, response_area] = Layout::vertical([
+        Constraint::Length(strip_h),
         Constraint::Length(urlbar::HEIGHT),
         Constraint::Length(req_height),
         Constraint::Length(resp_height),
@@ -4920,11 +5152,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
     let theme = app.theme.clone();
     let dirty = app.is_dirty();
-    // The loaded endpoint's file while dirty — its explorer row gets the accent
-    // ● suffix (matched by path in the explorer render).
-    let dirty_file: Option<std::path::PathBuf> = dirty
-        .then(|| app.selected().map(|s| s.file.clone()))
-        .flatten();
+    // Every open dirty buffer's file — each such explorer row gets the accent
+    // ● suffix (matched by path in the explorer render), and the active buffer's
+    // dirtiness drives the URL-bar dot below.
+    let dirty_files: Vec<std::path::PathBuf> = app
+        .buffers
+        .iter()
+        .filter(|b| b.is_dirty())
+        .map(|b| b.file().to_path_buf())
+        .collect();
     if let Some(explorer_area) = explorer_area {
         if app.sequences_shown {
             // PR 2b: split the left column vertically. The focused sub-pane
@@ -4952,7 +5188,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     has_ws,
                     &theme,
                     app.jump.as_ref(),
-                    dirty_file.as_deref(),
+                    &dirty_files,
                 );
             } else {
                 // Endpoints collapsed to a stub summarizing the current selection.
@@ -4985,10 +5221,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 has_ws,
                 &theme,
                 app.jump.as_ref(),
-                dirty_file.as_deref(),
+                &dirty_files,
             );
         }
     }
+    // The tab strip (top of column B), rendered only when a buffer is open —
+    // `strip_h` is 0 and `strip_area` empty otherwise, so nothing draws.
+    if strip_h > 0 {
+        let tab_items: Vec<tab_strip::TabItem> = app
+            .buffers
+            .iter()
+            .map(|b| tab_strip::TabItem {
+                short_name: b
+                    .as_endpoint()
+                    .map(|e| e.endpoint.endpoint.name.clone())
+                    .unwrap_or_default(),
+                dirty: b.is_dirty(),
+            })
+            .collect();
+        tab_strip::render(frame, strip_area, &tab_items, app.active, &theme);
+    }
+
     // Bind the active endpoint buffer by *field* access (not the `&mut self`
     // accessor) so `app.jump`/`app.focus`/`app.theme`/`app.highlight_tx`/… stay
     // independently borrowable while we hold the buffer mutably (the design's
@@ -5212,7 +5465,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
         Mode::Confirm(purpose) => {
-            let (title, question, hint) = confirm_text(purpose);
+            let (title, question, hint) = confirm_text(purpose, app.pending_close.is_some());
             prompt::render_confirm(frame, main, title, question, hint, &theme);
         }
         Mode::EnvEditor => {
@@ -5541,10 +5794,21 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// The (title, question, key-hint) for a confirmation overlay.
-fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'static str) {
+/// The (title, question, key-hint) for a confirmation overlay. `closing`
+/// distinguishes the two `DiscardChanges` flows — a buffer close (`<leader>t x`/
+/// `X`, `pending_close` set) vs an endpoint/workspace switch (`pending_load`) —
+/// so the copy matches the actual action.
+fn confirm_text(
+    purpose: ConfirmPurpose,
+    closing: bool,
+) -> (&'static str, &'static str, &'static str) {
     match purpose {
         ConfirmPurpose::DeleteEndpoint => ("Delete endpoint", "Delete this endpoint?", "[y/n]"),
+        ConfirmPurpose::DiscardChanges if closing => (
+            "Unsaved changes",
+            "Close without saving?",
+            "s save · d discard · esc stay",
+        ),
         ConfirmPurpose::DiscardChanges => (
             "Unsaved changes",
             "Save changes before switching?",
@@ -7671,6 +7935,150 @@ mod tests {
         assert!(app.selected().is_none());
     }
 
+    /// A two-endpoint workspace whose files exist on disk, so `save_request`
+    /// (which writes TOML) succeeds. Opens both endpoints as buffers (`alpha`
+    /// active last).
+    fn two_endpoint_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                coll.join(format!("{name}.toml")),
+                format!(
+                    "seq = 0\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("beta.toml")))
+            .unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("alpha.toml")))
+            .unwrap();
+        app
+    }
+
+    /// M1: a workspace switch with MULTIPLE dirty buffers. `s` must save EVERY
+    /// dirty buffer (not just the active one) before the switch destroys them all
+    /// — a non-active dirty buffer must never be lost silently.
+    #[test]
+    fn workspace_switch_s_saves_all_dirty_buffers() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // Dirty BOTH buffers via a saveable body edit.
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-body"));
+        app.active = alpha_idx; // active is alpha
+        *app.test_editor() = EditorState::new(Lines::from("alpha-body"));
+        assert!(app.any_buffer_dirty());
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "multi-dirty switch reaches the confirm"
+        );
+
+        // `s`: save all, then switch (all clean).
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
+        // BOTH files were written — the non-active buffer (beta) was not lost.
+        let alpha = std::fs::read_to_string(dir_a.path().join("api/alpha.toml")).unwrap();
+        let beta = std::fs::read_to_string(dir_a.path().join("api/beta.toml")).unwrap();
+        assert!(alpha.contains("alpha-body"), "active saved: {alpha}");
+        assert!(
+            beta.contains("beta-body"),
+            "the NON-active dirty buffer was saved too: {beta}"
+        );
+    }
+
+    /// M1: the workspace-switch guard fires even when ONLY a NON-active buffer is
+    /// dirty (the guard uses `any_buffer_dirty`, not active-only).
+    #[test]
+    fn workspace_switch_guards_on_nonactive_dirty() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // Dirty ONLY the non-active buffer (beta); leave the active one (alpha)
+        // clean.
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-edit"));
+        app.active = alpha_idx;
+        assert!(!app.is_dirty(), "active (alpha) is clean");
+        assert!(app.any_buffer_dirty(), "but beta is dirty");
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "non-active dirty must still guard the switch"
+        );
+    }
+
+    /// M1: a REFUSED save during a multi-dirty workspace switch aborts the switch
+    /// and keeps every buffer (mirrors the single-buffer save-failure behaviour).
+    #[test]
+    fn workspace_switch_s_refused_save_aborts_switch() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        // beta: a saveable edit; alpha: an UNSAVEABLE literal-secret auth.
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-body"));
+        app.active = alpha_idx;
+        app.selected_mut().unwrap().endpoint.request.auth = Some(churl_core::model::Auth::Bearer {
+            token: "ghp_literal_secret".to_owned(),
+        });
+        assert!(app.any_buffer_dirty());
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        // Switch aborted: still on workspace "demo", both buffers kept.
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.workspace.as_ref().unwrap().manifest().name,
+            "demo",
+            "refused save must abort the switch"
+        );
+        assert_eq!(app.buffers.len(), 2, "no buffer destroyed");
+        assert!(app.any_buffer_dirty(), "the refused buffer stays dirty");
+    }
+
     // ---- M7.5 concurrent-load runner ----
 
     /// Builds an app with one selected endpoint (targeting `url`) and opens the
@@ -7747,17 +8155,17 @@ mod tests {
         app.accept_overlay().unwrap();
     }
 
-    /// BLOCKER 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint
-    /// must defer into the discard-changes confirm and NOT open the load runner
-    /// over the stale selection.
+    /// STAGE 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint no
+    /// longer defers — each endpoint has its own buffer, so beta opens as a NEW
+    /// buffer (dirty alpha stays open) and the runner opens over beta.
     #[test]
-    fn load_runner_pick_dirty_defers_to_confirm_not_stale_run() {
+    fn load_runner_pick_dirty_opens_new_buffer_and_runner() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = load_pick_app(dir.path());
         // Make the loaded `alpha` dirty.
         *app.test_editor() = EditorState::new(Lines::from("dirty body"));
         assert!(app.is_dirty());
-        let loaded_before = app.selected().unwrap().file.clone();
+        let alpha_file = app.selected().unwrap().file.clone();
 
         app.open_load_runner_pick().unwrap();
         assert_eq!(app.mode, Mode::Search);
@@ -7765,19 +8173,20 @@ mod tests {
         // Pick the DIFFERENT endpoint (beta).
         pick_search(&mut app, "beta");
 
-        // Deferred into the discard confirm — NOT the load runner.
+        // No confirm — the runner opens over the freshly-focused beta buffer.
+        assert_eq!(app.mode, Mode::LoadRunner);
         assert_eq!(
-            app.mode,
-            Mode::Confirm(ConfirmPurpose::DiscardChanges),
-            "dirty + other endpoint must defer to the discard confirm"
+            app.load_runner.as_ref().unwrap().url,
+            "https://api.test/beta"
         );
+        // Two buffers now: dirty alpha still open, beta active.
+        assert_eq!(app.buffers.len(), 2, "beta pushed as a new buffer");
+        assert_eq!(app.selected().unwrap().display_path, "api/beta");
+        let alpha_idx = app.buffer_index_for_path(&alpha_file).unwrap();
         assert!(
-            app.load_runner.is_none(),
-            "no runner over the stale selection"
+            app.buffers[alpha_idx].is_dirty(),
+            "alpha's unsaved edits are preserved in its own buffer"
         );
-        // Selection unchanged (still alpha) until the confirm resolves.
-        assert_eq!(app.selected().unwrap().file, loaded_before);
-        // The one-shot intent was consumed.
         assert!(!app.load_runner_after_pick);
     }
 
@@ -8152,7 +8561,8 @@ mod tests {
 
     /// `open_or_focus_buffer` builds a buffer whose editor is seeded from the
     /// request body and whose `loaded_snapshot` clones the pristine endpoint.
-    /// Stage 1 stays single-buffer (`buffers.len() == 1`, `active == 0`).
+    /// Stage 2: a fresh open seeds the editor/snapshot; a SECOND distinct
+    /// endpoint pushes a new buffer (never replaces).
     #[test]
     fn open_or_focus_buffer_seeds_editor_and_snapshot() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
@@ -8167,12 +8577,46 @@ mod tests {
         );
         assert!(!app.is_dirty(), "freshly opened buffer is not dirty");
 
-        // Opening a second endpoint REPLACES the slot (Stage 1 single-buffer).
+        // Opening a second distinct endpoint PUSHES a new buffer + focuses it.
         app.open_or_focus_buffer(selected_with("b.toml", None));
-        assert_eq!(app.buffers.len(), 1, "still single-buffer in Stage 1");
+        assert_eq!(app.buffers.len(), 2, "distinct endpoint pushes a buffer");
+        assert_eq!(app.active, 1);
         assert_eq!(
             app.active_endpoint_buffer().unwrap().endpoint.file,
             PathBuf::from("b.toml")
+        );
+    }
+
+    /// Stage 2: re-opening an already-open endpoint DEDUPS — focuses the existing
+    /// buffer instead of pushing a duplicate, preserving its in-memory edits.
+    #[test]
+    fn open_or_focus_buffer_dedups_and_focuses_existing() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("body a")));
+        app.open_or_focus_buffer(selected_with("b.toml", Some("body b")));
+        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.active, 1);
+        // Edit B so we can prove the dedup keeps its edits.
+        *app.test_editor() = EditorState::new(Lines::from("edited b"));
+        assert!(app.is_dirty());
+
+        // Re-open A: focuses it, no new buffer.
+        app.open_or_focus_buffer(selected_with("a.toml", Some("body a")));
+        assert_eq!(app.buffers.len(), 1 + 1, "no duplicate buffer for A");
+        assert_eq!(app.active, 0, "A focused");
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "body a"
+        );
+
+        // Re-open B: focuses it again, edits intact.
+        app.open_or_focus_buffer(selected_with("b.toml", Some("body b")));
+        assert_eq!(app.buffers.len(), 2, "still two buffers");
+        assert_eq!(app.active, 1);
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "edited b",
+            "B's in-memory edits survive the dedup-focus"
         );
     }
 
@@ -8218,6 +8662,220 @@ mod tests {
         // Restore the exact snapshot text → clean again (derived, not a flag).
         *app.test_editor() = EditorState::new(Lines::from("orig"));
         assert!(!app.is_dirty(), "reverting the edit clears dirty");
+    }
+
+    /// Distinct buffers keep independent editor state: editing A, switching to B
+    /// and back leaves A's edit intact (each buffer owns its editor).
+    #[test]
+    fn distinct_buffers_keep_independent_editor_state() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("A")));
+        app.open_or_focus_buffer(selected_with("b.toml", Some("B")));
+        assert_eq!(app.buffers.len(), 2);
+        // Edit A (index 0).
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("A edited"));
+        // Switch to B, then back to A.
+        app.active = 1;
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "B"
+        );
+        app.active = 0;
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "A edited",
+            "A's edit survived the round-trip"
+        );
+    }
+
+    /// `buffer_cycle` wraps forward/backward and no-ops on an empty list.
+    #[test]
+    fn buffer_cycle_wraps_and_noops_on_empty() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.buffer_cycle(true); // no panic on empty
+        assert_eq!(app.active, 0);
+
+        for f in ["a.toml", "b.toml", "c.toml"] {
+            app.open_or_focus_buffer(selected_with(f, None));
+        }
+        app.active = 0;
+        app.buffer_cycle(true);
+        assert_eq!(app.active, 1);
+        app.buffer_cycle(true);
+        app.buffer_cycle(true);
+        assert_eq!(app.active, 0, "forward wraps 2 -> 0");
+        app.buffer_cycle(false);
+        assert_eq!(app.active, 2, "backward wraps 0 -> 2");
+    }
+
+    /// `new_active_after_close` neighbour rule across the closed-vs-active matrix.
+    #[test]
+    fn close_clean_new_active_matrix() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        let reopen = |app: &mut App| {
+            app.buffers.clear();
+            for f in ["a.toml", "b.toml", "c.toml"] {
+                app.open_or_focus_buffer(selected_with(f, None));
+            }
+        };
+
+        // closed < active: active shifts left.
+        reopen(&mut app);
+        app.active = 2;
+        app.close_buffer(0);
+        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.active, 1, "closed<active shifts active left");
+
+        // closed == active (middle): right neighbour takes the slot.
+        reopen(&mut app);
+        app.active = 1;
+        app.close_buffer(1);
+        assert_eq!(app.active, 1, "closed==active picks the right neighbour");
+
+        // closed > active: active unchanged.
+        reopen(&mut app);
+        app.active = 0;
+        app.close_buffer(2);
+        assert_eq!(app.active, 0, "closed>active leaves active");
+
+        // close the tail while active is the tail: clamps to new last.
+        reopen(&mut app);
+        app.active = 2;
+        app.close_buffer(2);
+        assert_eq!(app.active, 1, "closing the active tail clamps to new last");
+
+        // close the last remaining buffer -> empty, active 0.
+        app.buffers.clear();
+        app.open_or_focus_buffer(selected_with("only.toml", None));
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty());
+        assert_eq!(app.active, 0);
+    }
+
+    /// Closing a DIRTY buffer opens the discard confirm with `pending_close`
+    /// parked; `d` closes it, `Esc` keeps it.
+    #[test]
+    fn close_dirty_buffer_confirm_discard_and_cancel() {
+        // d closes.
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("orig")));
+        *app.test_editor() = EditorState::new(Lines::from("edited"));
+        assert!(app.is_dirty());
+        app.close_buffer(0);
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert!(matches!(app.pending_close, Some(PendingClose::One(_))));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.buffers.is_empty(), "d discards + closes");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+
+        // Esc keeps the buffer.
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("orig")));
+        *app.test_editor() = EditorState::new(Lines::from("edited"));
+        app.close_buffer(0);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "Esc keeps the dirty buffer");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// Closing a CLEAN buffer skips the confirm entirely.
+    #[test]
+    fn close_clean_buffer_no_confirm() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", None));
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty());
+        assert_eq!(app.mode, Mode::Normal, "clean close needs no confirm");
+    }
+
+    /// close-all with two dirty buffers prompts one at a time; `d` on each drains
+    /// to empty. Clean buffers close immediately.
+    #[test]
+    fn close_all_two_dirty_sequential_prompts() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // A dirty, B clean, C dirty.
+        app.open_or_focus_buffer(selected_with("a.toml", Some("a")));
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("a edited"));
+        app.open_or_focus_buffer(selected_with("b.toml", None));
+        app.open_or_focus_buffer(selected_with("c.toml", Some("c")));
+        app.active = 2;
+        *app.test_editor() = EditorState::new(Lines::from("c edited"));
+
+        app.close_all_buffers();
+        // Clean B closed immediately; A + C queued behind the confirm.
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert!(matches!(app.pending_close, Some(PendingClose::All(_))));
+        assert_eq!(app.buffers.len(), 2, "B closed immediately");
+
+        // Discard first dirty (A) -> prompt for C.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+        assert_eq!(app.buffers.len(), 1, "A closed, C remains");
+        // Discard C -> empty.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.buffers.is_empty(), "queue drained");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// Esc mid close-all queue aborts the rest: the already-closed clean/discarded
+    /// buffers stay closed, the still-dirty ones stay open.
+    #[test]
+    fn close_all_esc_mid_queue_aborts_remaining() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("a")));
+        app.active = 0;
+        *app.test_editor() = EditorState::new(Lines::from("a edited"));
+        app.open_or_focus_buffer(selected_with("c.toml", Some("c")));
+        app.active = 1;
+        *app.test_editor() = EditorState::new(Lines::from("c edited"));
+
+        app.close_all_buffers();
+        assert_eq!(app.buffers.len(), 2, "both dirty, both queued");
+        // Discard A -> prompt for C.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "A closed");
+        // Esc aborts: C stays open.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.buffers.len(), 1, "C stays open after Esc");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_close.is_none());
+    }
+
+    /// `leader_sub_lookup(Tabs, …)` resolves the buffer actions.
+    #[test]
+    fn leader_tabs_submenu_binds() {
+        let km = KeyMap::default();
+        let lk = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('n')),
+            Some(Action::BufferNext)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('p')),
+            Some(Action::BufferPrev)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(LeaderMenu::Tabs, lk('x')),
+            Some(Action::BufferClose)
+        );
+        assert_eq!(
+            km.leader_sub_lookup(
+                LeaderMenu::Tabs,
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)
+            ),
+            Some(Action::BufferCloseAll)
+        );
     }
 
     /// `send_request`'s in-flight guard reads the ACTIVE buffer: with an
@@ -8284,6 +8942,30 @@ mod tests {
         // An unknown generation is dropped without touching any buffer.
         app.on_response(42, Ok(response()), meta());
         assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
+    }
+
+    /// Closing a clean buffer aborts its in-flight request before removal (no
+    /// history row written — silent, per the design).
+    #[tokio::test]
+    async fn close_buffer_aborts_its_in_flight() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", None));
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let aborted = handle.abort_handle();
+        app.active_endpoint_buffer_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: aborted.clone(),
+            generation: 1,
+            meta: meta(),
+        });
+        app.close_buffer(0);
+        assert!(app.buffers.is_empty(), "clean buffer closed");
+        tokio::task::yield_now().await;
+        assert!(
+            aborted.is_finished(),
+            "the in-flight task was aborted on close"
+        );
     }
 
     /// `switch_workspace` drops every buffer (clearing all editor/response/dirty

@@ -1,12 +1,12 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1681
-expression: snapshot(&mut app)
+assertion_line: 2197
+expression: rendered
 ---
-┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users                                       
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users ●                                     
 ┃  ▸ orders                  ┃┌ URL ───────────────────────────────────────────┐
-┃  ▾ users                   ┃│GET  https://api.test/users                     │
-┃>   List users              ┃└────────────────────────────────────────────────┘
+┃  ▾ users                   ┃│GET  https://api.test/usersZZZ              ●   │
+┃>   List users ●            ┃└────────────────────────────────────────────────┘
 ┃    Create user             ┃┌ Request ───────────────────────────────────────┐
 ┃    Get user                ┃│ Params(0)   Headers(0)   Auth   Body           │
 ┃                            ┃│  (no params — a to add)                        │
@@ -18,12 +18,12 @@ expression: snapshot(&mut app)
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
-┃                            ┃│GET https://api.test/users                      │
+┃                            ┃│GET https://api.test/usersZZZ                   │
 ┃                            ┃│                                                │
 ┃                            ┃│press ctrl-s to send                            │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
+┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
- Saved List users                                                               
- EXPLORER · demo · ? help · space leader · / search · : palette
+ EXPLORER · demo · ● unsaved · w save · ? help · space leader · / search · : pal

@@ -1,15 +1,15 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1681
-expression: snapshot(&mut app)
+assertion_line: 2247
+expression: rendered
 ---
-┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users                                       
-┃  ▸ orders                  ┃┌ URL ───────────────────────────────────────────┐
-┃  ▾ users                   ┃│GET  https://api.test/users                     │
-┃>   List users              ┃└────────────────────────────────────────────────┘
-┃    Create user             ┃┌ Request ───────────────────────────────────────┐
-┃    Get user                ┃│ Params(0)   Headers(0)   Auth   Body           │
-┃                            ┃│  (no params — a to add)                        │
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
+┃> ▸ orders                  ┃│no endpoint selected                            │
+┃  ▸ users                   ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Request ───────────────────────────────────────┐
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
@@ -18,12 +18,12 @@ expression: snapshot(&mut app)
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Response ──────────────────────────────────────┐
 ┃                            ┃│no response yet                                 │
-┃                            ┃│GET https://api.test/users                      │
 ┃                            ┃│                                                │
-┃                            ┃│press ctrl-s to send                            │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
- Saved List users                                                               
  EXPLORER · demo · ? help · space leader · / search · : palette

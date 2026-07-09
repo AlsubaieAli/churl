@@ -649,9 +649,9 @@ impl ExplorerState {
 
 /// Renders the explorer pane. Pure: no I/O, deterministic for snapshots. Takes
 /// `&mut` because it updates the scroll offset to keep the cursor in view.
-/// `dirty_file` is the loaded endpoint's file while it has unsaved changes —
-/// its row gets an accent `●` suffix (the editor modified-file convention),
-/// matched by path, cleared on save/discard.
+/// `dirty_files` are the files of every open buffer with unsaved changes — each
+/// matching endpoint row gets an accent `●` suffix (the editor modified-file
+/// convention), matched by path, cleared on save/discard/close.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
@@ -661,7 +661,7 @@ pub fn render(
     has_ws: bool,
     theme: &Theme,
     jump: Option<&JumpState>,
-    dirty_file: Option<&Path>,
+    dirty_files: &[PathBuf],
 ) {
     let (border_type, border_style) = if focused {
         (BorderType::Thick, theme.border_focused)
@@ -707,12 +707,13 @@ pub fn render(
                 RowKind::Endpoint => "",
             };
             let indent = "  ".repeat(row.depth);
-            // The loaded-and-dirty endpoint's row gets an accent ● suffix,
+            // Any open dirty buffer's endpoint row gets an accent ● suffix,
             // matched by file path (indices shift across reloads).
             let dirty_suffix = (row.kind == RowKind::Endpoint
-                && dirty_file.is_some()
-                && state.row_endpoint_file(row) == dirty_file)
-                .then(|| Span::styled(" ●", theme.accent));
+                && state
+                    .row_endpoint_file(row)
+                    .is_some_and(|f| dirty_files.iter().any(|d| d.as_path() == f)))
+            .then(|| Span::styled(" ●", theme.accent));
             // In jump-mode, overlay the row's label at the start; otherwise the
             // usual cursor marker.
             match jump.and_then(|j| j.label_for_row(i)) {
