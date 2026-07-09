@@ -20,10 +20,10 @@ expression: snapshot(&mut app)
 ┃                            ┃│no response yet                                 │
 ┃                            ┃│                                                │
 ┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
 ┃                            ┃│                        ┏ leader · sequences ━━━┓
-┃                            ┃│                        ┃ a  add sequence       ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                        ┃ f  open sequence      ┃
-┌ Sequences ─────────────────┐│                        ┃ o  open sequence      ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                        ┃ Space  open sequence  ┃
+┌ Sequences ─────────────────┐│                        ┃ a  add sequence       ┃
 │<leader>s a to add          ││                        ┃ r  run sequence (pick)┃
 └────────────────────────────┘└────────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

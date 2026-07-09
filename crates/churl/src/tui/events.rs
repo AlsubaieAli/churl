@@ -568,6 +568,15 @@ impl Default for KeyMap {
         // sub-pane (PR 2b) — a lawful in-pane move, only live when the left
         // column is focused. `s` is otherwise free in the Explorer overlay.
         overlay(PaneCtx::Explorer, key!(s), Action::FocusSequencesToggle);
+        // Arrow keys navigate the explorer, mirroring the global `k`/`j`/`h`/`l`
+        // (owner drive-test 2026-07-10). Scoped to the Explorer overlay — NOT
+        // global — so Left/Right→Collapse/Expand never leak into other panes.
+        // The flat sequences sub-pane no-ops Collapse/Expand, so Left/Right are
+        // harmless there.
+        overlay(PaneCtx::Explorer, key!(up), Action::Up);
+        overlay(PaneCtx::Explorer, key!(down), Action::Down);
+        overlay(PaneCtx::Explorer, key!(left), Action::Collapse);
+        overlay(PaneCtx::Explorer, key!(right), Action::Expand);
         // URL bar: edit + method switch.
         overlay(PaneCtx::UrlBar, key!(i), Action::EditUrl);
         overlay(PaneCtx::UrlBar, key!(enter), Action::EditUrl);
@@ -626,9 +635,14 @@ impl Default for KeyMap {
         // `<leader>v` opens the environments & variables editor (`v` is free).
         root_bind(key!(v), LeaderEntry::Act(Action::OpenEnvEditor));
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
-        // Quick-jump pickers (M7.2): `<leader>f` reuses the endpoint-search
-        // overlay; `<leader>w` opens the recent-workspace picker.
-        root_bind(key!(f), LeaderEntry::Act(Action::QuickJumpRequests));
+        // Quick-jump pickers: `<leader><leader>` (Space, the leader-as-its-own
+        // continuation) opens the endpoint/request picker — owner drive-test
+        // 2026-07-10 moved it off `f`, freeing `f` at root for jump-mode. A
+        // leader continuation of Space is NOT flagged by `validate` (that only
+        // checks the leader against the GLOBAL map and pane overlays), so the
+        // default config stays warning-clean. `<leader>w` opens the
+        // recent-workspace picker.
+        root_bind(key!(space), LeaderEntry::Act(Action::QuickJumpRequests));
         root_bind(key!(w), LeaderEntry::Act(Action::QuickJumpWorkspaces));
         // Copy the loaded request as a curl one-liner (`y` was free). Moved off
         // the Request-overlay `C` so it can't shadow body-editor text input.
@@ -650,15 +664,15 @@ impl Default for KeyMap {
         sequences
             .binds
             .insert(key!(a).normalized(), Action::EditSequence);
+        // `<leader>s <leader>` (Space) is the single "find/open a sequence"
+        // picker, mirroring `<leader><leader>` for endpoints (owner drive-test
+        // 2026-07-10). This also resolves the earlier "two ways to open a
+        // sequence" note: the former `o` and `f` binds are gone — one key for
+        // one job. A leader continuation of Space stays warning-clean in
+        // `validate` (see the root Space bind above).
         sequences
             .binds
-            .insert(key!(o).normalized(), Action::OpenSequencePicker);
-        // `<leader>s f` is the canonical "find/open a sequence" picker (M7.10),
-        // mirroring `<leader>f` for endpoints; `<leader>s o` is retained as an
-        // alias to the same action (one key for one job, but muscle memory kept).
-        sequences
-            .binds
-            .insert(key!(f).normalized(), Action::OpenSequencePicker);
+            .insert(key!(space).normalized(), Action::OpenSequencePicker);
         // D1: `<leader>s r` routes to a run-flavored chooser (pick which sequence
         // to run) instead of silently running `sequences[seq_cursor]`. The direct
         // `RunSequence` action stays reachable via the in-pane `r` + palette.
@@ -672,8 +686,10 @@ impl Default for KeyMap {
         let mut load = Submenu::new("load");
         load.binds
             .insert(key!(c).normalized(), Action::OpenLoadRunner);
+        // `<leader>l <leader>` (Space) picks an endpoint first, mirroring the
+        // endpoint/sequence pickers (owner drive-test 2026-07-10).
         load.binds
-            .insert(key!(f).normalized(), Action::OpenLoadRunnerPick);
+            .insert(key!(space).normalized(), Action::OpenLoadRunnerPick);
         submenus.insert("load".to_owned(), load);
 
         // `<leader>t …`: buffer/tab actions. `n` next · `p` prev · `x` close ·
@@ -1349,6 +1365,40 @@ mod tests {
         );
     }
 
+    /// Arrow keys navigate the endpoint/sequence explorer, mirroring the global
+    /// `k`/`j`/`h`/`l` (owner drive-test 2026-07-10). Scoped to the Explorer
+    /// overlay so Left/Right→Collapse/Expand never leak into other panes.
+    #[test]
+    fn explorer_overlay_arrow_keys_navigate() {
+        let keymap = KeyMap::default();
+        assert_eq!(
+            keymap.lookup_ctx(press(KeyCode::Up, KeyModifiers::NONE), PaneCtx::Explorer),
+            Some(Action::Up)
+        );
+        assert_eq!(
+            keymap.lookup_ctx(press(KeyCode::Down, KeyModifiers::NONE), PaneCtx::Explorer),
+            Some(Action::Down)
+        );
+        assert_eq!(
+            keymap.lookup_ctx(press(KeyCode::Left, KeyModifiers::NONE), PaneCtx::Explorer),
+            Some(Action::Collapse)
+        );
+        assert_eq!(
+            keymap.lookup_ctx(press(KeyCode::Right, KeyModifiers::NONE), PaneCtx::Explorer),
+            Some(Action::Expand)
+        );
+        // Left/Right stay Explorer-scoped: no global bind, so Collapse/Expand
+        // never leak into other panes via the arrows.
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Left, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Right, KeyModifiers::NONE)),
+            None
+        );
+    }
+
     #[test]
     fn overlay_override_parses_and_wins() {
         let overlays = BTreeMap::from([(
@@ -1469,6 +1519,17 @@ mod tests {
             keymap.leader_root_lookup(press(KeyCode::Char('l'), KeyModifiers::NONE)),
             Some(LeaderEntry::Submenu("load".to_owned()))
         );
+        // `<leader><leader>` (Space) is the endpoint/request picker — moved off
+        // `f` (owner drive-test 2026-07-10). A leader continuation of Space is
+        // fine; `f` is now free at root.
+        assert_eq!(
+            keymap.leader_root_lookup(press(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(LeaderEntry::Act(Action::QuickJumpRequests))
+        );
+        assert_eq!(
+            keymap.leader_root_lookup(press(KeyCode::Char('f'), KeyModifiers::NONE)),
+            None
+        );
         // An unbound root continuation returns None (the popup dismisses).
         assert_eq!(
             keymap.leader_root_lookup(press(KeyCode::Char('x'), KeyModifiers::NONE)),
@@ -1488,22 +1549,33 @@ mod tests {
             keymap.leader_sub_lookup("sequences", press(KeyCode::Char('a'), KeyModifiers::NONE)),
             Some(Action::EditSequence)
         );
+        // `<leader>s <leader>` (Space) is the single sequence finder (mirrors
+        // `<leader><leader>` for endpoints); the former `o`/`f` binds are gone
+        // (owner drive-test 2026-07-10).
         assert_eq!(
-            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('o'), KeyModifiers::NONE)),
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char(' '), KeyModifiers::NONE)),
             Some(Action::OpenSequencePicker)
         );
-        // M7.10: `<leader>s f` is the canonical sequence finder (mirrors <leader>f).
+        assert_eq!(
+            keymap.leader_sub_lookup("sequences", press(KeyCode::Char('o'), KeyModifiers::NONE)),
+            None
+        );
         assert_eq!(
             keymap.leader_sub_lookup("sequences", press(KeyCode::Char('f'), KeyModifiers::NONE)),
-            Some(Action::OpenSequencePicker)
+            None
         );
         assert_eq!(
             keymap.leader_sub_lookup("load", press(KeyCode::Char('c'), KeyModifiers::NONE)),
             Some(Action::OpenLoadRunner)
         );
+        // `<leader>l <leader>` (Space) picks an endpoint first (was `f`).
+        assert_eq!(
+            keymap.leader_sub_lookup("load", press(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(Action::OpenLoadRunnerPick)
+        );
         assert_eq!(
             keymap.leader_sub_lookup("load", press(KeyCode::Char('f'), KeyModifiers::NONE)),
-            Some(Action::OpenLoadRunnerPick)
+            None
         );
         // `<leader>l s` is reserved (composable-runs) — must stay unbound.
         assert_eq!(
@@ -1711,7 +1783,12 @@ mod tests {
     #[test]
     fn validate_clean_default_config_has_no_warnings() {
         // The out-of-the-box keymap must produce ZERO warnings — documented
-        // single-pane shadows (Response `h`/`/`, Request `1`–`4`) are lawful.
+        // single-pane shadows (Response `h`/`/`, Request `1`–`4`) are lawful,
+        // and so is Space bound as a leader *continuation*
+        // (`<leader><leader>`/`<leader>s <leader>`/`<leader>l <leader>`, owner
+        // drive-test 2026-07-10): `validate` only flags the leader key when it
+        // is (re)bound in the GLOBAL map or a PANE overlay, never as a leader
+        // continuation.
         let keymap = KeyMap::default();
         assert!(
             keymap

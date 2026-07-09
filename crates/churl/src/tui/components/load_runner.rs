@@ -469,7 +469,11 @@ impl LoadRunnerState {
                     LoadOutcome::Close
                 }
             }
-            KeyCode::Char('r') => LoadOutcome::Run,
+            // Run/re-run the batch. Ctrl-R (not plain `r`) to match the sequence
+            // surface's Ctrl-R (owner decision 2026-07-10); plain `r` no longer
+            // runs. Guarded like Ctrl-C above — the editing/confirm sub-states
+            // return before this match, so Ctrl-R only fires from a live pane.
+            KeyCode::Char('r') if ctrl => LoadOutcome::Run,
             // Tab / Shift-Tab are the ONLY cross-pane traversal: Tab cycles
             // forward (config → results → response → config), BackTab reverse.
             // `h`/`j`/`k`/`l` are in-pane movement only.
@@ -992,9 +996,9 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &LoadRunnerState, theme: 
     } else {
         match state.focus {
             RunnerFocus::ConfigHeader => {
-                "h/l field · j/k adjust · enter edit · r run · tab results · ctrl-c cancel · q close"
+                "h/l field · j/k adjust · enter edit · ^R run · tab results · ctrl-c cancel · q close"
             }
-            RunnerFocus::Results => "j/k row · tab response · r re-run · ctrl-c cancel · q close",
+            RunnerFocus::Results => "j/k row · tab response · ^R re-run · ctrl-c cancel · q close",
             RunnerFocus::Response => "j/k scroll · W wrap · o/O fold · tab config · q close",
         }
     };
@@ -1196,9 +1200,15 @@ mod tests {
     }
 
     #[test]
-    fn r_requests_run() {
+    fn ctrl_r_requests_run() {
+        // Run is Ctrl-R (matches the sequence surface); plain `r` no longer runs
+        // (owner decision 2026-07-10).
         let mut r = runner();
-        assert_eq!(r.handle_key(ch('r')), LoadOutcome::Run);
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(r.handle_key(ctrl_r), LoadOutcome::Run);
+        // Plain `r` is now inert at the config header (no run).
+        let mut r2 = runner();
+        assert_ne!(r2.handle_key(ch('r')), LoadOutcome::Run);
     }
 
     #[test]

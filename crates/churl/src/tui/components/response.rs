@@ -768,7 +768,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
 
     // For Done state, embed the stats as a right-aligned block title.
     let stats_title: Option<String> = if let ResponseState::Done { view } = ctx.state {
-        Some(status_summary(view))
+        Some(status_summary(view, ctx.focused))
     } else {
         None
     };
@@ -1188,7 +1188,9 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
             timing,
             size,
         } => dropped_status(*status, *timing, *size),
-        ResponseState::Done { view } => status_summary(view),
+        // A collapsed response is never focused (zoom follows focus), so the
+        // `[h]` hint is correctly suppressed here.
+        ResponseState::Done { view } => status_summary(view, false),
     };
     Line::from(text)
 }
@@ -1197,7 +1199,7 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
 /// `200 OK · 142 ms · 4.1 KB · 3 headers`), with view-mode markers (`· headers`,
 /// `· wrap`), search feedback, and a ` · truncated at <size>` suffix when the
 /// body hit the configured cap.
-fn status_summary(view: &ResponseView) -> String {
+fn status_summary(view: &ResponseView, focused: bool) -> String {
     let phrase = reason_phrase(view.status);
     let status = if phrase.is_empty() {
         view.status.to_string()
@@ -1210,9 +1212,11 @@ fn status_summary(view: &ResponseView) -> String {
         format!("{} headers", view.header_count)
     };
     // In body view, append a `[h]` affordance hinting the full-headers key so the
-    // count earns its spot (owner call). In headers view the `· headers` marker
-    // below already shows the state, so omit the hint there.
-    let headers = if view.view_mode == ViewMode::Body {
+    // count earns its spot (owner call) — but ONLY when this response pane is
+    // focused, so the hint doesn't clutter unfocused/embedded viewers (owner
+    // drive-test 2026-07-10). In headers view the `· headers` marker below
+    // already shows the state, so omit the hint there.
+    let headers = if focused && view.view_mode == ViewMode::Body {
         format!("{count}  [h]")
     } else {
         count
@@ -1388,22 +1392,22 @@ mod tests {
     fn status_summary_markers() {
         let mut v = view("body");
         // The `· headers` view-mode marker (distinct from the `N headers` count).
-        assert!(!status_summary(&v).contains("· headers"));
-        assert!(!status_summary(&v).contains("wrap"));
+        assert!(!status_summary(&v, true).contains("· headers"));
+        assert!(!status_summary(&v, true).contains("wrap"));
         v.toggle_wrap();
-        assert!(status_summary(&v).contains("· wrap"));
+        assert!(status_summary(&v, true).contains("· wrap"));
         v.view_mode = ViewMode::Headers;
-        assert!(status_summary(&v).contains("· headers"));
+        assert!(status_summary(&v, true).contains("· headers"));
     }
 
     #[test]
     fn status_summary_appends_truncated_marker() {
         let mut v = view("body");
-        assert!(!status_summary(&v).contains("truncated"));
+        assert!(!status_summary(&v, true).contains("truncated"));
         v.truncated = true;
         v.byte_size = 10 * 1024 * 1024;
         assert_eq!(
-            status_summary(&v),
+            status_summary(&v, true),
             "200 OK · 5 ms · 10.0 MB · 0 headers  [h] · truncated at 10.0 MB"
         );
     }
@@ -1417,16 +1421,28 @@ mod tests {
         };
         // 0 headers → plural.
         let zero = response_with("body", Vec::new(), false);
-        assert!(status_summary(&zero).contains("· 0 headers"));
+        assert!(status_summary(&zero, true).contains("· 0 headers"));
         // 1 header → singular.
         let one = response_with("body", vec![header("A")], false);
-        assert!(status_summary(&one).contains("· 1 header"));
-        assert!(!status_summary(&one).contains("1 headers"));
+        assert!(status_summary(&one, true).contains("· 1 header"));
+        assert!(!status_summary(&one, true).contains("1 headers"));
         // 2 headers → plural.
         let two = response_with("body", vec![header("A"), header("B")], false);
-        assert!(status_summary(&two).contains("· 2 headers"));
-        // Body view appends the `[h]` full-headers affordance after the count.
-        assert!(status_summary(&two).contains("2 headers  [h]"));
+        assert!(status_summary(&two, true).contains("· 2 headers"));
+        // Body view appends the `[h]` full-headers affordance after the count —
+        // but only when the pane is focused.
+        assert!(status_summary(&two, true).contains("2 headers  [h]"));
+    }
+
+    #[test]
+    fn status_summary_omits_hint_when_unfocused() {
+        // The `[h]` full-headers affordance is focus-gated (owner drive-test
+        // 2026-07-10): an unfocused Body-view response never shows it, so
+        // embedded/collapsed viewers stay uncluttered.
+        let v = view("body");
+        assert_eq!(v.view_mode, ViewMode::Body);
+        assert!(status_summary(&v, true).contains("[h]"));
+        assert!(!status_summary(&v, false).contains("[h]"));
     }
 
     #[test]
@@ -1639,7 +1655,7 @@ mod tests {
         v.set_search("zzz".to_owned());
         assert_eq!(v.search().unwrap().count(), 0);
         assert!(v.search().is_some());
-        assert!(status_summary(&v).contains("no matches"));
+        assert!(status_summary(&v, true).contains("no matches"));
     }
 
     #[test]

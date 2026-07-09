@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1456
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -13,9 +14,9 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│                    ┃ c  cancel request         ┃
-┃                            ┃└────────────────────┃ e  toggle explorer sidebar┃
-┃                            ┃┌ Response ──────────┃ f  request picker         ┃
+┃                            ┃│                    ┃ Space  request picker     ┃
+┃                            ┃└────────────────────┃ c  cancel request         ┃
+┃                            ┃┌ Response ──────────┃ e  toggle explorer sidebar┃
 ┃                            ┃│no response yet     ┃ p  switch profile         ┃
 ┃                            ┃│                    ┃ q  quit                   ┃
 ┃                            ┃│no endpoint selected┃ v  Environments & vars    ┃

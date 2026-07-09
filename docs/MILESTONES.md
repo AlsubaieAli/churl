@@ -134,6 +134,13 @@ Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in p
 
 **M7.10 complete** (all three stages merged). Milestone status → done; roadmap advances to **M7.7**.
 
+**M7.10 follow-up fixes** (owner drive-test 2026-07-10, branch `feat/m7.10-followup-fixes`) — five small UX corrections surfaced by a live drive-test after the nav/keymap unification landed. See the 2026-07-10 ADRs in DECISIONS.md.
+1. **Find/open pickers on the leader key** — `<leader><leader>` (endpoints), `<leader>s <leader>` (sequences), `<leader>l <leader>` (load) replace the old `<leader>f`/`<leader>s o`+`s f`/`<leader>l f`; `f` freed at root for jump-mode. Validator stays clean (Space-as-continuation is not a conflict). Also collapses the "two ways to open a sequence" into one.
+2. **Load-runner run = Ctrl-R** — matches the sequence surface; plain `r` no longer runs. Sequence editor/runner deliberately left untouched.
+3. **`f`-jump `e` lands on the endpoints tree** — the Explorer label now resets `left_active = Endpoints`, so `f e` from a focused Sequences sub-pane works instead of appearing to do nothing.
+4. **Response `[h]` headers-hint is focus-gated** — shows only when its response pane (main / sequence-runner / load-runner) is focused.
+5. **Arrow keys navigate the explorer** — `Up`/`Down`/`Left`/`Right` bound in the Explorer overlay (mirroring `k`/`j`/`h`/`l`), the last pane where arrows didn't already work.
+
 **Deliverables**:
 - **4-region Tab model** (decision 6): `Left column → URL → Request → Response`, Shift-Tab reverses; left column is one stop showing the active sub-pane; returning restores last-active sub-pane + zoom.
 - **`f` jump-to-pane addresses all five** (Explorer, Sequences, URL, Request, Response) — precise access including the peeking Sequences pane (reverses the PR-2b deferral in DECISIONS.md).
