@@ -1,28 +1,29 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 885
 expression: snapshot(&mut app)
 ---
-┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▸ orders                  ││GET  https://api.test/usersX                ●   │
-│  ▾ users                   │└────────────────────────────────────────────────┘
-│    List users ●            │┌ Request ───────────────────────────────────────┐
-│>   Create user             ││ Params(0)   Headers(0)   Auth   Body           │
-│    Get user                ││  (no params — a to add)                        │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│              ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
-│              ┃Save changes before switching?                  ┃              │
-│              ┃s save · d discard · esc stay                   ┃──────────────┘
-│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
-│                            ││no response yet                                 │
-│                            ││GET https://api.test/usersX                     │
-│                            ││                                                │
-│                            ││press ctrl-s to send                            │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-└────────────────────────────┘└────────────────────────────────────────────────┘
- EXPLORER · demo · ● unsaved · w save · ? help · space leader · / search · : pal
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List users ●  Create user                        
+┃  ▸ orders                  ┃┌ URL ───────────────────────────────────────────┐
+┃  ▾ users                   ┃│POST  https://api.test/users                    │
+┃    List users ●            ┃└────────────────────────────────────────────────┘
+┃>   Create user             ┃┌ Request ───────────────────────────────────────┐
+┃    Get user                ┃│ Params(0)   Headers(1)   Auth   Body           │
+┃                            ┃│  (no params — a to add)                        │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│POST https://api.test/users                     │
+┃                            ┃│                                                │
+┃                            ┃│press ctrl-s to send                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

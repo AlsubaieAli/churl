@@ -3,13 +3,13 @@ source: crates/churl/tests/tui_snapshot.rs
 assertion_line: 92
 expression: snapshot(&mut app)
 ---
-┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
-┃  ▸ orders                  ┃│POST  https://api.test/users                    │
-┃  ▾ users                   ┃└────────────────────────────────────────────────┘
-┃    List users              ┃┌ Request ───────────────────────────────────────┐
-┃>   Create user             ┃│ Params(0)   Headers(1)   Auth   Body           │
-┃    Get user                ┃│  (no params — a to add)                        │
-┃                            ┃│                                                │
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓ Create user                                      
+┃  ▸ orders                  ┃┌ URL ───────────────────────────────────────────┐
+┃  ▾ users                   ┃│POST  https://api.test/users                    │
+┃    List users              ┃└────────────────────────────────────────────────┘
+┃>   Create user             ┃┌ Request ───────────────────────────────────────┐
+┃    Get user                ┃│ Params(0)   Headers(1)   Auth   Body           │
+┃                            ┃│  (no params — a to add)                        │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │

@@ -55,7 +55,7 @@ use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, Ste
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
     env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
-    request, response, sequence_editor, sequence_runner, statusline, urlbar,
+    request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, LeaderMenu, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -4437,7 +4437,7 @@ impl App {
             msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
         }
         self.notify(msg);
-        // Guarded: loading the new endpoint must not silently discard dirty edits.
+        // Open the new endpoint as its own buffer (File target — no confirm).
         self.guarded_load(PendingLoad::File(path))?;
         Ok(())
     }
@@ -4469,8 +4469,8 @@ impl App {
                     Ok(path) => {
                         self.reload_explorer()?;
                         self.message = Some(Message::new(format!("created {text}")));
-                        // Guarded: loading the new endpoint must not silently
-                        // discard dirty edits on the currently-loaded one.
+                        // Open the new endpoint as its own buffer (File target —
+                        // no cross-endpoint confirm in the multi-buffer model).
                         self.guarded_load(PendingLoad::File(path))?;
                     }
                     Err(err) => self.crud_error(err),
@@ -4793,8 +4793,7 @@ impl App {
     /// switch still defers behind a single [`ConfirmPurpose::DiscardChanges`]
     /// (discard-all) overlay with the target parked in `pending_load`.
     fn guarded_load(&mut self, target: PendingLoad) -> Result<()> {
-        if matches!(target, PendingLoad::Workspace(_))
-            && self.buffers.iter().any(Buffer::is_dirty)
+        if matches!(target, PendingLoad::Workspace(_)) && self.buffers.iter().any(Buffer::is_dirty)
         {
             self.pending_load = Some(target);
             self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
@@ -5095,7 +5094,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (border top + summary line + border bottom) keeping its title and
     // tab-bar/stats content visible.
     const COLLAPSED_HEIGHT: u16 = 3;
-    let remaining = right_area.height.saturating_sub(urlbar::HEIGHT);
+    // The tab strip occupies a single row at the very top of column B, ONLY when
+    // at least one buffer is open. `Length(0)` renders nothing so the zero-buffer
+    // layout stays byte-identical to the pre-tabs one; a strip shifts the URL
+    // bar / request / response down by exactly one row.
+    let strip_h: u16 = u16::from(!app.buffers.is_empty());
+    let remaining = right_area.height.saturating_sub(urlbar::HEIGHT + strip_h);
     let (req_height, resp_height) = match app.zoom {
         Some(ZoomPane::Request) => (remaining.saturating_sub(COLLAPSED_HEIGHT), COLLAPSED_HEIGHT),
         Some(ZoomPane::Response) => (COLLAPSED_HEIGHT, remaining.saturating_sub(COLLAPSED_HEIGHT)),
@@ -5104,7 +5108,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             (req, remaining - req)
         }
     };
-    let [urlbar_area, request_area, response_area] = Layout::vertical([
+    let [strip_area, urlbar_area, request_area, response_area] = Layout::vertical([
+        Constraint::Length(strip_h),
         Constraint::Length(urlbar::HEIGHT),
         Constraint::Length(req_height),
         Constraint::Length(resp_height),
@@ -5115,11 +5120,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
     let theme = app.theme.clone();
     let dirty = app.is_dirty();
-    // The loaded endpoint's file while dirty — its explorer row gets the accent
-    // ● suffix (matched by path in the explorer render).
-    let dirty_file: Option<std::path::PathBuf> = dirty
-        .then(|| app.selected().map(|s| s.file.clone()))
-        .flatten();
+    // Every open dirty buffer's file — each such explorer row gets the accent
+    // ● suffix (matched by path in the explorer render), and the active buffer's
+    // dirtiness drives the URL-bar dot below.
+    let dirty_files: Vec<std::path::PathBuf> = app
+        .buffers
+        .iter()
+        .filter(|b| b.is_dirty())
+        .map(|b| b.file().to_path_buf())
+        .collect();
     if let Some(explorer_area) = explorer_area {
         if app.sequences_shown {
             // PR 2b: split the left column vertically. The focused sub-pane
@@ -5147,7 +5156,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     has_ws,
                     &theme,
                     app.jump.as_ref(),
-                    dirty_file.as_deref(),
+                    &dirty_files,
                 );
             } else {
                 // Endpoints collapsed to a stub summarizing the current selection.
@@ -5180,10 +5189,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 has_ws,
                 &theme,
                 app.jump.as_ref(),
-                dirty_file.as_deref(),
+                &dirty_files,
             );
         }
     }
+    // The tab strip (top of column B), rendered only when a buffer is open —
+    // `strip_h` is 0 and `strip_area` empty otherwise, so nothing draws.
+    if strip_h > 0 {
+        let tab_items: Vec<tab_strip::TabItem> = app
+            .buffers
+            .iter()
+            .map(|b| tab_strip::TabItem {
+                short_name: b
+                    .as_endpoint()
+                    .map(|e| e.endpoint.endpoint.name.clone())
+                    .unwrap_or_default(),
+                dirty: b.is_dirty(),
+            })
+            .collect();
+        tab_strip::render(frame, strip_area, &tab_items, app.active, &theme);
+    }
+
     // Bind the active endpoint buffer by *field* access (not the `&mut self`
     // accessor) so `app.jump`/`app.focus`/`app.theme`/`app.highlight_tx`/… stay
     // independently borrowable while we hold the buffer mutably (the design's
@@ -7942,17 +7968,17 @@ mod tests {
         app.accept_overlay().unwrap();
     }
 
-    /// BLOCKER 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint
-    /// must defer into the discard-changes confirm and NOT open the load runner
-    /// over the stale selection.
+    /// STAGE 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint no
+    /// longer defers — each endpoint has its own buffer, so beta opens as a NEW
+    /// buffer (dirty alpha stays open) and the runner opens over beta.
     #[test]
-    fn load_runner_pick_dirty_defers_to_confirm_not_stale_run() {
+    fn load_runner_pick_dirty_opens_new_buffer_and_runner() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = load_pick_app(dir.path());
         // Make the loaded `alpha` dirty.
         *app.test_editor() = EditorState::new(Lines::from("dirty body"));
         assert!(app.is_dirty());
-        let loaded_before = app.selected().unwrap().file.clone();
+        let alpha_file = app.selected().unwrap().file.clone();
 
         app.open_load_runner_pick().unwrap();
         assert_eq!(app.mode, Mode::Search);
@@ -7960,19 +7986,20 @@ mod tests {
         // Pick the DIFFERENT endpoint (beta).
         pick_search(&mut app, "beta");
 
-        // Deferred into the discard confirm — NOT the load runner.
+        // No confirm — the runner opens over the freshly-focused beta buffer.
+        assert_eq!(app.mode, Mode::LoadRunner);
         assert_eq!(
-            app.mode,
-            Mode::Confirm(ConfirmPurpose::DiscardChanges),
-            "dirty + other endpoint must defer to the discard confirm"
+            app.load_runner.as_ref().unwrap().url,
+            "https://api.test/beta"
         );
+        // Two buffers now: dirty alpha still open, beta active.
+        assert_eq!(app.buffers.len(), 2, "beta pushed as a new buffer");
+        assert_eq!(app.selected().unwrap().display_path, "api/beta");
+        let alpha_idx = app.buffer_index_for_path(&alpha_file).unwrap();
         assert!(
-            app.load_runner.is_none(),
-            "no runner over the stale selection"
+            app.buffers[alpha_idx].is_dirty(),
+            "alpha's unsaved edits are preserved in its own buffer"
         );
-        // Selection unchanged (still alpha) until the confirm resolves.
-        assert_eq!(app.selected().unwrap().file, loaded_before);
-        // The one-shot intent was consumed.
         assert!(!app.load_runner_after_pick);
     }
 
@@ -8347,7 +8374,8 @@ mod tests {
 
     /// `open_or_focus_buffer` builds a buffer whose editor is seeded from the
     /// request body and whose `loaded_snapshot` clones the pristine endpoint.
-    /// Stage 1 stays single-buffer (`buffers.len() == 1`, `active == 0`).
+    /// Stage 2: a fresh open seeds the editor/snapshot; a SECOND distinct
+    /// endpoint pushes a new buffer (never replaces).
     #[test]
     fn open_or_focus_buffer_seeds_editor_and_snapshot() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
@@ -8362,12 +8390,46 @@ mod tests {
         );
         assert!(!app.is_dirty(), "freshly opened buffer is not dirty");
 
-        // Opening a second endpoint REPLACES the slot (Stage 1 single-buffer).
+        // Opening a second distinct endpoint PUSHES a new buffer + focuses it.
         app.open_or_focus_buffer(selected_with("b.toml", None));
-        assert_eq!(app.buffers.len(), 1, "still single-buffer in Stage 1");
+        assert_eq!(app.buffers.len(), 2, "distinct endpoint pushes a buffer");
+        assert_eq!(app.active, 1);
         assert_eq!(
             app.active_endpoint_buffer().unwrap().endpoint.file,
             PathBuf::from("b.toml")
+        );
+    }
+
+    /// Stage 2: re-opening an already-open endpoint DEDUPS — focuses the existing
+    /// buffer instead of pushing a duplicate, preserving its in-memory edits.
+    #[test]
+    fn open_or_focus_buffer_dedups_and_focuses_existing() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("body a")));
+        app.open_or_focus_buffer(selected_with("b.toml", Some("body b")));
+        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.active, 1);
+        // Edit B so we can prove the dedup keeps its edits.
+        *app.test_editor() = EditorState::new(Lines::from("edited b"));
+        assert!(app.is_dirty());
+
+        // Re-open A: focuses it, no new buffer.
+        app.open_or_focus_buffer(selected_with("a.toml", Some("body a")));
+        assert_eq!(app.buffers.len(), 1 + 1, "no duplicate buffer for A");
+        assert_eq!(app.active, 0, "A focused");
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "body a"
+        );
+
+        // Re-open B: focuses it again, edits intact.
+        app.open_or_focus_buffer(selected_with("b.toml", Some("body b")));
+        assert_eq!(app.buffers.len(), 2, "still two buffers");
+        assert_eq!(app.active, 1);
+        assert_eq!(
+            String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),
+            "edited b",
+            "B's in-memory edits survive the dedup-focus"
         );
     }
 

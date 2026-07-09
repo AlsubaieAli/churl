@@ -1,15 +1,15 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 402
+assertion_line: 759
 expression: snapshot(&mut app)
 ---
-┌ Explorer ──────────────────┐┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│  ▸ orders                  │┃GET  https://api.test/users                     ┃
-│  ▾ users                   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-│>   List users              │┌ Request ───────────────────────────────────────┐
-│    Create user             ││ Params(0)   Headers(0)   Auth   Body           │
-│    Get user                ││  (no params — a to add)                        │
-│                            ││                                                │
+┌ Explorer ──────────────────┐ List users                                       
+│  ▸ orders                  │┏ URL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│  ▾ users                   │┃GET  https://api.test/users                     ┃
+│>   List users              │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│    Create user             │┌ Request ───────────────────────────────────────┐
+│    Get user                ││ Params(0)   Headers(0)   Auth   Body           │
+│                            ││  (no params — a to add)                        │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │

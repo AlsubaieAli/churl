@@ -977,6 +977,14 @@ fn every_palette_command_dispatches() {
                     "{label:?} must open the search overlay"
                 );
             }
+            // Buffer/tab actions no-op cleanly on an empty buffer list (nothing
+            // open in this fixture) — no overlay, mode stays Normal.
+            Action::BufferNext
+            | Action::BufferPrev
+            | Action::BufferClose
+            | Action::BufferCloseAll => {
+                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
+            }
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
@@ -1040,50 +1048,60 @@ fn row_add_and_toggle_serialize() {
     );
 }
 
-/// Discarding changes drops the edits and switches to the other endpoint.
+/// Stage 2: switching endpoints while dirty NO LONGER discards — each endpoint
+/// has its own buffer, so the second endpoint opens as a new buffer and the
+/// dirty first buffer stays open (no confirm). Nothing is written to disk.
 #[test]
-fn discard_changes_switches_endpoint() {
+fn switching_endpoints_while_dirty_opens_new_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users
+    let first_file = app.selected().unwrap().file.clone();
     // Dirty the URL.
     app.focus = Pane::UrlBar;
     press(&mut app, KeyCode::Char('i'));
     type_str(&mut app, "ZZZ");
     press(&mut app, KeyCode::Enter);
-    // Switch to another endpoint → discard confirm.
+    // Switch to another endpoint → opens directly, no confirm.
     app.focus = Pane::Explorer;
     press(&mut app, KeyCode::Char('j')); // onto "Create user"
     press(&mut app, KeyCode::Enter);
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
-    // 'd' discards.
-    press(&mut app, KeyCode::Char('d'));
-    // The endpoint actually switched…
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.mode,
+        Mode::Normal,
+        "no confirm — endpoint opens directly"
+    );
     let selected = app.selected().expect("an endpoint is loaded");
     assert!(
         selected.file.ends_with("users/create.toml"),
-        "must have switched to Create user, got {:?}",
+        "must have opened Create user, got {:?}",
         selected.file
     );
     assert!(
         !selected.endpoint.request.url.contains("ZZZ"),
-        "discarded edit must not leak into the new endpoint"
+        "the new endpoint's own buffer has no leaked edit"
     );
-    // …and the list.toml file was never written.
-    let file = dir.path().join("users").join("list.toml");
-    let contents = std::fs::read_to_string(&file).unwrap();
+    let _ = first_file;
+    // The dirty List-users buffer is still open: its explorer row keeps the ●
+    // dirty marker (dirty markers reflect every open dirty buffer).
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('●'),
+        "the first endpoint's buffer stays dirty (● shown):\n{rendered}"
+    );
+    // Neither file was written.
+    let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(
         !contents.contains("ZZZ"),
-        "discarded edit must not persist: {contents}"
+        "edit must not persist: {contents}"
     );
 }
 
-/// Review #2a: switching endpoints via the *search overlay* while dirty must
-/// raise the same discard-changes confirm as the explorer path — never a
-/// silent discard.
+/// Stage 2: switching endpoints via the *search overlay* while dirty opens the
+/// target as its own buffer directly (no discard confirm — each endpoint has its
+/// own buffer). The dirty buffer is untouched; nothing is written.
 #[test]
-fn search_switch_while_dirty_is_guarded() {
+fn search_switch_while_dirty_opens_new_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users
@@ -1092,35 +1110,39 @@ fn search_switch_while_dirty_is_guarded() {
     press(&mut app, KeyCode::Char('i'));
     type_str(&mut app, "ZZZ");
     press(&mut app, KeyCode::Enter);
-    // Search for "Get user" and accept.
+    // Search for "Get user" and accept → opens directly, no confirm.
     press(&mut app, KeyCode::Char('/'));
     type_str(&mut app, "get us");
     press(&mut app, KeyCode::Enter);
-    // Guard must fire; nothing switched yet.
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
-    assert!(
-        app.selected().unwrap().file.ends_with("list.toml"),
-        "still on List users while the confirm is open"
+    assert_eq!(
+        app.mode,
+        Mode::Normal,
+        "no confirm — search target opens directly"
     );
-    // Discard → the search target loads.
-    press(&mut app, KeyCode::Char('d'));
     assert!(
         app.selected().unwrap().file.ends_with("users/get.toml"),
-        "search target must load after discard, got {:?}",
+        "search target must be focused, got {:?}",
         app.selected().unwrap().file
+    );
+    // The dirty List-users buffer is still open (● shown in the explorer).
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('●'),
+        "first buffer stays dirty:\n{rendered}"
     );
     let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(!contents.contains("ZZZ"), "edit must not persist");
 }
 
-/// Review #2b: switching endpoints via a *jump-mode row label* while dirty must
-/// raise the confirm; `s` saves the edits to disk, then switches.
+/// Stage 2: switching endpoints via a *jump-mode row label* while dirty opens the
+/// target as its own buffer directly (no confirm). The dirty edit stays in its
+/// own buffer, unsaved — it is NOT force-written on switch.
 #[test]
-fn jump_switch_while_dirty_guards_and_saves() {
+fn jump_switch_while_dirty_opens_new_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users (row 2)
-    // A saveable dirty edit.
+    // A dirty edit.
     app.focus = Pane::UrlBar;
     press(&mut app, KeyCode::Char('i'));
     type_str(&mut app, "/active");
@@ -1131,29 +1153,28 @@ fn jump_switch_while_dirty_guards_and_saves() {
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(
         app.mode,
-        Mode::Confirm(ConfirmPurpose::DiscardChanges),
-        "jump-mode endpoint switch must be guarded while dirty"
+        Mode::Normal,
+        "jump-mode endpoint switch opens directly — no confirm"
     );
-    // Save-then-switch.
-    press(&mut app, KeyCode::Char('s'));
-    assert_eq!(app.mode, Mode::Normal);
     assert!(
         app.selected().unwrap().file.ends_with("users/create.toml"),
-        "must switch after a successful save, got {:?}",
+        "must open the jump target, got {:?}",
         app.selected().unwrap().file
     );
+    // The dirty edit was NOT written to disk (switching no longer saves).
     let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(
-        contents.contains("https://api.test/users/active"),
-        "the edit must be saved before switching: {contents}"
+        !contents.contains("https://api.test/users/active"),
+        "switching must not force-save the edit: {contents}"
     );
 }
 
-/// Review #3: `s` (save-then-switch) with a save that *fails* (literal secret
-/// auth is refused) must stay on the same endpoint with the edits intact and
-/// the error visible — never destroy the unsaved edits it just refused to write.
+/// Stage 2: closing a DIRTY buffer with `s` (save-then-close) where the save
+/// *fails* (literal secret auth is refused) must keep the buffer open with the
+/// edits intact and the error visible — never destroy the unsaved edits it just
+/// refused to write.
 #[test]
-fn save_failure_blocks_discard_changes_switch() {
+fn save_failure_blocks_dirty_buffer_close() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users
@@ -1161,18 +1182,18 @@ fn save_failure_blocks_discard_changes_switch() {
     app.selected_mut().unwrap().endpoint.request.auth = Some(Auth::Bearer {
         token: "ghp_literal_secret".to_owned(),
     });
-    // Attempt to switch → confirm → 's'.
-    app.focus = Pane::Explorer;
-    press(&mut app, KeyCode::Char('j')); // onto "Create user"
-    press(&mut app, KeyCode::Enter);
+    // Close the buffer via <leader>t x → dirty confirm → 's'.
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('x'));
     assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
     press(&mut app, KeyCode::Char('s'));
-    // Still on the same endpoint, still dirty, error on the statusline.
+    // Still open, still dirty, error on the statusline.
     assert_eq!(app.mode, Mode::Normal);
-    let selected = app.selected().expect("endpoint still loaded");
+    let selected = app.selected().expect("buffer still open");
     assert!(
         selected.file.ends_with("users/list.toml"),
-        "must NOT switch when the save failed, got {:?}",
+        "must NOT close when the save failed, got {:?}",
         selected.file
     );
     assert!(
@@ -1267,11 +1288,11 @@ fn placement_row_enter_toggles() {
     assert_eq!(placement(&app), ApiKeyPlacement::Header, "…both ways");
 }
 
-/// Review #7: creating a new endpoint while the loaded one is dirty goes
-/// through the guarded seam — the confirm appears instead of a silent discard;
-/// Esc stays put with the edits intact (the file is created on disk either way).
+/// Stage 2: creating a new endpoint while the loaded one is dirty opens the new
+/// endpoint as its own buffer directly (no confirm) — the dirty buffer stays
+/// open, its edits preserved, and the new file is created on disk.
 #[test]
-fn new_endpoint_while_dirty_is_guarded() {
+fn new_endpoint_while_dirty_opens_new_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // users/list.toml
@@ -1286,17 +1307,20 @@ fn new_endpoint_while_dirty_is_guarded() {
     press(&mut app, KeyCode::Char('n'));
     type_str(&mut app, "Fresh One");
     press(&mut app, KeyCode::Enter);
-    // The file exists, but the load is deferred behind the confirm.
+    // The file exists AND the new endpoint is opened directly — no confirm.
     assert!(dir.path().join("users").join("fresh-one.toml").exists());
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
-    // Esc: stay on the dirty endpoint, edits intact.
-    press(&mut app, KeyCode::Esc);
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.mode, Mode::Normal, "opens directly, no confirm");
     let selected = app.selected().unwrap();
-    assert!(selected.file.ends_with("users/list.toml"), "must stay put");
     assert!(
-        selected.endpoint.request.url.contains("ZZZ"),
-        "edits must survive Esc"
+        selected.file.ends_with("users/fresh-one.toml"),
+        "new endpoint focused, got {:?}",
+        selected.file
+    );
+    // The dirty List-users buffer stays open (● shown in the explorer).
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('●'),
+        "dirty buffer preserved:\n{rendered}"
     );
 }
 

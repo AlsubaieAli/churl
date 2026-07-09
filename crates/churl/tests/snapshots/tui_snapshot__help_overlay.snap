@@ -1,28 +1,28 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1637
+assertion_line: 1668
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
 ┃> ▸ orders                  ┃│no endpoint selected                            │
 ┃  ▸ users  ┏ Help — keys (?/esc/q to close) ━━━━━━━━━━━━━━━━━━━━━━┓───────────┘
 ┃           ┃Global                                                ┃───────────┐
-┃           ┃  Ctrl-c, q         quit                              ┃           │
-┃           ┃  Tab               focus next pane                   ┃           │
-┃           ┃  Shift-BackTab     focus previous pane               ┃           │
-┃           ┃  h                 collapse / parent                 ┃           │
-┃           ┃  j                 move down                         ┃           │
-┃           ┃  k                 move up                           ┃           │
-┃           ┃  l                 expand / descend                  ┃           │
-┃           ┃  Enter             select / toggle                   ┃           │
-┃           ┃  g                 jump to top                       ┃───────────┘
-┃           ┃  Shift-g           jump to bottom                    ┃───────────┐
-┃           ┃  Ctrl-d            scroll half page down             ┃           │
-┃           ┃  Ctrl-u            scroll half page up               ┃           │
-┃           ┃  Ctrl-s            send request                      ┃           │
-┃           ┃  /                 search endpoints                  ┃           │
-┃           ┃  :                 command palette                   ┃           │
-┃           ┃  f                 jump to pane / row                ┃           │
+┃           ┃  Ctrl-c, q           quit                            ┃           │
+┃           ┃  Tab                 focus next pane                 ┃           │
+┃           ┃  Shift-BackTab       focus previous pane             ┃           │
+┃           ┃  h                   collapse / parent               ┃           │
+┃           ┃  j                   move down                       ┃           │
+┃           ┃  k                   move up                         ┃           │
+┃           ┃  l                   expand / descend                ┃           │
+┃           ┃  Enter               select / toggle                 ┃           │
+┃           ┃  g                   jump to top                     ┃───────────┘
+┃           ┃  Shift-g             jump to bottom                  ┃───────────┐
+┃           ┃  Ctrl-d              scroll half page down           ┃           │
+┃           ┃  Ctrl-u              scroll half page up             ┃           │
+┃           ┃  Ctrl-s              send request                    ┃           │
+┃           ┃  /                   search endpoints                ┃           │
+┃           ┃  :                   command palette                 ┃           │
+┃           ┃  f                   jump to pane / row              ┃           │
 ┃           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘

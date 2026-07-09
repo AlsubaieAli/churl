@@ -1,16 +1,17 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1771
 expression: snapshot(&mut app)
 ---
-┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
-│  ▸ orders                  ││GET  https://api.test/users                     │
-│  ▾ users                   │└────────────────────────────────────────────────┘
-│>   List users              │┌ Request ───────────────────────────────────────┐
-│    Create user             ││ Params(0)   Headers(0)   Auth   Body           │
-│    Get user                │└────────────────────────────────────────────────┘
+┌ Explorer ──────────────────┐ List users                                       
+│  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
+│  ▾ users                   ││GET  https://api.test/users                     │
+│>   List users              │└────────────────────────────────────────────────┘
+│    Create user             │┌ Request ───────────────────────────────────────┐
+│    Get user                ││ Params(0)   Headers(0)   Auth   Body           │
+│                            │└────────────────────────────────────────────────┘
 │                            │┏ Response 200 OK · 142 ms · 2 B · 1 header  [h] ┓
 │                            │┃{}                                              ┃
-│                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
