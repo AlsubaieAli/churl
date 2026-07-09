@@ -713,12 +713,15 @@ fn sequences_subpane_peek_symmetry_both_present() {
         "endpoints tree visible on launch: {launch}"
     );
 
-    // Focus-switch to Sequences: now Explorer collapses to a stub, Sequences
-    // fills. Both titles still render — neither pane vanished.
-    press(&mut app, KeyCode::Char(' ')); // leader
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    // Focus-switch to Sequences via the Explorer `s` overlay: now Explorer
+    // collapses to a stub, Sequences fills. Both titles still render — neither
+    // pane vanished — and the render must actually change (fill/stub inverts).
+    press(&mut app, KeyCode::Char('s')); // Explorer `s` = focus-sequences-toggle
     let switched = snapshot(&mut app);
+    assert_ne!(
+        switched, launch,
+        "focusing Sequences must invert the fill/stub, not leave the render unchanged: {switched}"
+    );
     assert!(
         switched.contains("Explorer"),
         "Explorer stub must be present when Sequences is focused: {switched}"
@@ -728,14 +731,13 @@ fn sequences_subpane_peek_symmetry_both_present() {
         "Sequences sub-pane fills when focused: {switched}"
     );
 
-    // Pressing `<leader>S` again never hides — it switches focus back.
-    press(&mut app, KeyCode::Char(' '));
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    // Pressing `s` again never hides — it toggles focus back to the launch
+    // state exactly (round-trip), proving it's a focus switch, not a hide.
+    press(&mut app, KeyCode::Char('s'));
     let back = snapshot(&mut app);
-    assert!(
-        back.contains("Sequences"),
-        "Sequences pane still present after switching back — never hidden: {back}"
+    assert_eq!(
+        back, launch,
+        "toggling back must restore the launch render exactly — never hides: {back}"
     );
 }
 
