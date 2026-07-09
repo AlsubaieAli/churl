@@ -389,12 +389,13 @@ impl EndpointBuffer {
             .as_ref()
             .map(|body| body.content.as_str())
             .unwrap_or("");
+        let editor = EditorState::new(Lines::from(body));
         let mut editor_vim = VimExt::default();
         editor_vim.reset();
         Self {
             loaded_snapshot: selected.endpoint.clone(),
             endpoint: selected,
-            editor: EditorState::new(Lines::from(body)),
+            editor,
             editor_events: EditorEventHandler::default(),
             editor_vim,
             tabs: RequestTabs::default(),
@@ -593,6 +594,15 @@ pub struct App {
     /// dropped. Global (not per-buffer) so generations are unique across buffers,
     /// which is how [`App::on_response`] routes a landed response to its buffer.
     generation: u64,
+    /// Orphan response for the response-pane render snapshots, which drive the
+    /// response component in isolation (no loaded endpoint). Real responses
+    /// always live in the active buffer — this state is UNREACHABLE in
+    /// production (a response only exists after sending from a loaded endpoint),
+    /// so this stays `Idle` outside the isolation tests. The render's no-buffer
+    /// branch falls back to it so those snapshots stay byte-identical.
+    /// (Test-support only; integration snapshot tests need it, so it cannot be
+    /// `#[cfg(test)]`-gated — that flag is off for `tests/`.)
+    orphan_response: ResponseState,
     /// A clipboard copy queued by a key handler, flushed by the run loop after
     /// the key is handled (native copy needs no terminal, but the OSC 52
     /// fallback writes to the terminal backend, which dispatch has no handle
@@ -766,6 +776,7 @@ impl App {
             client: None,
             execute_options: ExecuteOptions::default(),
             generation: 0,
+            orphan_response: ResponseState::Idle,
             pending_clipboard: None,
             body_search_editor: LineEditor::default(),
             highlight_tx: None,
@@ -899,21 +910,118 @@ impl App {
         self.active_endpoint_buffer_mut().map(|b| &mut b.endpoint)
     }
 
-    /// The active buffer's response state (tests / snapshot drivers). Replaces
-    /// the old public `response` field; falls back to [`ResponseState::Idle`]
-    /// when nothing is loaded (the pre-refactor default of the flat field).
-    pub fn response(&self) -> &ResponseState {
-        self.active_endpoint_buffer()
-            .map(|b| &b.response)
-            .unwrap_or(&ResponseState::IDLE)
+    /// The active buffer's response state for internal readers (render). Always
+    /// compiled. Falls back to the test-only orphan slot (isolation snapshots)
+    /// when nothing is loaded, else [`ResponseState::Idle`].
+    fn active_response(&self) -> &ResponseState {
+        match self.active_endpoint_buffer() {
+            Some(b) => &b.response,
+            None => &self.orphan_response,
+        }
     }
 
-    /// Sets the active buffer's response state (tests). No-op when nothing is
-    /// loaded.
-    pub fn set_response(&mut self, response: ResponseState) {
-        if let Some(b) = self.active_endpoint_buffer_mut() {
-            b.response = response;
+    /// Mutable active response: the active buffer's, or the orphan slot when
+    /// nothing is loaded. In production the orphan is always `Idle`, so response
+    /// actions on it are harmless no-ops; the isolation snapshots use it to drive
+    /// the response viewer without a loaded endpoint.
+    fn active_response_mut(&mut self) -> &mut ResponseState {
+        match self
+            .buffers
+            .get_mut(self.active)
+            .and_then(Buffer::as_endpoint_mut)
+        {
+            Some(b) => &mut b.response,
+            None => &mut self.orphan_response,
         }
+    }
+
+    /// The active buffer's response state (tests / snapshot drivers). Replaces
+    /// the old public `response` field.
+    pub fn response(&self) -> &ResponseState {
+        self.active_response()
+    }
+
+    /// Sets the active buffer's response state, or the orphan slot when nothing
+    /// is loaded (isolation snapshots).
+    pub fn set_response(&mut self, response: ResponseState) {
+        match self.active_endpoint_buffer_mut() {
+            Some(b) => b.response = response,
+            None => self.orphan_response = response,
+        }
+    }
+
+    /// Mutable access to the active buffer's response state, or the orphan slot
+    /// when nothing is loaded (isolation snapshots that assign
+    /// `*app.response_mut() = …` without a loaded endpoint).
+    pub fn response_mut(&mut self) -> &mut ResponseState {
+        match self
+            .buffers
+            .get_mut(self.active)
+            .and_then(Buffer::as_endpoint_mut)
+        {
+            Some(b) => &mut b.response,
+            None => &mut self.orphan_response,
+        }
+    }
+
+    /// Loads an endpoint into a single active buffer (test/white-box entry point;
+    /// production code goes through [`App::open_or_focus_buffer`]).
+    #[cfg(test)]
+    fn load_endpoint(&mut self, selected: SelectedEndpoint) {
+        self.open_or_focus_buffer(selected);
+    }
+
+    /// White-box access to the active endpoint buffer's editor (tests).
+    #[cfg(test)]
+    fn test_editor(&mut self) -> &mut EditorState {
+        &mut self
+            .active_endpoint_buffer_mut()
+            .expect("no active endpoint buffer")
+            .editor
+    }
+
+    /// White-box access to the active endpoint buffer's request tabs (tests).
+    #[cfg(test)]
+    fn test_tabs(&mut self) -> &mut RequestTabs {
+        &mut self
+            .active_endpoint_buffer_mut()
+            .expect("no active endpoint buffer")
+            .tabs
+    }
+
+    /// White-box: the active buffer's inline URL editor slot (tests).
+    #[cfg(test)]
+    fn test_url_editor(&self) -> &Option<LineEditor> {
+        &self
+            .active_endpoint_buffer()
+            .expect("no active endpoint buffer")
+            .url_editor
+    }
+
+    /// White-box: the active buffer's URL popup slot, immutable (tests).
+    #[cfg(test)]
+    fn test_url_popup(&self) -> &Option<EditorState> {
+        &self
+            .active_endpoint_buffer()
+            .expect("no active endpoint buffer")
+            .url_popup
+    }
+
+    /// White-box: the active buffer's URL popup slot, mutable (tests).
+    #[cfg(test)]
+    fn test_url_popup_mut(&mut self) -> &mut Option<EditorState> {
+        &mut self
+            .active_endpoint_buffer_mut()
+            .expect("no active endpoint buffer")
+            .url_popup
+    }
+
+    /// White-box: whether nothing is loaded. In the buffer model the snapshot is
+    /// non-Option, so "no snapshot" means "no buffer" (tests that asserted
+    /// `loaded_snapshot.is_none()`).
+    #[cfg(test)]
+    fn test_no_snapshot(&self) -> bool {
+        self.active_endpoint_buffer().is_none()
     }
 
     /// The active request tab, or the pre-refactor default (`RequestTabs`'s
@@ -1596,7 +1704,8 @@ impl App {
 
     /// The live request currently loaded (with any in-memory edits), or `None`.
     fn live_request(&self) -> Option<&Request> {
-        self.active_endpoint_buffer().map(EndpointBuffer::live_request)
+        self.active_endpoint_buffer()
+            .map(EndpointBuffer::live_request)
     }
 
     /// Mirrors the current edtui body text into the active buffer's live request
@@ -1614,8 +1723,7 @@ impl App {
     /// pristine snapshot. Derived — no dirty flag to keep in sync. `false` when
     /// nothing is loaded.
     fn is_dirty(&self) -> bool {
-        self.active_endpoint_buffer()
-            .is_some_and(EndpointBuffer::is_dirty)
+        self.active_buffer().is_some_and(Buffer::is_dirty)
     }
 
     /// Sends the selected endpoint's request with the live edtui body text.
@@ -1771,22 +1879,39 @@ impl App {
 
     // ---- Response viewer M7 actions ----
 
-    /// The live `ResponseView` of the active buffer, when the pane holds a
-    /// completed response.
+    /// The live `ResponseView`, when the pane holds a completed response. Reads
+    /// the active buffer's response, or the orphan slot when nothing is loaded
+    /// (isolation snapshots).
     fn response_view_mut(&mut self) -> Option<&mut ResponseView> {
-        match &mut self.active_endpoint_buffer_mut()?.response {
+        match self.active_response_mut() {
             ResponseState::Done { view } => Some(view),
             _ => None,
         }
     }
 
+    /// Resets the active buffer's response cursor/scroll (+ optionally the
+    /// highlight guard) after a view-geometry change. No-op when nothing is
+    /// loaded — the orphan slot has no geometry (it starts at 0).
+    fn reset_response_geometry(&mut self, clear_cache: bool) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.response_cursor = 0;
+            b.response_scroll = 0;
+            b.pending_highlight = None;
+            if clear_cache {
+                b.highlight_cache.clear();
+            }
+        }
+    }
+
     /// The logical line under the response cursor (through the last render's
-    /// fold/wrap geometry), or `None` when there is no response.
+    /// fold/wrap geometry), or `None` when there is no response. With no loaded
+    /// endpoint the cursor/width are 0 (orphan slot).
     fn response_cursor_logical(&self) -> Option<usize> {
-        let b = self.active_endpoint_buffer()?;
-        let width = b.response_viewport_width;
-        let cursor = b.response_cursor;
-        match &b.response {
+        let (width, cursor) = self
+            .active_endpoint_buffer()
+            .map(|b| (b.response_viewport_width, b.response_cursor))
+            .unwrap_or((0, 0));
+        match self.active_response() {
             ResponseState::Done { view } => view.logical_at_display_row(cursor, width),
             _ => None,
         }
@@ -1795,28 +1920,17 @@ impl App {
     /// `h`: toggle body/headers view. Resets cursor + scroll (the two views have
     /// different geometry) and clears any live search.
     fn response_toggle_headers(&mut self) {
-        let Some(b) = self.active_endpoint_buffer_mut() else {
-            return;
-        };
-        if let ResponseState::Done { view } = &mut b.response {
+        if let Some(view) = self.response_view_mut() {
             view.toggle_view_mode();
-            b.response_cursor = 0;
-            b.response_scroll = 0;
-            b.pending_highlight = None;
-            b.highlight_cache.clear();
+            self.reset_response_geometry(true);
         }
     }
 
     /// `W`: toggle soft-wrap. Cursor/scroll geometry changes, so reset them.
     fn response_toggle_wrap(&mut self) {
-        let Some(b) = self.active_endpoint_buffer_mut() else {
-            return;
-        };
-        if let ResponseState::Done { view } = &mut b.response {
+        if let Some(view) = self.response_view_mut() {
             view.toggle_wrap();
-            b.response_cursor = 0;
-            b.response_scroll = 0;
-            b.pending_highlight = None;
+            self.reset_response_geometry(false);
         }
     }
 
@@ -1826,8 +1940,8 @@ impl App {
     /// The headers view of a JSON response gets its own reason — "JSON responses
     /// only" would be wrong there.
     fn fold_unsupported_notice(&self) -> Option<&'static str> {
-        let view = match self.active_endpoint_buffer().map(|b| &b.response) {
-            Some(ResponseState::Done { view }) => view,
+        let view = match self.active_response() {
+            ResponseState::Done { view } => view,
             _ => return Some("folding: no response"),
         };
         if view.view_mode() == ViewMode::Headers {
@@ -1847,10 +1961,10 @@ impl App {
             self.notify(notice);
             return;
         }
-        if let Some(b) = self.active_endpoint_buffer_mut()
-            && let ResponseState::Done { view } = &mut b.response
-        {
+        if let Some(view) = self.response_view_mut() {
             view.toggle_fold_at(logical);
+        }
+        if let Some(b) = self.active_endpoint_buffer_mut() {
             b.pending_highlight = None;
             b.highlight_cache.clear();
         }
@@ -1863,14 +1977,9 @@ impl App {
             self.notify(notice);
             return;
         }
-        if let Some(b) = self.active_endpoint_buffer_mut()
-            && let ResponseState::Done { view } = &mut b.response
-        {
+        if let Some(view) = self.response_view_mut() {
             view.toggle_all_folds();
-            b.response_cursor = 0;
-            b.response_scroll = 0;
-            b.pending_highlight = None;
-            b.highlight_cache.clear();
+            self.reset_response_geometry(true);
         }
     }
 
@@ -2078,10 +2187,7 @@ impl App {
         };
         // History write needs `&mut self`; compute the status args first, then
         // borrow the target buffer to store the response.
-        let status = outcome
-            .as_ref()
-            .ok()
-            .map(|r| (r.status, r.timing.total));
+        let status = outcome.as_ref().ok().map(|r| (r.status, r.timing.total));
         match &outcome {
             Ok(_) => {
                 let (st, total) = status.expect("Ok outcome has status");
@@ -4750,7 +4856,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (vim-style `/query`), shadowing any transient message.
     let body_search_input: Option<String> = (app.mode == Mode::BodySearch).then(|| {
         let q = app.body_search_editor.text();
-        let matches = match app.response() {
+        let matches = match app.active_response() {
             ResponseState::Done { view } => view.search().map(|s| s.count()).unwrap_or(0),
             _ => 0,
         };
@@ -4891,44 +4997,43 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // buffer is loaded, we render against fresh defaults — byte-identical to the
     // pre-refactor flat fields, which were always default with nothing loaded.
     let active = app.active;
-    let buf = app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut);
+    // The no-buffer response fallback. In production `orphan_response` is always
+    // Idle (a response requires a loaded endpoint); the response-pane isolation
+    // snapshots set it to render a response with no endpoint, byte-identical to
+    // pre-refactor. Bound before `buf` (disjoint field) so both borrows coexist.
+    let default_response: &ResponseState = &app.orphan_response;
+    let buf = app
+        .buffers
+        .get_mut(active)
+        .and_then(Buffer::as_endpoint_mut);
     let mut default_editor = EditorState::default();
     let mut default_tabs = RequestTabs::default();
-    let default_response = ResponseState::Idle;
     let default_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
 
     // Split the buffer into the disjoint pieces the render fns take.
-    let (
-        selected_request,
-        editor,
-        tabs,
-        response,
-        cache,
-        url_editor,
-        resp_scroll,
-        resp_cursor,
-    ) = match buf {
-        Some(b) => (
-            Some(&b.endpoint.endpoint.request),
-            &mut b.editor,
-            &mut b.tabs,
-            &b.response,
-            &b.highlight_cache,
-            b.url_editor.as_mut(),
-            b.response_scroll,
-            b.response_cursor,
-        ),
-        None => (
-            None,
-            &mut default_editor,
-            &mut default_tabs,
-            &default_response,
-            &default_cache,
-            None,
-            0,
-            0,
-        ),
-    };
+    let (selected_request, editor, tabs, response, cache, url_editor, resp_scroll, resp_cursor) =
+        match buf {
+            Some(b) => (
+                Some(&b.endpoint.endpoint.request),
+                &mut b.editor,
+                &mut b.tabs,
+                &b.response,
+                &b.highlight_cache,
+                b.url_editor.as_mut(),
+                b.response_scroll,
+                b.response_cursor,
+            ),
+            None => (
+                None,
+                &mut default_editor,
+                &mut default_tabs,
+                default_response,
+                &default_cache,
+                None,
+                0,
+                0,
+            ),
+        };
     let req_focused = app.focus == Pane::Request && app.mode == Mode::Normal;
     let resp_focused =
         app.focus == Pane::Response && (app.mode == Mode::Normal || app.mode == Mode::BodySearch);
@@ -5037,7 +5142,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // active buffer, and enqueue a highlight job. Done after the borrow split so
     // it targets the same buffer the render read from.
     if let Some(outcome) = resp_outcome
-        && let Some(b) = app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut)
+        && let Some(b) = app
+            .buffers
+            .get_mut(active)
+            .and_then(Buffer::as_endpoint_mut)
     {
         b.response_scroll = outcome.clamped_scroll;
         b.response_cursor = outcome.clamped_cursor;
@@ -5126,7 +5234,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 // with no buffer loaded they fall back to a per-frame empty cache
                 // (first-frame render is identical — only cross-frame caching is
                 // skipped, which is invisible to snapshots/behaviour).
-                let mut scratch_cache = HashMap::new();
+                let scratch_cache = HashMap::new();
                 let mut scratch_pending = None;
                 let cache = app
                     .buffers
@@ -5151,7 +5259,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     if !dup && let Some(tx) = &app.highlight_tx {
                         let hash = job.hash;
                         if tx.send(job).is_ok() {
-                            match app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut) {
+                            match app
+                                .buffers
+                                .get_mut(active)
+                                .and_then(Buffer::as_endpoint_mut)
+                            {
                                 Some(b) => b.pending_highlight = Some(hash),
                                 None => scratch_pending = Some(hash),
                             }
@@ -5164,7 +5276,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::LoadRunner => {
             let tick = app.tick_count;
             let active = app.active;
-            let mut scratch_cache = HashMap::new();
+            let scratch_cache = HashMap::new();
             let mut scratch_pending = None;
             let cache = app
                 .buffers
@@ -5187,7 +5299,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 if !dup && let Some(tx) = &app.highlight_tx {
                     let hash = job.hash;
                     if tx.send(job).is_ok() {
-                        match app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut) {
+                        match app
+                            .buffers
+                            .get_mut(active)
+                            .and_then(Buffer::as_endpoint_mut)
+                        {
                             Some(b) => b.pending_highlight = Some(hash),
                             None => scratch_pending = Some(hash),
                         }
@@ -5509,54 +5625,93 @@ mod tests {
         }
     }
 
+    /// A minimal loaded endpoint buffer (no workspace) so white-box tests can set
+    /// per-buffer state (`in_flight`, `response`, editor) that used to live as
+    /// flat `App` fields.
+    fn open_bare_endpoint(app: &mut App) {
+        let endpoint = Endpoint {
+            seq: 0,
+            name: "test".to_owned(),
+            request: Request {
+                method: churl_core::model::Method::Get,
+                url: "https://api.test/x".to_owned(),
+                headers: Vec::new(),
+                params: Vec::new(),
+                body: None,
+                auth: None,
+            },
+        };
+        app.open_or_focus_buffer(SelectedEndpoint {
+            display_path: "test".to_owned(),
+            file: std::path::PathBuf::from("/tmp/test.toml"),
+            collection: 0,
+            endpoint,
+        });
+    }
+
+    /// White-box: put a fabricated in-flight request on the active buffer.
+    fn set_active_in_flight(app: &mut App, generation: u64) {
+        let handle = tokio::spawn(async {});
+        app.active_endpoint_buffer_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: handle.abort_handle(),
+            generation,
+            meta: meta(),
+        });
+    }
+
+    /// White-box: whether the active buffer has an in-flight request.
+    fn active_in_flight_is_some(app: &App) -> bool {
+        app.active_endpoint_buffer()
+            .is_some_and(|b| b.in_flight.is_some())
+    }
+
     /// A response whose generation no longer matches the in-flight request (after
     /// a cancel+resend) must be dropped without touching the pane.
     #[tokio::test]
     async fn stale_generation_response_is_dropped() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
-        // Pretend a request at generation 5 is in flight.
-        let handle = tokio::spawn(async {});
+        open_bare_endpoint(&mut app);
+        // Pretend a request at generation 5 is in flight on the active buffer.
         app.generation = 5;
-        app.in_flight = Some(InFlightRequest {
-            handle: handle.abort_handle(),
-            generation: 5,
-            meta: meta(),
-        });
+        set_active_in_flight(&mut app, 5);
 
         // A late result from an older generation is ignored…
         app.on_response(4, Ok(response()), meta());
-        assert!(matches!(app.response, ResponseState::Idle));
-        assert!(app.in_flight.is_some(), "in-flight preserved on stale drop");
+        assert!(matches!(app.response(), ResponseState::Idle));
+        assert!(
+            active_in_flight_is_some(&app),
+            "in-flight preserved on stale drop"
+        );
 
         // …the matching generation lands and clears the in-flight slot.
         app.on_response(5, Ok(response()), meta());
-        assert!(matches!(app.response, ResponseState::Done { .. }));
-        assert!(app.in_flight.is_none());
+        assert!(matches!(app.response(), ResponseState::Done { .. }));
+        assert!(!active_in_flight_is_some(&app));
     }
 
     /// Puts a fresh app in insert mode on the request pane's Body tab (where the
-    /// edtui editor lives).
+    /// edtui editor lives). A bare endpoint buffer is loaded so the per-buffer
+    /// editor/tabs exist (they moved off `App` into the active buffer).
     fn insert_mode_app(keymap: KeyMap) -> App {
         let mut app = App::new(None, keymap).unwrap();
+        open_bare_endpoint(&mut app);
         app.focus = Pane::Request;
-        app.tabs.active = RequestTab::Body;
-        app.editor.mode = EditorMode::Insert;
+        app.test_tabs().active = RequestTab::Body;
+        app.test_editor().mode = EditorMode::Insert;
         app
     }
 
-    /// Insert mode + Ctrl-S dispatches Send (here: the no-endpoint statusline
-    /// hint) instead of reaching edtui; the editor stays in insert mode.
+    /// Insert mode + Ctrl-S dispatches Send instead of reaching edtui; the editor
+    /// is untouched (no text typed) and stays in insert mode. (With an endpoint
+    /// loaded and no HTTP client, Send is a silent runtime-free no-op — the proof
+    /// of interception is that Ctrl-S produced no text and did not quit.)
     #[test]
     fn insert_mode_ctrl_s_dispatches_send() {
         let mut app = insert_mode_app(KeyMap::default());
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .unwrap();
-        assert_eq!(
-            app.message.as_ref().map(|m| m.text.as_str()),
-            Some("no endpoint selected — nothing to send")
-        );
-        assert_eq!(String::from(app.editor.lines.clone()), "");
-        assert_eq!(app.editor.mode, EditorMode::Insert);
+        assert_eq!(String::from(app.test_editor().lines.clone()), "");
+        assert_eq!(app.test_editor().mode, EditorMode::Insert);
         assert!(!app.should_quit);
     }
 
@@ -5565,19 +5720,14 @@ mod tests {
     #[tokio::test]
     async fn insert_mode_ctrl_c_cancels_in_flight() {
         let mut app = insert_mode_app(KeyMap::default());
-        let handle = tokio::spawn(async {});
         app.generation = 1;
-        app.in_flight = Some(InFlightRequest {
-            handle: handle.abort_handle(),
-            generation: 1,
-            meta: meta(),
-        });
+        set_active_in_flight(&mut app, 1);
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .unwrap();
-        assert!(app.in_flight.is_none());
-        assert!(matches!(app.response, ResponseState::Cancelled));
+        assert!(!active_in_flight_is_some(&app));
+        assert!(matches!(app.response(), ResponseState::Cancelled));
         assert!(!app.should_quit);
-        assert_eq!(String::from(app.editor.lines.clone()), "");
+        assert_eq!(String::from(app.test_editor().lines.clone()), "");
     }
 
     /// Insert mode + Ctrl-C with nothing in flight falls back to Quit
@@ -5598,7 +5748,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
         }
-        assert_eq!(String::from(app.editor.lines.clone()), "sc");
+        assert_eq!(String::from(app.test_editor().lines.clone()), "sc");
         assert!(!app.should_quit);
         assert!(app.message.is_none());
     }
@@ -5612,11 +5762,8 @@ mod tests {
         let mut app = insert_mode_app(KeyMap::with_overrides(&overrides).unwrap());
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .unwrap();
-        assert_eq!(
-            app.message.as_ref().map(|m| m.text.as_str()),
-            Some("no endpoint selected — nothing to send")
-        );
-        assert_eq!(String::from(app.editor.lines.clone()), "");
+        // Intercepted as Send (silent no-op with no client), not typed as text.
+        assert_eq!(String::from(app.test_editor().lines.clone()), "");
     }
 
     /// Builds a minimal workspace with one collection + endpoint and two profiles.
@@ -6256,8 +6403,8 @@ mod tests {
         assert_eq!(app.focus, Pane::Explorer);
         assert_eq!(app.explorer.cursor, 1);
         // The endpoint row was selected and loaded.
-        assert!(app.selected.is_some());
-        assert_eq!(app.selected.as_ref().unwrap().endpoint.name, "Get user");
+        assert!(app.selected().is_some());
+        assert_eq!(app.selected().unwrap().endpoint.name, "Get user");
     }
 
     /// The default Jump key `f` is also a row label (3rd row): when assigned,
@@ -6357,18 +6504,19 @@ mod tests {
     fn body_tab_row_keys_reach_edtui() {
         for c in ['i', 'a'] {
             let mut app = App::new(None, KeyMap::default()).unwrap();
+            open_bare_endpoint(&mut app);
             app.focus = Pane::Request;
-            app.tabs.active = RequestTab::Body;
-            assert_eq!(app.editor.mode, EditorMode::Normal);
+            app.test_tabs().active = RequestTab::Body;
+            assert_eq!(app.test_editor().mode, EditorMode::Normal);
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
             assert_eq!(
-                app.editor.mode,
+                app.test_editor().mode,
                 EditorMode::Insert,
                 "'{c}' on the Body tab must enter edtui insert mode"
             );
             assert!(
-                app.tabs.editing.is_none(),
+                app.test_tabs().editing.is_none(),
                 "no row edit must start for '{c}'"
             );
         }
@@ -6398,18 +6546,18 @@ mod tests {
         app.explorer.cursor = 1;
         let selected = app.explorer.select().unwrap().expect("endpoint");
         app.load_endpoint(selected);
-        assert_eq!(app.selected.as_ref().unwrap().collection, 0);
+        assert_eq!(app.selected().unwrap().collection, 0);
 
         // Create a collection that sorts *before* "bbb" and reload: "bbb" is
         // now index 1; the stale index 0 would read "aaa"'s (empty) vars.
         churl_core::persistence::create_collection(dir.path(), "aaa").unwrap();
         app.reload_explorer().unwrap();
         assert_eq!(
-            app.selected.as_ref().unwrap().collection,
+            app.selected().unwrap().collection,
             1,
             "collection index must be remapped from the file path"
         );
-        let selected = app.selected.clone().unwrap();
+        let selected = app.selected().cloned().unwrap();
         let resolver = app.build_resolver(&selected);
         assert_eq!(
             resolver.substitute("{{who}}"),
@@ -6552,11 +6700,11 @@ mod tests {
         let selected = app.explorer.select().unwrap().expect("endpoint");
         app.load_endpoint(selected);
         app.begin_url_edit_inline();
-        assert!(app.url_editor.is_some());
+        assert!(app.test_url_editor().is_some());
         press(&mut app, ' ');
         assert_eq!(app.leader, None, "space must not enter leader during edit");
         assert!(
-            app.url_editor.as_ref().unwrap().text().contains(' '),
+            app.test_url_editor().as_ref().unwrap().text().contains(' '),
             "space types a space in the editor"
         );
     }
@@ -6567,7 +6715,7 @@ mod tests {
         let mut app = insert_mode_app(KeyMap::default());
         press(&mut app, ' ');
         assert_eq!(app.leader, None);
-        assert_eq!(String::from(app.editor.lines.clone()), " ");
+        assert_eq!(String::from(app.test_editor().lines.clone()), " ");
     }
 
     /// The `?` help / `churl keymaps` traversal: RunSequence is reachable only
@@ -6590,13 +6738,14 @@ mod tests {
     #[test]
     fn digit_focus_removed_at_app_level() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
+        open_bare_endpoint(&mut app);
         app.focus = Pane::Response;
         press(&mut app, '1'); // was FocusExplorer
         assert_eq!(app.focus, Pane::Response, "digit must not change focus");
         // In the Request pane, 1–4 jump tabs.
         app.focus = Pane::Request;
         press(&mut app, '2');
-        assert_eq!(app.tabs.active, RequestTab::Headers);
+        assert_eq!(app.test_tabs().active, RequestTab::Headers);
     }
 
     // ---- M6.7: URL→Params merge policy ----
@@ -7138,12 +7287,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
-        assert!(app.url_popup.is_some());
+        assert!(app.test_url_popup().is_some());
         // Replace the buffer and commit.
-        app.url_popup = Some(EditorState::new(Lines::from("https://api.test/x?q=1")));
+        *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("https://api.test/x?q=1")));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        assert!(app.url_popup.is_none(), "enter commits + closes");
+        assert!(app.test_url_popup().is_none(), "enter commits + closes");
         let req = app.live_request().unwrap();
         assert_eq!(req.url, "https://api.test/x");
         assert!(req.params.iter().any(|p| p.name == "q" && p.enabled));
@@ -7158,7 +7307,7 @@ mod tests {
         // In Normal mode, Esc cancels (edtui popups open in Normal mode).
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        assert!(app.url_popup.is_none());
+        assert!(app.test_url_popup().is_none());
         assert_eq!(app.live_request().unwrap().url, before, "url unchanged");
     }
 
@@ -7168,7 +7317,7 @@ mod tests {
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
         // A buffer that somehow holds two lines collapses to one on commit.
-        app.url_popup = Some(EditorState::new(Lines::from("https://a/b\nc")));
+        *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("https://a/b\nc")));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.live_request().unwrap().url, "https://a/bc");
@@ -7182,21 +7331,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
-        app.url_popup = Some(EditorState::new(Lines::from("https://api.test/find")));
+        *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("https://api.test/find")));
         // `/` enters Search; type "find"; Enter runs FindFirst → Normal.
         for c in "/find".chars() {
             press(&mut app, c);
         }
-        assert_eq!(app.url_popup.as_ref().unwrap().mode, EditorMode::Search);
+        assert_eq!(
+            app.test_url_popup().as_ref().unwrap().mode,
+            EditorMode::Search
+        );
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        let popup = app.url_popup.as_ref().expect("popup still open");
+        let popup = app.test_url_popup().as_ref().expect("popup still open");
         assert_eq!(popup.mode, EditorMode::Normal, "search left Search mode");
         assert_eq!(popup.cursor.col, 17, "cursor jumped to the 'find' match");
         // A second Enter (now in Normal) commits.
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        assert!(app.url_popup.is_none(), "second enter commits");
+        assert!(app.test_url_popup().is_none(), "second enter commits");
     }
 
     /// The vim motion extensions move the popup cursor in Normal mode.
@@ -7205,8 +7357,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
-        app.url_popup = Some(EditorState::new(Lines::from("foo bar baz")));
-        let cursor = |app: &App| app.url_popup.as_ref().unwrap().cursor.col;
+        *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("foo bar baz")));
+        let cursor = |app: &App| app.test_url_popup().as_ref().unwrap().cursor.col;
 
         press(&mut app, 'W'); // → start of "bar"
         assert_eq!(cursor(&app), 4);
@@ -7229,24 +7381,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
-        app.url_popup = Some(EditorState::new(Lines::from("foo bar")));
+        *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("foo bar")));
         press(&mut app, 'f'); // pending find…
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         assert!(
-            app.url_popup.is_some(),
+            app.test_url_popup().is_some(),
             "esc aborted the find, not the popup"
         );
         // The find is gone: a char is typed-through to edtui, not a target.
         press(&mut app, 'b');
         assert_eq!(
-            app.url_popup.as_ref().unwrap().cursor.col,
+            app.test_url_popup().as_ref().unwrap().cursor.col,
             0,
             "aborted find must not resolve on the next char"
         );
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        assert!(app.url_popup.is_none(), "esc with no pending cancels");
+        assert!(
+            app.test_url_popup().is_none(),
+            "esc with no pending cancels"
+        );
     }
 
     /// Body tab in Normal mode: `W` moves the editor cursor, and `f`+char is
@@ -7254,19 +7409,24 @@ mod tests {
     #[test]
     fn body_tab_vim_motions_and_f_shadows_jump() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
+        open_bare_endpoint(&mut app);
         app.focus = Pane::Request;
-        app.tabs.active = RequestTab::Body;
-        app.editor = EditorState::new(Lines::from("foo bar baz"));
-        app.editor.mode = EditorMode::Normal;
+        app.test_tabs().active = RequestTab::Body;
+        *app.test_editor() = EditorState::new(Lines::from("foo bar baz"));
+        app.test_editor().mode = EditorMode::Normal;
 
         press(&mut app, 'W');
-        assert_eq!(app.editor.cursor.col, 4, "W moved the body cursor");
+        assert_eq!(app.test_editor().cursor.col, 4, "W moved the body cursor");
 
         press(&mut app, 'f');
         press(&mut app, 'z');
-        assert_eq!(app.editor.cursor.col, 10, "f<c> moved the body cursor");
+        assert_eq!(
+            app.test_editor().cursor.col,
+            10,
+            "f<c> moved the body cursor"
+        );
         assert!(app.jump.is_none(), "f shadowed jump inside the Body editor");
-        assert_eq!(app.editor.mode, EditorMode::Normal);
+        assert_eq!(app.test_editor().mode, EditorMode::Normal);
     }
 
     /// The `f` shadow is Body-scoped: from the Explorer pane `f` still enters
@@ -7285,15 +7445,15 @@ mod tests {
         // Default (inline): begin_url_edit opens the inline editor.
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_edit();
-        assert!(app.url_editor.is_some());
-        assert!(app.url_popup.is_none());
+        assert!(app.test_url_editor().is_some());
+        assert!(app.test_url_popup().is_none());
         // Popup mode: begin_url_edit opens the popup.
         let dir2 = tempfile::tempdir().unwrap();
         let mut app = app_with_endpoint(dir2.path());
         app.set_url_edit_mode(UrlEditMode::Popup);
         app.begin_url_edit();
-        assert!(app.url_popup.is_some());
-        assert!(app.url_editor.is_none());
+        assert!(app.test_url_popup().is_some());
+        assert!(app.test_url_editor().is_none());
     }
 
     // ---- M6.7: help overlay ----
@@ -7424,11 +7584,11 @@ mod tests {
         // pane focus, an active profile, a non-Idle response.
         app.explorer.expand().unwrap();
         app.guarded_load(PendingLoad::Row(1)).unwrap();
-        assert!(app.selected.is_some());
-        app.editor = EditorState::new(Lines::from("dirty body"));
+        assert!(app.selected().is_some());
+        *app.test_editor() = EditorState::new(Lines::from("dirty body"));
         app.active_profile = Some("dev".to_owned());
         app.focus = Pane::Response;
-        app.response = ResponseState::Cancelled;
+        *app.response_mut() = ResponseState::Cancelled;
 
         let dir_b = tempfile::tempdir().unwrap();
         other_workspace_fixture(dir_b.path());
@@ -7442,14 +7602,17 @@ mod tests {
         assert!(names.iter().any(|n| n == "orders"), "shows B: {names:?}");
         assert!(!names.iter().any(|n| n == "users"), "no A rows: {names:?}");
 
-        // Endpoint/workspace-scoped state is reset.
-        assert!(app.selected.is_none());
-        assert!(app.loaded_snapshot.is_none());
-        assert_eq!(String::from(app.editor.lines.clone()), "");
+        // Endpoint/workspace-scoped state is reset: the buffer (which owns the
+        // editor/response/dirty state) is dropped entirely.
+        assert!(app.selected().is_none());
+        assert!(
+            app.test_no_snapshot(),
+            "buffer dropped → editor/response gone"
+        );
         assert!(app.active_profile.is_none());
         assert_eq!(app.explorer.cursor, 0);
         assert_eq!(app.focus, Pane::Explorer);
-        assert!(matches!(app.response, ResponseState::Idle));
+        assert!(matches!(app.response(), ResponseState::Idle));
         assert!(!app.is_dirty(), "no dirty state after switch");
         assert_eq!(
             app.message.as_ref().map(|m| m.text.as_str()),
@@ -7471,7 +7634,7 @@ mod tests {
         app.history = Some(HistoryStore::in_memory().unwrap());
         app.explorer.expand().unwrap();
         app.guarded_load(PendingLoad::Row(1)).unwrap();
-        app.editor = EditorState::new(Lines::from("unsaved edit"));
+        *app.test_editor() = EditorState::new(Lines::from("unsaved edit"));
         assert!(app.is_dirty());
 
         let dir_b = tempfile::tempdir().unwrap();
@@ -7488,7 +7651,7 @@ mod tests {
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
-        assert!(app.selected.is_none());
+        assert!(app.selected().is_none());
     }
 
     // ---- M7.5 concurrent-load runner ----
@@ -7575,9 +7738,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = load_pick_app(dir.path());
         // Make the loaded `alpha` dirty.
-        app.editor = EditorState::new(Lines::from("dirty body"));
+        *app.test_editor() = EditorState::new(Lines::from("dirty body"));
         assert!(app.is_dirty());
-        let loaded_before = app.selected.as_ref().unwrap().file.clone();
+        let loaded_before = app.selected().unwrap().file.clone();
 
         app.open_load_runner_pick().unwrap();
         assert_eq!(app.mode, Mode::Search);
@@ -7596,7 +7759,7 @@ mod tests {
             "no runner over the stale selection"
         );
         // Selection unchanged (still alpha) until the confirm resolves.
-        assert_eq!(app.selected.as_ref().unwrap().file, loaded_before);
+        assert_eq!(app.selected().unwrap().file, loaded_before);
         // The one-shot intent was consumed.
         assert!(!app.load_runner_after_pick);
     }
@@ -7941,6 +8104,240 @@ mod tests {
         assert!(
             app.load_runner.as_ref().unwrap().cancelled,
             "runner marked cancelled"
+        );
+    }
+
+    // ---- PR 3a: Buffer refactor (Stage 1) unit tests ----
+
+    /// Builds a `SelectedEndpoint` with the given file + body for buffer tests.
+    fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
+        SelectedEndpoint {
+            display_path: format!("coll/{file}"),
+            file: std::path::PathBuf::from(file),
+            collection: 0,
+            endpoint: Endpoint {
+                seq: 0,
+                name: "ep".to_owned(),
+                request: Request {
+                    method: churl_core::model::Method::Get,
+                    url: "https://api.test/x".to_owned(),
+                    headers: Vec::new(),
+                    params: Vec::new(),
+                    body: body.map(|c| Body {
+                        kind: BodyKind::Text,
+                        content: c.to_owned(),
+                    }),
+                    auth: None,
+                },
+            },
+        }
+    }
+
+    /// `open_or_focus_buffer` builds a buffer whose editor is seeded from the
+    /// request body and whose `loaded_snapshot` clones the pristine endpoint.
+    /// Stage 1 stays single-buffer (`buffers.len() == 1`, `active == 0`).
+    #[test]
+    fn open_or_focus_buffer_seeds_editor_and_snapshot() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("hello body")));
+        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.active, 0);
+        let b = app.active_endpoint_buffer().unwrap();
+        assert_eq!(String::from(b.editor.lines.clone()), "hello body");
+        assert_eq!(
+            b.loaded_snapshot.request.body.as_ref().unwrap().content,
+            "hello body"
+        );
+        assert!(!app.is_dirty(), "freshly opened buffer is not dirty");
+
+        // Opening a second endpoint REPLACES the slot (Stage 1 single-buffer).
+        app.open_or_focus_buffer(selected_with("b.toml", None));
+        assert_eq!(app.buffers.len(), 1, "still single-buffer in Stage 1");
+        assert_eq!(
+            app.active_endpoint_buffer().unwrap().endpoint.file,
+            PathBuf::from("b.toml")
+        );
+    }
+
+    /// `is_dirty` is derived per-`EndpointBuffer`: an in-memory body edit that
+    /// diverges from the buffer's own snapshot marks it dirty.
+    #[test]
+    fn is_dirty_is_per_endpoint_buffer() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", Some("orig")));
+        assert!(!app.is_dirty());
+        // Edit the body editor away from the snapshot → dirty.
+        *app.test_editor() = EditorState::new(Lines::from("changed"));
+        assert!(app.is_dirty(), "body edit diverging from snapshot is dirty");
+        // Restore the exact snapshot text → clean again (derived, not a flag).
+        *app.test_editor() = EditorState::new(Lines::from("orig"));
+        assert!(!app.is_dirty(), "reverting the edit clears dirty");
+    }
+
+    /// `send_request`'s in-flight guard reads the ACTIVE buffer: with an
+    /// in-flight already on it, a second send reports "already in flight" and
+    /// does not overwrite the slot.
+    #[tokio::test]
+    async fn send_request_guards_on_active_buffer_in_flight() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        open_bare_endpoint(&mut app);
+        set_active_in_flight(&mut app, 1);
+        app.send_request();
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("request already in flight — ctrl-c to cancel")
+        );
+        assert!(
+            active_in_flight_is_some(&app),
+            "existing in-flight untouched"
+        );
+    }
+
+    /// `on_response` routes by `in_flight.generation` to the MATCHING buffer,
+    /// even when it is not the active one. Two buffers each carry an in-flight at
+    /// a distinct generation; the response lands on the right buffer only.
+    #[tokio::test]
+    async fn on_response_routes_by_generation_to_matching_buffer() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // Two buffers pushed directly (Stage 2 shape; Stage 1 keeps 1, but the
+        // routing scan must already be correct).
+        app.buffers = vec![
+            Buffer::endpoint(selected_with("a.toml", None)),
+            Buffer::endpoint(selected_with("b.toml", None)),
+        ];
+        // Buffer 0 in-flight at gen 7; buffer 1 in-flight at gen 9.
+        app.buffers[0].as_endpoint_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: tokio::spawn(async {}).abort_handle(),
+            generation: 7,
+            meta: meta(),
+        });
+        app.buffers[1].as_endpoint_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: tokio::spawn(async {}).abort_handle(),
+            generation: 9,
+            meta: meta(),
+        });
+        app.active = 0;
+
+        // A response for gen 9 must land on buffer 1 (NOT the active buffer 0).
+        app.on_response(9, Ok(response()), meta());
+        assert!(
+            matches!(
+                app.buffers[1].as_endpoint().unwrap().response,
+                ResponseState::Done { .. }
+            ),
+            "gen 9 lands on buffer 1"
+        );
+        assert!(app.buffers[1].as_endpoint().unwrap().in_flight.is_none());
+        // Buffer 0 is untouched (still in-flight, still Idle).
+        assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
+        assert!(matches!(
+            app.buffers[0].as_endpoint().unwrap().response,
+            ResponseState::Idle
+        ));
+
+        // An unknown generation is dropped without touching any buffer.
+        app.on_response(42, Ok(response()), meta());
+        assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
+    }
+
+    /// `switch_workspace` drops every buffer (clearing all editor/response/dirty
+    /// state) and aborts any in-flight request.
+    #[tokio::test]
+    async fn switch_workspace_clears_buffers_and_aborts_in_flight() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = workspace_fixture(dir_a.path());
+        app.explorer.expand().unwrap();
+        app.guarded_load(PendingLoad::Row(1)).unwrap();
+        assert!(app.selected().is_some());
+        // A never-completing in-flight task so "finished" unambiguously means
+        // "aborted" (an empty task would finish on its own).
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let aborted = handle.abort_handle();
+        app.active_endpoint_buffer_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: aborted.clone(),
+            generation: 1,
+            meta: meta(),
+        });
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.switch_workspace(dir_b.path().to_path_buf()).unwrap();
+
+        assert!(app.buffers.is_empty(), "all buffers dropped on switch");
+        assert_eq!(app.active, 0);
+        assert!(app.selected().is_none());
+        // Let the abort propagate, then confirm the task is gone (not orphaned).
+        tokio::task::yield_now().await;
+        assert!(aborted.is_finished(), "the in-flight task was aborted");
+    }
+
+    /// `remap_buffers` removes a buffer whose file vanished (post-delete) and
+    /// clamps `active`.
+    #[test]
+    fn remap_buffers_removes_vanished_file_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = dir.path().join("api");
+        std::fs::create_dir(&coll).unwrap();
+        let file = coll.join("ping.toml");
+        std::fs::write(
+            &file,
+            "seq = 0\nname = \"Ping\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/ping\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(file.clone())).unwrap();
+        assert_eq!(app.buffers.len(), 1);
+
+        // The file disappears on disk, then a reload remaps.
+        std::fs::remove_file(&file).unwrap();
+        app.reload_explorer().unwrap();
+        assert!(app.buffers.is_empty(), "vanished-file buffer is removed");
+        assert_eq!(app.active, 0);
+        assert!(app.selected().is_none());
+    }
+
+    /// Renaming the loaded endpoint repoints its buffer's file path + name +
+    /// snapshot name in place (path-based), preserving unsaved edits.
+    #[test]
+    fn rename_repoints_loaded_buffer_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = dir.path().join("api");
+        std::fs::create_dir(&coll).unwrap();
+        let file = coll.join("ping.toml");
+        std::fs::write(
+            &file,
+            "seq = 0\nname = \"Ping\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/ping\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(file.clone())).unwrap();
+        // Move the explorer cursor onto the endpoint row so rename targets it.
+        app.explorer.select_file(&file).unwrap();
+        // Make an unsaved edit that must survive the rename.
+        *app.test_editor() = EditorState::new(Lines::from("draft body"));
+
+        app.commit_rename("Pong".to_owned()).unwrap();
+
+        let b = app
+            .active_endpoint_buffer()
+            .expect("buffer survives rename");
+        assert_eq!(b.endpoint.endpoint.name, "Pong", "endpoint name repointed");
+        assert_eq!(b.loaded_snapshot.name, "Pong", "snapshot name repointed");
+        assert!(
+            b.endpoint.file.ends_with("pong.toml"),
+            "file path repointed (slugified), got {:?}",
+            b.endpoint.file
+        );
+        assert_eq!(
+            String::from(b.editor.lines.clone()),
+            "draft body",
+            "unsaved edit survives the in-place rename"
         );
     }
 }
