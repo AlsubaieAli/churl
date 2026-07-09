@@ -1870,6 +1870,33 @@ impl App {
         self.active_buffer().is_some_and(Buffer::is_dirty)
     }
 
+    /// Whether ANY open buffer has unsaved changes (not just the active one).
+    /// Drives the workspace-switch guard + its save-all resolution, so a
+    /// non-active dirty buffer still prompts and is never silently destroyed.
+    fn any_buffer_dirty(&self) -> bool {
+        self.buffers.iter().any(Buffer::is_dirty)
+    }
+
+    /// Saves EVERY dirty buffer through the normal save path (each buffer becomes
+    /// active in turn so `save_request` operates on it). Restores the original
+    /// active index afterward. A refused save (e.g. literal-secret auth) leaves
+    /// its buffer dirty and surfaces the error — callers gate the switch on
+    /// [`App::any_buffer_dirty`] being clear afterward. No-op when nothing dirty.
+    fn save_all_dirty_buffers(&mut self) {
+        let restore = self.active;
+        let mut i = 0;
+        while i < self.buffers.len() {
+            if self.buffers[i].is_dirty() {
+                self.active = i;
+                self.save_request();
+            }
+            i += 1;
+        }
+        // Clamp the restore target in case the buffer list shrank (it never does
+        // here, but stay defensive).
+        self.active = restore.min(self.buffers.len().saturating_sub(1));
+    }
+
     /// Sends the selected endpoint's request with the live edtui body text.
     /// Spawns the execution task, keeps its `AbortHandle`, and moves the response
     /// pane to the in-flight state. Ignored (with a statusline hint) when a
@@ -4618,12 +4645,15 @@ impl App {
             ConfirmPurpose::DiscardChanges => match key.code {
                 KeyCode::Char('s') => {
                     self.mode = Mode::Normal;
-                    self.save_request();
-                    // Only switch when the save actually took: a refused save
-                    // (e.g. literal secret auth) leaves the request dirty and
-                    // the error on the statusline — switching anyway would
-                    // destroy the unsaved edits it just refused to write.
-                    if !self.is_dirty() {
+                    // The switch destroys ALL buffers, so "save changes before
+                    // switching" must save EVERY dirty buffer — not just the
+                    // active one (else a non-active dirty buffer is lost silently).
+                    self.save_all_dirty_buffers();
+                    // Only switch once every buffer is clean: a refused save
+                    // (e.g. literal secret auth) leaves that buffer dirty and the
+                    // error on the statusline — switching anyway would destroy the
+                    // unsaved edits it just refused to write.
+                    if !self.any_buffer_dirty() {
                         if let Some(target) = self.pending_load.take() {
                             self.perform_load(target)?;
                         }
@@ -4793,8 +4823,10 @@ impl App {
     /// switch still defers behind a single [`ConfirmPurpose::DiscardChanges`]
     /// (discard-all) overlay with the target parked in `pending_load`.
     fn guarded_load(&mut self, target: PendingLoad) -> Result<()> {
-        if matches!(target, PendingLoad::Workspace(_)) && self.buffers.iter().any(Buffer::is_dirty)
-        {
+        // The guard fires when ANY buffer is dirty (not just the active one) — a
+        // switch destroys every buffer, so a non-active dirty buffer must still
+        // prompt (else its unsaved edits vanish silently).
+        if matches!(target, PendingLoad::Workspace(_)) && self.any_buffer_dirty() {
             self.pending_load = Some(target);
             self.mode = Mode::Confirm(ConfirmPurpose::DiscardChanges);
             return Ok(());
@@ -5433,7 +5465,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
         Mode::Confirm(purpose) => {
-            let (title, question, hint) = confirm_text(purpose);
+            let (title, question, hint) = confirm_text(purpose, app.pending_close.is_some());
             prompt::render_confirm(frame, main, title, question, hint, &theme);
         }
         Mode::EnvEditor => {
@@ -5762,10 +5794,21 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// The (title, question, key-hint) for a confirmation overlay.
-fn confirm_text(purpose: ConfirmPurpose) -> (&'static str, &'static str, &'static str) {
+/// The (title, question, key-hint) for a confirmation overlay. `closing`
+/// distinguishes the two `DiscardChanges` flows — a buffer close (`<leader>t x`/
+/// `X`, `pending_close` set) vs an endpoint/workspace switch (`pending_load`) —
+/// so the copy matches the actual action.
+fn confirm_text(
+    purpose: ConfirmPurpose,
+    closing: bool,
+) -> (&'static str, &'static str, &'static str) {
     match purpose {
         ConfirmPurpose::DeleteEndpoint => ("Delete endpoint", "Delete this endpoint?", "[y/n]"),
+        ConfirmPurpose::DiscardChanges if closing => (
+            "Unsaved changes",
+            "Close without saving?",
+            "s save · d discard · esc stay",
+        ),
         ConfirmPurpose::DiscardChanges => (
             "Unsaved changes",
             "Save changes before switching?",
@@ -7890,6 +7933,150 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
         assert!(app.selected().is_none());
+    }
+
+    /// A two-endpoint workspace whose files exist on disk, so `save_request`
+    /// (which writes TOML) succeeds. Opens both endpoints as buffers (`alpha`
+    /// active last).
+    fn two_endpoint_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                coll.join(format!("{name}.toml")),
+                format!(
+                    "seq = 0\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("beta.toml")))
+            .unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("alpha.toml")))
+            .unwrap();
+        app
+    }
+
+    /// M1: a workspace switch with MULTIPLE dirty buffers. `s` must save EVERY
+    /// dirty buffer (not just the active one) before the switch destroys them all
+    /// — a non-active dirty buffer must never be lost silently.
+    #[test]
+    fn workspace_switch_s_saves_all_dirty_buffers() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // Dirty BOTH buffers via a saveable body edit.
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-body"));
+        app.active = alpha_idx; // active is alpha
+        *app.test_editor() = EditorState::new(Lines::from("alpha-body"));
+        assert!(app.any_buffer_dirty());
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "multi-dirty switch reaches the confirm"
+        );
+
+        // `s`: save all, then switch (all clean).
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
+        // BOTH files were written — the non-active buffer (beta) was not lost.
+        let alpha = std::fs::read_to_string(dir_a.path().join("api/alpha.toml")).unwrap();
+        let beta = std::fs::read_to_string(dir_a.path().join("api/beta.toml")).unwrap();
+        assert!(alpha.contains("alpha-body"), "active saved: {alpha}");
+        assert!(
+            beta.contains("beta-body"),
+            "the NON-active dirty buffer was saved too: {beta}"
+        );
+    }
+
+    /// M1: the workspace-switch guard fires even when ONLY a NON-active buffer is
+    /// dirty (the guard uses `any_buffer_dirty`, not active-only).
+    #[test]
+    fn workspace_switch_guards_on_nonactive_dirty() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        // Dirty ONLY the non-active buffer (beta); leave the active one (alpha)
+        // clean.
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-edit"));
+        app.active = alpha_idx;
+        assert!(!app.is_dirty(), "active (alpha) is clean");
+        assert!(app.any_buffer_dirty(), "but beta is dirty");
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "non-active dirty must still guard the switch"
+        );
+    }
+
+    /// M1: a REFUSED save during a multi-dirty workspace switch aborts the switch
+    /// and keeps every buffer (mirrors the single-buffer save-failure behaviour).
+    #[test]
+    fn workspace_switch_s_refused_save_aborts_switch() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = two_endpoint_app(dir_a.path());
+        app.history = Some(HistoryStore::in_memory().unwrap());
+        let alpha_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/alpha.toml"))
+            .unwrap();
+        let beta_idx = app
+            .buffer_index_for_path(&dir_a.path().join("api/beta.toml"))
+            .unwrap();
+        // beta: a saveable edit; alpha: an UNSAVEABLE literal-secret auth.
+        app.active = beta_idx;
+        *app.test_editor() = EditorState::new(Lines::from("beta-body"));
+        app.active = alpha_idx;
+        app.selected_mut().unwrap().endpoint.request.auth = Some(churl_core::model::Auth::Bearer {
+            token: "ghp_literal_secret".to_owned(),
+        });
+        assert!(app.any_buffer_dirty());
+
+        let dir_b = tempfile::tempdir().unwrap();
+        other_workspace_fixture(dir_b.path());
+        app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        // Switch aborted: still on workspace "demo", both buffers kept.
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.workspace.as_ref().unwrap().manifest().name,
+            "demo",
+            "refused save must abort the switch"
+        );
+        assert_eq!(app.buffers.len(), 2, "no buffer destroyed");
+        assert!(app.any_buffer_dirty(), "the refused buffer stays dirty");
     }
 
     // ---- M7.5 concurrent-load runner ----

@@ -61,14 +61,17 @@ fn label_width(item: &TabItem) -> usize {
 /// candidate start upward until `active` fits; a simple keep-active-visible
 /// window (no persistent state). Returns `(start, show_left_marker)`.
 fn window_start(items: &[TabItem], active: usize, width: usize) -> (usize, bool) {
-    // Walk `start` up until everything from `start..=active` fits in `width`
-    // (minus a left marker when `start > 0`). This keeps the active tab visible
-    // and biases toward showing as many earlier tabs as possible.
+    // Walk `start` up until everything from `start..=active` fits in `width`,
+    // reserving a left marker when `start > 0` and a right marker when tabs
+    // follow `active` (so the render loop's matching right-reserve can never
+    // clip the active tab itself). This keeps the active tab visible and biases
+    // toward showing as many earlier tabs as possible.
+    let right_marker = usize::from(active < items.len() - 1);
     let mut start = 0;
     loop {
         let left_marker = if start > 0 { 1 } else { 0 };
         let used: usize = items[start..=active].iter().map(label_width).sum();
-        if used + left_marker <= width || start >= active {
+        if used + left_marker + right_marker <= width || start >= active {
             return (start, start > 0);
         }
         start += 1;
@@ -96,14 +99,13 @@ pub fn render(frame: &mut Frame, area: Rect, items: &[TabItem], active: usize, t
     for (i, item) in items.iter().enumerate().skip(start) {
         let label = tab_label(item);
         let w = label.chars().count();
-        // Reserve a column for the right edge marker when more tabs follow.
+        // Reserve a column for the right edge marker when more tabs follow — for
+        // EVERY tab (incl. the active one), so a tab that would land exactly at
+        // `width` while more tabs follow is clipped, guaranteeing a free column
+        // for the `›` marker (Mn2: the exactly-full case).
         let more_follow = i < items.len() - 1;
         let reserve = usize::from(more_follow);
-        if used + w + reserve > width && i != active {
-            clipped_right = true;
-            break;
-        }
-        if used + w > width {
+        if used + w + reserve > width {
             clipped_right = true;
             break;
         }
@@ -128,4 +130,57 @@ pub fn render(frame: &mut Frame, area: Rect, items: &[TabItem], active: usize, t
         spans.push(Span::styled("›", theme.title));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(name: &str, dirty: bool) -> TabItem {
+        TabItem {
+            short_name: name.to_owned(),
+            dirty,
+        }
+    }
+
+    #[test]
+    fn tab_label_widths() {
+        assert_eq!(tab_label(&item("ab", false)), " ab ");
+        assert_eq!(tab_label(&item("ab", true)), " ab ● ");
+        // Truncation to MAX_NAME cols with an ellipsis.
+        let long = "a".repeat(20);
+        let lbl = tab_label(&item(&long, false));
+        assert!(lbl.contains('…'), "long name truncated: {lbl:?}");
+        assert_eq!(
+            lbl.chars().count(),
+            MAX_NAME + 2,
+            "MAX_NAME + surrounding spaces"
+        );
+    }
+
+    /// Mn2: when the active tab is the last-visible and tabs still FOLLOW it,
+    /// `window_start` reserves a right-marker column so the render loop's matching
+    /// reserve can never clip the active tab — the window fits `start..=active`
+    /// into `width - 1` (right marker), guaranteeing a free column for `›`.
+    #[test]
+    fn window_reserves_right_marker_when_more_follow() {
+        // Three tabs of width 4 each (" a " → 3? no: " ab " = 4). Use 1-char
+        // names so each label is " x " = 3 cols.
+        let items = vec![item("a", false), item("b", false), item("c", false)];
+        // widths: 3 each. active = 1 (middle), more follow (c). width chosen so
+        // start..=active (a,b = 6) fits exactly, but +1 right marker forces the
+        // window to drop `a`.
+        let (start, left) = window_start(&items, 1, 6);
+        assert_eq!(start, 1, "right-marker reserve drops the leading tab");
+        assert!(left, "a left marker shows when clipped-left");
+
+        // With one extra column (7) both a and b + right marker fit.
+        let (start, _) = window_start(&items, 1, 7);
+        assert_eq!(start, 0, "extra column lets the leading tab stay");
+
+        // No tabs follow the active (active is last) → no right reserve, so with
+        // width 7 the last two tabs (b,c = 6) + left marker (1) fit at start=1.
+        let (start, _) = window_start(&items, 2, 7);
+        assert_eq!(start, 1, "no right reserve when active is the last tab");
+    }
 }

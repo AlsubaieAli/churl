@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 2266
+assertion_line: 2275
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐ List users ●                                     
@@ -14,7 +14,7 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │              ┏ Unsaved changes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
-│              ┃Save changes before switching?                  ┃              │
+│              ┃Close without saving?                           ┃              │
 │              ┃s save · d discard · esc stay                   ┃──────────────┘
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
 │                            ││no response yet                                 │

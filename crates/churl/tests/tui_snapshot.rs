@@ -1161,6 +1161,15 @@ fn jump_switch_while_dirty_opens_new_buffer() {
         "must open the jump target, got {:?}",
         app.selected().unwrap().file
     );
+    // The dirty List-users buffer SURVIVED as its own background buffer: two
+    // buffers open, and the dirty ● shows on the backgrounded row. (Guards
+    // against a silent drop-the-old-buffer regression — an edit merely absent
+    // from disk would also pass without this.)
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('●'),
+        "the backgrounded dirty buffer keeps its ● marker:\n{rendered}"
+    );
     // The dirty edit was NOT written to disk (switching no longer saves).
     let contents = std::fs::read_to_string(dir.path().join("users").join("list.toml")).unwrap();
     assert!(
