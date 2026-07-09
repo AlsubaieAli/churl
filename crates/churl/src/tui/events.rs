@@ -111,6 +111,12 @@ pub enum Action {
     Delete,
     /// Toggle the explorer sidebar (hide / reopen).
     ToggleExplorer,
+    /// Toggle the sequences sub-pane on/off at the bottom of the explorer column
+    /// (PR 2b). Off by default; turning it on focuses it.
+    ToggleSequencesPane,
+    /// Switch focus/zoom between the endpoints tree and the sequences sub-pane
+    /// inside the (focused) explorer column (PR 2b). Auto-shows the sub-pane.
+    FocusSequencesToggle,
     /// Zoom the focused pane (Request/Response), collapsing the other.
     Zoom,
     /// Open the `?` help overlay (effective keymap).
@@ -227,6 +233,16 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::ToggleExplorer,
         "toggle-explorer",
         "toggle explorer sidebar",
+    ),
+    (
+        Action::ToggleSequencesPane,
+        "toggle-sequences-pane",
+        "toggle sequences sub-pane",
+    ),
+    (
+        Action::FocusSequencesToggle,
+        "focus-sequences-toggle",
+        "switch endpoints / sequences",
     ),
     (Action::Zoom, "zoom", "zoom pane"),
     (Action::Help, "help", "help overlay"),
@@ -522,6 +538,10 @@ impl Default for KeyMap {
         overlay(PaneCtx::Explorer, key!(shift - n), Action::NewCollection);
         overlay(PaneCtx::Explorer, key!(r), Action::Rename);
         overlay(PaneCtx::Explorer, key!(d), Action::Delete);
+        // `s` switches focus/zoom between the endpoints tree and the sequences
+        // sub-pane (PR 2b) — a lawful in-pane move, only live when the left
+        // column is focused. `s` is otherwise free in the Explorer overlay.
+        overlay(PaneCtx::Explorer, key!(s), Action::FocusSequencesToggle);
         // URL bar: edit + method switch.
         overlay(PaneCtx::UrlBar, key!(i), Action::EditUrl);
         overlay(PaneCtx::UrlBar, key!(enter), Action::EditUrl);
@@ -571,6 +591,12 @@ impl Default for KeyMap {
         // Direct root actions. `s` (formerly Send) now descends into the
         // sequences submenu — Send stays Ctrl-S ONLY (bound in `map` above).
         root_bind(key!(e), LeaderEntry::Act(Action::ToggleExplorer));
+        // `<leader>S` (Shift-s) toggles the sequences sub-pane — a sibling of
+        // `<leader>e`. Distinct from the lowercase-`s` sequences submenu descent.
+        root_bind(
+            key!(shift - s),
+            LeaderEntry::Act(Action::ToggleSequencesPane),
+        );
         root_bind(key!(c), LeaderEntry::Act(Action::Cancel));
         root_bind(key!(p), LeaderEntry::Act(Action::SwitchProfile));
         // `<leader>v` opens the environments & variables editor (`v` is free).

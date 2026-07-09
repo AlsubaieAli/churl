@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1331
+assertion_line: 1341
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -13,17 +13,17 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃└────────────────────┃ c  cancel request         ┃
-┃                            ┃┌ Response ──────────┃ e  toggle explorer sidebar┃
-┃                            ┃│no response yet     ┃ f  request picker         ┃
-┃                            ┃│                    ┃ p  switch profile         ┃
-┃                            ┃│no endpoint selected┃ q  quit                   ┃
-┃                            ┃│                    ┃ v  Environments & vars    ┃
-┃                            ┃│                    ┃ w  workspace picker       ┃
-┃                            ┃│                    ┃ y  copy request as curl   ┃
-┃                            ┃│                    ┃ l  ▸ load                 ┃
-┃                            ┃│                    ┃ s  ▸ sequences            ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃│            ┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│            ┃ Shift-s  toggle sequences sub-pane┃
+┃                            ┃└────────────┃ c  cancel request                 ┃
+┃                            ┃┌ Response ──┃ e  toggle explorer sidebar        ┃
+┃                            ┃│no response ┃ f  request picker                 ┃
+┃                            ┃│            ┃ p  switch profile                 ┃
+┃                            ┃│no endpoint ┃ q  quit                           ┃
+┃                            ┃│            ┃ v  Environments & vars            ┃
+┃                            ┃│            ┃ w  workspace picker               ┃
+┃                            ┃│            ┃ y  copy request as curl           ┃
+┃                            ┃│            ┃ l  ▸ load                         ┃
+┃                            ┃│            ┃ s  ▸ sequences                    ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

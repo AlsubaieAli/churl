@@ -882,6 +882,12 @@ fn every_palette_command_dispatches() {
             Action::ToggleHeadersView | Action::ToggleWrap => {
                 assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
             }
+            // Toggling the sequences sub-pane focuses the explorer and shows the
+            // sub-pane (no overlay, no workspace needed).
+            Action::ToggleSequencesPane => {
+                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
+                assert_eq!(app.focus, Pane::Explorer);
+            }
             Action::FocusExplorer => assert_eq!(app.focus, Pane::Explorer),
             Action::FocusUrlBar => assert_eq!(app.focus, Pane::UrlBar),
             Action::FocusRequest => assert_eq!(app.focus, Pane::Request),

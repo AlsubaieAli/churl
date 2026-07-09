@@ -109,6 +109,19 @@ impl Pane {
     }
 }
 
+/// Which sub-pane inside the left (explorer) column has focus/zoom (PR 2b). The
+/// left column is modelled on a separate axis from [`Pane`]: `Pane::Explorer`
+/// means "left column focused", and `LeftPane` decides which sub-pane inside it.
+/// This keeps `Pane` at its four variants (no Tab-cycle/zoom-pairing churn) and
+/// lets the sequences sub-pane be independently toggled off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftPane {
+    /// The endpoints tree (default; the only occupant when the sub-pane is off).
+    Endpoints,
+    /// The sequences sub-pane at the bottom of the column.
+    Sequences,
+}
+
 /// Top-level input mode. Overlays own the keyboard; edtui manages its own vim
 /// modes internally and is not represented here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +456,17 @@ pub struct App {
     zoom: Option<ZoomPane>,
     /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
     explorer_hidden: bool,
+    /// Which sub-pane inside the left column has focus/zoom (PR 2b). Forced to
+    /// `Endpoints` whenever `sequences_shown` is false.
+    left_active: LeftPane,
+    /// Whether the sequences sub-pane is visible at the bottom of the explorer
+    /// column (PR 2b). Off by default — the left column then renders endpoints
+    /// full-height, byte-identical to the pre-2b behaviour.
+    sequences_shown: bool,
+    /// The pane focus held before focus last moved INTO the left column from a
+    /// non-left pane (PR 2b / owner #2B). `<leader>e` hiding a focused explorer
+    /// restores this, instead of falling back to the URL bar.
+    focus_before_explorer: Option<Pane>,
     /// The active leader chord, or `None` when no chord is in progress. `Some`
     /// drives the two-level which-key popup (root ⇄ submenu).
     leader: Option<LeaderState>,
@@ -606,6 +630,9 @@ impl App {
             pending_load: None,
             zoom: None,
             explorer_hidden: false,
+            left_active: LeftPane::Endpoints,
+            sequences_shown: false,
+            focus_before_explorer: None,
             leader: None,
             help_open: false,
             help_scroll: 0,
@@ -1097,6 +1124,8 @@ impl App {
             Action::FocusRequest => self.set_focus(Pane::Request),
             Action::FocusResponse => self.set_focus(Pane::Response),
             Action::ToggleExplorer => self.toggle_explorer(),
+            Action::ToggleSequencesPane => self.toggle_sequences_pane(),
+            Action::FocusSequencesToggle => self.focus_sequences_toggle(),
             Action::Zoom => self.toggle_zoom(),
             Action::Help => self.help_open = true,
             Action::Leader => self.leader = Some(LeaderState::Root),
@@ -1138,6 +1167,9 @@ impl App {
             Action::RowEdit => self.row_edit(),
             Action::NewEndpoint => self.begin_new_endpoint(),
             Action::NewCollection => self.begin_new_collection(),
+            // `r` on the sequences sub-pane runs the hovered sequence (Run face);
+            // everywhere else it renames the selected tree node.
+            Action::Rename if self.left_column_on_sequences() => self.run_selected_sequence(),
             Action::Rename => self.begin_rename(),
             Action::Delete => self.begin_delete(),
             Action::HalfPageDown | Action::HalfPageUp => {
@@ -1201,7 +1233,33 @@ impl App {
         }
     }
 
+    /// True when the left column is focused AND the sequences sub-pane holds the
+    /// in-pane focus/zoom (PR 2b). Guards the sequence-specific `h/j/k/l/Enter/r`
+    /// routing so it never fires while the endpoints tree is active.
+    fn left_column_on_sequences(&self) -> bool {
+        self.focus == Pane::Explorer
+            && self.sequences_shown
+            && self.left_active == LeftPane::Sequences
+    }
+
     fn explorer_action(&mut self, action: Action) -> Result<()> {
+        // PR 2b: when the sequences sub-pane is the active occupant of the left
+        // column, in-pane nav drives the sequence cursor (a flat list — h/l
+        // no-op) and Enter opens the unified surface (Edit face) on the hovered
+        // sequence.
+        if self.left_active == LeftPane::Sequences && self.sequences_shown {
+            match action {
+                Action::Up => self.explorer.seq_move_up(),
+                Action::Down => self.explorer.seq_move_down(),
+                Action::Top => self.explorer.seq_top(),
+                Action::Bottom => self.explorer.seq_bottom(),
+                // Flat list: collapse/expand are no-ops.
+                Action::Collapse | Action::Expand => {}
+                Action::Select => self.edit_selected_sequence()?,
+                _ => unreachable!("only navigation actions reach explorer_action"),
+            }
+            return Ok(());
+        }
         match action {
             Action::Up => self.explorer.move_up(),
             Action::Down => self.explorer.move_down(),
@@ -1213,10 +1271,9 @@ impl App {
                 self.surface_explorer_warnings();
             }
             Action::Select => {
-                // A sequence row opens the runner; otherwise the guarded seam:
-                // switching to a *different* endpoint while dirty prompts to
-                // save/discard first (a collection toggle / same endpoint is not
-                // guarded).
+                // The guarded seam: switching to a *different* endpoint while
+                // dirty prompts to save/discard first (a collection toggle /
+                // same endpoint is not guarded).
                 self.activate_explorer_row(self.explorer.cursor)?;
             }
             _ => unreachable!("only navigation actions reach explorer_action"),
@@ -1964,24 +2021,20 @@ impl App {
 
     // ---- M7.4 sequence runner ----
 
-    /// Enter (or a jump label) on the current explorer row: opens the sequence
-    /// runner on a sequence row, otherwise loads the endpoint through the guarded
-    /// seam. One seam so both the explorer `Enter` and jump-mode agree.
+    /// Enter (or a jump label) on the current explorer row: loads the endpoint
+    /// through the guarded seam. One seam so both the explorer `Enter` and
+    /// jump-mode agree. (Sequences are no longer tree rows — they activate via
+    /// the sub-pane, PR 2b.)
     fn activate_explorer_row(&mut self, row: usize) -> Result<()> {
         self.explorer.cursor = row;
-        if self.explorer.selected_kind() == Some(RowKind::Sequence) {
-            self.run_selected_sequence();
-            Ok(())
-        } else {
-            self.guarded_load(PendingLoad::Row(row))
-        }
+        self.guarded_load(PendingLoad::Row(row))
     }
 
-    /// Runs the sequence under the explorer cursor (`<leader>r` / palette / Enter
-    /// on a sequence row). Notifies when the cursor is not on a sequence.
+    /// Runs the sequence under the sub-pane cursor (`<leader>s r` / palette / `r`
+    /// on the sequences sub-pane). Notifies when no sequence is selected.
     fn run_selected_sequence(&mut self) {
         let Some(selected) = self.explorer.selected_sequence() else {
-            self.notify("select a sequence in the SEQUENCES section first");
+            self.notify("select a sequence first");
             return;
         };
         self.open_sequence_runner(selected);
@@ -2972,6 +3025,12 @@ impl App {
         if pane == Pane::Explorer && self.explorer_hidden {
             self.explorer_hidden = false;
         }
+        // Remember the pane we left when focus moves INTO the left column from a
+        // non-left pane, so `<leader>e` can restore true prior focus on hide
+        // (PR 2b / owner #2B).
+        if pane == Pane::Explorer && self.focus != Pane::Explorer {
+            self.focus_before_explorer = Some(self.focus);
+        }
         // Zoom follows focus: moving to the collapsed counterpart transfers the
         // zoom to it, so exactly one pane is ever zoomed and a collapsed pane
         // never holds focus.
@@ -2981,15 +3040,63 @@ impl App {
             _ => {}
         }
         self.focus = pane;
+        // Focusing the left column lands on the remembered sub-pane (owner #2B).
+        // The invariant below keeps `left_active` honest when the sub-pane is off.
+        self.enforce_left_active_invariant();
+    }
+
+    /// A hidden sequences sub-pane can never hold the left-column focus: when
+    /// `!sequences_shown`, `left_active` is forced back to `Endpoints` (PR 2b).
+    fn enforce_left_active_invariant(&mut self) {
+        if !self.sequences_shown {
+            self.left_active = LeftPane::Endpoints;
+        }
     }
 
     /// `<leader>e`: toggles the explorer sidebar. Hiding it while it is focused
-    /// moves focus to the URL bar (a hidden pane cannot hold focus).
+    /// restores focus to the pane held before we entered the left column (owner
+    /// #2B — true prior-pane restore, URL bar only as a last resort). Showing it
+    /// re-focuses the left column, landing on the active sub-pane.
     fn toggle_explorer(&mut self) {
-        self.explorer_hidden = !self.explorer_hidden;
-        if self.explorer_hidden && self.focus == Pane::Explorer {
-            self.focus = Pane::UrlBar;
+        if self.explorer_hidden {
+            // Show: re-focus the left column (lands on `left_active`).
+            self.explorer_hidden = false;
+            self.set_focus(Pane::Explorer);
+        } else {
+            // Hide: a hidden pane cannot hold focus.
+            self.explorer_hidden = true;
+            if self.focus == Pane::Explorer {
+                self.focus = self.focus_before_explorer.take().unwrap_or(Pane::UrlBar);
+            }
         }
+    }
+
+    /// `<leader>S`: toggles the sequences sub-pane on/off. Turning it on shows +
+    /// focuses the new sub-pane (`left_active = Sequences`); turning it off never
+    /// leaves a hidden sub-pane focused (falls back to `Endpoints`).
+    fn toggle_sequences_pane(&mut self) {
+        self.sequences_shown = !self.sequences_shown;
+        if self.sequences_shown {
+            self.left_active = LeftPane::Sequences;
+            self.set_focus(Pane::Explorer);
+        } else {
+            self.left_active = LeftPane::Endpoints;
+        }
+    }
+
+    /// Explorer overlay `s`: switches focus/zoom between the endpoints tree and
+    /// the sequences sub-pane (PR 2b). Auto-shows the sub-pane if hidden, toggles
+    /// which sub-pane is active, and ensures the left column is focused. This is
+    /// the endpoints⇄sequences mutually-exclusive-zoom switch.
+    fn focus_sequences_toggle(&mut self) {
+        if !self.sequences_shown {
+            self.sequences_shown = true;
+        }
+        self.left_active = match self.left_active {
+            LeftPane::Endpoints => LeftPane::Sequences,
+            LeftPane::Sequences => LeftPane::Endpoints,
+        };
+        self.set_focus(Pane::Explorer);
     }
 
     /// `z`: zooms the focused Request/Response pane (collapsing the other), or
@@ -3476,7 +3583,7 @@ impl App {
             Some(RowKind::Collection) => {
                 self.open_prompt(PromptPurpose::DeleteCollectionConfirm, "");
             }
-            Some(RowKind::Sequence) | Some(RowKind::SequenceHeader) | None => {
+            None => {
                 self.message = Some(Message::new("nothing selected to delete"));
             }
         }
@@ -3863,7 +3970,7 @@ impl App {
                     Err(err) => self.crud_error(err),
                 }
             }
-            Some(RowKind::Sequence) | Some(RowKind::SequenceHeader) | None => {}
+            None => {}
         }
         Ok(())
     }
@@ -4339,16 +4446,68 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .then(|| app.selected.as_ref().map(|s| s.file.clone()))
         .flatten();
     if let Some(explorer_area) = explorer_area {
-        explorer::render(
-            frame,
-            explorer_area,
-            &mut app.explorer,
-            explorer_focused,
-            has_ws,
-            &theme,
-            app.jump.as_ref(),
-            dirty_file.as_deref(),
-        );
+        if app.sequences_shown {
+            // PR 2b: split the left column vertically. The focused sub-pane
+            // (`left_active`) gets Fill(1); the other collapses to a 3-row stub.
+            // Endpoints on top, sequences on the bottom.
+            let seq_focused = explorer_focused && app.left_active == LeftPane::Sequences;
+            let tree_focused = explorer_focused && app.left_active == LeftPane::Endpoints;
+            let (tree_area, seq_area) = if app.left_active == LeftPane::Sequences {
+                let [tree, seq] =
+                    Layout::vertical([Constraint::Length(COLLAPSED_HEIGHT), Constraint::Fill(1)])
+                        .areas(explorer_area);
+                (tree, seq)
+            } else {
+                let [tree, seq] =
+                    Layout::vertical([Constraint::Fill(1), Constraint::Length(COLLAPSED_HEIGHT)])
+                        .areas(explorer_area);
+                (tree, seq)
+            };
+            if app.left_active == LeftPane::Endpoints {
+                explorer::render(
+                    frame,
+                    tree_area,
+                    &mut app.explorer,
+                    tree_focused,
+                    has_ws,
+                    &theme,
+                    app.jump.as_ref(),
+                    dirty_file.as_deref(),
+                );
+            } else {
+                // Endpoints collapsed to a stub summarizing the current selection.
+                let summary = app
+                    .explorer
+                    .selected_name()
+                    .map(|name| Line::from(ratatui::text::Span::styled(name, theme.statusline)))
+                    .unwrap_or_else(|| Line::from(""));
+                render_collapsed_stub(frame, tree_area, "Explorer", None, summary, &theme);
+            }
+            if app.left_active == LeftPane::Sequences {
+                explorer::render_sequences_pane(
+                    frame,
+                    seq_area,
+                    &mut app.explorer,
+                    seq_focused,
+                    &theme,
+                );
+            } else {
+                let summary = explorer::sequences_stub_summary(&app.explorer, &theme);
+                render_collapsed_stub(frame, seq_area, "Sequences", None, summary, &theme);
+            }
+        } else {
+            // Sub-pane off: endpoints full-height (byte-identical to pre-2b).
+            explorer::render(
+                frame,
+                explorer_area,
+                &mut app.explorer,
+                explorer_focused,
+                has_ws,
+                &theme,
+                app.jump.as_ref(),
+                dirty_file.as_deref(),
+            );
+        }
     }
     let selected_request = app
         .selected
