@@ -1,0 +1,7 @@
+# Code owners for churl.
+# Every path is owned by the maintainer, so opening a PR automatically
+# requests their review. When branch protection requires code-owner review,
+# this is what enforces it.
+# Docs: https://docs.github.com/articles/about-code-owners
+
+* @AlsubaieAli
