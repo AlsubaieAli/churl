@@ -1531,8 +1531,14 @@ impl App {
                     self.should_quit = true;
                 }
             }
-            Action::FocusNext => self.set_focus(self.focus.next()),
-            Action::FocusPrev => self.set_focus(self.focus.prev()),
+            Action::FocusNext => {
+                let target = self.skip_hidden_explorer(self.focus.next(), true);
+                self.set_focus(target);
+            }
+            Action::FocusPrev => {
+                let target = self.skip_hidden_explorer(self.focus.prev(), false);
+                self.set_focus(target);
+            }
             Action::FocusExplorer => self.set_focus(Pane::Explorer),
             Action::FocusUrlBar => self.set_focus(Pane::UrlBar),
             Action::FocusRequest => self.set_focus(Pane::Request),
@@ -3681,6 +3687,23 @@ impl App {
     /// (zoom) cannot hold focus — targeting the counterpart transfers the zoom to
     /// the newly focused pane, so a collapsed pane still never holds focus — and
     /// focusing the explorer auto-reopens it when hidden.
+    /// A collapsed explorer (`<leader>e`) drops out of the Tab ring: cycling
+    /// skips it and lands on the next visible region, leaving it hidden until
+    /// `<leader>e` reopens it. Only Explorer is ever hidden, so a single skip
+    /// suffices. Explicit focus (jump-mode, `FocusExplorer`) still auto-reopens
+    /// via `set_focus` below.
+    fn skip_hidden_explorer(&self, target: Pane, forward: bool) -> Pane {
+        if target == Pane::Explorer && self.explorer_hidden {
+            if forward {
+                target.next()
+            } else {
+                target.prev()
+            }
+        } else {
+            target
+        }
+    }
+
     fn set_focus(&mut self, pane: Pane) {
         if pane == Pane::Explorer && self.explorer_hidden {
             self.explorer_hidden = false;
@@ -7311,15 +7334,27 @@ mod tests {
         assert_ne!(app.focus, Pane::Explorer, "hidden pane cannot hold focus");
     }
 
-    /// Tab cycling onto the hidden explorer auto-reopens it.
+    /// Tab cycling skips a collapsed explorer instead of reopening it: it stays
+    /// hidden and focus lands on the next visible region (both directions).
     #[test]
-    fn tab_onto_hidden_explorer_reopens() {
+    fn tab_skips_hidden_explorer() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         app.explorer_hidden = true;
-        app.focus = Pane::Response; // next() → Explorer
+
+        // Forward: Response → (skip Explorer) → UrlBar.
+        app.focus = Pane::Response;
         app.dispatch(Action::FocusNext, None).unwrap();
-        assert_eq!(app.focus, Pane::Explorer);
-        assert!(!app.explorer_hidden, "tab onto explorer reopens it");
+        assert_eq!(app.focus, Pane::UrlBar);
+        assert!(app.explorer_hidden, "tab must not reopen the explorer");
+
+        // Backward: UrlBar → (skip Explorer) → Response.
+        app.focus = Pane::UrlBar;
+        app.dispatch(Action::FocusPrev, None).unwrap();
+        assert_eq!(app.focus, Pane::Response);
+        assert!(
+            app.explorer_hidden,
+            "shift-tab must not reopen the explorer"
+        );
     }
 
     // ---- PR 2b: sequences sub-pane ----
