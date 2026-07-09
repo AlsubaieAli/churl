@@ -678,10 +678,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceEditorState, the
     } else {
         match state.focus {
             Focus::Steps => {
-                "j/k step · a add · d delete · K/J move · o on_error · l rules · w save · ^R run · q close"
+                "j/k step · a add · d del · K/J mv · o on-err · w save · ^R run · q close"
             }
             Focus::Rules => {
-                "j/k rule · a add · enter expr · r name · d delete · h back · w save · ^R run · q close"
+                "j/k rule · a add · enter expr · r name · d del · w save · ^R run · q close"
             }
         }
     };

@@ -1828,6 +1828,12 @@ fn sequence_editor_mode_in_top_row_shortcut_in_footer() {
         .rfind(|l| l.contains("j/k step"))
         .expect("footer row");
     assert!(footer.contains("^R run"), "footer shortcut missing:\n{out}");
+    // The escape hatch must survive at this 90-col modal width — adding the
+    // `^R run` hint must never push `q close` off the right border.
+    assert!(
+        footer.contains("q close"),
+        "escape-hatch hint clipped from footer:\n{out}"
+    );
 }
 
 /// The `?` help overlay renders the effective keymap, sectioned.

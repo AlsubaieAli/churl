@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1744
 expression: rendered
 ---
                                                                                           
@@ -24,5 +23,5 @@ expression: rendered
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
-     ┃j/k step · a add · d delete · K/J move · o on_error · l rules · w save · ^R run┃    
+     ┃j/k step · a add · d del · K/J mv · o on-err · w save · ^R run · q close       ┃    
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
