@@ -11,18 +11,18 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│            ┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│            ┃ Shift-s  toggle sequences sub-pane┃
-┃                            ┃│            ┃ c  cancel request                 ┃
-┃                            ┃└────────────┃ e  toggle explorer sidebar        ┃
-┃                            ┃┌ Response ──┃ f  request picker                 ┃
-┃                            ┃│no response ┃ p  switch profile                 ┃
-┃                            ┃│            ┃ q  quit                           ┃
-┃                            ┃│no endpoint ┃ v  Environments & vars            ┃
-┃                            ┃│            ┃ w  workspace picker               ┃
-┃                            ┃│            ┃ y  copy request as curl           ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│            ┃ l  ▸ load                         ┃
-┌ Sequences ─────────────────┐│            ┃ s  ▸ sequences                    ┃
-│<leader>s a to add          ││            ┃ t  ▸ tabs                         ┃
-└────────────────────────────┘└────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃│                                                │
+┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│                    ┃ c  cancel request         ┃
+┃                            ┃└────────────────────┃ e  toggle explorer sidebar┃
+┃                            ┃┌ Response ──────────┃ f  request picker         ┃
+┃                            ┃│no response yet     ┃ p  switch profile         ┃
+┃                            ┃│                    ┃ q  quit                   ┃
+┃                            ┃│no endpoint selected┃ v  Environments & vars    ┃
+┃                            ┃│                    ┃ w  workspace picker       ┃
+┃                            ┃│                    ┃ y  copy request as curl   ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                    ┃ l  ▸ load                 ┃
+┌ Sequences ─────────────────┐│                    ┃ s  ▸ sequences            ┃
+│<leader>s a to add          ││                    ┃ t  ▸ tabs                 ┃
+└────────────────────────────┘└────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

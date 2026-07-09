@@ -282,6 +282,17 @@ impl ExplorerState {
         }
     }
 
+    /// The endpoint under the tree cursor, if the cursor is on an endpoint row
+    /// (M7.10 stage B). Read-only — unlike [`select`], it neither toggles a
+    /// collection nor loads a buffer; it just peeks at what is hovered. Powers
+    /// the hover-vs-selection fallback for one-shot read actions.
+    pub fn hovered_endpoint(&self) -> Option<SelectedEndpoint> {
+        let row = self.current_row()?;
+        (row.kind == RowKind::Endpoint)
+            .then(|| self.selected_endpoint(&row))
+            .flatten()
+    }
+
     /// The sequence under the sub-pane cursor (PR 2b), if any. Read by the run
     /// and edit paths; no tree-cursor gate — the sub-pane owns the selection.
     pub fn selected_sequence(&self) -> Option<SelectedSequence> {
@@ -714,29 +725,17 @@ pub fn render(
                     .row_endpoint_file(row)
                     .is_some_and(|f| dirty_files.iter().any(|d| d.as_path() == f)))
             .then(|| Span::styled(" ●", theme.accent));
-            // In jump-mode, overlay the row's label at the start; otherwise the
-            // usual cursor marker.
-            match jump.and_then(|j| j.label_for_row(i)) {
-                Some(label) => {
-                    let mut spans = vec![
-                        Span::styled(label.to_string(), theme.jump_label),
-                        Span::raw(format!(" {indent}{marker}{}", row.name)),
-                    ];
-                    spans.extend(dirty_suffix);
-                    Line::from(spans)
-                }
-                None => {
-                    let cursor = if i == state.cursor { "> " } else { "  " };
-                    let text = format!("{cursor}{indent}{marker}{}", row.name);
-                    let mut spans = vec![Span::raw(text)];
-                    spans.extend(dirty_suffix);
-                    let line = Line::from(spans);
-                    if i == state.cursor && focused {
-                        line.style(theme.selection)
-                    } else {
-                        line
-                    }
-                }
+            // `f`-jump is pane-only now (M7.10 stage B) — rows carry no jump
+            // labels, only the usual cursor marker.
+            let cursor = if i == state.cursor { "> " } else { "  " };
+            let text = format!("{cursor}{indent}{marker}{}", row.name);
+            let mut spans = vec![Span::raw(text)];
+            spans.extend(dirty_suffix);
+            let line = Line::from(spans);
+            if i == state.cursor && focused {
+                line.style(theme.selection)
+            } else {
+                line
             }
         })
         .collect();
@@ -753,16 +752,21 @@ pub fn render_sequences_pane(
     state: &mut ExplorerState,
     focused: bool,
     theme: &Theme,
+    jump_label: Option<char>,
 ) {
     let (border_type, border_style) = if focused {
         (BorderType::Thick, theme.border_focused)
     } else {
         (BorderType::Plain, theme.border_unfocused)
     };
+    let title = match jump_label {
+        Some(label) => format!(" Sequences [{label}] "),
+        None => " Sequences ".to_owned(),
+    };
     let block = Block::bordered()
         .border_type(border_type)
         .border_style(border_style)
-        .title(" Sequences ")
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
