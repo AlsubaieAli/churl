@@ -1,9 +1,10 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1488
 expression: render_runner(&mut state)
 ---
                                                                                           
-     ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┏ Sequence · Auth flow · RUN (^R edit) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
      ┃2/3 · 1 failed · 1 skipped · 135ms total · done   on_error: halt               ┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ─────────────────────────────┐┃    
      ┃┃✓ POST auth/login.toml  200  90ms   ┃│request failed                         │┃    

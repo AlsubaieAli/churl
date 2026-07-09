@@ -145,6 +145,11 @@ impl SequenceEditorState {
         &self.path
     }
 
+    /// The sequence's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Whether the working copy differs from the snapshot.
     pub fn is_dirty(&self) -> bool {
         (self.on_error, &self.steps) != (self.snapshot.0, &self.snapshot.1)
@@ -492,7 +497,16 @@ impl SequenceEditorState {
 }
 
 /// Renders the sequence editor over `area`.
-pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
+/// Renders the sequence editor. `surface` chooses the title: `true` marks it as
+/// the Edit face of the unified sequence surface (with the `Ctrl-R` run hint);
+/// `false` keeps the standalone "Edit sequence" title.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SequenceEditorState,
+    surface: bool,
+    theme: &Theme,
+) {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)
         .areas(area);
@@ -502,10 +516,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
 
     frame.render_widget(Clear, modal);
     let dirty = if state.is_dirty() { " ●" } else { "" };
+    let title = if surface {
+        format!(" Sequence · {}{dirty} · EDIT (^R run) ", state.name)
+    } else {
+        format!(" Edit sequence · {}{dirty} ", state.name)
+    };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Edit sequence · {}{dirty} ", state.name))
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);

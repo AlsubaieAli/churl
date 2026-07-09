@@ -442,6 +442,22 @@ pub fn render(
     cache: &HashMap<u64, Vec<Line<'static>>>,
     theme: &Theme,
 ) -> Option<HighlightJob> {
+    render_faced(frame, area, state, tick_count, cache, true, theme)
+}
+
+/// Renders the runner. `surface` chooses the title: `true` marks it as the Run
+/// face of the unified sequence surface (with the `Ctrl-R` edit hint); `false`
+/// keeps the standalone "Sequence" title.
+#[allow(clippy::too_many_arguments)]
+pub fn render_faced(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut SequenceRunnerState,
+    tick_count: u64,
+    cache: &HashMap<u64, Vec<Line<'static>>>,
+    surface: bool,
+    theme: &Theme,
+) -> Option<HighlightJob> {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)
         .areas(area);
@@ -450,10 +466,15 @@ pub fn render(
         .areas(modal);
 
     frame.render_widget(Clear, modal);
+    let title = if surface {
+        format!(" Sequence · {} · RUN (^R edit) ", state.name)
+    } else {
+        format!(" Sequence · {} ", state.name)
+    };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Sequence · {} ", state.name))
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);

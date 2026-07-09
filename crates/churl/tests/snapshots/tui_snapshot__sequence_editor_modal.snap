@@ -1,9 +1,10 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1618
 expression: rendered
 ---
                                                                                           
-     ┏ Edit sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┏ Sequence · Auth flow · EDIT (^R run) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
      ┃2 steps   on_error: halt                                                       ┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Extraction rules ─────────────────────┐┃    
      ┃┃> 1. auth/login.toml  (2 rules)     ┃│> token = $.data.token                 │┃    

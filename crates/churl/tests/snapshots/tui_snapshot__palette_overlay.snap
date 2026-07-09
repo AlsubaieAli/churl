@@ -19,9 +19,9 @@ expression: snapshot(&mut app)
 │           ┃  switch profile                                      ┃───────────┐
 │           ┃  environments & vars                                 ┃           │
 │           ┃  run sequence                                        ┃           │
-│           ┃  edit sequence                                       ┃           │
+│           ┃  add sequence                                        ┃           │
+│           ┃  open sequence                                       ┃           │
 │           ┃  load test endpoint (concurrent)                     ┃           │
-│           ┃  toggle response headers view                        ┃           │
 │           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 │                            ││                                                │
 │                            ││                                                │
