@@ -1,11 +1,11 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1618
 expression: rendered
 ---
                                                                                           
-     ┏ Sequence · Auth flow · EDIT (^R run) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
-     ┃2 steps   on_error: halt                                                       ┃    
+     ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┃Mode: EDIT   2 steps   on_error: halt                                          ┃    
+     ┃Compose an ordered chain of requests, extracting values from each response to f┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Extraction rules ─────────────────────┐┃    
      ┃┃> 1. auth/login.toml  (2 rules)     ┃│> token = $.data.token                 │┃    
      ┃┃  2. users/me.toml  (0 rules)       ┃│  user_id = $.data.user.id             │┃    
@@ -22,7 +22,6 @@ expression: rendered
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
      ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
-     ┃j/k step · a add · d delete · K/J move · o on_error · l rules · w save · q clos┃    
+     ┃j/k step · a add · d del · K/J mv · o on-err · w save · ^R run · q close       ┃    
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

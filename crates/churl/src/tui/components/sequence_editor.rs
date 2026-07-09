@@ -497,8 +497,9 @@ impl SequenceEditorState {
 }
 
 /// Renders the sequence editor over `area`.
-/// Renders the sequence editor — the Edit face of the unified sequence surface
-/// (title carries the `Ctrl-R` run hint).
+/// Renders the sequence editor — the Edit face of the unified sequence surface.
+/// The mode shows in a top row inside the pane; the `Ctrl-R` face-flip hint lives
+/// in the footer (see [`render_footer`]), keeping the title to name + dirty marker.
 pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)
@@ -509,7 +510,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
 
     frame.render_widget(Clear, modal);
     let dirty = if state.is_dirty() { " ●" } else { "" };
-    let title = format!(" Sequence · {}{dirty} · EDIT (^R run) ", state.name);
+    let title = format!(" Sequence · {}{dirty} ", state.name);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
@@ -521,7 +522,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
         return;
     }
 
-    let [header, body, footer] = Layout::vertical([
+    // Mode + progress row · one-line purpose hint · body · footer (key hints).
+    let [header, hint, body, footer] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -530,7 +533,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{} steps", state.steps.len()), theme.title),
+            Span::styled("Mode: EDIT", theme.title),
+            Span::styled(format!("   {} steps", state.steps.len()), theme.statusline),
             Span::styled(
                 format!(
                     "   on_error: {}",
@@ -543,6 +547,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
             ),
         ])),
         header,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Compose an ordered chain of requests, extracting values from each response to feed the next.",
+            theme.statusline,
+        ))),
+        hint,
     );
 
     let left_width = (inner.width.saturating_sub(2) / 2).clamp(1, 44);
@@ -666,10 +678,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceEditorState, the
     } else {
         match state.focus {
             Focus::Steps => {
-                "j/k step · a add · d delete · K/J move · o on_error · l rules · w save · q close"
+                "j/k step · a add · d del · K/J mv · o on-err · w save · ^R run · q close"
             }
             Focus::Rules => {
-                "j/k rule · a add · enter expr · r name · d delete · h back · w save · q close"
+                "j/k rule · a add · enter expr · r name · d del · w save · ^R run · q close"
             }
         }
     };

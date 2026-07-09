@@ -775,7 +775,7 @@ pub fn render(
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Load · {} ", state.endpoint_label))
+        .title(" Load ".to_owned())
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
@@ -783,8 +783,19 @@ pub fn render(
         return None;
     }
 
-    // Header (config + target url + stats) + body + footer.
-    let [config_row, url_row, stats_row, body, footer] = Layout::vertical([
+    // Top-left block, ordered name → url → config → stats, each on its own row so
+    // the four are visually distinct; then the one-line purpose hint, body, footer.
+    let [
+        name_row,
+        url_row,
+        config_row,
+        stats_row,
+        hint_row,
+        body,
+        footer,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -794,8 +805,11 @@ pub fn render(
     .areas(inner);
 
     frame.render_widget(
-        Paragraph::new(Line::from(config_spans(state, theme))),
-        config_row,
+        Paragraph::new(Line::from(Span::styled(
+            state.endpoint_label.clone(),
+            theme.title,
+        ))),
+        name_row,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -803,6 +817,10 @@ pub fn render(
             Span::styled(state.url.clone(), theme.statusline),
         ])),
         url_row,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(config_spans(state, theme))),
+        config_row,
     );
     let status_word = if state.cancelled {
         "  cancelled"
@@ -819,6 +837,13 @@ pub fn render(
             Span::styled(status_word.to_owned(), theme.statusline),
         ])),
         stats_row,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.",
+            theme.statusline,
+        ))),
+        hint_row,
     );
 
     let left_width = inner.width.saturating_sub(2) / 2;
@@ -1356,6 +1381,26 @@ mod tests {
     fn snapshot_config_header_pre_run() {
         let mut r = runner();
         insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    /// C2: the top-left block reads name → url → config → stats in that row order,
+    /// and a dim one-line purpose hint explains the pane at a glance.
+    #[test]
+    fn top_left_block_ordered_name_url_config_stats_with_hint() {
+        let mut r = runner();
+        let out = snapshot(&mut r);
+        let name = out.find("List users").expect("name row");
+        let url = out.find("https://api.test/users").expect("url row");
+        let config = out.find("total=10").expect("config row");
+        let stats = out.find("0/0 done").expect("stats row");
+        assert!(
+            name < url && url < config && config < stats,
+            "expected name → url → config → stats order:\n{out}"
+        );
+        assert!(
+            out.contains("measure throughput and latency"),
+            "one-line purpose hint missing:\n{out}"
+        );
     }
 
     /// L1: the Response pane must be a bordered, titled pane with a placeholder

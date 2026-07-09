@@ -452,7 +452,7 @@ pub fn render(
         .areas(modal);
 
     frame.render_widget(Clear, modal);
-    let title = format!(" Sequence · {} · RUN (^R edit) ", state.name);
+    let title = format!(" Sequence · {} ", state.name);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
@@ -464,8 +464,9 @@ pub fn render(
         return None;
     }
 
-    // Header (progress) + body + footer (key hints).
-    let [header, body, footer] = Layout::vertical([
+    // Mode + progress row · one-line purpose hint · body · footer (key hints).
+    let [header, hint, body, footer] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -474,7 +475,8 @@ pub fn render(
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(progress_line(state), theme.title),
+            Span::styled("Mode: RUN", theme.title),
+            Span::styled(format!("   {}", progress_line(state)), theme.statusline),
             Span::styled(
                 format!(
                     "   on_error: {}",
@@ -487,6 +489,14 @@ pub fn render(
             ),
         ])),
         header,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Run the chain in order, piping each step's extracted values into the requests that follow.",
+            theme.statusline,
+        ))),
+        hint,
     );
 
     let left_width = inner.width.saturating_sub(2) / 2;
@@ -624,8 +634,12 @@ fn render_response(
 /// Renders the footer key hints, contextual to focus.
 fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceRunnerState, theme: &Theme) {
     let hint = match state.focus {
-        RunnerFocus::Steps => "j/k step · tab response · r re-run · ctrl-c cancel · q close",
-        RunnerFocus::Response => "j/k scroll · h headers · W wrap · o/O fold · tab steps · q close",
+        RunnerFocus::Steps => {
+            "j/k step · tab response · r re-run · ^R edit · ctrl-c cancel · q close"
+        }
+        RunnerFocus::Response => {
+            "j/k scroll · h headers · W wrap · o/O fold · tab steps · ^R edit · q close"
+        }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(hint, theme.statusline))),

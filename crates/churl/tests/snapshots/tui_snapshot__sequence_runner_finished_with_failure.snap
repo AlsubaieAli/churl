@@ -1,11 +1,12 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1488
+assertion_line: 1614
 expression: render_runner(&mut state)
 ---
                                                                                           
-     ┏ Sequence · Auth flow · RUN (^R edit) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
-     ┃2/3 · 1 failed · 1 skipped · 135ms total · done   on_error: halt               ┃    
+     ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┃Mode: RUN   2/3 · 1 failed · 1 skipped · 135ms total · done   on_error: halt   ┃    
+     ┃Run the chain in order, piping each step's extracted values into the requests t┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ─────────────────────────────┐┃    
      ┃┃✓ POST auth/login.toml  200  90ms   ┃│request failed                         │┃    
      ┃┃✗ GET users/me.toml  500  45ms      ┃│error:                                 │┃    
@@ -22,7 +23,6 @@ expression: render_runner(&mut state)
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
      ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
-     ┃j/k step · tab response · r re-run · ctrl-c cancel · q close                   ┃    
+     ┃j/k step · tab response · r re-run · ^R edit · ctrl-c cancel · q close         ┃    
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

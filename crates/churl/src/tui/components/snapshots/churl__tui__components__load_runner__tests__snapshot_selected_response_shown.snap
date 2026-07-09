@@ -1,17 +1,18 @@
 ---
 source: crates/churl/src/tui/components/load_runner.rs
+assertion_line: 1574
 expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
-"      ┏ Load · List users ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓      "
-"      ┃total=2 · concurrency=5 · min gap=0ms · max rate                                                      ┃      "
+"      ┏ Load ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓      "
+"      ┃List users                                                                                            ┃      "
 "      ┃→ https://api.test/users                                                                              ┃      "
+"      ┃total=2 · concurrency=5 · min gap=0ms · max rate                                                      ┃      "
 "      ┃1/2 done · 1 ok · range 42–42ms · p50/p95 42/42ms · avg 42ms  done                                    ┃      "
+"      ┃Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.                 ┃      "
 "      ┃┌ Results ─────────────────────────────┐┏ Response ━━━━━━━━━━━ 200 OK · 42 ms · 11 B · 1 header  [h] ┓┃      "
 "      ┃│✓ #1    200  42ms                     │┃{"ok":true}                                                 ┃┃      "
 "      ┃│· #2                                  │┃                                                            ┃┃      "
-"      ┃│                                      │┃                                                            ┃┃      "
-"      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
