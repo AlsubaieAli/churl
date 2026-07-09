@@ -1,17 +1,16 @@
 //! Response pane: a virtualised viewer over an executed response body.
 //!
 //! The body is stored once as a lossy-UTF-8 [`String`] plus a `Vec<usize>` of
-//! line-start byte offsets (a single pass). Rendering slices only the visible
-//! lines out of that index — a 1 MB response is never materialised into a
-//! `Vec<Line>`. Syntax highlighting is layered on top by the off-thread worker
-//! (see [`crate::tui::highlight`]): a cache hit draws coloured lines, a miss
-//! draws plain text immediately and enqueues a highlight job.
+//! line-start byte offsets (single pass); rendering slices only the visible
+//! lines, so a 1 MB response is never materialised into a `Vec<Line>`. Syntax
+//! highlighting is layered on by the off-thread worker
+//! ([`crate::tui::highlight`]): a cache hit draws coloured lines, a miss draws
+//! plain text and enqueues a highlight job.
 //!
 //! ## Display pipeline (M7)
 //!
-//! The viewer composes three transforms over the logical lines, in this order —
-//! all pure functions over [`ResponseView`] so they are snapshot-testable without
-//! a runtime:
+//! Three pure transforms over the logical lines (snapshot-testable without a
+//! runtime):
 //!
 //! ```text
 //! logical lines (body or headers text, CRLF-stripped)
@@ -20,7 +19,7 @@
 //!   → viewport slice    (scroll offset + height)
 //! ```
 //!
-//! The **cursor** and **scroll** are display-row indices (post-fold, post-wrap).
+//! **Cursor** and **scroll** are display-row indices (post-fold, post-wrap).
 //! Search matches are stored against *logical* lines and mapped through the
 //! pipeline for navigation and highlighting.
 
@@ -38,9 +37,8 @@ use super::fold::{self, FoldRegion};
 use crate::tui::highlight::{HighlightJob, SyntaxToken};
 use crate::tui::theme::Theme;
 
-/// Immutable metadata about a request that produced (or failed to produce) a
-/// response. Captured at send time so history and the error view need nothing
-/// from the live app state.
+/// Immutable metadata about a request, captured at send time so history and the
+/// error view need nothing from live app state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseMeta {
     /// HTTP method string, e.g. `"GET"`.
@@ -53,8 +51,7 @@ pub struct ResponseMeta {
     pub executed_at_ms: i64,
 }
 
-/// Which body the viewer is showing: the response body or its headers. Reset to
-/// [`ViewMode::Body`] on each new response.
+/// Which body the viewer shows. Reset to [`ViewMode::Body`] on each new response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     /// The response body (default).
@@ -90,8 +87,8 @@ pub enum ResponseState {
 }
 
 impl ResponseState {
-    /// The idle default, as a `const` so `&self`-returning accessors can hand
-    /// back a `'static` reference when nothing is loaded.
+    /// The idle default as a `const`, so `&self` accessors can return a
+    /// `'static` reference when nothing is loaded.
     pub const IDLE: ResponseState = ResponseState::Idle;
 }
 
@@ -101,8 +98,7 @@ impl ResponseState {
 pub struct SearchState {
     /// The current query text.
     pub query: String,
-    /// `(logical line index, byte start, byte end)` for every match, in reading
-    /// order (top-to-bottom, left-to-right).
+    /// `(logical line, byte start, byte end)` per match, in reading order.
     matches: Vec<(usize, usize, usize)>,
     /// Index of the current match within `matches`, when there is one.
     current: Option<usize>,
