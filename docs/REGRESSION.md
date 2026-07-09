@@ -22,25 +22,27 @@ binary, so the built commit is recorded below every pass.
 - [ ] `s` (explorer overlay) switches focus/zoom Explorer⇄Sequences; the unfocused pane stays a peeking stub, never vanishes.
 - [ ] `<leader>S` switches focus Explorer⇄Sequences and never hides the Sequences pane (interim focus-switch).
 - [ ] `<leader>e` toggles the entire left column (hides/shows), restoring prior focus on hide.
-- [ ] Arrow / `j`/`k` move the Explorer cursor; expand/collapse a collection.
+- [ ] Arrow / `j`/`k` move the Explorer cursor; `←`/`→` (and `h`/`l`) collapse/expand a collection — arrows navigate the explorer, not just the runners/pickers.
+- [ ] From a focused Sequences sub-pane, `f` then `e` reaches the **endpoints** tree (not stranded on Sequences).
 
 ## Picker nav (Search · Sequence · Workspace · Palette)
 - [ ] Open each picker; Up/Down move the highlight.
 - [ ] Ctrl-p / Ctrl-n move up/down in every picker.
 - [ ] `j` / `k` move up/down in every picker.
 - [ ] Type to fuzzy-filter; Enter accepts the highlighted row; Esc cancels with no side effect.
-- [ ] Esc-cancelling a `<leader>s r` / `<leader>l f` pick does not leak intent into the next `<leader>f` search.
+- [ ] Esc-cancelling a `<leader>s r` / `<leader>l <leader>` pick does not leak intent into the next `<leader><leader>` search.
+- [ ] `<leader><leader>` opens the endpoint/request picker; `<leader>s <leader>` the sequence picker; `<leader>l <leader>` the load-runner endpoint picker (all on the leader-as-continuation gesture).
 
 ## Sequences run / edit
-- [ ] `<leader>s o` opens the "Open sequence" picker; accepting opens the chosen sequence in the Edit face.
+- [ ] `<leader>s <leader>` opens the "Open sequence" picker; accepting opens the chosen sequence in the Edit face.
 - [ ] `<leader>s r` opens the "Run sequence" picker; accepting runs the **chosen** sequence (not sequence #0 / last-run).
 - [ ] In-pane `r` on the hovered sequence still runs it directly.
 - [ ] `<leader>s a` adds a new sequence.
 - [ ] A sequence run shows live per-step status/timing; extracted secret values are masked.
 
 ## Load runner
-- [ ] `<leader>l c` opens the load runner on the loaded endpoint; `<leader>l f` picks an endpoint first.
-- [ ] Edit config header (total / concurrency / interval); start a run → live results list + stats update.
+- [ ] `<leader>l c` opens the load runner on the loaded endpoint; `<leader>l <leader>` picks an endpoint first.
+- [ ] Edit config header (total / concurrency / interval); `Ctrl-R` starts/re-runs the run (plain `r` does nothing) → live results list + stats update.
 - [ ] Cancel a running batch → launched-then-cancelled rows show a real `{}ms` time-to-cancel next to the cancelled glyph.
 - [ ] Never-launched (pending) rows show a blank duration (no fabricated zero).
 - [ ] The run writes exactly one summary row to `load_batches` (not per-copy history).
@@ -57,6 +59,7 @@ binary, so the built commit is recorded below every pass.
 ## Response viewer
 - [ ] Send a request → response renders; cursor / headers toggle / wrap / fold / search / copy all work.
 - [ ] Large body is truncated with the truncation status; folding JSON regions works.
+- [ ] The `[h]` headers hint appears in the response summary **only when the response pane is focused** — unfocused (incl. a collapsed stub or an embedded sequence/load-runner response that isn't the focused sub-pane) omits it.
 
 ## Persistence durability
 - [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)

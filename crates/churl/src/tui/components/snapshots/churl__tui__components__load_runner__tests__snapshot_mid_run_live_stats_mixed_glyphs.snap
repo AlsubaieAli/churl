@@ -1,6 +1,6 @@
 ---
 source: crates/churl/src/tui/components/load_runner.rs
-assertion_line: 1426
+assertion_line: 1464
 expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
@@ -24,6 +24,6 @@ expression: snapshot(&mut r)
 "      ┃┃                                      ┃│                                                            │┃      "
 "      ┃┃                                      ┃│                                                            │┃      "
 "      ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────────────────┘┃      "
-"      ┃j/k row · tab response · r re-run · ctrl-c cancel · q close                                           ┃      "
+"      ┃j/k row · tab response · ^R re-run · ctrl-c cancel · q close                                          ┃      "
 "      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛      "
 "                                                                                                                    "

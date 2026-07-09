@@ -57,7 +57,11 @@ Key routing precedence (per key event, in `Mode::Normal` the crokey map is autho
 3. Request pane, Body tab, edtui in a non-Normal mode: keys go to edtui with the same Ctrl-S/Ctrl-C interception (M4, DECISIONS.md).
 4. Otherwise: `KeyMap::lookup_ctx(key, focused_pane.ctx())` — the focused pane's overlay wins over the global map (so `1`–`4` are tab jumps in the Request pane but pane-focus globally). Unmapped keys fall through to edtui only on the Body tab; navigation actions forward their key event to edtui there so vim motions keep working.
 
-The Response pane (M7) adds a `[keys.response]` overlay (`h` headers · `W` wrap · `/` search · `n`/`N` match nav · `o`/`O` fold · `y`/`Y` copy) and a new keyboard-owning overlay mode `Mode::BodySearch` (routed like the other overlays; the incremental `/query` input renders in the message-row position via the shared `LineEditor`).
+The Explorer pane overlay binds the arrow keys to navigation (`Up`/`Down` → Up/Down, `Left`/`Right` → Collapse/Expand), mirroring the global `k`/`j`/`h`/`l` (M7.10 follow-up). They are Explorer-scoped, not global, so Left/Right never leak Collapse/Expand into other panes; the flat sequences sub-pane no-ops Collapse/Expand, so they are harmless there.
+
+The find/open pickers hang off the leader key as its own continuation (M7.10 follow-up): `<leader><leader>` (Space Space) opens the endpoint/request picker, `<leader>s <leader>` the sequence picker, `<leader>l <leader>` the load-runner endpoint picker. `f` is freed at root for jump-mode. Space as a leader *continuation* is not flagged by `validate` (which only checks the leader key against the global map + pane overlays).
+
+The Response pane (M7) adds a `[keys.response]` overlay (`h` headers · `W` wrap · `/` search · `n`/`N` match nav · `o`/`O` fold · `y`/`Y` copy) and a new keyboard-owning overlay mode `Mode::BodySearch` (routed like the other overlays; the incremental `/query` input renders in the message-row position via the shared `LineEditor`). The response `[h]` headers-hint is focus-gated — it shows only when its response pane (main, sequence-runner, or load-runner) is focused.
 
 ### Response viewer pipeline (M7)
 

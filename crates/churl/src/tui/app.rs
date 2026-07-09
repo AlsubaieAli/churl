@@ -2541,6 +2541,18 @@ impl App {
                 // collapsed pane transfers the zoom to it, so it becomes the
                 // zoomed pane rather than holding focus while collapsed (the
                 // set_focus invariant).
+                // Jumping to the Explorer via its `e` label must land on the
+                // endpoints tree, mirroring the `s` label landing on Sequences.
+                // Without resetting `left_active`, an `f e` from a focused
+                // Sequences sub-pane would leave you on Sequences and appear to
+                // do nothing (owner drive-test 2026-07-10). Setting Endpoints is
+                // safe: `enforce_left_active_invariant` only *forces* Endpoints
+                // when the list is empty, so an explicit Endpoints here never
+                // fights the invariant.
+                JumpTarget::Pane(Pane::Explorer) => {
+                    self.left_active = LeftPane::Endpoints;
+                    self.set_focus(Pane::Explorer);
+                }
                 JumpTarget::Pane(pane) => self.set_focus(pane),
                 // The sequences sub-pane lives inside the left column: focus it
                 // and make it the active sub-pane (auto-shows if empty is fine —
@@ -7463,6 +7475,30 @@ mod tests {
         assert_eq!(app.left_active, LeftPane::Endpoints);
     }
 
+    /// A jump to the Explorer `e` label from a focused Sequences sub-pane must
+    /// land on the endpoints tree, not stay on Sequences (owner drive-test
+    /// 2026-07-10). Before the fix, `f e` set focus but never reset
+    /// `left_active`, so it appeared to do nothing.
+    #[test]
+    fn jump_e_lands_on_endpoints_from_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Focus the sequences sub-pane first.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        // Enter jump-mode and press the Explorer `e` label.
+        app.dispatch(Action::Jump, None).unwrap();
+        assert_eq!(app.mode, Mode::Jump);
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "`f e` must reach the endpoints tree, not stay on Sequences"
+        );
+    }
+
     /// M7.10 stage B: the empty-list invariant still holds — a workspace with no
     /// sequences forces `left_active` back to Endpoints on the next focus (the
     /// `sequences_shown` clause is gone, but the empty guard survives).
@@ -7573,28 +7609,29 @@ mod tests {
         assert!(app.sequence_runner.is_some());
     }
 
-    /// M7.10: `<leader>s f` is the canonical sequence finder — it opens the
-    /// sequence picker (edit face), mirroring `<leader>f` for endpoints.
+    /// `<leader>s <leader>` (Space) is the canonical sequence finder — it opens
+    /// the sequence picker (edit face), mirroring `<leader><leader>` for
+    /// endpoints (owner drive-test 2026-07-10).
     #[test]
-    fn leader_s_f_opens_the_sequence_picker() {
+    fn leader_s_space_opens_the_sequence_picker() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        // Space → Root → `s` → sequences submenu → `f`.
+        // Space → Root → `s` → sequences submenu → Space.
         press(&mut app, ' ');
         press(&mut app, 's');
         assert_eq!(
             app.leader,
             Some(LeaderState::Submenu("sequences".to_owned()))
         );
-        press(&mut app, 'f');
+        press(&mut app, ' ');
         assert_eq!(
             app.mode,
             Mode::SequencePicker,
-            "s f opens the sequence picker"
+            "s <leader> opens the sequence picker"
         );
         assert!(
             !app.sequence_pick_runs,
-            "s f is the open/edit finder, not run"
+            "s <leader> is the open/edit finder, not run"
         );
         assert_eq!(app.leader, None, "submenu dispatch dismisses the popup");
     }
@@ -8284,9 +8321,10 @@ mod tests {
         .unwrap();
     }
 
-    /// `<leader>f` reuses the endpoint-search overlay as the request picker.
+    /// `<leader><leader>` (Space Space) reuses the endpoint-search overlay as
+    /// the request picker (owner drive-test 2026-07-10 — moved off `<leader>f`).
     #[test]
-    fn leader_f_opens_request_picker() {
+    fn leader_leader_opens_request_picker() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = workspace_fixture(dir.path());
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -8296,9 +8334,13 @@ mod tests {
             Some(LeaderState::Root),
             "space enters the root which-key state"
         );
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.mode, Mode::Search, "<leader>f opens the search overlay");
+        assert_eq!(
+            app.mode,
+            Mode::Search,
+            "<leader><leader> opens the search overlay"
+        );
         let picker = app.picker.as_ref().expect("picker open");
         assert!(
             picker.items.iter().any(|i| i.contains("Get user")),
@@ -8880,8 +8922,9 @@ mod tests {
         app.on_load_result(g1, 0, Ok(ok_resp(200, "a")));
         assert!(app.load_runner.as_ref().unwrap().running);
 
-        // `r` while running: cancel-record the partial, then restart fresh.
-        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        // Ctrl-R while running: cancel-record the partial, then restart fresh
+        // (Run is Ctrl-R as of the 2026-07-10 owner decision).
+        app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
             .unwrap();
         let runner = app.load_runner.as_ref().unwrap();
         assert!(runner.running, "a fresh run started");

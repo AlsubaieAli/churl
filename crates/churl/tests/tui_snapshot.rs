@@ -1445,8 +1445,9 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
 
 // ---- M6.7 snapshots + round-trips ----
 
-/// The which-key leader popup (root): direct binds plus the `▸ sequences` /
-/// `▸ load` submenu continuations.
+/// The which-key leader popup (root): direct binds (incl. `space request
+/// picker` — the `<leader><leader>` endpoint finder, owner drive-test
+/// 2026-07-10) plus the `▸ sequences` / `▸ load` submenu continuations.
 #[test]
 fn leader_which_key_popup() {
     let dir = tempfile::tempdir().unwrap();
@@ -1455,9 +1456,10 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// The sequences submenu popup: `Space s` shows add / find (`f`) / open (`o`) /
-/// run. `f` and `o` are aliases for the same sequence-finder picker (M7.10 —
-/// `<leader>s f` mirrors `<leader>f` for endpoints; `o` kept for muscle memory).
+/// The sequences submenu popup: `Space s` shows add (`a`) / open (`space`) /
+/// run (`r`). The single sequence finder is `<leader>s <leader>`, mirroring
+/// `<leader><leader>` for endpoints (owner drive-test 2026-07-10 — the former
+/// `o`/`f` aliases were removed).
 #[test]
 fn leader_sequences_submenu_popup() {
     let dir = tempfile::tempdir().unwrap();
