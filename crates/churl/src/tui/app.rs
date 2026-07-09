@@ -2316,6 +2316,18 @@ impl App {
                     .into_iter()
                     .cloned()
                     .collect();
+                // A prior run's in-flight step survives a Run→Edit flip (the abort
+                // handle is kept alive). Rebuilding the runner here without aborting
+                // it would ORPHAN that async step — a real POST/DELETE running to
+                // completion in the background with no UI. Abort + bump the old
+                // generation first (mirrors start_sequence_run/close), so a landed
+                // straggler is also dropped by the generation guard.
+                if let Some(handle) = self.sequence_abort.take() {
+                    handle.abort();
+                }
+                if let Some(runner) = self.sequence_runner.as_mut() {
+                    runner.run_generation += 1;
+                }
                 self.sequence_runner = Some(SequenceRunnerState::new(
                     name,
                     file,
@@ -2779,6 +2791,9 @@ impl App {
         self.workspace_choices.clear();
         self.sequence_choices.clear();
         self.auth_picker = false;
+        // Clear the one-shot `<leader>l f` intent so an Esc-cancelled pick never
+        // leaks into the NEXT plain `<leader>f` / `/` search.
+        self.load_runner_after_pick = false;
         self.mode = Mode::Normal;
     }
 
@@ -2842,6 +2857,10 @@ impl App {
         let profile_choices = std::mem::take(&mut self.profile_choices);
         let workspace_choices = std::mem::take(&mut self.workspace_choices);
         let sequence_choices = std::mem::take(&mut self.sequence_choices);
+        // Capture the one-shot load-runner-after-pick intent BEFORE close_overlay
+        // clears it, so an empty-result Enter (early-return below) still drops the
+        // flag while a real pick can act on it.
+        let after_pick = std::mem::take(&mut self.load_runner_after_pick);
         let auth_picker = self.auth_picker;
         self.close_overlay();
         let Some(index) = current else {
@@ -2853,9 +2872,9 @@ impl App {
         }
         match mode {
             Mode::Search => {
-                // A pending `<leader>l f` pick: consume the flag regardless of
-                // the outcome so it can never leak into a later search.
-                let after_pick = std::mem::take(&mut self.load_runner_after_pick);
+                // `after_pick` (captured above, always cleared) carries a pending
+                // `<leader>l f` intent — it can never leak into a later plain
+                // `<leader>f` / `/` search.
                 if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
                     self.focus = Pane::Explorer;
                     // jump_to only navigates (expand + cursor); the load itself
@@ -2864,8 +2883,15 @@ impl App {
                     if let Some(selected) = self.explorer.jump_to(collection, endpoint)? {
                         self.guarded_load(PendingLoad::File(selected.file.clone()))?;
                     }
-                    // With the endpoint loaded, open the load runner over it.
-                    if after_pick {
+                    // Only open the load runner if the endpoint actually loaded.
+                    // When the editor is dirty and the picked endpoint differs,
+                    // `guarded_load` DEFERS into a discard-changes confirm and does
+                    // not load — opening the runner then would fire over the STALE
+                    // selection, so skip it. (The user re-triggers after resolving
+                    // the confirm.)
+                    let deferred =
+                        matches!(self.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+                    if after_pick && !deferred {
                         self.open_load_runner();
                     }
                 }
@@ -4527,7 +4553,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Sequence => match app.sequence_view {
             SeqView::Edit => {
                 if let Some(editor) = &app.sequence_editor {
-                    sequence_editor::render(frame, main, editor, true, &theme);
+                    sequence_editor::render(frame, main, editor, &theme);
                 }
             }
             SeqView::Run => {
@@ -5559,6 +5585,42 @@ mod tests {
         assert_eq!(app.sequence_view, SeqView::Edit);
     }
 
+    /// MAJOR: `Ctrl-R` Edit→Run rebuilds the runner but must first ABORT any
+    /// in-flight step surviving from a prior run (kept alive across Run→Edit) —
+    /// otherwise the async step (a real POST/DELETE) orphans and runs to
+    /// completion in the background. Inject a live abort handle and assert the
+    /// rebuild aborts it.
+    #[tokio::test]
+    async fn edit_to_run_aborts_orphaned_inflight_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_surface_app(dir.path());
+        // Simulate a prior run whose in-flight step survived a Run→Edit flip: a
+        // long-lived task whose abort handle is parked in `sequence_abort`.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        let handle = task.abort_handle();
+        app.sequence_abort = Some(handle.clone());
+        // Force the surface into the Edit face (clean editor) so a Ctrl-R flip
+        // takes the Edit→Run rebuild branch.
+        app.sequence_view = SeqView::Edit;
+        assert!(!handle.is_finished(), "task live before the flip");
+
+        ctrl_r(&mut app);
+
+        assert_eq!(app.sequence_view, SeqView::Run, "clean edit→run flips");
+        assert!(
+            app.sequence_abort.is_none(),
+            "the prior abort handle was taken during rebuild"
+        );
+        // Yield so the abort propagates, then confirm the orphaned task is gone.
+        tokio::task::yield_now().await;
+        assert!(
+            handle.is_finished(),
+            "the prior in-flight step must be aborted, not orphaned"
+        );
+    }
+
     /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.
     #[test]
     fn jump_label_focuses_pane() {
@@ -6585,6 +6647,133 @@ mod tests {
         assert!(!runner.running, "must not auto-run");
         assert!(runner.results.is_empty(), "no rows until a run starts");
         assert!(app.load_request.is_some(), "request resolved once at open");
+    }
+
+    // ---- `<leader>l f` pick-then-load-test: dirty-safe + no flag leak ----
+
+    /// A two-endpoint workspace with `alpha` loaded into the request pane.
+    fn load_pick_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                coll.join(format!("{name}.toml")),
+                format!(
+                    "seq = 0\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("alpha.toml")))
+            .unwrap();
+        app
+    }
+
+    /// Drives the search picker to the single item matching `query` and accepts it.
+    fn pick_search(app: &mut App, query: &str) {
+        for c in query.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.accept_overlay().unwrap();
+    }
+
+    /// BLOCKER 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint
+    /// must defer into the discard-changes confirm and NOT open the load runner
+    /// over the stale selection.
+    #[test]
+    fn load_runner_pick_dirty_defers_to_confirm_not_stale_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        // Make the loaded `alpha` dirty.
+        app.editor = EditorState::new(Lines::from("dirty body"));
+        assert!(app.is_dirty());
+        let loaded_before = app.selected.as_ref().unwrap().file.clone();
+
+        app.open_load_runner_pick().unwrap();
+        assert_eq!(app.mode, Mode::Search);
+        assert!(app.load_runner_after_pick, "intent armed");
+        // Pick the DIFFERENT endpoint (beta).
+        pick_search(&mut app, "beta");
+
+        // Deferred into the discard confirm — NOT the load runner.
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "dirty + other endpoint must defer to the discard confirm"
+        );
+        assert!(
+            app.load_runner.is_none(),
+            "no runner over the stale selection"
+        );
+        // Selection unchanged (still alpha) until the confirm resolves.
+        assert_eq!(app.selected.as_ref().unwrap().file, loaded_before);
+        // The one-shot intent was consumed.
+        assert!(!app.load_runner_after_pick);
+    }
+
+    /// A clean `<leader>l f` pick loads the endpoint AND opens the load runner.
+    #[test]
+    fn load_runner_pick_clean_loads_and_opens_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        assert!(!app.is_dirty());
+        app.open_load_runner_pick().unwrap();
+        pick_search(&mut app, "beta");
+        assert_eq!(app.mode, Mode::LoadRunner, "clean pick opens the runner");
+        // The runner targets the newly-picked endpoint, not the previously loaded one.
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().url,
+            "https://api.test/beta"
+        );
+        assert!(!app.load_runner_after_pick);
+    }
+
+    /// BLOCKER 3a: Esc-cancelling the `<leader>l f` picker clears the one-shot flag
+    /// so the NEXT plain `<leader>f` / `/` search does not spuriously open the runner.
+    #[test]
+    fn load_runner_pick_esc_clears_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        app.open_load_runner_pick().unwrap();
+        assert!(app.load_runner_after_pick);
+        // Esc cancels the picker.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            !app.load_runner_after_pick,
+            "esc-cancel must clear the one-shot intent"
+        );
+    }
+
+    /// BLOCKER 3b: an empty-result Enter (nothing selected) clears the flag too.
+    #[test]
+    fn load_runner_pick_empty_enter_clears_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        app.open_load_runner_pick().unwrap();
+        // Type a query that matches nothing → the picker has no current item.
+        for c in "zzzznomatch".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert!(
+            app.picker
+                .as_ref()
+                .and_then(picker::PickerState::current)
+                .is_none(),
+            "no current item for a non-matching query"
+        );
+        app.accept_overlay().unwrap();
+        assert!(
+            !app.load_runner_after_pick,
+            "empty-result Enter must clear the one-shot intent"
+        );
+        assert!(app.load_runner.is_none());
     }
 
     #[test]

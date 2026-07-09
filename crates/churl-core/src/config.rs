@@ -41,6 +41,11 @@ pub enum ConfigError {
         /// A human-readable description of the allowed values.
         expected: &'static str,
     },
+    /// The `[keys]` structure is malformed: a sub-table nested where only
+    /// `combo = "action"` scalars are allowed. Only `[keys.leader]` may carry
+    /// further sub-tables (its submenus).
+    #[error("bad [keys] structure: {0}")]
+    BadKeys(String),
 }
 
 /// Global churl configuration. Every field is optional; a missing file means defaults.
@@ -140,21 +145,34 @@ pub enum UrlEditMode {
 }
 
 /// One entry in the raw `[keys]` TOML table: either a flat `combo = "action"`
-/// binding, or a nested per-pane overlay sub-table (`[keys.request]`).
+/// binding, or a nested overlay sub-table (`[keys.request]`, `[keys.leader]`).
+///
+/// The overlay variant is recursive (`BTreeMap<String, KeyEntry>`) so a table can
+/// itself carry nested sub-tables. Only `[keys.leader]` uses that today — it may
+/// mix flat root binds (`x = "quit"`) with submenu sub-tables
+/// (`[keys.leader.sequences]`); [`Config::split_key_overlays`] flattens the nested
+/// sub-tables into dotted [`Config::key_overlays`] keys (e.g. `"leader.sequences"`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum KeyEntry {
     /// A flat global binding: the action name string.
     Action(String),
-    /// A nested overlay table: `combo → action` for one pane context.
-    Overlay(BTreeMap<String, String>),
+    /// A nested overlay table: `combo → entry` for one context (values are
+    /// action strings, or further sub-tables in the leader case).
+    Overlay(BTreeMap<String, KeyEntry>),
 }
 
 impl Config {
     /// Partitions [`Config::raw_keys`] into the flat [`Config::keys`] map and the
     /// nested [`Config::key_overlays`] tables. Called by [`load_config`] after
     /// deserialization; idempotent.
-    fn split_key_overlays(&mut self) {
+    ///
+    /// An overlay table's string members become that table's `combo → action`
+    /// map. `[keys.leader]` may additionally carry submenu sub-tables
+    /// (`[keys.leader.sequences]` / `.load`); those flatten into dotted overlay
+    /// keys (`"leader.sequences"`). A sub-table nested anywhere else — or a
+    /// submenu carrying its own sub-table — is a hard error (fail loud).
+    fn split_key_overlays(&mut self) -> Result<(), ConfigError> {
         self.keys.clear();
         self.key_overlays.clear();
         for (name, entry) in &self.raw_keys {
@@ -163,10 +181,44 @@ impl Config {
                     self.keys.insert(name.clone(), action.clone());
                 }
                 KeyEntry::Overlay(table) => {
-                    self.key_overlays.insert(name.clone(), table.clone());
+                    let mut flat = BTreeMap::new();
+                    for (key, value) in table {
+                        match value {
+                            KeyEntry::Action(action) => {
+                                flat.insert(key.clone(), action.clone());
+                            }
+                            KeyEntry::Overlay(sub) => {
+                                // Only `[keys.leader]` may nest a further table.
+                                if name != "leader" {
+                                    return Err(ConfigError::BadKeys(format!(
+                                        "sub-table [keys.{name}.{key}] is not allowed \
+                                         (only [keys.leader] may carry sub-tables)"
+                                    )));
+                                }
+                                // The submenu's members must all be scalars.
+                                let mut sub_flat = BTreeMap::new();
+                                for (sub_key, sub_val) in sub {
+                                    match sub_val {
+                                        KeyEntry::Action(action) => {
+                                            sub_flat.insert(sub_key.clone(), action.clone());
+                                        }
+                                        KeyEntry::Overlay(_) => {
+                                            return Err(ConfigError::BadKeys(format!(
+                                                "[keys.{name}.{key}.{sub_key}] nests too deep \
+                                                 (leader submenus take combo = \"action\" only)"
+                                            )));
+                                        }
+                                    }
+                                }
+                                self.key_overlays.insert(format!("{name}.{key}"), sub_flat);
+                            }
+                        }
+                    }
+                    self.key_overlays.insert(name.clone(), flat);
                 }
             }
         }
+        Ok(())
     }
 
     /// The resolved response body-size cap: `max_body_bytes`, or the 10 MB default.
@@ -238,7 +290,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
         path: path.to_owned(),
         source: err,
     })?;
-    config.split_key_overlays();
+    config.split_key_overlays()?;
     Ok(config)
 }
 
@@ -449,6 +501,110 @@ mod tests {
         assert!(
             !config.keys.contains_key("request"),
             "overlay not in flat keys"
+        );
+    }
+
+    #[test]
+    fn config_parses_leader_submenu_tables() {
+        // Real TOML: `[keys.leader]` mixes a flat root bind with two submenu
+        // sub-tables. Previously the whole config hard-failed ("did not match any
+        // variant of untagged enum KeyEntry"); now it parses and the submenu binds
+        // flatten into dotted `key_overlays` keys.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            concat!(
+                "[keys.leader]\n",
+                "x = \"quit\"\n\n",
+                "[keys.leader.sequences]\n",
+                "z = \"run-sequence\"\n\n",
+                "[keys.leader.load]\n",
+                "z = \"load-runner-pick\"\n",
+            ),
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        // The flat root bind lands in the `"leader"` overlay table.
+        assert_eq!(
+            config
+                .key_overlays
+                .get("leader")
+                .and_then(|t| t.get("x"))
+                .map(String::as_str),
+            Some("quit")
+        );
+        // Submenu sub-tables flatten into dotted overlay keys.
+        assert_eq!(
+            config
+                .key_overlays
+                .get("leader.sequences")
+                .and_then(|t| t.get("z"))
+                .map(String::as_str),
+            Some("run-sequence")
+        );
+        assert_eq!(
+            config
+                .key_overlays
+                .get("leader.load")
+                .and_then(|t| t.get("z"))
+                .map(String::as_str),
+            Some("load-runner-pick")
+        );
+    }
+
+    #[test]
+    fn config_leader_submenu_only_no_root_binds_parses() {
+        // A `[keys.leader.sequences]` table WITHOUT a preceding scalar under
+        // `[keys.leader]` still parses (regression: the leader overlay is created
+        // even when it has no flat members).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[keys.leader.sequences]\nz = \"run-sequence\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(
+            config
+                .key_overlays
+                .get("leader.sequences")
+                .and_then(|t| t.get("z"))
+                .map(String::as_str),
+            Some("run-sequence")
+        );
+    }
+
+    #[test]
+    fn config_non_leader_subtable_errors() {
+        // A sub-table nested under a non-leader pane is a hard structural error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[keys.request.nope]\nz = \"tab-next\"\n").unwrap();
+        let err = load_config(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::BadKeys(_)),
+            "expected BadKeys, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn config_no_leader_tables_still_loads() {
+        // An unrelated valid config with NO leader tables loads cleanly (guards
+        // against the recursive KeyEntry change breaking ordinary configs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            concat!(
+                "theme = \"dark\"\n",
+                "[keys]\nq = \"quit\"\n\n",
+                "[keys.request]\n\"]\" = \"tab-next\"\n",
+            ),
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.keys.get("q").map(String::as_str), Some("quit"));
+        assert!(
+            config.key_overlays.keys().all(|k| !k.starts_with("leader")),
+            "no leader overlays for a leader-free config"
         );
     }
 

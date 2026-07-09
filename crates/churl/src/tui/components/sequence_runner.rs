@@ -434,28 +434,14 @@ fn progress_line(state: &SequenceRunnerState) -> String {
 /// into the highlight worker (mirrors the main response pane). The `cache` is the
 /// app's shared viewport-hash → highlighted-lines cache.
 #[must_use]
+/// Renders the runner — the Run face of the unified sequence surface (title
+/// carries the `Ctrl-R` edit hint).
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &mut SequenceRunnerState,
     tick_count: u64,
     cache: &HashMap<u64, Vec<Line<'static>>>,
-    theme: &Theme,
-) -> Option<HighlightJob> {
-    render_faced(frame, area, state, tick_count, cache, true, theme)
-}
-
-/// Renders the runner. `surface` chooses the title: `true` marks it as the Run
-/// face of the unified sequence surface (with the `Ctrl-R` edit hint); `false`
-/// keeps the standalone "Sequence" title.
-#[allow(clippy::too_many_arguments)]
-pub fn render_faced(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut SequenceRunnerState,
-    tick_count: u64,
-    cache: &HashMap<u64, Vec<Line<'static>>>,
-    surface: bool,
     theme: &Theme,
 ) -> Option<HighlightJob> {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
@@ -466,11 +452,7 @@ pub fn render_faced(
         .areas(modal);
 
     frame.render_widget(Clear, modal);
-    let title = if surface {
-        format!(" Sequence · {} · RUN (^R edit) ", state.name)
-    } else {
-        format!(" Sequence · {} ", state.name)
-    };
+    let title = format!(" Sequence · {} · RUN (^R edit) ", state.name);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)

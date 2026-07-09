@@ -1608,7 +1608,7 @@ fn sequence_editor_modal() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::default();
     terminal
-        .draw(|frame| sequence_editor::render(frame, frame.area(), &state, true, &theme))
+        .draw(|frame| sequence_editor::render(frame, frame.area(), &state, &theme))
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
     let rendered = (0..24)
