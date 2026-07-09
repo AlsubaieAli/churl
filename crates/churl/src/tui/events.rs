@@ -479,11 +479,11 @@ impl Default for KeyMap {
         // `t` so Space stays free everywhere (DECISIONS.md).
         overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
-        // Copy the loaded request as a curl one-liner. `C` (shift-c) is free in
-        // the Request overlay and globally (M7.1); the resolved-vars variant and
-        // all interchange import/export actions stay palette-only (rare, and a
-        // path prompt is the natural entry point).
-        overlay(PaneCtx::Request, key!(shift - c), Action::CopyAsCurl);
+        // Copy the loaded request as a curl one-liner: `<leader>y` (see the
+        // leader binds below). Leader keys are inert during text edits, so this
+        // never risks shadowing character insertion in the body editor. The
+        // resolved-vars variant and all interchange import/export actions stay
+        // palette-only (rare, and a path prompt is the natural entry point).
         // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
         overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
         // Response pane (M7): body/headers, wrap, search, match nav, folding,
@@ -521,6 +521,9 @@ impl Default for KeyMap {
         leader_bind(key!(a), Action::EditSequence);
         // Concurrent-load runner (M7.5): `<leader>l` (l was free).
         leader_bind(key!(l), Action::OpenLoadRunner);
+        // Copy the loaded request as a curl one-liner (`y` was free). Moved off
+        // the Request-overlay `C` so it can't shadow body-editor text input.
+        leader_bind(key!(y), Action::CopyAsCurl);
 
         Self {
             map,
