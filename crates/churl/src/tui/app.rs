@@ -57,7 +57,7 @@ use super::components::{
     env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
     request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
 };
-use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, LeaderMenu, PaneCtx};
+use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
 
@@ -304,12 +304,12 @@ pub enum AppMsg {
 
 /// The active level of the two-level which-key leader popup. `None` (the field's
 /// resting value) means no leader chord is in progress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderState {
     /// The root which-key popup: direct binds + submenu prefixes.
     Root,
-    /// A nested submenu is open (`<leader>s …` / `<leader>l …`).
-    Submenu(LeaderMenu),
+    /// A nested submenu is open, keyed by its name (`<leader>s …` = `"sequences"`).
+    Submenu(String),
 }
 
 /// The active face of the unified sequence surface ([`Mode::Sequence`]). `Ctrl-R`
@@ -635,6 +635,13 @@ pub struct App {
     /// statusline (send hints, history/errors, merges, CRUD results); auto-expires
     /// after `Message::EXPIRE_SECS`.
     message: Option<Message>,
+    /// Load-time keymap conflict/shadow warnings (M7.10), surfaced as a
+    /// first-frame statusline toast. Empty for a clean config. Populated from
+    /// [`KeyMap::validate`] by the TUI entry point; a `false` `keymap_warned`
+    /// flag ensures the toast fires exactly once.
+    keymap_warnings: Vec<String>,
+    /// Whether the first-frame keymap-warning toast has already fired.
+    keymap_warned: bool,
     /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
     /// animation in the response pane. `pub` so snapshot tests can set it.
     pub tick_count: u64,
@@ -804,6 +811,8 @@ impl App {
             highlight_tx: None,
             history: None,
             message: None,
+            keymap_warnings: Vec::new(),
+            keymap_warned: false,
             tick_count: 0,
             prompt_editor: LineEditor::default(),
             auth_picker: false,
@@ -892,6 +901,31 @@ impl App {
     /// Sets a transient message in the dedicated message row (auto-expires).
     fn notify(&mut self, text: impl Into<String>) {
         self.message = Some(Message::new(text));
+    }
+
+    /// Records the load-time keymap conflict/shadow warnings (M7.10) so the run
+    /// loop can flash a first-frame toast. Called by the TUI entry point after
+    /// [`KeyMap::validate`].
+    pub fn set_keymap_warnings(&mut self, warnings: Vec<String>) {
+        self.keymap_warnings = warnings;
+    }
+
+    /// The load-time keymap warnings, for tests/inspection.
+    #[cfg(test)]
+    pub fn keymap_warnings(&self) -> &[String] {
+        &self.keymap_warnings
+    }
+
+    /// Fires the first-frame keymap-warning toast exactly once (M7.10). No-op
+    /// when the config is clean or the toast has already fired.
+    fn arm_keymap_warning_toast(&mut self) {
+        if self.keymap_warned || self.keymap_warnings.is_empty() {
+            return;
+        }
+        self.keymap_warned = true;
+        let n = self.keymap_warnings.len();
+        let plural = if n == 1 { "issue" } else { "issues" };
+        self.notify(format!("⚠ {n} keymap {plural} — run churl keymaps"));
     }
 
     // ---- Buffer accessors ----
@@ -1210,6 +1244,11 @@ impl App {
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(250));
+        // First-frame keymap-warning toast (M7.10): if the loaded config has
+        // conflict/shadow issues, flash a non-blocking statusline notice once
+        // (stderr already carried the detail before raw mode; `churl keymaps`
+        // has the full list).
+        self.arm_keymap_warning_toast();
         while !self.should_quit {
             terminal.draw(|frame| render(frame, self))?;
             tokio::select! {
@@ -1373,7 +1412,7 @@ impl App {
     /// closes), an unknown key cancels. (A second Esc from Root cancels — "Esc
     /// backs out one level then cancels".)
     fn handle_leader_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(state) = self.leader else {
+        let Some(state) = self.leader.clone() else {
             return Ok(());
         };
         match state {
@@ -1402,7 +1441,7 @@ impl App {
                     self.leader = Some(LeaderState::Root);
                     return Ok(());
                 }
-                match self.keymap.leader_sub_lookup(menu, key) {
+                match self.keymap.leader_sub_lookup(&menu, key) {
                     Some(action) => {
                         self.leader = None;
                         self.dispatch(action, Some(key))
@@ -5649,8 +5688,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // The two-level which-key leader popup (deliverable 1).
-    if let Some(state) = app.leader {
-        let (title, entries) = leader_popup_entries(app, state);
+    if let Some(state) = app.leader.clone() {
+        let (title, entries) = leader_popup_entries(app, &state);
         leader_popup::render(frame, main, &title, &entries, &theme);
     }
 
@@ -5665,7 +5704,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// Builds the `(title, entries)` for the which-key popup at `state`. Root shows
 /// sorted direct binds plus one `"<key>   ▸ <submenu>"` row per submenu prefix;
 /// a submenu shows its own sorted `(combo, label)` rows.
-fn leader_popup_entries(app: &App, state: LeaderState) -> (String, Vec<(String, String)>) {
+fn leader_popup_entries(app: &App, state: &LeaderState) -> (String, Vec<(String, String)>) {
     match state {
         LeaderState::Root => {
             let mut entries: Vec<(String, String)> = app
@@ -5687,7 +5726,10 @@ fn leader_popup_entries(app: &App, state: LeaderState) -> (String, Vec<(String, 
                 .map(|(combo, action)| (combo.to_string(), action.label().to_owned()))
                 .collect();
             entries.sort();
-            (format!(" leader · {} ", menu.label()), entries)
+            (
+                format!(" leader · {} ", app.keymap.submenu_title(menu)),
+                entries,
+            )
         }
     }
 }
@@ -7004,7 +7046,7 @@ mod tests {
         press(&mut app, 's');
         assert_eq!(
             app.leader,
-            Some(LeaderState::Submenu(LeaderMenu::Sequences))
+            Some(LeaderState::Submenu("sequences".to_owned()))
         );
         // A bound submenu key dispatches and closes the popup.
         press(&mut app, 'r');
@@ -7526,6 +7568,124 @@ mod tests {
         assert_eq!(app.mode, Mode::Sequence);
         assert_eq!(app.sequence_view, SeqView::Run);
         assert!(app.sequence_runner.is_some());
+    }
+
+    /// M7.10: `<leader>s f` is the canonical sequence finder — it opens the
+    /// sequence picker (edit face), mirroring `<leader>f` for endpoints.
+    #[test]
+    fn leader_s_f_opens_the_sequence_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Space → Root → `s` → sequences submenu → `f`.
+        press(&mut app, ' ');
+        press(&mut app, 's');
+        assert_eq!(
+            app.leader,
+            Some(LeaderState::Submenu("sequences".to_owned()))
+        );
+        press(&mut app, 'f');
+        assert_eq!(
+            app.mode,
+            Mode::SequencePicker,
+            "s f opens the sequence picker"
+        );
+        assert!(
+            !app.sequence_pick_runs,
+            "s f is the open/edit finder, not run"
+        );
+        assert_eq!(app.leader, None, "submenu dispatch dismisses the popup");
+    }
+
+    /// M7.10 dynamic submenus, end-to-end at the app layer: a config
+    /// `g = "+git"` + `[keys.leader.git]` wires a brand-new submenu that shows in
+    /// which-key and whose keys dispatch through the leader state machine.
+    #[test]
+    fn dynamic_leader_submenu_dispatches_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        // A config-defined `git` submenu reached via `<leader>g`, binding `t` to a
+        // globally-observable action (toggle the explorer sidebar).
+        let global = BTreeMap::new();
+        let overlays = BTreeMap::from([
+            (
+                "leader".to_string(),
+                BTreeMap::from([("g".to_string(), "+git".to_string())]),
+            ),
+            (
+                "leader.git".to_string(),
+                BTreeMap::from([("t".to_string(), "toggle-explorer".to_string())]),
+            ),
+        ]);
+        let keymap = KeyMap::with_all_overrides(&global, &overlays).unwrap();
+        let mut app = App::new(ws, keymap).unwrap();
+
+        // which-key: the root popup lists the `git` submenu behind `g`.
+        let (_, root_entries) = leader_popup_entries(&app, &LeaderState::Root);
+        assert!(
+            root_entries.iter().any(|(k, l)| k == "g" && l == "▸ git"),
+            "root which-key shows the config submenu: {root_entries:?}"
+        );
+        // which-key: inside the submenu, `t` shows its action label.
+        let (title, sub_entries) =
+            leader_popup_entries(&app, &LeaderState::Submenu("git".to_owned()));
+        assert_eq!(title, " leader · git ");
+        assert!(
+            sub_entries
+                .iter()
+                .any(|(k, l)| k == "t" && l == "toggle explorer sidebar"),
+            "submenu which-key shows its bind: {sub_entries:?}"
+        );
+
+        // Dispatch through the real key path: Space → g → t toggles the explorer.
+        let before = app.explorer_hidden;
+        press(&mut app, ' ');
+        press(&mut app, 'g');
+        assert_eq!(app.leader, Some(LeaderState::Submenu("git".to_owned())));
+        press(&mut app, 't');
+        assert_eq!(app.leader, None, "submenu dispatch dismisses");
+        assert_ne!(app.explorer_hidden, before, "the git submenu action ran");
+    }
+
+    /// Deliverable #5 (verify): every "pick"-style leader action opens a picker
+    /// Mode and never silently runs/executes on entry. Guards against a run-last
+    /// regression sneaking into any of the four picker front doors.
+    #[test]
+    fn pickers_open_a_mode_never_run_last() {
+        // Sequence pickers (open + run-pick) both open `Mode::SequencePicker`.
+        let d1 = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(d1.path());
+        app.dispatch(Action::OpenSequencePicker, None).unwrap();
+        assert_eq!(app.mode, Mode::SequencePicker, "s o/s f open a picker");
+        assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
+
+        let d2 = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(d2.path());
+        app.dispatch(Action::RunSequencePick, None).unwrap();
+        assert_eq!(app.mode, Mode::SequencePicker, "s r opens a picker");
+        assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
+
+        // Endpoint request picker (`<leader>f`) opens the search overlay.
+        let d3 = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(d3.path());
+        app.dispatch(Action::QuickJumpRequests, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Search,
+            "<leader>f opens the endpoint picker"
+        );
+
+        // Load-runner pick (`<leader>l f`) opens the endpoint picker first,
+        // arming the after-pick hand-off — it never fires a load on entry.
+        let d4 = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(d4.path());
+        app.dispatch(Action::OpenLoadRunnerPick, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Search,
+            "<leader>l f opens the endpoint picker"
+        );
+        assert!(app.load_runner.is_none(), "no load runner opened on entry");
     }
 
     #[test]
@@ -9038,20 +9198,20 @@ mod tests {
         let km = KeyMap::default();
         let lk = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         assert_eq!(
-            km.leader_sub_lookup(LeaderMenu::Tabs, lk('n')),
+            km.leader_sub_lookup("tabs", lk('n')),
             Some(Action::BufferNext)
         );
         assert_eq!(
-            km.leader_sub_lookup(LeaderMenu::Tabs, lk('p')),
+            km.leader_sub_lookup("tabs", lk('p')),
             Some(Action::BufferPrev)
         );
         assert_eq!(
-            km.leader_sub_lookup(LeaderMenu::Tabs, lk('x')),
+            km.leader_sub_lookup("tabs", lk('x')),
             Some(Action::BufferClose)
         );
         assert_eq!(
             km.leader_sub_lookup(
-                LeaderMenu::Tabs,
+                "tabs",
                 KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)
             ),
             Some(Action::BufferCloseAll)
