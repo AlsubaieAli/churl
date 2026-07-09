@@ -445,6 +445,19 @@ impl ExplorerState {
             .collect()
     }
 
+    /// Moves the sequence sub-pane cursor onto the sequence backed by `file`, if
+    /// it is loaded. Keeps run/edit consistent with a `<leader>s o` pick — a
+    /// later `<leader>s r` runs the picked sequence, not sequence #0. Returns
+    /// whether a match was found.
+    pub fn select_sequence_file(&mut self, file: &Path) -> bool {
+        if let Some(idx) = self.sequences.iter().position(|(p, _)| p == file) {
+            self.seq_cursor = idx;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Loads every collection's endpoints (for fuzzy search) and returns
     /// `(display path, collection index, endpoint index)` for each endpoint.
     pub fn all_endpoints(&mut self) -> Result<Vec<(String, usize, usize)>, PersistenceError> {

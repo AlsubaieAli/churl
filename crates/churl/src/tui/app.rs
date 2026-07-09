@@ -1165,12 +1165,23 @@ impl App {
             Action::RowDelete => self.row_delete(),
             Action::RowToggle => self.row_toggle(),
             Action::RowEdit => self.row_edit(),
+            // On the sequences sub-pane the tree-mutating overlay keys must NEVER
+            // touch the (hidden, off-screen) endpoints tree cursor: `n` creates a
+            // new sequence (parallels endpoints `n`=new endpoint), while `N`/`d`
+            // no-op with a note. Endpoints keep their normal behaviour.
+            Action::NewEndpoint if self.left_column_on_sequences() => self.new_sequence_prompt(),
             Action::NewEndpoint => self.begin_new_endpoint(),
+            Action::NewCollection if self.left_column_on_sequences() => {
+                self.notify("not available in the sequences pane")
+            }
             Action::NewCollection => self.begin_new_collection(),
             // `r` on the sequences sub-pane runs the hovered sequence (Run face);
             // everywhere else it renames the selected tree node.
             Action::Rename if self.left_column_on_sequences() => self.run_selected_sequence(),
             Action::Rename => self.begin_rename(),
+            Action::Delete if self.left_column_on_sequences() => {
+                self.notify("not available in the sequences pane")
+            }
             Action::Delete => self.begin_delete(),
             Action::HalfPageDown | Action::HalfPageUp => {
                 if self.focus == Pane::Response {
@@ -2064,9 +2075,12 @@ impl App {
     }
 
     /// Loads the sequence at `path` and opens the unified surface (Edit face).
+    /// Also moves the sub-pane cursor onto the picked sequence so a subsequent
+    /// `<leader>s r` runs *this* sequence, not sequence #0.
     fn open_picked_sequence(&mut self, path: PathBuf) -> Result<()> {
         match persistence::load_sequence(&path) {
             Ok(sequence) => {
+                self.explorer.select_sequence_file(&path);
                 self.open_sequence_editor(sequence.name.clone(), path, &sequence);
             }
             Err(err) => self.crud_error(err),
@@ -2750,10 +2764,21 @@ impl App {
                 Ok(())
             }
             None => {
-                self.open_prompt(PromptPurpose::NewSequence, "");
+                self.new_sequence_prompt();
                 Ok(())
             }
         }
+    }
+
+    /// Opens the "new sequence" name prompt (the `n`-on-the-sequences-sub-pane
+    /// entry point, parallel to endpoints `n`=new endpoint). Guards on an open
+    /// workspace like every other create path.
+    fn new_sequence_prompt(&mut self) {
+        if self.workspace.is_none() {
+            self.notify("open a workspace first");
+            return;
+        }
+        self.open_prompt(PromptPurpose::NewSequence, "");
     }
 
     /// Workspace-relative endpoint paths for the editor's add-step picker.
@@ -3045,10 +3070,13 @@ impl App {
         self.enforce_left_active_invariant();
     }
 
-    /// A hidden sequences sub-pane can never hold the left-column focus: when
-    /// `!sequences_shown`, `left_active` is forced back to `Endpoints` (PR 2b).
+    /// A hidden — or empty — sequences sub-pane can never hold the left-column
+    /// focus: when `!sequences_shown` OR the workspace has no sequences,
+    /// `left_active` is forced back to `Endpoints` (PR 2b). The empty-list case
+    /// catches a workspace switch/reload into a sequence-less workspace, which
+    /// would otherwise strand focus on an empty pane.
     fn enforce_left_active_invariant(&mut self) {
-        if !self.sequences_shown {
+        if !self.sequences_shown || self.explorer.sequences_len() == 0 {
             self.left_active = LeftPane::Endpoints;
         }
     }
@@ -4042,6 +4070,10 @@ impl App {
         self.explorer.reload(self.workspace.as_ref())?;
         self.remap_selected();
         self.surface_explorer_warnings();
+        // A reload can empty the sequence list (e.g. every sequence deleted on
+        // disk); reconcile the left-column focus so it never strands on an empty
+        // sub-pane.
+        self.enforce_left_active_invariant();
         Ok(())
     }
 
@@ -4188,6 +4220,12 @@ impl App {
         self.highlight_cache.clear();
         self.pending_load = None;
         self.zoom = None;
+        // Clean slate for the sequences sub-pane: the new workspace may have no
+        // sequences, and its list is unrelated to the old one. Reset to off +
+        // endpoints; set_focus below re-runs the invariant after the reload.
+        self.sequences_shown = false;
+        self.left_active = LeftPane::Endpoints;
+        self.focus_before_explorer = None;
         // set_focus(Explorer) also un-hides the explorer if it was hidden.
         self.set_focus(Pane::Explorer);
 
@@ -6549,6 +6587,135 @@ mod tests {
         assert_eq!(app.zoom, None);
         app.dispatch(Action::Zoom, None).unwrap();
         assert_eq!(app.zoom, None, "z zooms only Request/Response");
+    }
+
+    /// B1 regression: with the sequences sub-pane focused, `d`/`N` must NOT open
+    /// a tree delete/new-collection prompt targeting the off-screen tree cursor
+    /// (which sits on collection "api"); `n` opens the new-SEQUENCE prompt, not a
+    /// new-endpoint one. Fails pre-fix (d→delete-collection confirm, n→new
+    /// endpoint under the invisible collection).
+    #[test]
+    fn tree_mutating_keys_suppressed_on_sequences_subpane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Put the tree cursor on the collection so `d`/`n`/`N` would target it.
+        app.explorer.cursor = 0;
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert!(app.left_column_on_sequences());
+
+        // `d` → no tree delete prompt; mode stays Normal.
+        app.dispatch(Action::Delete, None).unwrap();
+        assert_eq!(app.mode, Mode::Normal, "d must not open a delete prompt");
+
+        // `N` → no new-collection prompt; mode stays Normal.
+        app.dispatch(Action::NewCollection, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "N must not open a new-collection prompt"
+        );
+
+        // `n` → the new-SEQUENCE prompt (not new-endpoint).
+        app.dispatch(Action::NewEndpoint, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Prompt(PromptPurpose::NewSequence),
+            "n on the sequences sub-pane creates a new sequence"
+        );
+    }
+
+    /// The same tree-mutating keys keep their normal behaviour on the endpoints
+    /// tree (guard is scoped to `left_active==Sequences`).
+    #[test]
+    fn tree_mutating_keys_work_normally_on_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Sub-pane shown but endpoints active (the default occupant).
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap(); // → Endpoints
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+        app.explorer.cursor = 0; // on collection "api"
+
+        app.dispatch(Action::Delete, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Prompt(PromptPurpose::DeleteCollectionConfirm),
+            "d still deletes the selected collection on the endpoints tree"
+        );
+    }
+
+    /// M1 regression: switching from a sequenced workspace (sub-pane on, sequences
+    /// focused) into a sequence-less one resets to endpoints — focus is never
+    /// stranded on an empty sub-pane and B1 is disarmed. Fails pre-fix
+    /// (`left_active` stays `Sequences` with an empty list).
+    #[test]
+    fn workspace_switch_into_sequenceless_resets_to_endpoints() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir_a.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        assert!(app.sequences_shown);
+
+        // A second workspace with NO sequences.
+        let dir_b = tempfile::tempdir().unwrap();
+        std::fs::write(dir_b.path().join("churl.toml"), "name = \"empty\"\n").unwrap();
+        let coll = dir_b.path().join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("x.toml"),
+            "seq = 0\nname = \"x\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/x\"\n",
+        )
+        .unwrap();
+
+        app.switch_workspace(dir_b.path().to_path_buf()).unwrap();
+        assert_eq!(app.explorer.sequences_len(), 0);
+        assert!(
+            !app.sequences_shown,
+            "sub-pane resets off for the new workspace"
+        );
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "focus must not strand on an empty sequences pane"
+        );
+        assert!(!app.left_column_on_sequences(), "B1 disarmed");
+    }
+
+    /// M1 regression (reload path): the invariant forces Endpoints when a reload
+    /// empties the sequence list even without a full workspace switch.
+    #[test]
+    fn reload_emptying_sequences_forces_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        // Delete every sequence file on disk, then reload.
+        std::fs::remove_dir_all(dir.path().join("sequences")).unwrap();
+        app.reload_explorer().unwrap();
+        assert_eq!(app.explorer.sequences_len(), 0);
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "an emptied sub-pane never keeps focus"
+        );
+    }
+
+    /// m1 regression: `<leader>s o` picking a sequence moves the sub-pane cursor
+    /// onto it, so a later run/edit acts on the PICKED sequence, not #0.
+    #[test]
+    fn picking_a_sequence_sets_seq_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Sequences sort by seq: "Login" (0), "Checkout" (1). Pick #1's file.
+        let (_, checkout_file) = app
+            .explorer
+            .all_sequences()
+            .into_iter()
+            .find(|(name, _)| name == "Checkout")
+            .unwrap();
+        app.open_picked_sequence(checkout_file).unwrap();
+        assert_eq!(app.explorer.seq_cursor(), 1);
+        assert_eq!(app.explorer.selected_sequence().unwrap().name, "Checkout");
     }
 
     // ---- M6.7: URL popup editor ----
