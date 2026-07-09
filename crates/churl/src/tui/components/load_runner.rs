@@ -10,7 +10,7 @@
 //! same `churl_core::load` primitives the wiremock-tested `run_load` uses, so the
 //! live launcher and the tested twin can never drift.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use churl_core::load::{LoadConfig, LoadStats};
@@ -25,6 +25,13 @@ use super::prompt;
 use super::response::{self, RenderCtx, ResponseState};
 use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
+
+/// How many completed rows keep a full [`ResponseState::Done`] view in memory
+/// (R0 memory bound). Retention is O(concurrency + K): the last `K` OK completions
+/// plus the currently-selected row are kept live; older OK rows are downgraded to
+/// [`ResponseState::Dropped`] (status/timing/size only, no body). A high-`total`
+/// load run therefore holds bounded memory instead of `total × body`.
+const LIVE_VIEW_WINDOW: usize = 16;
 
 /// Per-request display status in the results list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +205,11 @@ pub struct LoadRunnerState {
     pub results: Vec<ResultRow>,
     /// Completed outcomes so far (for the stats recompute); completion order.
     outcomes: Vec<(churl_core::load::ReqOutcome, Option<Duration>)>,
+    /// Row indices currently holding a live [`ResponseState::Done`] view, in
+    /// completion order (front = oldest). Bounds retained bodies to `K`: when a
+    /// new view lands and the window overflows, the oldest non-selected row here
+    /// is downgraded to [`ResponseState::Dropped`]. Drives the R0 memory bound.
+    live_views: VecDeque<usize>,
     /// The selected results row (drives the response viewer).
     pub selected: usize,
     /// Which sub-pane has focus.
@@ -257,6 +269,7 @@ impl LoadRunnerState {
             editing: None,
             results: Vec::new(),
             outcomes: Vec::new(),
+            live_views: VecDeque::new(),
             selected: 0,
             focus: RunnerFocus::ConfigHeader,
             follow: true,
@@ -303,6 +316,7 @@ impl LoadRunnerState {
         let total = self.cfg.total;
         self.results = (0..total).map(ResultRow::pending).collect();
         self.outcomes.clear();
+        self.live_views.clear();
         self.completed = 0;
         self.selected = 0;
         self.follow = true;
@@ -340,6 +354,7 @@ impl LoadRunnerState {
         response: ResponseState,
         outcome: churl_core::load::ReqOutcome,
     ) -> bool {
+        let holds_view = matches!(response, ResponseState::Done { .. });
         if let Some(row) = self.results.get_mut(index) {
             row.status = status;
             row.timing = timing;
@@ -353,7 +368,47 @@ impl LoadRunnerState {
             self.resp_cursor = 0;
             self.resp_scroll = 0;
         }
+        // R0 memory bound: track the newly-retained view and evict the oldest
+        // ones beyond the window. Done *after* the follow-selection update so the
+        // just-selected row is never a candidate for eviction.
+        if holds_view {
+            self.live_views.push_back(index);
+            self.enforce_view_window();
+        }
         self.completed >= self.results.len()
+    }
+
+    /// Keeps at most [`LIVE_VIEW_WINDOW`] rows holding a live `Done` view (plus
+    /// the selected row, which is never evicted). When over the bound, the oldest
+    /// non-selected retained row is downgraded to [`ResponseState::Dropped`] —
+    /// status/timing/size survive for an honest placeholder, but the body bytes
+    /// are released and are NOT reconstructable.
+    fn enforce_view_window(&mut self) {
+        while self.live_views.len() > LIVE_VIEW_WINDOW {
+            // Find the oldest queued row that is not the current selection.
+            let Some(pos) = self.live_views.iter().position(|&i| i != self.selected) else {
+                // Every retained row is the selection (K == 0 edge); nothing to
+                // evict without dropping what the user is viewing.
+                break;
+            };
+            let row_index = self.live_views.remove(pos).expect("position in range");
+            self.drop_row_view(row_index);
+        }
+    }
+
+    /// Downgrades one row's retained `Done` view to [`ResponseState::Dropped`],
+    /// releasing its body. No-op if the row no longer holds a live view.
+    fn drop_row_view(&mut self, index: usize) {
+        if let Some(row) = self.results.get_mut(index)
+            && let ResponseState::Done { view } = &row.response
+        {
+            let dropped = ResponseState::Dropped {
+                status: view.status(),
+                timing: row.timing,
+                size: view.body_len(),
+            };
+            row.response = dropped;
+        }
     }
 
     /// Selects a results row, resetting the response viewport.
@@ -1388,6 +1443,97 @@ mod tests {
         r.running = false;
         r.finished = true;
         insta::assert_snapshot!(snapshot(&mut r));
+    }
+
+    /// R0 memory bound: a high-`total` run holds a bounded number of live
+    /// `Done` views (`K + 1`: the window plus the selected row), and — regardless
+    /// of eviction — the stats computed over *all* outcomes stay correct.
+    #[test]
+    fn high_total_run_bounds_retained_views() {
+        let mut r = runner();
+        r.cfg.total = 500;
+        r.reset_for_run();
+        r.focus = RunnerFocus::Results;
+
+        for i in 0..500 {
+            let view = response::ResponseView::build(
+                &json_response(200, &format!("{{\"i\":{i}}}")),
+                r.next_view_gen(),
+            );
+            r.record_result(
+                i,
+                LoadStatus::Ok(200),
+                Some(Duration::from_millis((i % 100) as u64 + 1)),
+                ResponseState::Done { view },
+                ReqOutcome::Ok { status: 200 },
+            );
+        }
+
+        let live = r
+            .results
+            .iter()
+            .filter(|row| matches!(row.response, ResponseState::Done { .. }))
+            .count();
+        assert!(
+            live <= LIVE_VIEW_WINDOW + 1,
+            "retained views {live} exceed the K+1 bound ({})",
+            LIVE_VIEW_WINDOW + 1
+        );
+        // Evicted rows are downgraded honestly, not lost or left Idle.
+        let dropped = r
+            .results
+            .iter()
+            .filter(|row| matches!(row.response, ResponseState::Dropped { .. }))
+            .count();
+        assert_eq!(
+            live + dropped,
+            500,
+            "every completed row is Done or Dropped"
+        );
+
+        // Stats span every outcome, not just retained ones.
+        assert_eq!(r.completed, 500);
+        assert_eq!(r.stats.ok, 500);
+        assert_eq!(r.stats.failed, 0);
+        assert_eq!(r.stats.min, Some(Duration::from_millis(1)));
+        assert_eq!(r.stats.max, Some(Duration::from_millis(100)));
+    }
+
+    /// The currently-selected row is never evicted, even when it is the oldest
+    /// retained view (follow off, then many later completions land).
+    #[test]
+    fn selected_row_is_never_evicted() {
+        let mut r = runner();
+        r.cfg.total = 200;
+        r.reset_for_run();
+        r.focus = RunnerFocus::Results;
+
+        // Complete + retain row 0, then pin the selection there (follow off).
+        let done_row = |r: &mut LoadRunnerState, i: usize| {
+            let view = response::ResponseView::build(
+                &json_response(200, "{\"ok\":true}"),
+                r.next_view_gen(),
+            );
+            r.record_result(
+                i,
+                LoadStatus::Ok(200),
+                Some(Duration::from_millis(5)),
+                ResponseState::Done { view },
+                ReqOutcome::Ok { status: 200 },
+            );
+        };
+        done_row(&mut r, 0);
+        r.handle_key(key(KeyCode::Home)); // select row 0, follow off
+        assert_eq!(r.selected, 0);
+
+        for i in 1..200 {
+            done_row(&mut r, i);
+        }
+        // Row 0 held a view and was the selection the whole time → still live.
+        assert!(
+            matches!(r.results[0].response, ResponseState::Done { .. }),
+            "the selected row was evicted"
+        );
     }
 
     #[test]
