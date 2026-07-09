@@ -7,6 +7,31 @@
 3. Get it green and merged (squash merge; the PR title becomes the commit).
 4. That's it. Releases happen automatically from your PR title.
 
+## Branch naming
+
+Branches follow `<type>/<milestone>-<slug>`:
+
+```
+<type>/<milestone>-<short-kebab-slug>
+```
+
+- **`<type>`** — the same Conventional-Commit type as the PR title
+  (`feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`,
+  `revert`), so branch, PR title, and squash commit stay consistent.
+- **`<milestone>`** — the milestone id when the work belongs to one
+  (`d1`, `r0`, `m7`, `m7.10`, …). **Drop it** for milestone-less work.
+- **`<slug>`** — a short kebab-case description.
+
+Examples:
+
+```
+feat/d1-demo-stabilize        # milestone work
+fix/m7-clipboard-tmux
+refactor/r0-atomic-saves
+ci/parallel-check-jobs         # no milestone → type/slug
+docs/contributing-conventions
+```
+
 ## PR title convention
 
 PR titles follow [Conventional Commits](https://www.conventionalcommits.org):
@@ -104,10 +129,11 @@ Need a binary from an unreleased branch? Comment `/build` on the PR
 (collaborators only) or run the **Dev build** workflow from the Actions tab —
 binaries appear as workflow artifacts with 14-day retention.
 
-## Release machinery map
+## Workflow map
 
 | Piece | Role |
 |---|---|
+| `.github/workflows/ci.yml` | Format · Lint · Test · Security audit (parallel PR gate) |
 | `.github/workflows/pr-title.yml` | Enforces conventional PR titles |
 | `.github/workflows/pr-label.yml` | Auto-labels PRs from the title type |
 | `release-plz.toml` | Version/changelog/tag policy (single release train) |
@@ -117,9 +143,25 @@ binaries appear as workflow artifacts with 14-day retention.
 | `.github/workflows/dev-build.yml` | Tester binaries from any ref |
 | `install.sh` | End-user installer (attached to every release) |
 
-## Local checks
+## Continuous integration
 
-CI runs exactly these — green locally means green in CI:
+`ci.yml` runs four **independent, parallel** jobs on every push and PR to
+`master` — each is its own status check, so any can be marked *required* in
+branch protection:
+
+| Check | Command |
+|---|---|
+| **Format** | `cargo fmt --all --check` |
+| **Lint** | `cargo clippy --all-targets --all-features -- -D warnings` |
+| **Test** | `cargo test --all` (with `INSTA_UPDATE=no` — CI never writes snapshots) |
+| **Security audit** | `cargo audit` |
+
+They run in parallel with no `needs:` between them (none depends on another);
+`needs:` is reserved for genuine pipelines like the release flow.
+
+### Local checks
+
+Green locally means green in CI — run the first three before pushing:
 
 ```sh
 cargo fmt --all --check

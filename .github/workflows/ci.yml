@@ -14,9 +14,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Four independent checks, each its own job so they run in parallel and can be
+# required individually in branch protection. No `needs:` between them — none
+# depends on another's output (see docs/DECISIONS.md, 2026-07-09). Format skips
+# the Cargo cache: `cargo fmt --check` never compiles, so there is nothing to
+# cache and the restore would only cost time.
 jobs:
-  check:
-    name: Check, lint, and test
+  format:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,24 +29,47 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Format check
-        run: cargo fmt --all --check
-
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Tests
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
         run: cargo test --all
         env:
           # Strict in CI: fail on any snapshot not already committed.
           INSTA_UPDATE: "no"
 
-  audit:
+  security-audit:
     name: Security audit
     runs-on: ubuntu-latest
     permissions:
@@ -51,9 +79,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
 
       # Run cargo-audit directly rather than rustsec/audit-check: that action
       # has no Node.js 24 release (it targets the deprecated node20). Running
