@@ -6395,6 +6395,162 @@ mod tests {
         assert!(!app.explorer_hidden, "tab onto explorer reopens it");
     }
 
+    // ---- PR 2b: sequences sub-pane ----
+
+    /// A workspace with one collection (one endpoint) and two sequences, for the
+    /// sub-pane state-machine tests.
+    fn seq_pane_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        for (i, name) in ["Login", "Checkout"].iter().enumerate() {
+            std::fs::write(
+                seq_dir.join(format!("s{i}.toml")),
+                format!("seq = {i}\nname = \"{name}\"\non_error = \"halt\"\n"),
+            )
+            .unwrap();
+        }
+        let ws = open_workspace(root).unwrap();
+        App::new(ws, KeyMap::default()).unwrap()
+    }
+
+    #[test]
+    fn toggle_sequences_pane_shows_and_focuses_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        assert!(!app.sequences_shown);
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert!(app.sequences_shown, "toggle shows the sub-pane");
+        assert_eq!(app.left_active, LeftPane::Sequences, "and focuses it");
+        assert_eq!(app.focus, Pane::Explorer);
+        // Toggling off never leaves a hidden sub-pane focused.
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert!(!app.sequences_shown);
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+    }
+
+    #[test]
+    fn focus_sequences_toggle_unhides_and_switches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // `s` from the explorer: auto-shows + moves to sequences.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert!(app.sequences_shown);
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        assert_eq!(app.focus, Pane::Explorer);
+        // `s` again: back to endpoints (mutually-exclusive zoom), still shown.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+        assert!(app.sequences_shown);
+    }
+
+    #[test]
+    fn left_active_forced_endpoints_when_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Force an inconsistent state, then set_focus enforces the invariant.
+        app.left_active = LeftPane::Sequences;
+        app.sequences_shown = false;
+        app.set_focus(Pane::Explorer);
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+    }
+
+    #[test]
+    fn tab_cycle_never_changes_left_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        // Full Tab cycle back to the explorer must not touch left_active.
+        for _ in 0..4 {
+            app.dispatch(Action::FocusNext, None).unwrap();
+        }
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(
+            app.left_active,
+            LeftPane::Sequences,
+            "Tab is cross-pane only; it never switches the sub-pane"
+        );
+    }
+
+    #[test]
+    fn explorer_nav_routes_to_seq_cursor_when_sequences_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert_eq!(app.explorer.seq_cursor(), 0);
+        let tree_cursor = app.explorer.cursor;
+        // j/Down moves the sequence cursor, not the tree cursor.
+        app.dispatch(Action::Down, None).unwrap();
+        assert_eq!(app.explorer.seq_cursor(), 1);
+        assert_eq!(app.explorer.cursor, tree_cursor, "tree cursor untouched");
+        // Enter opens the unified surface (Edit face) on the hovered sequence.
+        app.dispatch(Action::Select, None).unwrap();
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Edit);
+    }
+
+    #[test]
+    fn r_on_sequences_subpane_runs_hovered_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        // `r` maps to Rename, but on the sequences sub-pane it runs the sequence.
+        app.dispatch(Action::Rename, None).unwrap();
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Run);
+        assert!(app.sequence_runner.is_some());
+    }
+
+    #[test]
+    fn leader_e_hide_restores_prior_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Focus Response, then Tab-cycle into the explorer (records prior focus).
+        app.set_focus(Pane::Response);
+        app.set_focus(Pane::Explorer);
+        assert_eq!(app.focus, Pane::Explorer);
+        // Hide: focus restores to Response (owner #2B — not the URL-bar fallback).
+        app.dispatch(Action::ToggleExplorer, None).unwrap();
+        assert!(app.explorer_hidden);
+        assert_eq!(app.focus, Pane::Response, "true prior-pane restore");
+        // Show: re-focus the explorer, landing on the active sub-pane.
+        app.left_active = LeftPane::Endpoints; // (default; explicit for clarity)
+        app.dispatch(Action::ToggleExplorer, None).unwrap();
+        assert!(!app.explorer_hidden);
+        assert_eq!(app.focus, Pane::Explorer);
+    }
+
+    #[test]
+    fn leader_e_hide_falls_back_to_urlbar_without_prior() {
+        // No recorded prior pane (explorer focused from the start) → URL bar.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        assert_eq!(app.focus, Pane::Explorer);
+        app.dispatch(Action::ToggleExplorer, None).unwrap();
+        assert!(app.explorer_hidden);
+        assert_eq!(app.focus, Pane::UrlBar);
+    }
+
+    #[test]
+    fn z_still_noop_from_explorer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.zoom, None);
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, None, "z zooms only Request/Response");
+    }
+
     // ---- M6.7: URL popup editor ----
 
     fn app_with_endpoint(dir: &Path) -> App {

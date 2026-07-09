@@ -650,6 +650,59 @@ fn explorer_scrolls_to_keep_selection_visible() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
+/// A workspace fixture that also carries two sequences (for the PR-2b sub-pane
+/// snapshots). Mirrors [`fixture`] plus a `sequences/` dir.
+fn fixture_with_sequences(root: &Path) -> App {
+    fixture(root);
+    let seq_dir = root.join("sequences");
+    std::fs::create_dir(&seq_dir).unwrap();
+    for (i, name) in ["Login flow", "Checkout"].iter().enumerate() {
+        std::fs::write(
+            seq_dir.join(format!("s{i}.toml")),
+            format!("seq = {i}\nname = \"{name}\"\non_error = \"halt\"\n"),
+        )
+        .unwrap();
+    }
+    let workspace = open_workspace(root).unwrap();
+    App::new(workspace, KeyMap::default()).unwrap()
+}
+
+/// `<leader>S` (Space then Shift-s) shows the sequences sub-pane and focuses it:
+/// the endpoints tree collapses to a 3-row stub on top, sequences fill below.
+#[test]
+fn sequences_subpane_on_sequences_focused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = fixture_with_sequences(dir.path());
+    press(&mut app, KeyCode::Char(' ')); // leader
+    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// After showing the sub-pane, `s` (explorer overlay) switches focus back to the
+/// endpoints tree: endpoints fill the top, the sequences sub-pane collapses to a
+/// 3-row stub at the bottom.
+#[test]
+fn sequences_subpane_on_endpoints_focused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = fixture_with_sequences(dir.path());
+    press(&mut app, KeyCode::Char(' ')); // leader
+    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+        .unwrap();
+    press(&mut app, KeyCode::Char('s')); // switch back to endpoints
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// Regression: with the sub-pane OFF (default), the explorer column renders
+/// endpoints full-height exactly as before PR 2b — even when the workspace HAS
+/// sequences. Proves sequences left the tree without churning the column.
+#[test]
+fn sequences_subpane_off_matches_plain_explorer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = fixture_with_sequences(dir.path());
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
 /// The URL bar shows `METHOD  url` + right-aligned indicators when an endpoint
 /// with auth and `{{var}}` placeholders is selected.
 #[test]
