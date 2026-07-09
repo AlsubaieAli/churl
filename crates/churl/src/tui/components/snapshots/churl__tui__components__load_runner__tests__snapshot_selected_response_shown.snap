@@ -1,6 +1,5 @@
 ---
 source: crates/churl/src/tui/components/load_runner.rs
-assertion_line: 1574
 expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
@@ -11,9 +10,9 @@ expression: snapshot(&mut r)
 "      ┃1/2 done · 1 ok · range 42–42ms · p50/p95 42/42ms · avg 42ms  done                                    ┃      "
 "      ┃Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.                 ┃      "
 "      ┃┌ Results ─────────────────────────────┐┏ Response ━━━━━━━━━━━ 200 OK · 42 ms · 11 B · 1 header  [h] ┓┃      "
-"      ┃│✓ #1    200  42ms                     │┃{"ok":true}                                                 ┃┃      "
-"      ┃│· #2                                  │┃                                                            ┃┃      "
-"      ┃│                                      │┃                                                            ┃┃      "
+"      ┃│✓ #1    200  42ms                     │┃{                                                           ┃┃      "
+"      ┃│· #2                                  │┃  "ok": true                                                ┃┃      "
+"      ┃│                                      │┃}                                                           ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "

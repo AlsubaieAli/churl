@@ -31,6 +31,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("load test (pick endpoint)", Action::OpenLoadRunnerPick),
     ("toggle response headers view", Action::ToggleHeadersView),
     ("toggle response wrap", Action::ToggleWrap),
+    ("toggle response pretty/raw", Action::TogglePretty),
     ("import collection (JSON)", Action::ImportCollection),
     (
         "export collection · Postman v2.1",

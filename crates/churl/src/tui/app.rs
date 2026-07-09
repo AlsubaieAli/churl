@@ -1657,6 +1657,7 @@ impl App {
             }
             Action::ToggleHeadersView => self.response_toggle_headers(),
             Action::ToggleWrap => self.response_toggle_wrap(),
+            Action::TogglePretty => self.response_toggle_pretty(),
             Action::OpenBodySearch => self.open_body_search(),
             Action::SearchNext => self.response_search_step(true),
             Action::SearchPrev => self.response_search_step(false),
@@ -2162,6 +2163,29 @@ impl App {
         if let Some(view) = self.response_view_mut() {
             view.toggle_wrap();
             self.reset_response_geometry(false);
+        }
+    }
+
+    /// `p`: toggle raw↔pretty rendering of the body (M7.7). The body text and its
+    /// line count change (and `toggle_pretty` resets folds), so reset the
+    /// cursor/scroll geometry and clear the highlight cache. No-op with a notice
+    /// outside a JSON body view — pretty is JSON-only in v1 and would silently do
+    /// nothing otherwise.
+    fn response_toggle_pretty(&mut self) {
+        let is_json_body = match self.active_response() {
+            ResponseState::Done { view } => {
+                view.view_mode() == ViewMode::Body
+                    && view.syntax() == crate::tui::highlight::SyntaxToken::Json
+            }
+            _ => false,
+        };
+        if !is_json_body {
+            self.notify("pretty: JSON body only");
+            return;
+        }
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_pretty();
+            self.reset_response_geometry(true);
         }
     }
 

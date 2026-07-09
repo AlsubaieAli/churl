@@ -61,7 +61,14 @@ pub enum ViewMode {
 }
 
 /// The response pane's state machine.
+///
+/// The `Done` variant carries the full [`ResponseView`] inline (the common,
+/// hot path — read on every render). Boxing it to satisfy `large_enum_variant`
+/// would add an allocation + indirection on that path and ripple through ~20
+/// match sites for a variant that is almost always the live one, so we keep it
+/// inline and silence the lint here.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResponseState {
     /// No request has been sent yet.
     Idle,
@@ -158,9 +165,15 @@ impl Visible {
 /// so it all resets together when a new response replaces it.
 #[derive(Debug)]
 pub struct ResponseView {
-    /// Lossy-UTF-8 decode of the full body.
+    /// The body text as *displayed*: the pretty-reformatted body when `pretty`
+    /// is on and reformatting succeeded, otherwise the raw decoded body. Line
+    /// navigation, folds, wrap, search and highlighting all operate on this.
     text: String,
-    /// Byte offset of each line start. Empty for an empty body.
+    /// The raw, on-the-wire body — a lossy-UTF-8 decode of the exact response
+    /// bytes, never reformatted. Copy (`y`/`Y`) reads from here so it stays
+    /// byte-exact regardless of the pretty toggle.
+    raw_text: String,
+    /// Byte offset of each line start (into `text`). Empty for an empty body.
     line_offsets: Vec<usize>,
     /// The headers rendered as `name: value` lines, built lazily on first use.
     headers_text: String,
@@ -190,6 +203,12 @@ pub struct ResponseView {
     folded: HashSet<usize>,
     /// Whether soft-wrap is on.
     wrap: bool,
+    /// Whether the body is rendered pretty (reformatted) rather than raw.
+    /// Defaults to `true` on arrival for json-ish content-types (decision 2),
+    /// `false` otherwise. Toggled by `p` in the Response overlay. When on but the
+    /// body is not parseable JSON, the reformat silently falls back to raw and
+    /// `text == raw_text`.
+    pretty: bool,
     /// The active body search, when a search is live.
     search: Option<SearchState>,
 }
@@ -197,13 +216,19 @@ pub struct ResponseView {
 impl ResponseView {
     /// Builds the view from a response, indexing its line starts in one pass.
     pub fn build(response: &Response, generation: u64) -> Self {
-        let text = String::from_utf8_lossy(&response.body).into_owned();
-        let line_offsets = index_lines(&text);
+        let raw_text = String::from_utf8_lossy(&response.body).into_owned();
         let content_type = response
             .headers
             .iter()
             .find(|header| header.name.eq_ignore_ascii_case("content-type"))
             .map(|header| header.value.as_str());
+        let syntax = SyntaxToken::from_content_type(content_type);
+        // Pretty-by-default for json-ish content-types (decision 2); raw for
+        // everything else. The reformat is a transform *before* the fold/wrap/
+        // viewport stages — `text`/`line_offsets` describe what is displayed.
+        let pretty = syntax == SyntaxToken::Json;
+        let text = reformat_body_if_needed(&raw_text, syntax, pretty);
+        let line_offsets = index_lines(&text);
         // Build the headers text eagerly — it is tiny and lets the headers view
         // reuse the exact same pipeline with no lazy-init branches.
         let headers_text = response
@@ -214,7 +239,7 @@ impl ResponseView {
             .join("\n");
         let headers_offsets = index_lines(&headers_text);
         Self {
-            syntax: SyntaxToken::from_content_type(content_type),
+            syntax,
             byte_size: response.body.len(),
             truncated: response.truncated,
             status: response.status,
@@ -223,12 +248,14 @@ impl ResponseView {
             generation,
             line_offsets,
             text,
+            raw_text,
             headers_text,
             headers_offsets,
             view_mode: ViewMode::Body,
             folds: None,
             folded: HashSet::new(),
             wrap: false,
+            pretty,
             search: None,
         }
     }
@@ -256,6 +283,11 @@ impl ResponseView {
     /// Whether wrap is on.
     pub fn wrap(&self) -> bool {
         self.wrap
+    }
+
+    /// Whether the body is currently rendered pretty (reformatted).
+    pub fn pretty(&self) -> bool {
+        self.pretty
     }
 
     /// Whether the body was truncated at the size cap (only meaningful for the
@@ -361,6 +393,28 @@ impl ResponseView {
     /// Toggles soft-wrap.
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
+    }
+
+    /// Toggles raw↔pretty rendering of the body (`p`). Rebuilds the displayed
+    /// `text` and its line index from the raw body, bumps the generation (so the
+    /// viewport highlight cache invalidates), and **resets folds** — fold openers
+    /// are position-based and the line layout changes between raw and pretty.
+    /// Toggling to raw yields exactly the on-the-wire bytes (`text == raw_text`);
+    /// toggling to pretty over unparseable JSON silently keeps the raw text.
+    /// Returns the new `pretty` state.
+    pub fn toggle_pretty(&mut self) -> bool {
+        self.pretty = !self.pretty;
+        self.text = reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty);
+        self.line_offsets = index_lines(&self.text);
+        self.generation = self.generation.wrapping_add(1);
+        self.folds = None;
+        self.folded.clear();
+        // The line layout changes drastically raw↔pretty, so any live search's
+        // `(logical_line, byte_start, byte_end)` matches now point at the wrong
+        // lines/offsets. Clear it (same guard as `toggle_view_mode`) rather than
+        // leave a lying `k/N` counter and mispainted overlays.
+        self.search = None;
+        self.pretty
     }
 
     // ---- folding ----
@@ -601,20 +655,43 @@ impl ResponseView {
 
     // ---- copy payloads ----
 
-    /// The full text of the current view (body as decoded, or the headers text),
-    /// for the copy-view action.
+    /// The full text of the current view for the copy-view action (`y`). In the
+    /// body view this is the **raw on-the-wire** body, NOT the reformatted text —
+    /// copy stays byte-exact regardless of the pretty toggle (decision 3). In the
+    /// headers view it is the headers text.
     pub fn copy_all(&self) -> &str {
-        self.source_text()
+        match self.view_mode {
+            ViewMode::Body => &self.raw_text,
+            ViewMode::Headers => &self.headers_text,
+        }
     }
 
-    /// The text of the logical line at `logical` (the copy-line action). Returns
-    /// an owned string because CRLF stripping may borrow a sub-slice.
+    /// The text of the logical line at `logical` (the copy-line action, `Y`) — the
+    /// line currently under the cursor as displayed. Returns an owned string
+    /// because CRLF stripping may borrow a sub-slice.
     pub fn copy_line(&self, logical: usize) -> String {
         if logical < self.source_line_count() {
             self.logical_line(logical).to_owned()
         } else {
             String::new()
         }
+    }
+}
+
+/// Reformats a response body for display when the viewer is in pretty mode and
+/// the body is JSON (decision 1: JSON-only in v1). Parses `text` as a
+/// `serde_json::Value` and re-emits it with `to_string_pretty`. On **any** parse
+/// error — or when `pretty` is off, or the syntax is not JSON — the original
+/// `text` is returned unchanged (silent raw fallback; never errors, never
+/// panics, decision 2). Returns an owned string so the caller can store it as the
+/// displayed body.
+fn reformat_body_if_needed(text: &str, syntax: SyntaxToken, pretty: bool) -> String {
+    if !pretty || syntax != SyntaxToken::Json {
+        return text.to_owned();
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned()),
+        Err(_) => text.to_owned(),
     }
 }
 
@@ -1263,6 +1340,9 @@ fn viewport_hash(view: &ResponseView, scroll: usize, height: usize) -> u64 {
     scroll.hash(&mut hasher);
     height.hash(&mut hasher);
     view.syntax.hash(&mut hasher);
+    // Raw↔pretty changes the displayed text, so it must key the highlight cache
+    // (belt-and-braces alongside the generation bump `toggle_pretty` already does).
+    view.pretty.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1622,7 +1702,9 @@ mod tests {
     fn set_search_auto_unfolds_first_match() {
         // Fold everything, then start typing a query whose first match is
         // buried inside the fold — set_search itself must unfold it (the
-        // incremental-typing jump, not just n/N).
+        // incremental-typing jump, not just n/N). The reformatter preserves wire
+        // key order (preserve_order), so `needle` stays on line 1 after the
+        // (already-pretty) body is canonicalised.
         let body = "{\n  \"needle\": 1,\n  \"b\": 2\n}";
         let mut v = json_view(body);
         assert!(v.toggle_all_folds()); // collapse all
@@ -1688,6 +1770,156 @@ mod tests {
         assert_eq!(v.copy_all(), "line one\nline two");
         assert_eq!(v.copy_line(1), "line two");
         assert_eq!(v.copy_line(99), "");
+    }
+
+    // ---- M7.7: JSON response reformatter + pretty toggle ----
+
+    #[test]
+    fn minified_json_renders_pretty_by_default() {
+        // petstore-style: minified single-line JSON must arrive multi-line.
+        let v = json_view(r#"{"id":1,"tags":["a","b"],"nested":{"x":true}}"#);
+        assert!(v.pretty(), "json-ish content-type defaults to pretty");
+        assert!(
+            v.line_count() > 1,
+            "minified single-line JSON should render as multiple lines, got {}",
+            v.line_count()
+        );
+        // The pretty text is what serde_json emits.
+        let expected = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":1,"tags":["a","b"],"nested":{"x":true}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v.text, expected);
+    }
+
+    #[test]
+    fn non_json_content_type_is_not_pretty() {
+        // A plain-text body is never reformatted (pretty defaults off).
+        let v = view("{\"a\":1}");
+        assert!(!v.pretty());
+        assert_eq!(v.text, "{\"a\":1}");
+    }
+
+    #[test]
+    fn toggle_pretty_to_raw_is_byte_exact() {
+        let raw = r#"{"id":1,"tags":["a","b"]}"#;
+        let mut v = json_view(raw);
+        assert!(v.pretty());
+        // Displayed text is pretty; raw source is the exact on-the-wire bytes.
+        assert_ne!(v.text, raw);
+        // Toggle to raw → displayed text is exactly the original bytes.
+        assert!(!v.toggle_pretty());
+        assert_eq!(v.text, raw);
+        assert_eq!(v.copy_all(), raw);
+        // Toggle back to pretty → reformatted again, and idempotent.
+        assert!(v.toggle_pretty());
+        assert_eq!(
+            v.text,
+            serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(raw).unwrap())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_json_falls_back_to_raw_no_panic() {
+        // Not valid JSON despite the json content-type: stay raw, never error.
+        let raw = "{ this is not json ]";
+        let v = json_view(raw);
+        assert!(v.pretty(), "pretty flag is on (json content-type)");
+        // But the displayed text is the untouched raw body (silent fallback).
+        assert_eq!(v.text, raw);
+        assert_eq!(v.line_count(), 1);
+        assert_eq!(v.copy_all(), raw);
+    }
+
+    #[test]
+    fn toggle_pretty_bumps_generation_and_resets_folds() {
+        let mut v = json_view(r#"{"a":{"b":1},"c":2}"#);
+        let gen0 = v.generation();
+        // Fold something on the pretty text.
+        assert!(v.toggle_all_folds());
+        assert!(!v.folded.is_empty());
+        // Toggle to raw: generation bumps (cache invalidation) and folds reset.
+        v.toggle_pretty();
+        assert_ne!(v.generation(), gen0, "generation must bump on toggle");
+        assert!(v.folds.is_none(), "folds must reset to unscanned");
+        assert!(v.folded.is_empty(), "folded openers must clear");
+    }
+
+    #[test]
+    fn fold_and_wrap_operate_on_pretty_text() {
+        // Minified input → pretty multi-line; folding + wrap work on the result.
+        let mut v = json_view(r#"{"outer":{"inner":1,"more":2},"tail":3}"#);
+        assert!(v.pretty());
+        assert!(v.line_count() > 1);
+        // Fold the top-level object.
+        assert!(v.folding_supported());
+        assert!(v.toggle_all_folds());
+        let headers = v
+            .visible_map()
+            .iter()
+            .filter(|x| matches!(x, Visible::FoldHeader { .. }))
+            .count();
+        assert!(headers >= 1, "a fold header should appear on pretty text");
+        // Wrap expansion over the pretty lines yields >= line_count rows.
+        v.toggle_all_folds(); // expand back
+        let visible = v.visible_map();
+        let rows = expand_wrap(&v, &visible, true, 4);
+        assert!(rows.len() >= v.line_count());
+    }
+
+    #[test]
+    fn toggle_pretty_clears_search() {
+        // A live search's matches are (logical_line, byte_start, byte_end) against
+        // the OLD text; the raw↔pretty line layout differs, so a carried-over
+        // search would lie about counts and mispaint overlays. Mirror
+        // `view_toggle_clears_search`.
+        let mut v = json_view(r#"{"needle":1,"other":2}"#);
+        v.set_search("needle".to_owned());
+        assert!(v.search().is_some());
+        assert!(v.search().unwrap().count() >= 1);
+        v.toggle_pretty();
+        assert!(v.search().is_none(), "toggle_pretty must clear the search");
+    }
+
+    #[test]
+    fn truncated_json_falls_back_to_raw_and_keeps_marker() {
+        // A body cut off at the size cap is not valid JSON — it must render raw
+        // (no panic) while still reporting truncation.
+        let response = Response {
+            status: 200,
+            headers: vec![Header {
+                name: "Content-Type".to_owned(),
+                value: "application/json".to_owned(),
+                enabled: true,
+            }],
+            // Truncated mid-object: unparseable.
+            body: br#"{"items":[{"id":1},{"id":2},{"na"#.to_vec(),
+            truncated: true,
+            timing: Timing {
+                connect: None,
+                total: Duration::from_millis(5),
+            },
+        };
+        let v = ResponseView::build(&response, 1);
+        assert!(v.pretty(), "json content-type still flags pretty");
+        // But the malformed (truncated) body stays raw — no reformat, no panic.
+        assert_eq!(v.text, r#"{"items":[{"id":1},{"id":2},{"na"#);
+        assert_eq!(v.line_count(), 1);
+        assert!(v.truncated(), "truncation marker is preserved");
+    }
+
+    #[test]
+    fn copy_all_is_raw_even_when_pretty() {
+        // `y` copies raw on-the-wire bytes even while the body is shown pretty.
+        let raw = r#"{"id":1,"name":"x"}"#;
+        let v = json_view(raw);
+        assert!(v.pretty());
+        assert_ne!(v.text, raw, "displayed text is pretty");
+        assert_eq!(v.copy_all(), raw, "copy must be the raw bytes");
     }
 
     #[test]
