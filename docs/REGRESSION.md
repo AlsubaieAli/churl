@@ -44,6 +44,7 @@ binary, so the built commit is recorded below every pass.
 - [ ] Cancel a running batch → launched-then-cancelled rows show a real `{}ms` time-to-cancel next to the cancelled glyph.
 - [ ] Never-launched (pending) rows show a blank duration (no fabricated zero).
 - [ ] The run writes exactly one summary row to `load_batches` (not per-copy history).
+- [ ] A large run (e.g. total 500) stays memory-bounded — scrolling to old completed rows shows a "response body not retained (memory-bounded)" placeholder for evicted rows, while the last ~16 + the selected row show real bodies; stats (ok/failed/percentiles) are correct over the whole run. (R0)
 
 ## Env editor
 - [ ] `<leader>v` opens the environments & vars editor; scope list + rows render with live precedence.
@@ -56,6 +57,10 @@ binary, so the built commit is recorded below every pass.
 ## Response viewer
 - [ ] Send a request → response renders; cursor / headers toggle / wrap / fold / search / copy all work.
 - [ ] Large body is truncated with the truncation status; folding JSON regions works.
+
+## Persistence durability
+- [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)
+- [ ] Save leaves no `.<name>.<pid>.<n>.tmp` sibling files behind in the collection/workspace directory. (R0)
 
 ## Import / export
 - [ ] `churl import "curl ..."` produces the expected endpoint.
