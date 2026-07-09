@@ -1,0 +1,29 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1351
+expression: snapshot(&mut app)
+---
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
+┃> ▸ orders                  ┃│no endpoint selected                            │
+┃  ▸ users                   ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Request ───────────────────────────────────────┐
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                  ┏ leader · load ━━━━━━━━━━━━━━┓
+┃                            ┃│                  ┃ c  load test endpoint       ┃
+┃                            ┃│                  ┃ f  load test (pick endpoint)┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ EXPLORER · demo · ? help · space leader · / search · : palette

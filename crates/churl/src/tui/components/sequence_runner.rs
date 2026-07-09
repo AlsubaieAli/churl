@@ -434,6 +434,8 @@ fn progress_line(state: &SequenceRunnerState) -> String {
 /// into the highlight worker (mirrors the main response pane). The `cache` is the
 /// app's shared viewport-hash → highlighted-lines cache.
 #[must_use]
+/// Renders the runner — the Run face of the unified sequence surface (title
+/// carries the `Ctrl-R` edit hint).
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -450,10 +452,11 @@ pub fn render(
         .areas(modal);
 
     frame.render_widget(Clear, modal);
+    let title = format!(" Sequence · {} · RUN (^R edit) ", state.name);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Sequence · {} ", state.name))
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);

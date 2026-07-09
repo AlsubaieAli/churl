@@ -145,6 +145,11 @@ impl SequenceEditorState {
         &self.path
     }
 
+    /// The sequence's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Whether the working copy differs from the snapshot.
     pub fn is_dirty(&self) -> bool {
         (self.on_error, &self.steps) != (self.snapshot.0, &self.snapshot.1)
@@ -492,6 +497,8 @@ impl SequenceEditorState {
 }
 
 /// Renders the sequence editor over `area`.
+/// Renders the sequence editor — the Edit face of the unified sequence surface
+/// (title carries the `Ctrl-R` run hint).
 pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)
@@ -502,10 +509,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
 
     frame.render_widget(Clear, modal);
     let dirty = if state.is_dirty() { " ●" } else { "" };
+    let title = format!(" Sequence · {}{dirty} · EDIT (^R run) ", state.name);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Edit sequence · {}{dirty} ", state.name))
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);

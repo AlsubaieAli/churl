@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1331
+assertion_line: 1341
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -14,16 +14,16 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃└────────────────────┃ c  cancel request         ┃
-┃                            ┃┌ Response ──────────┃ e  toggle explorer sidebar┃
-┃                            ┃│no response yet     ┃ f  request picker         ┃
-┃                            ┃│                    ┃ p  switch profile         ┃
-┃                            ┃│no endpoint selected┃ q  quit                   ┃
-┃                            ┃│                    ┃ v  Environments & vars    ┃
-┃                            ┃│                    ┃ w  workspace picker       ┃
-┃                            ┃│                    ┃ y  copy request as curl   ┃
-┃                            ┃│                    ┃ l  ▸ load                 ┃
-┃                            ┃│                    ┃ s  ▸ sequences            ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                        ┏ leader · sequences ━━━┓
+┃                            ┃│                        ┃ a  add sequence       ┃
+┃                            ┃│                        ┃ o  open sequence      ┃
+┃                            ┃│                        ┃ r  run sequence       ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

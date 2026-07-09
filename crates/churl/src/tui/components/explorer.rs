@@ -421,6 +421,15 @@ impl ExplorerState {
         Ok(out)
     }
 
+    /// Every loaded sequence as `(name, file)`, in explorer order — for the
+    /// `<leader>s o` "open sequence" picker.
+    pub fn all_sequences(&self) -> Vec<(String, PathBuf)> {
+        self.sequences
+            .iter()
+            .map(|(file, sequence)| (sequence.name.clone(), file.clone()))
+            .collect()
+    }
+
     /// Loads every collection's endpoints (for fuzzy search) and returns
     /// `(display path, collection index, endpoint index)` for each endpoint.
     pub fn all_endpoints(&mut self) -> Result<Vec<(String, usize, usize)>, PersistenceError> {

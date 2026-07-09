@@ -57,7 +57,7 @@ use super::components::{
     env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
     request, response, sequence_editor, sequence_runner, statusline, urlbar,
 };
-use super::events::{Action, FuzzyFinder, KeyMap, PaneCtx};
+use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, LeaderMenu, PaneCtx};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
 
@@ -121,6 +121,9 @@ pub enum Mode {
     Palette,
     /// The quick-jump workspace picker overlay is open (M7.2).
     WorkspacePicker,
+    /// The "open sequence" picker overlay is open (`<leader>s o`): a fuzzy list
+    /// of sequence names; accepting one opens the unified sequence surface.
+    SequencePicker,
     /// Jump-mode: label-driven pane/row navigation overlay.
     Jump,
     /// The method-picker menu is open (URL bar `M`).
@@ -134,12 +137,10 @@ pub enum Mode {
     /// The environments & variables editor (M7.3): a modal split-view that grabs
     /// every key (same routing tier as Search/Palette/Picker).
     EnvEditor,
-    /// The sequence runner (M7.4): a large modal driving a request sequence and
-    /// showing live per-step status + each step's response.
-    SequenceRunner,
-    /// The in-app sequence editor (M7.4 §4): edit steps, extraction rules, and
-    /// `on_error`; saved through `save_sequence`.
-    SequenceEditor,
+    /// The unified sequence surface (M7.4): ONE modal with an edit⇄run switcher
+    /// (`Ctrl-R`). The active face is [`App::sequence_view`]; the Edit face drives
+    /// the step/extraction editor, the Run face drives + shows the live run.
+    Sequence,
     /// The concurrent-load runner (M7.5): a large modal firing N copies of the
     /// selected endpoint with live results + latency stats.
     LoadRunner,
@@ -276,6 +277,26 @@ pub enum AppMsg {
     },
 }
 
+/// The active level of the two-level which-key leader popup. `None` (the field's
+/// resting value) means no leader chord is in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderState {
+    /// The root which-key popup: direct binds + submenu prefixes.
+    Root,
+    /// A nested submenu is open (`<leader>s …` / `<leader>l …`).
+    Submenu(LeaderMenu),
+}
+
+/// The active face of the unified sequence surface ([`Mode::Sequence`]). `Ctrl-R`
+/// flips between them; the two component states persist across a flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeqView {
+    /// The step/extraction editor face.
+    Edit,
+    /// The live-run face.
+    Run,
+}
+
 /// Which pane is zoomed (the other collapses to a stub). See deliverable 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoomPane {
@@ -333,6 +354,13 @@ pub struct App {
     /// with the picker items). Non-empty only while `mode` is
     /// [`Mode::WorkspacePicker`].
     workspace_choices: Vec<PathBuf>,
+    /// Sequence files behind an open [`Mode::SequencePicker`] (index-aligned with
+    /// the picker items). Non-empty only while that picker is open.
+    sequence_choices: Vec<PathBuf>,
+    /// One-shot flag: the endpoint search overlay was opened to pick a target for
+    /// the load runner (`<leader>l f`). Set on open, consumed + cleared when the
+    /// pick lands (the endpoint loads, then the load runner opens over it).
+    load_runner_after_pick: bool,
     /// Active jump-mode state, when `mode` is [`Mode::Jump`].
     pub jump: Option<JumpState>,
     keymap: KeyMap,
@@ -415,8 +443,9 @@ pub struct App {
     zoom: Option<ZoomPane>,
     /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
     explorer_hidden: bool,
-    /// True while in pending-leader state (the which-key popup is shown).
-    pending_leader: bool,
+    /// The active leader chord, or `None` when no chord is in progress. `Some`
+    /// drives the two-level which-key popup (root ⇄ submenu).
+    leader: Option<LeaderState>,
     /// Whether the `?` help overlay is open.
     help_open: bool,
     /// Scroll offset of the help overlay.
@@ -434,12 +463,17 @@ pub struct App {
     url_edit_mode: UrlEditMode,
     /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
     env_editor: Option<EnvEditorState>,
-    /// The open sequence runner (M7.4), when `Mode::SequenceRunner`.
+    /// The unified sequence surface's run-face state (M7.4), when
+    /// `Mode::Sequence`. Built lazily on the first run (Edit-only sessions never
+    /// allocate it); persists across face flips.
     sequence_runner: Option<SequenceRunnerState>,
     /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
     sequence_abort: Option<AbortHandle>,
-    /// The open sequence editor (M7.4 §4), when `Mode::SequenceEditor`.
+    /// The unified sequence surface's edit-face state (M7.4 §4), when
+    /// `Mode::Sequence`. Built when the surface opens; persists across face flips.
     sequence_editor: Option<SequenceEditorState>,
+    /// The active face of the unified sequence surface (Edit vs Run).
+    sequence_view: SeqView,
     /// The open concurrent-load runner (M7.5), when `Mode::LoadRunner`.
     load_runner: Option<LoadRunnerState>,
     /// Abort handle for the single load-batch launcher task; aborting it drops
@@ -535,6 +569,8 @@ impl App {
             palette_actions: Vec::new(),
             profile_choices: Vec::new(),
             workspace_choices: Vec::new(),
+            sequence_choices: Vec::new(),
+            load_runner_after_pick: false,
             jump: None,
             keymap,
             theme: Theme::default(),
@@ -570,7 +606,7 @@ impl App {
             pending_load: None,
             zoom: None,
             explorer_hidden: false,
-            pending_leader: false,
+            leader: None,
             help_open: false,
             help_scroll: 0,
             help_viewport_height: 10,
@@ -582,6 +618,7 @@ impl App {
             sequence_runner: None,
             sequence_abort: None,
             sequence_editor: None,
+            sequence_view: SeqView::Edit,
             load_runner: None,
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
@@ -809,11 +846,13 @@ impl App {
         if self.url_popup.is_some() {
             return self.handle_url_popup_key(key);
         }
-        if self.pending_leader {
+        if self.leader.is_some() {
             return self.handle_leader_key(key);
         }
         match self.mode {
-            Mode::Search | Mode::Palette | Mode::WorkspacePicker => self.handle_overlay_key(key),
+            Mode::Search | Mode::Palette | Mode::WorkspacePicker | Mode::SequencePicker => {
+                self.handle_overlay_key(key)
+            }
             Mode::Jump => self.handle_jump_key(key),
             Mode::MethodMenu => {
                 self.handle_method_menu_key(key);
@@ -826,8 +865,7 @@ impl App {
             Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
             Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
             Mode::EnvEditor => self.handle_env_editor_key(key),
-            Mode::SequenceRunner => self.handle_sequence_runner_key(key),
-            Mode::SequenceEditor => self.handle_sequence_editor_key(key),
+            Mode::Sequence => self.handle_sequence_key(key),
             Mode::LoadRunner => self.handle_load_runner_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
@@ -880,7 +918,7 @@ impl App {
         //    enters pending-leader state and shows the which-key popup. Inside an
         //    edit, control never reaches here — Space types a space.
         if self.keymap.is_leader(key) {
-            self.pending_leader = true;
+            self.leader = Some(LeaderState::Root);
             return Ok(());
         }
         // 5. Keymap: the focused pane's overlay wins over the global map.
@@ -909,18 +947,53 @@ impl App {
         }
     }
 
-    /// Handles one key in pending-leader state: a bound continuation dispatches
-    /// its action (and dismisses the popup); any unbound key or Esc dismisses.
+    /// The two-level which-key state machine. At Root: Esc/unknown cancel, a
+    /// direct action dispatches (and closes), a submenu prefix descends. In a
+    /// submenu: Esc backs out ONE level to Root, a bound key dispatches (and
+    /// closes), an unknown key cancels. (A second Esc from Root cancels — "Esc
+    /// backs out one level then cancels".)
     fn handle_leader_key(&mut self, key: KeyEvent) -> Result<()> {
-        self.pending_leader = false;
-        if key.code == KeyCode::Esc {
+        let Some(state) = self.leader else {
             return Ok(());
+        };
+        match state {
+            LeaderState::Root => {
+                if key.code == KeyCode::Esc {
+                    self.leader = None;
+                    return Ok(());
+                }
+                match self.keymap.leader_root_lookup(key) {
+                    Some(LeaderEntry::Act(action)) => {
+                        self.leader = None;
+                        self.dispatch(action, Some(key))
+                    }
+                    Some(LeaderEntry::Submenu(menu)) => {
+                        self.leader = Some(LeaderState::Submenu(menu));
+                        Ok(())
+                    }
+                    None => {
+                        self.leader = None;
+                        Ok(())
+                    }
+                }
+            }
+            LeaderState::Submenu(menu) => {
+                if key.code == KeyCode::Esc {
+                    self.leader = Some(LeaderState::Root);
+                    return Ok(());
+                }
+                match self.keymap.leader_sub_lookup(menu, key) {
+                    Some(action) => {
+                        self.leader = None;
+                        self.dispatch(action, Some(key))
+                    }
+                    None => {
+                        self.leader = None;
+                        Ok(())
+                    }
+                }
+            }
         }
-        if let Some(action) = self.keymap.leader_lookup(key) {
-            return self.dispatch(action, Some(key));
-        }
-        // Unbound continuation: dismiss silently (already done).
-        Ok(())
     }
 
     /// Handles one key while the `?` help overlay is open: `?`/Esc/`q` close;
@@ -1026,7 +1099,7 @@ impl App {
             Action::ToggleExplorer => self.toggle_explorer(),
             Action::Zoom => self.toggle_zoom(),
             Action::Help => self.help_open = true,
-            Action::Leader => self.pending_leader = true,
+            Action::Leader => self.leader = Some(LeaderState::Root),
             Action::EditUrlPopup => self.begin_url_popup(),
             Action::OpenSearch => self.open_search()?,
             Action::OpenPalette => self.open_palette(),
@@ -1035,7 +1108,9 @@ impl App {
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
+            Action::OpenSequencePicker => self.open_sequence_picker(),
             Action::OpenLoadRunner => self.open_load_runner(),
+            Action::OpenLoadRunnerPick => self.open_load_runner_pick()?,
             Action::Send => self.send_request(),
             Action::Cancel => self.cancel_request(),
             Action::Save => self.save_request(),
@@ -1912,6 +1987,40 @@ impl App {
         self.open_sequence_runner(selected);
     }
 
+    /// `<leader>s o` / palette: opens a fuzzy picker over every sequence name.
+    /// Accepting one opens the unified sequence surface in the Edit face.
+    fn open_sequence_picker(&mut self) {
+        if self.workspace.is_none() {
+            self.notify("open a workspace first");
+            return;
+        }
+        let sequences = self.explorer.all_sequences();
+        if sequences.is_empty() {
+            self.notify("no sequences in this workspace");
+            return;
+        }
+        let mut items = Vec::with_capacity(sequences.len());
+        let mut choices = Vec::with_capacity(sequences.len());
+        for (name, file) in sequences {
+            items.push(name);
+            choices.push(file);
+        }
+        self.sequence_choices = choices;
+        self.picker = Some(picker::PickerState::new(" Open sequence ", items));
+        self.mode = Mode::SequencePicker;
+    }
+
+    /// Loads the sequence at `path` and opens the unified surface (Edit face).
+    fn open_picked_sequence(&mut self, path: PathBuf) -> Result<()> {
+        match persistence::load_sequence(&path) {
+            Ok(sequence) => {
+                self.open_sequence_editor(sequence.name.clone(), path, &sequence);
+            }
+            Err(err) => self.crud_error(err),
+        }
+        Ok(())
+    }
+
     /// Opens the runner over `selected` and starts the run.
     fn open_sequence_runner(&mut self, selected: super::components::explorer::SelectedSequence) {
         let steps = churl_core::sequence::ordered_steps(&selected.sequence)
@@ -1924,7 +2033,8 @@ impl App {
             selected.sequence.on_error,
             steps,
         ));
-        self.mode = Mode::SequenceRunner;
+        self.mode = Mode::Sequence;
+        self.sequence_view = SeqView::Run;
         self.start_sequence_run();
     }
 
@@ -2132,23 +2242,106 @@ impl App {
         self.notify("run cancelled");
     }
 
-    /// Routes a key to the open sequence runner and acts on its outcome.
-    fn handle_sequence_runner_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(runner) = self.sequence_runner.as_mut() else {
-            self.mode = Mode::Normal;
+    /// Routes a key to the unified sequence surface. `Ctrl-R` flips the Edit⇄Run
+    /// face (a switcher, not a nav-law key, free in both components); otherwise
+    /// the key goes to the active face's handler. Per-face `Esc`/`q` semantics
+    /// stay isolated — the Run-face confirm-on-close-while-running never fires in
+    /// the Edit face because Edit keys never reach the runner.
+    fn handle_sequence_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_sequence_view();
             return Ok(());
-        };
-        match runner.handle_key(key) {
-            RunnerOutcome::Consumed => {}
-            RunnerOutcome::Rerun => self.start_sequence_run(),
-            RunnerOutcome::Cancel => self.cancel_sequence_run(),
-            RunnerOutcome::Close => self.close_sequence_runner(),
+        }
+        match self.sequence_view {
+            SeqView::Edit => {
+                let Some(editor) = self.sequence_editor.as_mut() else {
+                    self.close_sequence_surface();
+                    return Ok(());
+                };
+                match editor.handle_key(key) {
+                    EditorOutcome::Consumed => {}
+                    EditorOutcome::Save => {
+                        self.save_sequence_editor()?;
+                    }
+                    EditorOutcome::SaveAndClose => {
+                        if self.save_sequence_editor()? {
+                            self.close_sequence_surface();
+                        }
+                    }
+                    EditorOutcome::Close => self.close_sequence_surface(),
+                }
+            }
+            SeqView::Run => {
+                let Some(runner) = self.sequence_runner.as_mut() else {
+                    self.close_sequence_surface();
+                    return Ok(());
+                };
+                match runner.handle_key(key) {
+                    RunnerOutcome::Consumed => {}
+                    RunnerOutcome::Rerun => self.start_sequence_run(),
+                    RunnerOutcome::Cancel => self.cancel_sequence_run(),
+                    RunnerOutcome::Close => self.close_sequence_surface(),
+                }
+            }
         }
         Ok(())
     }
 
-    /// Closes the runner, aborting any in-flight step.
-    fn close_sequence_runner(&mut self) {
+    /// Flips the sequence surface's face. Run→Edit is always safe. Edit→Run is
+    /// gated on the saved sequence being the single source of truth: a DIRTY
+    /// editor blocks with a notify (no auto-save, no stale run); a clean editor
+    /// (re)builds the runner from the saved steps before switching. The run
+    /// itself is never auto-started here — the user presses `r` in the Run face.
+    fn toggle_sequence_view(&mut self) {
+        match self.sequence_view {
+            SeqView::Run => self.sequence_view = SeqView::Edit,
+            SeqView::Edit => {
+                let Some(editor) = self.sequence_editor.as_ref() else {
+                    return;
+                };
+                if editor.is_dirty() {
+                    self.notify("save (w) before running");
+                    return;
+                }
+                let sequence = match editor.to_sequence_checked() {
+                    Ok(sequence) => sequence,
+                    Err(msg) => {
+                        self.notify(msg);
+                        return;
+                    }
+                };
+                let name = editor.name().to_owned();
+                let file = editor.path().to_owned();
+                let steps = churl_core::sequence::ordered_steps(&sequence)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                // A prior run's in-flight step survives a Run→Edit flip (the abort
+                // handle is kept alive). Rebuilding the runner here without aborting
+                // it would ORPHAN that async step — a real POST/DELETE running to
+                // completion in the background with no UI. Abort + bump the old
+                // generation first (mirrors start_sequence_run/close), so a landed
+                // straggler is also dropped by the generation guard.
+                if let Some(handle) = self.sequence_abort.take() {
+                    handle.abort();
+                }
+                if let Some(runner) = self.sequence_runner.as_mut() {
+                    runner.run_generation += 1;
+                }
+                self.sequence_runner = Some(SequenceRunnerState::new(
+                    name,
+                    file,
+                    sequence.on_error,
+                    steps,
+                ));
+                self.sequence_view = SeqView::Run;
+            }
+        }
+    }
+
+    /// Closes the unified sequence surface: aborts any in-flight step, drops both
+    /// component states, and returns to Normal.
+    fn close_sequence_surface(&mut self) {
         if let Some(handle) = self.sequence_abort.take() {
             handle.abort();
         }
@@ -2157,6 +2350,8 @@ impl App {
             runner.run_generation += 1;
         }
         self.sequence_runner = None;
+        self.sequence_editor = None;
+        self.sequence_view = SeqView::Edit;
         self.mode = Mode::Normal;
     }
 
@@ -2199,6 +2394,16 @@ impl App {
             LoadConfig::default(),
         ));
         self.mode = Mode::LoadRunner;
+    }
+
+    /// `<leader>l f` / palette: pick an endpoint via the fuzzy search overlay,
+    /// then open the load runner over it. Reuses the endpoint-search overlay + its
+    /// dirty-safe load path; a one-shot flag makes `accept_overlay` chain into
+    /// `open_load_runner` once the endpoint has loaded.
+    fn open_load_runner_pick(&mut self) -> Result<()> {
+        self.open_search()?;
+        self.load_runner_after_pick = true;
+        Ok(())
     }
 
     /// `r` in the runner: classify the config against the guardrail caps and act.
@@ -2524,7 +2729,10 @@ impl App {
     ) {
         let endpoints = self.endpoint_rel_paths();
         self.sequence_editor = Some(SequenceEditorState::new(name, file, sequence, endpoints));
-        self.mode = Mode::SequenceEditor;
+        // A fresh open starts with no run built; the run face is entered lazily.
+        self.sequence_runner = None;
+        self.mode = Mode::Sequence;
+        self.sequence_view = SeqView::Edit;
     }
 
     /// Commits the "new sequence" name prompt: creates the file and opens the
@@ -2541,27 +2749,6 @@ impl App {
                 self.open_sequence_editor(sequence.name.clone(), path, &sequence);
             }
             Err(err) => self.crud_error(err),
-        }
-        Ok(())
-    }
-
-    /// Routes a key to the open sequence editor and acts on its outcome.
-    fn handle_sequence_editor_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(editor) = self.sequence_editor.as_mut() else {
-            self.mode = Mode::Normal;
-            return Ok(());
-        };
-        match editor.handle_key(key) {
-            EditorOutcome::Consumed => {}
-            EditorOutcome::Save => {
-                self.save_sequence_editor()?;
-            }
-            EditorOutcome::SaveAndClose => {
-                if self.save_sequence_editor()? {
-                    self.close_sequence_editor();
-                }
-            }
-            EditorOutcome::Close => self.close_sequence_editor(),
         }
         Ok(())
     }
@@ -2598,17 +2785,15 @@ impl App {
         }
     }
 
-    /// Closes the editor and returns to normal mode.
-    fn close_sequence_editor(&mut self) {
-        self.sequence_editor = None;
-        self.mode = Mode::Normal;
-    }
-
     fn close_overlay(&mut self) {
         self.picker = None;
         self.profile_choices.clear();
         self.workspace_choices.clear();
+        self.sequence_choices.clear();
         self.auth_picker = false;
+        // Clear the one-shot `<leader>l f` intent so an Esc-cancelled pick never
+        // leaks into the NEXT plain `<leader>f` / `/` search.
+        self.load_runner_after_pick = false;
         self.mode = Mode::Normal;
     }
 
@@ -2671,6 +2856,11 @@ impl App {
         // close_overlay() clears them.
         let profile_choices = std::mem::take(&mut self.profile_choices);
         let workspace_choices = std::mem::take(&mut self.workspace_choices);
+        let sequence_choices = std::mem::take(&mut self.sequence_choices);
+        // Capture the one-shot load-runner-after-pick intent BEFORE close_overlay
+        // clears it, so an empty-result Enter (early-return below) still drops the
+        // flag while a real pick can act on it.
+        let after_pick = std::mem::take(&mut self.load_runner_after_pick);
         let auth_picker = self.auth_picker;
         self.close_overlay();
         let Some(index) = current else {
@@ -2682,6 +2872,9 @@ impl App {
         }
         match mode {
             Mode::Search => {
+                // `after_pick` (captured above, always cleared) carries a pending
+                // `<leader>l f` intent — it can never leak into a later plain
+                // `<leader>f` / `/` search.
                 if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
                     self.focus = Pane::Explorer;
                     // jump_to only navigates (expand + cursor); the load itself
@@ -2690,6 +2883,22 @@ impl App {
                     if let Some(selected) = self.explorer.jump_to(collection, endpoint)? {
                         self.guarded_load(PendingLoad::File(selected.file.clone()))?;
                     }
+                    // Only open the load runner if the endpoint actually loaded.
+                    // When the editor is dirty and the picked endpoint differs,
+                    // `guarded_load` DEFERS into a discard-changes confirm and does
+                    // not load — opening the runner then would fire over the STALE
+                    // selection, so skip it. (The user re-triggers after resolving
+                    // the confirm.)
+                    let deferred =
+                        matches!(self.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+                    if after_pick && !deferred {
+                        self.open_load_runner();
+                    }
+                }
+            }
+            Mode::SequencePicker => {
+                if let Some(path) = sequence_choices.get(index).cloned() {
+                    self.open_picked_sequence(path)?;
                 }
             }
             Mode::Palette => {
@@ -4341,32 +4550,34 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 env_editor::render(frame, main, editor, &theme);
             }
         }
-        Mode::SequenceRunner => {
-            let tick = app.tick_count;
-            let job = {
-                let cache = &app.highlight_cache;
-                match app.sequence_runner.as_mut() {
-                    Some(runner) => {
-                        sequence_runner::render(frame, main, runner, tick, cache, &theme)
-                    }
-                    None => None,
+        Mode::Sequence => match app.sequence_view {
+            SeqView::Edit => {
+                if let Some(editor) = &app.sequence_editor {
+                    sequence_editor::render(frame, main, editor, &theme);
                 }
-            };
-            if let Some(job) = job {
-                let dup = app.pending_highlight == Some(job.hash);
-                if !dup && let Some(tx) = &app.highlight_tx {
-                    let hash = job.hash;
-                    if tx.send(job).is_ok() {
-                        app.pending_highlight = Some(hash);
+            }
+            SeqView::Run => {
+                let tick = app.tick_count;
+                let job = {
+                    let cache = &app.highlight_cache;
+                    match app.sequence_runner.as_mut() {
+                        Some(runner) => {
+                            sequence_runner::render(frame, main, runner, tick, cache, &theme)
+                        }
+                        None => None,
+                    }
+                };
+                if let Some(job) = job {
+                    let dup = app.pending_highlight == Some(job.hash);
+                    if !dup && let Some(tx) = &app.highlight_tx {
+                        let hash = job.hash;
+                        if tx.send(job).is_ok() {
+                            app.pending_highlight = Some(hash);
+                        }
                     }
                 }
             }
-        }
-        Mode::SequenceEditor => {
-            if let Some(editor) = &app.sequence_editor {
-                sequence_editor::render(frame, main, editor, &theme);
-            }
-        }
+        },
         Mode::LoadRunner => {
             let tick = app.tick_count;
             let job = {
@@ -4394,24 +4605,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         urlbar::render_popup(frame, main, editor, &theme);
     }
 
-    // The which-key leader popup (deliverable 1).
-    if app.pending_leader {
-        let entries: Vec<(String, String)> = {
-            let mut actions: Vec<Action> =
-                app.keymap.iter_leader().map(|(_, action)| action).collect();
-            actions.sort_by_key(|a| a.name());
-            actions.dedup();
-            actions
-                .into_iter()
-                .map(|a| {
-                    (
-                        app.keymap.leader_combos_for(a).join("/"),
-                        a.label().to_owned(),
-                    )
-                })
-                .collect()
-        };
-        leader_popup::render(frame, main, &entries, &theme);
+    // The two-level which-key leader popup (deliverable 1).
+    if let Some(state) = app.leader {
+        let (title, entries) = leader_popup_entries(app, state);
+        leader_popup::render(frame, main, &title, &entries, &theme);
     }
 
     // The `?` help overlay (deliverable 8), rendered from the live keymap.
@@ -4422,8 +4619,38 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// Builds the `(title, entries)` for the which-key popup at `state`. Root shows
+/// sorted direct binds plus one `"<key>   ▸ <submenu>"` row per submenu prefix;
+/// a submenu shows its own sorted `(combo, label)` rows.
+fn leader_popup_entries(app: &App, state: LeaderState) -> (String, Vec<(String, String)>) {
+    match state {
+        LeaderState::Root => {
+            let mut entries: Vec<(String, String)> = app
+                .keymap
+                .iter_leader_root_acts()
+                .map(|(combo, action)| (combo.to_string(), action.label().to_owned()))
+                .collect();
+            entries.sort();
+            // Submenu prefixes render with a ▸ marker, after the direct binds.
+            for (key, label) in app.keymap.leader_menu_combos() {
+                entries.push((key, format!("▸ {label}")));
+            }
+            (" leader ".to_owned(), entries)
+        }
+        LeaderState::Submenu(menu) => {
+            let mut entries: Vec<(String, String)> = app
+                .keymap
+                .iter_submenu(menu)
+                .map(|(combo, action)| (combo.to_string(), action.label().to_owned()))
+                .collect();
+            entries.sort();
+            (format!(" leader · {} ", menu.label()), entries)
+        }
+    }
+}
+
 /// The which-key leader popup: a small floating panel listing the bound
-/// continuations while in pending-leader state.
+/// continuations while a leader chord is in progress.
 mod leader_popup {
     use ratatui::Frame;
     use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -4432,13 +4659,20 @@ mod leader_popup {
 
     use crate::tui::theme::Theme;
 
-    /// Renders the popup with `(keys, label)` continuation entries.
-    pub fn render(frame: &mut Frame, area: Rect, entries: &[(String, String)], theme: &Theme) {
+    /// Renders the popup with `title` and `(keys, label)` continuation entries.
+    pub fn render(
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        entries: &[(String, String)],
+        theme: &Theme,
+    ) {
         let width = entries
             .iter()
             .map(|(k, l)| k.len() + l.len() + 5)
             .max()
             .unwrap_or(20)
+            .max(title.len() + 4)
             .clamp(20, 50) as u16;
         let height = entries.len() as u16 + 2;
         let [modal] = Layout::horizontal([Constraint::Length(width)])
@@ -4451,7 +4685,7 @@ mod leader_popup {
         let block = Block::bordered()
             .border_type(BorderType::Thick)
             .border_style(theme.border_focused)
-            .title(" leader ")
+            .title(title.to_owned())
             .title_style(theme.title);
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
@@ -4868,7 +5102,8 @@ mod tests {
     fn sequence_runner_opens_with_first_step_running() {
         let dir = tempfile::tempdir().unwrap();
         let app = sequence_app(dir.path(), "halt", "");
-        assert_eq!(app.mode, Mode::SequenceRunner);
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Run);
         let runner = app.sequence_runner.as_ref().unwrap();
         assert_eq!(runner.steps.len(), 3);
         assert_eq!(runner.current, Some(0));
@@ -5143,7 +5378,8 @@ mod tests {
         app.prompt_editor = LineEditor::new("Auth flow");
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.mode, Mode::SequenceEditor);
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Edit);
 
         // Add a step: `a` opens the picker, Enter accepts the first endpoint.
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
@@ -5222,11 +5458,8 @@ mod tests {
         // Save → refused.
         ch(&mut app, 'w');
 
-        assert_eq!(
-            app.mode,
-            Mode::SequenceEditor,
-            "editor stays open on refusal"
-        );
+        assert_eq!(app.mode, Mode::Sequence, "editor stays open on refusal");
+        assert_eq!(app.sequence_view, SeqView::Edit);
         assert!(
             app.message
                 .as_ref()
@@ -5236,6 +5469,156 @@ mod tests {
         );
         // Nothing was written — the file is byte-for-byte unchanged.
         assert_eq!(std::fs::read_to_string(&seq_path).unwrap(), before);
+    }
+
+    // ---- Feature C: unified sequence surface (edit ⇄ run) ----
+
+    /// Opens a one-step sequence in the Edit face (via `open_sequence_editor`).
+    fn sequence_surface_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        let seq_path = seq_dir.join("flow.toml");
+        std::fs::write(
+            &seq_path,
+            "seq = 0\nname = \"Flow\"\non_error = \"halt\"\n\n[[step]]\nseq = 0\nendpoint = \"api/one.toml\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let sequence = churl_core::persistence::load_sequence(&seq_path).unwrap();
+        app.open_sequence_editor("Flow".to_owned(), seq_path, &sequence);
+        app
+    }
+
+    fn ctrl_r(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .unwrap();
+    }
+
+    /// Opening a sequence for edit lands on Mode::Sequence + the Edit face, with
+    /// no runner built yet (Run is entered lazily).
+    #[test]
+    fn sequence_surface_opens_in_edit_face() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = sequence_surface_app(dir.path());
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Edit);
+        assert!(app.sequence_editor.is_some());
+        assert!(app.sequence_runner.is_none(), "run built lazily");
+    }
+
+    /// `<leader>s r` (RunSequence) opens the surface in the Run face and starts
+    /// the run.
+    #[test]
+    fn run_sequence_opens_in_run_face() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = sequence_app(dir.path(), "halt", "");
+        assert_eq!(app.mode, Mode::Sequence);
+        assert_eq!(app.sequence_view, SeqView::Run);
+        assert!(app.sequence_runner.is_some());
+    }
+
+    /// `Ctrl-R` on a CLEAN editor flips to the Run face, building the runner from
+    /// the saved sequence; a second `Ctrl-R` flips back.
+    #[test]
+    fn ctrl_r_toggles_faces_when_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_surface_app(dir.path());
+        assert!(!app.sequence_editor.as_ref().unwrap().is_dirty());
+        ctrl_r(&mut app);
+        assert_eq!(app.sequence_view, SeqView::Run, "clean edit→run flips");
+        let runner = app.sequence_runner.as_ref().expect("runner built");
+        assert_eq!(runner.steps.len(), 1, "runner built from the saved steps");
+        // Run→Edit is always safe.
+        ctrl_r(&mut app);
+        assert_eq!(app.sequence_view, SeqView::Edit);
+    }
+
+    /// A DIRTY editor blocks Edit→Run with a notify (no auto-save, no stale run).
+    #[test]
+    fn dirty_edit_to_run_blocks_with_notify() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_surface_app(dir.path());
+        // Toggle on_error to make the editor dirty (`o` in the editor).
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.sequence_editor.as_ref().unwrap().is_dirty());
+        ctrl_r(&mut app);
+        assert_eq!(
+            app.sequence_view,
+            SeqView::Edit,
+            "stays in edit while dirty"
+        );
+        assert!(app.sequence_runner.is_none(), "no runner built while dirty");
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|m| m.text.contains("save (w) before running")),
+            "expected a save-first notify, got {:?}",
+            app.message.as_ref().map(|m| &m.text)
+        );
+    }
+
+    /// `close_sequence_surface` clears both component states + the abort handle
+    /// and returns to Normal.
+    #[test]
+    fn close_sequence_surface_clears_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_surface_app(dir.path());
+        // Build the runner too (clean flip), so both states are populated.
+        ctrl_r(&mut app);
+        assert!(app.sequence_runner.is_some());
+        assert!(app.sequence_editor.is_some());
+        app.close_sequence_surface();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.sequence_runner.is_none());
+        assert!(app.sequence_editor.is_none());
+        assert!(app.sequence_abort.is_none());
+        assert_eq!(app.sequence_view, SeqView::Edit);
+    }
+
+    /// MAJOR: `Ctrl-R` Edit→Run rebuilds the runner but must first ABORT any
+    /// in-flight step surviving from a prior run (kept alive across Run→Edit) —
+    /// otherwise the async step (a real POST/DELETE) orphans and runs to
+    /// completion in the background. Inject a live abort handle and assert the
+    /// rebuild aborts it.
+    #[tokio::test]
+    async fn edit_to_run_aborts_orphaned_inflight_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_surface_app(dir.path());
+        // Simulate a prior run whose in-flight step survived a Run→Edit flip: a
+        // long-lived task whose abort handle is parked in `sequence_abort`.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        let handle = task.abort_handle();
+        app.sequence_abort = Some(handle.clone());
+        // Force the surface into the Edit face (clean editor) so a Ctrl-R flip
+        // takes the Edit→Run rebuild branch.
+        app.sequence_view = SeqView::Edit;
+        assert!(!handle.is_finished(), "task live before the flip");
+
+        ctrl_r(&mut app);
+
+        assert_eq!(app.sequence_view, SeqView::Run, "clean edit→run flips");
+        assert!(
+            app.sequence_abort.is_none(),
+            "the prior abort handle was taken during rebuild"
+        );
+        // Yield so the abort propagates, then confirm the orphaned task is gone.
+        tokio::task::yield_now().await;
+        assert!(
+            handle.is_finished(),
+            "the prior in-flight step must be aborted, not orphaned"
+        );
     }
 
     /// Pressing `f` enters jump-mode; a pane label focuses that pane and exits.
@@ -5473,34 +5856,80 @@ mod tests {
             .unwrap();
     }
 
-    /// Space enters pending-leader; a bound continuation dispatches and dismisses.
+    fn esc(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    /// Space enters the root which-key; a direct bind dispatches and dismisses.
     #[test]
     fn leader_pending_then_dispatch() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         press(&mut app, ' ');
-        assert!(app.pending_leader, "space enters pending-leader");
+        assert_eq!(app.leader, Some(LeaderState::Root), "space enters root");
         // `<leader>q` quits.
         press(&mut app, 'q');
-        assert!(!app.pending_leader, "dispatch dismisses the popup");
+        assert_eq!(app.leader, None, "dispatch dismisses the popup");
         assert!(app.should_quit);
     }
 
-    /// An unbound continuation dismisses the popup with no action; Esc too.
+    /// An unbound root continuation dismisses the popup with no action; Esc too.
     #[test]
     fn leader_unbound_and_esc_dismiss() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         press(&mut app, ' ');
-        press(&mut app, 'x'); // unbound
-        assert!(!app.pending_leader);
+        press(&mut app, 'z'); // unbound at root
+        assert_eq!(app.leader, None);
         assert!(!app.should_quit);
 
         press(&mut app, ' ');
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-        assert!(!app.pending_leader, "esc dismisses");
+        esc(&mut app);
+        assert_eq!(app.leader, None, "esc dismisses at root");
     }
 
-    /// `<leader>e` toggles the explorer sidebar.
+    /// A submenu descent, then a bound key dispatches; Esc backs out one level
+    /// then cancels; an unknown key cancels at each level.
+    #[test]
+    fn leader_submenu_state_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        // A workspace so RunSequence has something to act on (no panic on empty).
+        let mut app = workspace_fixture(dir.path());
+
+        // Space → Root; `s` → Submenu(Sequences).
+        press(&mut app, ' ');
+        assert_eq!(app.leader, Some(LeaderState::Root));
+        press(&mut app, 's');
+        assert_eq!(
+            app.leader,
+            Some(LeaderState::Submenu(LeaderMenu::Sequences))
+        );
+        // A bound submenu key dispatches and closes the popup.
+        press(&mut app, 'r');
+        assert_eq!(app.leader, None, "submenu dispatch dismisses");
+
+        // Esc from a submenu backs out to Root; a second Esc cancels.
+        press(&mut app, ' ');
+        press(&mut app, 's');
+        esc(&mut app);
+        assert_eq!(
+            app.leader,
+            Some(LeaderState::Root),
+            "esc backs out one level"
+        );
+        esc(&mut app);
+        assert_eq!(app.leader, None, "second esc cancels");
+
+        // Unknown key cancels at Root and inside a submenu.
+        press(&mut app, ' ');
+        press(&mut app, 'z');
+        assert_eq!(app.leader, None);
+        press(&mut app, ' ');
+        press(&mut app, 's');
+        press(&mut app, 'z'); // unbound in the sequences submenu
+        assert_eq!(app.leader, None);
+    }
+
+    /// `<leader>e` toggles the explorer sidebar (a direct root bind).
     #[test]
     fn leader_e_toggles_explorer() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
@@ -5508,11 +5937,11 @@ mod tests {
         press(&mut app, ' ');
         press(&mut app, 'e');
         assert!(app.explorer_hidden);
-        assert!(!app.pending_leader);
+        assert_eq!(app.leader, None);
     }
 
     /// Leader is inert during text edits: Space types a space in the URL editor,
-    /// never entering pending-leader.
+    /// never entering the which-key state.
     #[test]
     fn leader_inert_during_url_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -5524,10 +5953,7 @@ mod tests {
         app.begin_url_edit_inline();
         assert!(app.url_editor.is_some());
         press(&mut app, ' ');
-        assert!(
-            !app.pending_leader,
-            "space must not enter leader during edit"
-        );
+        assert_eq!(app.leader, None, "space must not enter leader during edit");
         assert!(
             app.url_editor.as_ref().unwrap().text().contains(' '),
             "space types a space in the editor"
@@ -5539,8 +5965,22 @@ mod tests {
     fn leader_inert_in_edtui_insert() {
         let mut app = insert_mode_app(KeyMap::default());
         press(&mut app, ' ');
-        assert!(!app.pending_leader);
+        assert_eq!(app.leader, None);
         assert_eq!(String::from(app.editor.lines.clone()), " ");
+    }
+
+    /// The `?` help / `churl keymaps` traversal: RunSequence is reachable only
+    /// through the sequences submenu, so its combo must render as `s r`. Guards
+    /// the `leader_combos_for`/`iter_leader` submenu traversal (the help-guard
+    /// test alone can't catch a missing traversal).
+    #[test]
+    fn run_sequence_shows_submenu_chord() {
+        let keymap = KeyMap::default();
+        assert_eq!(keymap.leader_combos_for(Action::RunSequence), vec!["s r"]);
+        assert!(
+            keymap.iter_leader().any(|(_, a)| a == Action::RunSequence),
+            "iter_leader must traverse the submenu maps"
+        );
     }
 
     // ---- M6.7: digit binds only act in Request ----
@@ -6034,7 +6474,11 @@ mod tests {
         let mut app = workspace_fixture(dir.path());
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.pending_leader, "space enters pending-leader state");
+        assert_eq!(
+            app.leader,
+            Some(LeaderState::Root),
+            "space enters the root which-key state"
+        );
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Search, "<leader>f opens the search overlay");
@@ -6203,6 +6647,133 @@ mod tests {
         assert!(!runner.running, "must not auto-run");
         assert!(runner.results.is_empty(), "no rows until a run starts");
         assert!(app.load_request.is_some(), "request resolved once at open");
+    }
+
+    // ---- `<leader>l f` pick-then-load-test: dirty-safe + no flag leak ----
+
+    /// A two-endpoint workspace with `alpha` loaded into the request pane.
+    fn load_pick_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                coll.join(format!("{name}.toml")),
+                format!(
+                    "seq = 0\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{name}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        app.guarded_load(PendingLoad::File(coll.join("alpha.toml")))
+            .unwrap();
+        app
+    }
+
+    /// Drives the search picker to the single item matching `query` and accepts it.
+    fn pick_search(app: &mut App, query: &str) {
+        for c in query.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.accept_overlay().unwrap();
+    }
+
+    /// BLOCKER 2: `<leader>l f` with a DIRTY editor + a DIFFERENT picked endpoint
+    /// must defer into the discard-changes confirm and NOT open the load runner
+    /// over the stale selection.
+    #[test]
+    fn load_runner_pick_dirty_defers_to_confirm_not_stale_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        // Make the loaded `alpha` dirty.
+        app.editor = EditorState::new(Lines::from("dirty body"));
+        assert!(app.is_dirty());
+        let loaded_before = app.selected.as_ref().unwrap().file.clone();
+
+        app.open_load_runner_pick().unwrap();
+        assert_eq!(app.mode, Mode::Search);
+        assert!(app.load_runner_after_pick, "intent armed");
+        // Pick the DIFFERENT endpoint (beta).
+        pick_search(&mut app, "beta");
+
+        // Deferred into the discard confirm — NOT the load runner.
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DiscardChanges),
+            "dirty + other endpoint must defer to the discard confirm"
+        );
+        assert!(
+            app.load_runner.is_none(),
+            "no runner over the stale selection"
+        );
+        // Selection unchanged (still alpha) until the confirm resolves.
+        assert_eq!(app.selected.as_ref().unwrap().file, loaded_before);
+        // The one-shot intent was consumed.
+        assert!(!app.load_runner_after_pick);
+    }
+
+    /// A clean `<leader>l f` pick loads the endpoint AND opens the load runner.
+    #[test]
+    fn load_runner_pick_clean_loads_and_opens_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        assert!(!app.is_dirty());
+        app.open_load_runner_pick().unwrap();
+        pick_search(&mut app, "beta");
+        assert_eq!(app.mode, Mode::LoadRunner, "clean pick opens the runner");
+        // The runner targets the newly-picked endpoint, not the previously loaded one.
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().url,
+            "https://api.test/beta"
+        );
+        assert!(!app.load_runner_after_pick);
+    }
+
+    /// BLOCKER 3a: Esc-cancelling the `<leader>l f` picker clears the one-shot flag
+    /// so the NEXT plain `<leader>f` / `/` search does not spuriously open the runner.
+    #[test]
+    fn load_runner_pick_esc_clears_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        app.open_load_runner_pick().unwrap();
+        assert!(app.load_runner_after_pick);
+        // Esc cancels the picker.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            !app.load_runner_after_pick,
+            "esc-cancel must clear the one-shot intent"
+        );
+    }
+
+    /// BLOCKER 3b: an empty-result Enter (nothing selected) clears the flag too.
+    #[test]
+    fn load_runner_pick_empty_enter_clears_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_pick_app(dir.path());
+        app.open_load_runner_pick().unwrap();
+        // Type a query that matches nothing → the picker has no current item.
+        for c in "zzzznomatch".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert!(
+            app.picker
+                .as_ref()
+                .and_then(picker::PickerState::current)
+                .is_none(),
+            "no current item for a non-matching query"
+        );
+        app.accept_overlay().unwrap();
+        assert!(
+            !app.load_runner_after_pick,
+            "empty-result Enter must clear the one-shot intent"
+        );
+        assert!(app.load_runner.is_none());
     }
 
     #[test]

@@ -1,9 +1,10 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1452
 expression: render_runner(&mut state)
 ---
                                                                                           
-     ┏ Sequence · Auth flow ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
+     ┏ Sequence · Auth flow · RUN (^R edit) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    
      ┃1/3 · 120ms total   on_error: halt                                             ┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌200 OK · 120 ms · 27 B · 1 header  [h] ┐┃    
      ┃┃✓ POST auth/login.toml  200  120ms  ┃│{"data":{"token":"abc123"}}            │┃    

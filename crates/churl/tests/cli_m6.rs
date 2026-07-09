@@ -139,6 +139,81 @@ fn keymaps_marks_overridden_leader_binding() {
 }
 
 #[test]
+fn keymaps_applies_leader_submenu_remap() {
+    // A real `[keys.leader.sequences]` / `[keys.leader.load]` config must parse
+    // AND the remap must reach the effective keymap. `churl keymaps` renders the
+    // effective map, so a remapped submenu key shows up as a full `<prefix> <key>`
+    // chord for that action (guards the whole config → KeyMap seam end to end).
+    let dir = tempfile::tempdir().unwrap();
+    let envs = planted_config(
+        dir.path(),
+        concat!(
+            "[keys.leader]\n",
+            "x = \"quit\"\n\n",
+            "[keys.leader.sequences]\n",
+            "z = \"run-sequence\"\n\n",
+            "[keys.leader.load]\n",
+            "z = \"load-runner-pick\"\n",
+        ),
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_churl"));
+    cmd.arg("keymaps");
+    for (k, v) in &envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn churl");
+    assert!(
+        output.status.success(),
+        "config with leader submenu tables must load; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let leader_idx = stdout.find("\nLeader\n").expect("Leader section");
+    let after = &stdout[leader_idx..];
+    // run-sequence is reachable only through the sequences submenu; the remap
+    // adds `s z` alongside the default `s r`.
+    let run_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("run-sequence"))
+        .unwrap_or_else(|| panic!("no run-sequence line in leader:\n{after}"));
+    assert!(
+        run_line.contains("s z"),
+        "run-sequence must show the remapped `s z` chord: {run_line}"
+    );
+    // load-runner-pick gains `l z`.
+    let load_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("load-runner-pick"))
+        .unwrap_or_else(|| panic!("no load-runner-pick line in leader:\n{after}"));
+    assert!(
+        load_line.contains("l z"),
+        "load-runner-pick must show the remapped `l z` chord: {load_line}"
+    );
+}
+
+#[test]
+fn keymaps_bad_leader_submenu_action_errors() {
+    // An unknown action name in a leader submenu table fails loudly at startup.
+    let dir = tempfile::tempdir().unwrap();
+    let envs = planted_config(dir.path(), "[keys.leader.sequences]\nz = \"explode\"\n");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_churl"));
+    cmd.arg("keymaps");
+    for (k, v) in &envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("spawn churl");
+    assert!(
+        !output.status.success(),
+        "a bad submenu action name must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("explode"),
+        "error must name the bad action: {stderr}"
+    );
+}
+
+#[test]
 fn bad_var_format_is_hard_error() {
     // `--var` without `=` fails before launching the TUI.
     let dir = tempfile::tempdir().unwrap();

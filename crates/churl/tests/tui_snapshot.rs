@@ -905,9 +905,19 @@ fn every_palette_command_dispatches() {
             // Sequences (M7.4): no workspace / no sequence selected → warn.
             Action::RunSequence => expect_status(&mut app, "select a sequence"),
             Action::EditSequence => expect_status(&mut app, "open a workspace first"),
+            // The "open sequence" picker needs a workspace; without one it warns.
+            Action::OpenSequencePicker => expect_status(&mut app, "open a workspace first"),
             // Load runner (M7.5): with no endpoint selected it warns rather than
             // opening the modal.
             Action::OpenLoadRunner => expect_status(&mut app, "no endpoint selected"),
+            // The pick-then-load variant opens the endpoint search overlay first.
+            Action::OpenLoadRunnerPick => {
+                assert_eq!(
+                    app.mode,
+                    Mode::Search,
+                    "{label:?} must open the search overlay"
+                );
+            }
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
     }
@@ -1315,12 +1325,33 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
 
 // ---- M6.7 snapshots + round-trips ----
 
-/// The which-key leader popup: pressing Space shows the bound continuations.
+/// The which-key leader popup (root): direct binds plus the `▸ sequences` /
+/// `▸ load` submenu continuations.
 #[test]
 fn leader_which_key_popup() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// The sequences submenu popup: `Space s` shows add / open / run.
+#[test]
+fn leader_sequences_submenu_popup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('s'));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// The load submenu popup: `Space l` shows the two load-test entries.
+#[test]
+fn leader_load_submenu_popup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('l'));
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
