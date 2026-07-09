@@ -1,13 +1,12 @@
 //! TOML persistence via `toml_edit`, format-preserving on write.
 //!
-//! Users hand-edit endpoint files, so comments and key ordering must survive a churl
-//! round-trip. Reads deserialize with `toml_edit::de`; writes serialize the value to a
-//! fresh document and then *merge* it into the existing file's document, touching only
-//! what actually changed so all decor (comments, whitespace, ordering) is preserved.
+//! Users hand-edit endpoint files, so their comments and key ordering must survive a
+//! churl round-trip. Writes serialize to a fresh document and *merge* it into the
+//! existing file's parsed document, touching only changed values so all decor
+//! (comments, whitespace, ordering) is preserved.
 //!
-//! Collections are loaded lazily: opening a workspace parses only `churl.toml`;
-//! listing collections stats directories; endpoint files are parsed only when a
-//! collection's [`Collection::endpoints`] is called.
+//! Collections load lazily: opening a workspace parses only `churl.toml`; endpoint
+//! files are parsed only when [`Collection::endpoints`] is called.
 
 use std::path::{Path, PathBuf};
 

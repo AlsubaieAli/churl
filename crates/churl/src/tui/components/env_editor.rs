@@ -1,15 +1,13 @@
-//! The environments & variables editor (M7.3): a large split-view modal for
-//! editing the three template-var scopes — workspace `[vars]`, per-collection
-//! `folder.toml [vars]`, and named profiles — with profile CRUD, an explicit
-//! save, a dirty/discard guard, secret masking + refusal, and a live
-//! **precedence display** so "which value wins" stops being a file-reading
-//! exercise.
+//! The environments & variables editor (M7.3): a split-view modal for editing the
+//! three template-var scopes — workspace `[vars]`, per-collection `folder.toml
+//! [vars]`, and named profiles — with profile CRUD, explicit save, a
+//! dirty/discard guard, secret masking + refusal, and a live **precedence
+//! display** ("which value wins").
 //!
-//! All UI state lives here (the `churl` crate); `churl-core` stays TUI-free. The
-//! editor reuses the core seams verbatim: [`Workspace`]/[`Profile`]/
-//! [`CollectionMeta`] as the data model, the format-preserving
-//! `save_workspace_manifest`/`save_collection_meta` writers (which prune deleted
-//! keys/profiles — verified by the M7.3 persistence round-trip tests), the
+//! All UI state lives here (the `churl` crate); `churl-core` stays TUI-free. Reuses
+//! the core seams verbatim: [`Workspace`]/[`Profile`]/[`CollectionMeta`] as the
+//! data model, the format-preserving `save_workspace_manifest`/
+//! `save_collection_meta` writers (which prune deleted keys/profiles), the
 //! `config` secret gates, and the [`Resolver`]-order precedence (cli > profile >
 //! collection > workspace > env).
 
@@ -92,8 +90,8 @@ pub struct EnvFieldEdit {
     /// The field's value before this edit began, so `Esc` can revert the
     /// live-mirrored preview (see [`EnvEditorState::cancel_edit`]).
     pub original: String,
-    /// True when this edit is for a freshly-added row, so committing the name
-    /// auto-advances into the value (keystroke economy).
+    /// True for a freshly-added row, so committing the name auto-advances into
+    /// the value.
     pub is_new: bool,
 }
 
