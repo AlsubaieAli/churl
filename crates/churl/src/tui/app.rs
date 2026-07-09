@@ -329,6 +329,201 @@ struct InFlightRequest {
     meta: ResponseMeta,
 }
 
+/// The per-endpoint edit/response/dirty/tab/editor state that used to live as
+/// flat `App` fields. Everything here is scoped to a single loaded endpoint; the
+/// forward-compat split (a later `Sequence` buffer kind) keeps this the payload
+/// of [`BufferKind::Endpoint`] while the dedup key (file path), tab label, and
+/// dirty stay reachable at the [`Buffer`] level.
+struct EndpointBuffer {
+    /// The endpoint currently loaded (with any in-memory edits).
+    endpoint: SelectedEndpoint,
+    /// The pristine endpoint as loaded, cloned at load time. Dirty state is
+    /// *derived* by comparing it against the live request (incl. the edtui body).
+    /// Non-`Option`: a buffer always has a baseline.
+    loaded_snapshot: Endpoint,
+    /// edtui state for the request body.
+    editor: EditorState,
+    editor_events: EditorEventHandler,
+    /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the Body editor.
+    editor_vim: VimExt,
+    /// Request-pane tab state (active tab + per-tab selection + field edit).
+    tabs: RequestTabs,
+    /// The inline URL-bar editor while editing the URL; `None` otherwise.
+    url_editor: Option<LineEditor>,
+    /// The edtui popup URL editor (`e` on the URL bar / `url_edit = "popup"`),
+    /// present while the popup is open.
+    url_popup: Option<EditorState>,
+    /// edtui event handler for the URL popup.
+    url_popup_events: EditorEventHandler,
+    /// Normal-mode motion extensions for the URL popup editor.
+    url_popup_vim: VimExt,
+    /// The response pane state.
+    response: ResponseState,
+    /// Response body scroll offset (clamped to the viewport at render time).
+    response_scroll: usize,
+    /// Response viewer cursor as a display-row index (post-fold, post-wrap).
+    response_cursor: usize,
+    /// Total display rows in the response viewer as of the last render.
+    response_total_rows: usize,
+    /// Last rendered response body height, for half-page scrolling.
+    response_viewport_height: usize,
+    /// Last rendered response body width, for cursor→logical mapping (wrap).
+    response_viewport_width: usize,
+    /// The highlight hash last enqueued but not yet returned.
+    pending_highlight: Option<u64>,
+    /// Viewport-hash → highlighted-lines cache (capped, cleared on new response).
+    highlight_cache: HashMap<u64, Vec<Line<'static>>>,
+    /// The single in-flight request for this buffer, if any.
+    in_flight: Option<InFlightRequest>,
+}
+
+impl EndpointBuffer {
+    /// Folds today's `load_endpoint` body-preparation into a fresh buffer: the
+    /// edtui body from the request, a reset vim state, and a pristine snapshot
+    /// clone for dirty derivation.
+    fn new(selected: SelectedEndpoint) -> Self {
+        let body = selected
+            .endpoint
+            .request
+            .body
+            .as_ref()
+            .map(|body| body.content.as_str())
+            .unwrap_or("");
+        let mut editor_vim = VimExt::default();
+        editor_vim.reset();
+        Self {
+            loaded_snapshot: selected.endpoint.clone(),
+            endpoint: selected,
+            editor: EditorState::new(Lines::from(body)),
+            editor_events: EditorEventHandler::default(),
+            editor_vim,
+            tabs: RequestTabs::default(),
+            url_editor: None,
+            url_popup: None,
+            url_popup_events: EditorEventHandler::default(),
+            url_popup_vim: VimExt::default(),
+            response: ResponseState::Idle,
+            response_scroll: 0,
+            response_cursor: 0,
+            response_total_rows: 0,
+            response_viewport_height: 0,
+            response_viewport_width: 0,
+            pending_highlight: None,
+            highlight_cache: HashMap::new(),
+            in_flight: None,
+        }
+    }
+
+    /// The live request currently loaded (with any in-memory edits).
+    fn live_request(&self) -> &Request {
+        &self.endpoint.endpoint.request
+    }
+
+    /// Whether the live endpoint (incl. the edtui body) differs from the pristine
+    /// snapshot. Derived — no dirty flag to keep in sync.
+    fn is_dirty(&self) -> bool {
+        // Compare with the live body folded in (without mutating self).
+        let mut live = self.endpoint.endpoint.clone();
+        let text = String::from(self.editor.lines.clone());
+        fold_body_text(&mut live.request, text);
+        live != self.loaded_snapshot
+    }
+}
+
+/// The kind-specific payload of a [`Buffer`]. A single variant this stage; a
+/// later wave adds `Sequence(SequenceBuffer)` additively — the dedup key, tab
+/// label, and dirty already live on [`Buffer`] so nothing here needs to move.
+enum BufferKind {
+    Endpoint(EndpointBuffer),
+}
+
+/// A loaded tab/buffer. Stage 1 keeps `buffers.len() <= 1`; Stage 2 turns
+/// [`App::open_or_focus_buffer`] into true dedup-or-push and adds the tab strip.
+/// The dedup key (`file`), tab label (`display_path`), and dirty are reachable
+/// here without matching `kind`.
+struct Buffer {
+    kind: BufferKind,
+}
+
+impl Buffer {
+    /// Builds an endpoint buffer (the only kind this stage).
+    fn endpoint(selected: SelectedEndpoint) -> Self {
+        Self {
+            kind: BufferKind::Endpoint(EndpointBuffer::new(selected)),
+        }
+    }
+
+    /// The dedup key / tab identity: the buffer's endpoint file path. Reachable
+    /// without matching `kind` (a future `Sequence` buffer returns its own path).
+    fn file(&self) -> &Path {
+        match &self.kind {
+            BufferKind::Endpoint(b) => &b.endpoint.file,
+        }
+    }
+
+    /// The endpoint payload, if this is an endpoint buffer.
+    fn as_endpoint(&self) -> Option<&EndpointBuffer> {
+        match &self.kind {
+            BufferKind::Endpoint(b) => Some(b),
+        }
+    }
+
+    /// The endpoint payload (mutable), if this is an endpoint buffer.
+    fn as_endpoint_mut(&mut self) -> Option<&mut EndpointBuffer> {
+        match &mut self.kind {
+            BufferKind::Endpoint(b) => Some(b),
+        }
+    }
+
+    /// Whether the buffer has unsaved changes (per-kind).
+    fn is_dirty(&self) -> bool {
+        match &self.kind {
+            BufferKind::Endpoint(b) => b.is_dirty(),
+        }
+    }
+}
+
+/// Folds edtui body text into a request's `body` for **dirty derivation /
+/// save**: an empty body drops the `Body` entirely; otherwise it seeds or
+/// updates a text body. (The send/curl path uses [`overwrite_body_text`], which
+/// keeps an existing empty body instead of dropping it — preserving the two
+/// pre-refactor behaviours exactly.)
+fn fold_body_text(request: &mut Request, text: String) {
+    match request.body.as_mut() {
+        Some(body) => {
+            if text.is_empty() {
+                request.body = None;
+            } else {
+                body.content = text;
+            }
+        }
+        None if !text.is_empty() => {
+            request.body = Some(Body {
+                kind: BodyKind::Text,
+                content: text,
+            });
+        }
+        None => {}
+    }
+}
+
+/// Folds edtui body text into a request's `body` for a **send / curl copy**: an
+/// existing body is overwritten in place (even with empty text); a missing body
+/// is seeded only when the text is non-empty. Matches the pre-refactor
+/// `send_request`/`copy_as_curl` inline behaviour.
+fn overwrite_body_text(request: &mut Request, text: String) {
+    match request.body.as_mut() {
+        Some(body) => body.content = text,
+        None if !text.is_empty() => {
+            request.body = Some(Body {
+                kind: BodyKind::Text,
+                content: text,
+            });
+        }
+        None => {}
+    }
+}
+
 /// A clipboard copy queued by a key handler and flushed by the run loop (see
 /// [`App::pending_clipboard`]). Carries the capped payload plus the message to
 /// show **iff** a clipboard path succeeds — on total failure the loop reports
@@ -345,13 +540,13 @@ pub struct App {
     pub workspace: Option<OpenWorkspace>,
     /// Explorer tree state.
     pub explorer: ExplorerState,
-    /// edtui state for the request body.
-    pub editor: EditorState,
-    editor_events: EditorEventHandler,
-    /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the Body editor.
-    editor_vim: VimExt,
-    /// The endpoint currently loaded into the request pane.
-    pub selected: Option<SelectedEndpoint>,
+    /// The open buffers (loaded endpoints). Stage 1 holds at most one
+    /// (`buffers.len() <= 1`); Stage 2 adds true dedup-or-push + a tab strip.
+    /// All per-endpoint edit/response/dirty/tab/editor state lives inside the
+    /// active buffer — read via [`App::active_endpoint_buffer`]/`_mut`.
+    buffers: Vec<Buffer>,
+    /// Index of the active buffer in `buffers` (`0` while single-buffer).
+    active: usize,
     /// Focused pane in [`Mode::Normal`].
     pub focus: Pane,
     /// Current top-level input mode.
@@ -394,27 +589,10 @@ pub struct App {
     /// Per-execution knobs (body-size cap) resolved from config in
     /// [`App::install_runtime`]; defaults under snapshot-test construction.
     execute_options: ExecuteOptions,
-    /// The single in-flight request, if any.
-    in_flight: Option<InFlightRequest>,
-    /// Monotonic request counter; a landed response with a stale generation is dropped.
+    /// Monotonic request counter; a landed response with a stale generation is
+    /// dropped. Global (not per-buffer) so generations are unique across buffers,
+    /// which is how [`App::on_response`] routes a landed response to its buffer.
     generation: u64,
-    /// The response pane state.
-    pub response: ResponseState,
-    /// Response body scroll offset (clamped to the viewport at render time).
-    response_scroll: usize,
-    /// Response viewer cursor as a display-row index (post-fold, post-wrap);
-    /// clamped at render time. Reset to 0 on each new response (M7).
-    response_cursor: usize,
-    /// Total display rows in the response viewer as of the last render, for
-    /// clamping cursor/scroll motion between frames.
-    response_total_rows: usize,
-    /// Last rendered response body height, for half-page scrolling.
-    response_viewport_height: usize,
-    /// Last rendered response body width, for cursor→logical mapping (wrap).
-    response_viewport_width: usize,
-    /// The highlight hash last enqueued but not yet returned; guards against
-    /// re-enqueueing the same viewport twice (M7 highlight micro-nit).
-    pending_highlight: Option<u64>,
     /// A clipboard copy queued by a key handler, flushed by the run loop after
     /// the key is handled (native copy needs no terminal, but the OSC 52
     /// fallback writes to the terminal backend, which dispatch has no handle
@@ -425,8 +603,6 @@ pub struct App {
     body_search_editor: LineEditor,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
-    /// Viewport-hash → highlighted-lines cache (capped, cleared on new response).
-    highlight_cache: HashMap<u64, Vec<Line<'static>>>,
     /// History store; `None` when disabled (open failed or no data dir).
     history: Option<HistoryStore>,
     /// Transient action/status message shown in the dedicated row above the
@@ -436,14 +612,6 @@ pub struct App {
     /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
     /// animation in the response pane. `pub` so snapshot tests can set it.
     pub tick_count: u64,
-    /// Request-pane tab state (active tab + per-tab selection + field edit).
-    pub tabs: RequestTabs,
-    /// The pristine endpoint as loaded, cloned at load time. Dirty state is
-    /// *derived* by comparing it against the live request (incl. the edtui body)
-    /// — no flag bookkeeping. `None` when nothing is loaded.
-    loaded_snapshot: Option<Endpoint>,
-    /// The inline URL-bar editor while editing the URL; `None` otherwise.
-    pub url_editor: Option<LineEditor>,
     /// The text prompt's line editor while a [`Mode::Prompt`] overlay is open.
     pub prompt_editor: LineEditor,
     /// True while the open picker is the auth-kind picker (vs search/palette/profile).
@@ -476,13 +644,6 @@ pub struct App {
     help_scroll: usize,
     /// Last rendered inner height of the help overlay, for half-page scrolling.
     help_viewport_height: usize,
-    /// The edtui popup URL editor (`e` on the URL bar / `url_edit = "popup"`),
-    /// present while the popup is open.
-    url_popup: Option<EditorState>,
-    /// edtui event handler for the URL popup.
-    url_popup_events: EditorEventHandler,
-    /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the URL popup editor.
-    url_popup_vim: VimExt,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
     /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
@@ -582,10 +743,8 @@ impl App {
         Ok(Self {
             workspace,
             explorer,
-            editor: EditorState::default(),
-            editor_events: EditorEventHandler::default(),
-            editor_vim: VimExt::default(),
-            selected: None,
+            buffers: Vec::new(),
+            active: 0,
             focus: Pane::Explorer,
             mode: Mode::Normal,
             picker: None,
@@ -606,25 +765,13 @@ impl App {
             rx,
             client: None,
             execute_options: ExecuteOptions::default(),
-            in_flight: None,
             generation: 0,
-            response: ResponseState::Idle,
-            response_scroll: 0,
-            response_cursor: 0,
-            response_total_rows: 0,
-            response_viewport_height: 0,
-            response_viewport_width: 0,
-            pending_highlight: None,
             pending_clipboard: None,
             body_search_editor: LineEditor::default(),
             highlight_tx: None,
-            highlight_cache: HashMap::new(),
             history: None,
             message: None,
             tick_count: 0,
-            tabs: RequestTabs::default(),
-            loaded_snapshot: None,
-            url_editor: None,
             prompt_editor: LineEditor::default(),
             auth_picker: false,
             pending_load: None,
@@ -637,9 +784,6 @@ impl App {
             help_open: false,
             help_scroll: 0,
             help_viewport_height: 10,
-            url_popup: None,
-            url_popup_events: EditorEventHandler::default(),
-            url_popup_vim: VimExt::default(),
             url_edit_mode: UrlEditMode::Inline,
             env_editor: None,
             sequence_runner: None,
@@ -710,6 +854,120 @@ impl App {
     /// Sets a transient message in the dedicated message row (auto-expires).
     fn notify(&mut self, text: impl Into<String>) {
         self.message = Some(Message::new(text));
+    }
+
+    // ---- Buffer accessors ----
+
+    /// The active buffer, or `None` when nothing is loaded.
+    fn active_buffer(&self) -> Option<&Buffer> {
+        self.buffers.get(self.active)
+    }
+
+    /// The active buffer (mutable), or `None` when nothing is loaded.
+    fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        self.buffers.get_mut(self.active)
+    }
+
+    /// The index of the buffer whose endpoint file is `path`, if any. The dedup
+    /// key for Stage 2's open-or-focus (Stage 1 has at most one buffer).
+    fn buffer_index_for_path(&self, path: &Path) -> Option<usize> {
+        self.buffers.iter().position(|b| b.file() == path)
+    }
+
+    /// The active buffer's endpoint payload — the forward-compat seam every
+    /// endpoint-only reader routes through (a future `Sequence` buffer yields
+    /// `None`, so those actions no-op cleanly). `None` when nothing is loaded.
+    fn active_endpoint_buffer(&self) -> Option<&EndpointBuffer> {
+        self.active_buffer().and_then(Buffer::as_endpoint)
+    }
+
+    /// The active buffer's endpoint payload (mutable). See
+    /// [`App::active_endpoint_buffer`].
+    fn active_endpoint_buffer_mut(&mut self) -> Option<&mut EndpointBuffer> {
+        self.active_buffer_mut().and_then(Buffer::as_endpoint_mut)
+    }
+
+    /// The active endpoint's live [`SelectedEndpoint`], for tests / snapshot
+    /// drivers that inspect the loaded endpoint. Replaces the old public
+    /// `selected` field.
+    pub fn selected(&self) -> Option<&SelectedEndpoint> {
+        self.active_endpoint_buffer().map(|b| &b.endpoint)
+    }
+
+    /// Mutable access to the active endpoint's [`SelectedEndpoint`] (tests).
+    pub fn selected_mut(&mut self) -> Option<&mut SelectedEndpoint> {
+        self.active_endpoint_buffer_mut().map(|b| &mut b.endpoint)
+    }
+
+    /// The active buffer's response state (tests / snapshot drivers). Replaces
+    /// the old public `response` field; falls back to [`ResponseState::Idle`]
+    /// when nothing is loaded (the pre-refactor default of the flat field).
+    pub fn response(&self) -> &ResponseState {
+        self.active_endpoint_buffer()
+            .map(|b| &b.response)
+            .unwrap_or(&ResponseState::IDLE)
+    }
+
+    /// Sets the active buffer's response state (tests). No-op when nothing is
+    /// loaded.
+    pub fn set_response(&mut self, response: ResponseState) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.response = response;
+        }
+    }
+
+    /// The active request tab, or the pre-refactor default (`RequestTabs`'s
+    /// `Params`) when nothing is loaded. Used by the event-routing guards, which
+    /// pre-refactor read the flat `tabs.active` field that always existed.
+    fn active_tab(&self) -> RequestTab {
+        self.active_endpoint_buffer()
+            .map(|b| b.tabs.active)
+            .unwrap_or(RequestTab::Params)
+    }
+
+    /// Whether the active buffer's Body editor is in a non-Normal edtui mode
+    /// (Insert/Visual/Search) — the interception guard. `false` when nothing is
+    /// loaded.
+    fn body_editor_non_normal(&self) -> bool {
+        self.active_endpoint_buffer()
+            .is_some_and(|b| b.editor.mode != EditorMode::Normal)
+    }
+
+    /// Whether a request-row field edit is in progress on the active buffer.
+    /// `false` when nothing is loaded.
+    fn tabs_editing_active(&self) -> bool {
+        self.active_endpoint_buffer()
+            .is_some_and(|b| b.tabs.editing.is_some())
+    }
+
+    /// Forwards a key into the active buffer's Body edtui editor. No-op when
+    /// nothing is loaded (pre-refactor the flat editor absorbed it invisibly).
+    fn body_editor_on_key(&mut self, key: KeyEvent) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.editor_events.on_key_event(key, &mut b.editor);
+        }
+    }
+
+    /// Runs churl-side vim motions (W/B/^/f/F/t/T) on the active buffer's Body
+    /// editor; returns whether the key was consumed. `false` when nothing is
+    /// loaded.
+    fn body_vim_handle_key(&mut self, key: KeyEvent) -> bool {
+        match self.active_endpoint_buffer_mut() {
+            Some(b) => vim_ext::handle_key(key, &mut b.editor, &mut b.editor_vim),
+            None => false,
+        }
+    }
+
+    /// Whether the inline URL editor is open on the active buffer.
+    fn url_editor_active(&self) -> bool {
+        self.active_endpoint_buffer()
+            .is_some_and(|b| b.url_editor.is_some())
+    }
+
+    /// Whether the URL popup editor is open on the active buffer.
+    fn url_popup_active(&self) -> bool {
+        self.active_endpoint_buffer()
+            .is_some_and(|b| b.url_popup.is_some())
     }
 
     /// The success message of a queued-but-not-yet-flushed clipboard copy, if
@@ -870,7 +1128,7 @@ impl App {
         if self.help_open {
             return self.handle_help_key(key);
         }
-        if self.url_popup.is_some() {
+        if self.url_popup_active() {
             return self.handle_url_popup_key(key);
         }
         if self.leader.is_some() {
@@ -904,14 +1162,14 @@ impl App {
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<()> {
         // 1. Inline URL editing: the LineEditor owns keys, except the documented
         //    Ctrl-S/Ctrl-C interception (Send/Quit reach through).
-        if self.url_editor.is_some() {
+        if self.url_editor_active() {
             if let Some(action) = self.control_intercept(key) {
                 return self.dispatch(action, Some(key));
             }
             return self.handle_url_edit_key(key);
         }
         // 2. Inline request-row field editing (same interception rule).
-        if self.focus == Pane::Request && self.tabs.editing.is_some() {
+        if self.focus == Pane::Request && self.tabs_editing_active() {
             if let Some(action) = self.control_intercept(key) {
                 return self.dispatch(action, Some(key));
             }
@@ -919,13 +1177,13 @@ impl App {
         }
         // 3. edtui insert/visual mode on the Body tab (M4 interception exception).
         if self.focus == Pane::Request
-            && self.tabs.active == RequestTab::Body
-            && self.editor.mode != EditorMode::Normal
+            && self.active_tab() == RequestTab::Body
+            && self.body_editor_non_normal()
         {
             if let Some(action) = self.control_intercept(key) {
                 return self.dispatch(action, Some(key));
             }
-            self.editor_events.on_key_event(key, &mut self.editor);
+            self.body_editor_on_key(key);
             return Ok(());
         }
         // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T)
@@ -935,9 +1193,9 @@ impl App {
         //     lost. This precedes the leader/keymap steps so a pending find's
         //     next char reaches vim_ext even when it's Space or a mapped key.
         if self.focus == Pane::Request
-            && self.tabs.active == RequestTab::Body
-            && self.editor.mode == EditorMode::Normal
-            && vim_ext::handle_key(key, &mut self.editor, &mut self.editor_vim)
+            && self.active_tab() == RequestTab::Body
+            && !self.body_editor_non_normal()
+            && self.body_vim_handle_key(key)
         {
             return Ok(());
         }
@@ -951,9 +1209,9 @@ impl App {
         // 5. Keymap: the focused pane's overlay wins over the global map.
         if let Some(action) = self.keymap.lookup_ctx(key, self.focus.ctx()) {
             self.dispatch(action, Some(key))
-        } else if self.focus == Pane::Request && self.tabs.active == RequestTab::Body {
+        } else if self.focus == Pane::Request && self.active_tab() == RequestTab::Body {
             // Unmapped key on the Body tab falls through to edtui.
-            self.editor_events.on_key_event(key, &mut self.editor);
+            self.body_editor_on_key(key);
             Ok(())
         } else {
             Ok(())
@@ -1061,17 +1319,29 @@ impl App {
     /// Accepted edge: Enter while an f/F/t/T find is pending still commits (the
     /// pending find is dropped with the popup).
     fn handle_url_popup_key(&mut self, key: KeyEvent) -> Result<()> {
-        let mode = self.url_popup.as_ref().map(|e| e.mode);
+        let Some(mode) = self
+            .active_endpoint_buffer()
+            .and_then(|b| b.url_popup.as_ref().map(|e| e.mode))
+        else {
+            return Ok(());
+        };
         // Search mode: pass everything to edtui — Enter/Esc drive the search.
-        if mode == Some(EditorMode::Search) {
-            if let Some(editor) = self.url_popup.as_mut() {
-                self.url_popup_events.on_key_event(key, editor);
+        if mode == EditorMode::Search {
+            if let Some(b) = self.active_endpoint_buffer_mut()
+                && let Some(editor) = b.url_popup.as_mut()
+            {
+                b.url_popup_events.on_key_event(key, editor);
             }
             return Ok(());
         }
-        // Enter commits (single logical line — no newline).
+        // Enter commits (single logical line — no newline). Take the popup out
+        // first so `commit_url` (which needs `&mut self`) does not overlap the
+        // buffer borrow.
         if key.code == KeyCode::Enter {
-            if let Some(editor) = self.url_popup.take() {
+            let taken = self
+                .active_endpoint_buffer_mut()
+                .and_then(|b| b.url_popup.take());
+            if let Some(editor) = taken {
                 let text: String = editor.lines.clone().into();
                 // Collapse any stray newlines to enforce a single logical line.
                 let text = text.replace(['\n', '\r'], "");
@@ -1082,19 +1352,24 @@ impl App {
         // Normal mode: churl-side vim motions win before the Esc-cancel check —
         // Esc while an f/F/t/T find is pending aborts the find (vim), it must
         // not close the popup.
-        if mode == Some(EditorMode::Normal)
-            && let Some(editor) = self.url_popup.as_mut()
-            && vim_ext::handle_key(key, editor, &mut self.url_popup_vim)
+        if mode == EditorMode::Normal
+            && let Some(b) = self.active_endpoint_buffer_mut()
+            && let Some(editor) = b.url_popup.as_mut()
+            && vim_ext::handle_key(key, editor, &mut b.url_popup_vim)
         {
             return Ok(());
         }
         // Esc in Normal mode cancels; in Insert mode edtui uses it to leave insert.
-        if key.code == KeyCode::Esc && mode == Some(EditorMode::Normal) {
-            self.url_popup = None;
+        if key.code == KeyCode::Esc && mode == EditorMode::Normal {
+            if let Some(b) = self.active_endpoint_buffer_mut() {
+                b.url_popup = None;
+            }
             return Ok(());
         }
-        if let Some(editor) = self.url_popup.as_mut() {
-            self.url_popup_events.on_key_event(key, editor);
+        if let Some(b) = self.active_endpoint_buffer_mut()
+            && let Some(editor) = b.url_popup.as_mut()
+        {
+            b.url_popup_events.on_key_event(key, editor);
         }
         Ok(())
     }
@@ -1111,7 +1386,11 @@ impl App {
                     matches!(key.code, KeyCode::Char('c'))
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                 });
-                if is_ctrl_c && self.in_flight.is_some() {
+                if is_ctrl_c
+                    && self
+                        .active_endpoint_buffer()
+                        .is_some_and(|b| b.in_flight.is_some())
+                {
                     self.cancel_request();
                 } else {
                     self.should_quit = true;
@@ -1146,19 +1425,19 @@ impl App {
             Action::EditUrl => self.begin_url_edit(),
             Action::MethodCycle => self.cycle_method(),
             Action::MethodMenu => self.open_method_menu(),
-            Action::TabNext => self.tabs.tab_next(),
-            Action::TabPrev => self.tabs.tab_prev(),
-            Action::Tab1 => self.tabs.tab_jump(0),
-            Action::Tab2 => self.tabs.tab_jump(1),
-            Action::Tab3 => self.tabs.tab_jump(2),
-            Action::Tab4 => self.tabs.tab_jump(3),
+            Action::TabNext => self.with_active_tabs(RequestTabs::tab_next),
+            Action::TabPrev => self.with_active_tabs(RequestTabs::tab_prev),
+            Action::Tab1 => self.with_active_tabs(|t| t.tab_jump(0)),
+            Action::Tab2 => self.with_active_tabs(|t| t.tab_jump(1)),
+            Action::Tab3 => self.with_active_tabs(|t| t.tab_jump(2)),
+            Action::Tab4 => self.with_active_tabs(|t| t.tab_jump(3)),
             // On the Body tab there are no rows: the originating key (i/a/d/…)
             // belongs to edtui, same as the motion keys in `request_nav`.
             Action::RowAdd | Action::RowDelete | Action::RowToggle | Action::RowEdit
-                if self.focus == Pane::Request && self.tabs.active == RequestTab::Body =>
+                if self.focus == Pane::Request && self.active_tab() == RequestTab::Body =>
             {
                 if let Some(key) = key {
-                    self.editor_events.on_key_event(key, &mut self.editor);
+                    self.body_editor_on_key(key);
                 }
             }
             Action::RowAdd => self.row_add(),
@@ -1227,20 +1506,29 @@ impl App {
     /// Navigation within the Request pane. On the Body tab the motion keys forward
     /// to edtui; on the row-list tabs `j`/`k` move the selection, `Enter` edits.
     fn request_nav(&mut self, action: Action, key: Option<KeyEvent>) {
-        if self.tabs.active == RequestTab::Body {
+        if self.active_tab() == RequestTab::Body {
             if let Some(key) = key {
-                self.editor_events.on_key_event(key, &mut self.editor);
+                self.body_editor_on_key(key);
             }
             return;
         }
         match action {
-            Action::Up => self.tabs.move_up(),
+            Action::Up => self.with_active_tabs(RequestTabs::move_up),
             Action::Down => {
                 let n = self.active_tab_row_count();
-                self.tabs.move_down(n);
+                self.with_active_tabs(|t| t.move_down(n));
             }
             Action::Select => self.row_edit(),
             _ => {}
+        }
+    }
+
+    /// Runs `f` against the active buffer's request tabs, if any. Endpoint-only;
+    /// no-op when nothing is loaded (matches the pre-refactor flat `tabs` being
+    /// a no-op target with nothing selected).
+    fn with_active_tabs(&mut self, f: impl FnOnce(&mut RequestTabs)) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            f(&mut b.tabs);
         }
     }
 
@@ -1292,85 +1580,42 @@ impl App {
         Ok(())
     }
 
-    /// Loads an endpoint into the request pane: body into the edtui buffer, the
-    /// request itself into the live `selected` slot, and a pristine clone into
-    /// `loaded_snapshot` for dirty derivation. Resets tab state.
-    fn load_endpoint(&mut self, selected: SelectedEndpoint) {
-        let body = selected
-            .endpoint
-            .request
-            .body
-            .as_ref()
-            .map(|body| body.content.as_str())
-            .unwrap_or("");
-        self.editor = EditorState::new(Lines::from(body));
-        self.editor_vim.reset();
-        self.loaded_snapshot = Some(selected.endpoint.clone());
-        self.selected = Some(selected);
-        self.tabs = RequestTabs::default();
-        self.url_editor = None;
+    /// Opens `selected` into a buffer (was `load_endpoint`). Stage 1 keeps
+    /// behaviour single-buffer: any existing buffer is dropped and replaced so
+    /// `buffers.len() <= 1` and `active = 0`. Stage 2 turns this into
+    /// dedup-or-push (focus an already-open buffer, else push a new one) — the
+    /// dedup key is already reachable via [`App::buffer_index_for_path`], so that
+    /// change is small. `EndpointBuffer::new` folds today's body/vim/snapshot
+    /// setup.
+    fn open_or_focus_buffer(&mut self, selected: SelectedEndpoint) {
+        // Stage 2: `if let Some(i) = self.buffer_index_for_path(&selected.file)
+        // { self.active = i; return; }` then push instead of replace.
+        self.buffers = vec![Buffer::endpoint(selected)];
+        self.active = 0;
     }
 
     /// The live request currently loaded (with any in-memory edits), or `None`.
-    fn live_request(&self) -> Option<&churl_core::model::Request> {
-        self.selected.as_ref().map(|s| &s.endpoint.request)
+    fn live_request(&self) -> Option<&Request> {
+        self.active_endpoint_buffer().map(EndpointBuffer::live_request)
     }
 
-    /// Mirrors the current edtui body text into the live request's `body` so the
-    /// live endpoint reflects unsaved body edits (for dirty derivation and save).
-    /// A body that becomes empty drops the `Body` entirely.
+    /// Mirrors the current edtui body text into the active buffer's live request
+    /// `body` so the live endpoint reflects unsaved body edits (for dirty
+    /// derivation and save). A body that becomes empty drops the `Body` entirely.
     fn sync_body_into_selected(&mut self) {
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let text = String::from(self.editor.lines.clone());
-        match selected.endpoint.request.body.as_mut() {
-            Some(body) => {
-                if text.is_empty() {
-                    selected.endpoint.request.body = None;
-                } else {
-                    body.content = text;
-                }
-            }
-            None if !text.is_empty() => {
-                selected.endpoint.request.body = Some(Body {
-                    kind: BodyKind::Text,
-                    content: text,
-                });
-            }
-            None => {}
-        }
+        let text = String::from(b.editor.lines.clone());
+        fold_body_text(&mut b.endpoint.endpoint.request, text);
     }
 
-    /// Whether the live endpoint (incl. the edtui body) differs from the pristine
-    /// snapshot. Derived — no dirty flag to keep in sync.
+    /// Whether the active endpoint (incl. the edtui body) differs from its
+    /// pristine snapshot. Derived — no dirty flag to keep in sync. `false` when
+    /// nothing is loaded.
     fn is_dirty(&self) -> bool {
-        let Some(snapshot) = &self.loaded_snapshot else {
-            return false;
-        };
-        let Some(selected) = &self.selected else {
-            return false;
-        };
-        // Compare with the live body folded in (without mutating self).
-        let mut live = selected.endpoint.clone();
-        let text = String::from(self.editor.lines.clone());
-        match live.request.body.as_mut() {
-            Some(body) => {
-                if text.is_empty() {
-                    live.request.body = None;
-                } else {
-                    body.content = text;
-                }
-            }
-            None if !text.is_empty() => {
-                live.request.body = Some(Body {
-                    kind: BodyKind::Text,
-                    content: text,
-                });
-            }
-            None => {}
-        }
-        &live != snapshot
+        self.active_endpoint_buffer()
+            .is_some_and(EndpointBuffer::is_dirty)
     }
 
     /// Sends the selected endpoint's request with the live edtui body text.
@@ -1378,31 +1623,32 @@ impl App {
     /// pane to the in-flight state. Ignored (with a statusline hint) when a
     /// request is already in flight or no endpoint is selected.
     fn send_request(&mut self) {
-        if self.in_flight.is_some() {
+        if self
+            .active_endpoint_buffer()
+            .is_some_and(|b| b.in_flight.is_some())
+        {
             self.message = Some(Message::new("request already in flight — ctrl-c to cancel"));
             return;
         }
-        let Some(selected) = self.selected.clone() else {
+        // Clone the small `SelectedEndpoint` so `build_resolver`/`endpoint_rel_path`
+        // can take `&self`/`&mut self` while we later hold `&mut` the active
+        // buffer (the borrow-checker split noted in the design).
+        let Some(selected) = self.selected().cloned() else {
             self.message = Some(Message::new("no endpoint selected — nothing to send"));
             return;
         };
+        // The live edtui body text (read before we borrow the buffer mutably).
+        let body_text = self
+            .active_endpoint_buffer()
+            .map(|b| String::from(b.editor.lines.clone()))
+            .unwrap_or_default();
         // No client means runtime-free construction (snapshot tests); do nothing.
         let Some(client) = self.client.clone() else {
             return;
         };
 
         let mut request = selected.endpoint.request.clone();
-        let body_text = String::from(self.editor.lines.clone());
-        match request.body.as_mut() {
-            Some(body) => body.content = body_text,
-            None if !body_text.is_empty() => {
-                request.body = Some(Body {
-                    kind: BodyKind::Text,
-                    content: body_text,
-                });
-            }
-            None => {}
-        }
+        overwrite_body_text(&mut request, body_text);
 
         // Resolve `{{var}}` placeholders on the cloned request only — the seam is
         // `substitute_request`; resolved values are never written to disk (this
@@ -1434,29 +1680,36 @@ impl App {
             });
         });
 
-        self.in_flight = Some(InFlightRequest {
-            handle: handle.abort_handle(),
-            generation,
-            meta,
-        });
-        self.response = ResponseState::InFlight { started };
-        self.response_scroll = 0;
-        self.response_cursor = 0;
-        self.pending_highlight = None;
-        self.highlight_cache.clear();
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.in_flight = Some(InFlightRequest {
+                handle: handle.abort_handle(),
+                generation,
+                meta,
+            });
+            b.response = ResponseState::InFlight { started };
+            b.response_scroll = 0;
+            b.response_cursor = 0;
+            b.pending_highlight = None;
+            b.highlight_cache.clear();
+        }
         self.message = None;
     }
 
-    /// Cancels the in-flight request: aborts the task, records a history row with
-    /// no status, and moves the pane to the cancelled state.
+    /// Cancels the active buffer's in-flight request: aborts the task, records a
+    /// history row with no status, and moves the pane to the cancelled state.
     fn cancel_request(&mut self) {
-        let Some(in_flight) = self.in_flight.take() else {
+        let Some(in_flight) = self
+            .active_endpoint_buffer_mut()
+            .and_then(|b| b.in_flight.take())
+        else {
             self.message = Some(Message::new("no request in flight"));
             return;
         };
         in_flight.handle.abort();
         self.write_history(&in_flight.meta, None, None);
-        self.response = ResponseState::Cancelled;
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.response = ResponseState::Cancelled;
+        }
         self.message = Some(Message::new("request cancelled"));
     }
 
@@ -1472,47 +1725,56 @@ impl App {
     }
 
     /// The coarse maximum cursor row (total display rows minus one, as of the
-    /// last render); render clamps further.
+    /// last render); render clamps further. `0` when nothing is loaded.
     fn response_max_cursor(&self) -> usize {
-        self.response_total_rows.saturating_sub(1)
+        self.active_endpoint_buffer()
+            .map(|b| b.response_total_rows.saturating_sub(1))
+            .unwrap_or(0)
     }
 
     /// Moves the response viewer *cursor* for a navigation action. Scroll follows
     /// the cursor at render time (see `response::render`). `g`/`G` jump to the
     /// first/last visible display row.
     fn response_scroll(&mut self, action: Action) {
-        if !matches!(self.response, ResponseState::Done { .. }) {
+        let max = self.response_max_cursor();
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        if !matches!(b.response, ResponseState::Done { .. }) {
             return;
         }
-        let max = self.response_max_cursor();
         match action {
-            Action::Up => self.response_cursor = self.response_cursor.saturating_sub(1),
-            Action::Down => self.response_cursor = (self.response_cursor + 1).min(max),
-            Action::Top => self.response_cursor = 0,
-            Action::Bottom => self.response_cursor = max,
+            Action::Up => b.response_cursor = b.response_cursor.saturating_sub(1),
+            Action::Down => b.response_cursor = (b.response_cursor + 1).min(max),
+            Action::Top => b.response_cursor = 0,
+            Action::Bottom => b.response_cursor = max,
             _ => {}
         }
     }
 
     /// Moves the response cursor by half a viewport (scroll follows at render).
     fn response_half_page(&mut self, down: bool) {
-        if !matches!(self.response, ResponseState::Done { .. }) {
+        let max = self.response_max_cursor();
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        if !matches!(b.response, ResponseState::Done { .. }) {
             return;
         }
-        let half = (self.response_viewport_height / 2).max(1);
-        let max = self.response_max_cursor();
-        self.response_cursor = if down {
-            (self.response_cursor + half).min(max)
+        let half = (b.response_viewport_height / 2).max(1);
+        b.response_cursor = if down {
+            (b.response_cursor + half).min(max)
         } else {
-            self.response_cursor.saturating_sub(half)
+            b.response_cursor.saturating_sub(half)
         };
     }
 
     // ---- Response viewer M7 actions ----
 
-    /// The live `ResponseView`, when the pane holds a completed response.
+    /// The live `ResponseView` of the active buffer, when the pane holds a
+    /// completed response.
     fn response_view_mut(&mut self) -> Option<&mut ResponseView> {
-        match &mut self.response {
+        match &mut self.active_endpoint_buffer_mut()?.response {
             ResponseState::Done { view } => Some(view),
             _ => None,
         }
@@ -1521,9 +1783,10 @@ impl App {
     /// The logical line under the response cursor (through the last render's
     /// fold/wrap geometry), or `None` when there is no response.
     fn response_cursor_logical(&self) -> Option<usize> {
-        let width = self.response_viewport_width;
-        let cursor = self.response_cursor;
-        match &self.response {
+        let b = self.active_endpoint_buffer()?;
+        let width = b.response_viewport_width;
+        let cursor = b.response_cursor;
+        match &b.response {
             ResponseState::Done { view } => view.logical_at_display_row(cursor, width),
             _ => None,
         }
@@ -1532,22 +1795,28 @@ impl App {
     /// `h`: toggle body/headers view. Resets cursor + scroll (the two views have
     /// different geometry) and clears any live search.
     fn response_toggle_headers(&mut self) {
-        if let Some(view) = self.response_view_mut() {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        if let ResponseState::Done { view } = &mut b.response {
             view.toggle_view_mode();
-            self.response_cursor = 0;
-            self.response_scroll = 0;
-            self.pending_highlight = None;
-            self.highlight_cache.clear();
+            b.response_cursor = 0;
+            b.response_scroll = 0;
+            b.pending_highlight = None;
+            b.highlight_cache.clear();
         }
     }
 
     /// `W`: toggle soft-wrap. Cursor/scroll geometry changes, so reset them.
     fn response_toggle_wrap(&mut self) {
-        if let Some(view) = self.response_view_mut() {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        if let ResponseState::Done { view } = &mut b.response {
             view.toggle_wrap();
-            self.response_cursor = 0;
-            self.response_scroll = 0;
-            self.pending_highlight = None;
+            b.response_cursor = 0;
+            b.response_scroll = 0;
+            b.pending_highlight = None;
         }
     }
 
@@ -1556,9 +1825,9 @@ impl App {
     /// Why folding is unsupported right now, or `None` when it is available.
     /// The headers view of a JSON response gets its own reason — "JSON responses
     /// only" would be wrong there.
-    fn fold_unsupported_notice(&mut self) -> Option<&'static str> {
-        let view = match &self.response {
-            ResponseState::Done { view } => view,
+    fn fold_unsupported_notice(&self) -> Option<&'static str> {
+        let view = match self.active_endpoint_buffer().map(|b| &b.response) {
+            Some(ResponseState::Done { view }) => view,
             _ => return Some("folding: no response"),
         };
         if view.view_mode() == ViewMode::Headers {
@@ -1578,10 +1847,12 @@ impl App {
             self.notify(notice);
             return;
         }
-        if let Some(view) = self.response_view_mut() {
+        if let Some(b) = self.active_endpoint_buffer_mut()
+            && let ResponseState::Done { view } = &mut b.response
+        {
             view.toggle_fold_at(logical);
-            self.pending_highlight = None;
-            self.highlight_cache.clear();
+            b.pending_highlight = None;
+            b.highlight_cache.clear();
         }
     }
 
@@ -1592,12 +1863,14 @@ impl App {
             self.notify(notice);
             return;
         }
-        if let Some(view) = self.response_view_mut() {
+        if let Some(b) = self.active_endpoint_buffer_mut()
+            && let ResponseState::Done { view } = &mut b.response
+        {
             view.toggle_all_folds();
-            self.response_cursor = 0;
-            self.response_scroll = 0;
-            self.pending_highlight = None;
-            self.highlight_cache.clear();
+            b.response_cursor = 0;
+            b.response_scroll = 0;
+            b.pending_highlight = None;
+            b.highlight_cache.clear();
         }
     }
 
@@ -1655,8 +1928,10 @@ impl App {
         }
         let stepped = self.response_view_mut().and_then(|v| v.step_match(forward));
         if stepped.is_some() {
-            self.pending_highlight = None;
-            self.highlight_cache.clear();
+            if let Some(b) = self.active_endpoint_buffer_mut() {
+                b.pending_highlight = None;
+                b.highlight_cache.clear();
+            }
             self.response_center_on_match();
             // Feedback: `match k/N` in the message row.
             if let Some(view) = self.response_view_mut()
@@ -1674,15 +1949,18 @@ impl App {
     /// Moves the response cursor onto the current search match's logical line,
     /// so scroll follows it into view at the next render.
     fn response_center_on_match(&mut self) {
-        let width = self.response_viewport_width;
-        let row = match &self.response {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        let width = b.response_viewport_width;
+        let row = match &b.response {
             ResponseState::Done { view } => view
                 .current_match_line()
                 .and_then(|logical| view.display_row_for_logical(logical, width)),
             _ => None,
         };
         if let Some(row) = row {
-            self.response_cursor = row;
+            b.response_cursor = row;
         }
     }
 
@@ -1778,45 +2056,75 @@ impl App {
 
     /// Applies an arrived response, dropping it if its generation is stale (the
     /// request was cancelled or superseded by a newer send).
+    ///
+    /// Routing: `generation` is a single global counter, so each in-flight
+    /// request's generation is unique across buffers. We SCAN the buffers for the
+    /// one whose `in_flight.generation` matches and write the result to THAT
+    /// buffer — even if it is not the active one. (Stage 1 has ≤1 buffer, so this
+    /// is trivially the active buffer; the scan is written now so Stage 2's
+    /// multi-buffer routing is already correct.)
     fn on_response(
         &mut self,
         generation: u64,
         outcome: Result<Response, String>,
         meta: ResponseMeta,
     ) {
-        if self.in_flight.as_ref().map(|f| f.generation) != Some(generation) {
-            return; // stale — drop
+        let Some(idx) = self.buffers.iter().position(|b| {
+            b.as_endpoint()
+                .and_then(|e| e.in_flight.as_ref())
+                .is_some_and(|f| f.generation == generation)
+        }) else {
+            return; // stale — no buffer awaits this generation
+        };
+        // History write needs `&mut self`; compute the status args first, then
+        // borrow the target buffer to store the response.
+        let status = outcome
+            .as_ref()
+            .ok()
+            .map(|r| (r.status, r.timing.total));
+        match &outcome {
+            Ok(_) => {
+                let (st, total) = status.expect("Ok outcome has status");
+                self.write_history(&meta, Some(st), Some(total));
+            }
+            Err(_) => self.write_history(&meta, None, None),
         }
-        self.in_flight = None;
-        self.highlight_cache.clear();
-        self.response_scroll = 0;
-        self.response_cursor = 0;
-        self.pending_highlight = None;
+        let Some(b) = self.buffers[idx].as_endpoint_mut() else {
+            return;
+        };
+        b.in_flight = None;
+        b.highlight_cache.clear();
+        b.response_scroll = 0;
+        b.response_cursor = 0;
+        b.pending_highlight = None;
         match outcome {
             Ok(response) => {
-                self.write_history(&meta, Some(response.status), Some(response.timing.total));
-                self.response = ResponseState::Done {
+                b.response = ResponseState::Done {
                     view: ResponseView::build(&response, generation),
                 };
             }
             Err(error) => {
-                self.write_history(&meta, None, None);
-                self.response = ResponseState::Failed { error, meta };
+                b.response = ResponseState::Failed { error, meta };
             }
         }
     }
 
-    /// Stores highlighted viewport lines, capping the cache so long scrolls do
-    /// not grow it unbounded.
+    /// Stores highlighted viewport lines in the active buffer's cache, capping it
+    /// so long scrolls do not grow it unbounded. (Only the active buffer enqueues
+    /// highlight jobs, and the cache is keyed by viewport hash, so a job that
+    /// lands after a buffer switch is harmless.)
     fn cache_highlighted(&mut self, hash: u64, lines: Vec<Line<'static>>) {
-        if self.highlight_cache.len() >= 64 {
-            self.highlight_cache.clear();
+        let Some(b) = self.active_endpoint_buffer_mut() else {
+            return;
+        };
+        if b.highlight_cache.len() >= 64 {
+            b.highlight_cache.clear();
         }
         // Clear the in-flight guard when its result lands (M7 dedup micro-nit).
-        if self.pending_highlight == Some(hash) {
-            self.pending_highlight = None;
+        if b.pending_highlight == Some(hash) {
+            b.pending_highlight = None;
         }
-        self.highlight_cache.insert(hash, lines);
+        b.highlight_cache.insert(hash, lines);
     }
 
     /// Inserts a history row for a terminal outcome. Insert failure warns on the
@@ -2430,22 +2738,16 @@ impl App {
     /// batch hits the same URL/vars/auth as a normal send, and prefills the config
     /// from the load defaults. Never auto-runs — the user reviews/edits first.
     fn open_load_runner(&mut self) {
-        let Some(selected) = self.selected.clone() else {
+        let Some(selected) = self.selected().cloned() else {
             self.notify("no endpoint selected — select one to load-test");
             return;
         };
+        let body_text = self
+            .active_endpoint_buffer()
+            .map(|b| String::from(b.editor.lines.clone()))
+            .unwrap_or_default();
         let mut request = selected.endpoint.request.clone();
-        let body_text = String::from(self.editor.lines.clone());
-        match request.body.as_mut() {
-            Some(body) => body.content = body_text,
-            None if !body_text.is_empty() => {
-                request.body = Some(Body {
-                    kind: BodyKind::Text,
-                    content: body_text,
-                });
-            }
-            None => {}
-        }
+        overwrite_body_text(&mut request, body_text);
         // Resolve `{{var}}` on the clone ONCE; every copy reuses this resolved
         // request (consistent batch, no N× re-resolution). `execute` stays
         // substitution-free.
@@ -3027,7 +3329,9 @@ impl App {
             return;
         };
         self.set_focus(Pane::UrlBar);
-        self.url_editor = Some(LineEditor::new(&url));
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.url_editor = Some(LineEditor::new(&url));
+        }
     }
 
     /// Opens the centered vim-popup URL editor (`e`, or `url_edit = "popup"`).
@@ -3037,9 +3341,11 @@ impl App {
             return;
         };
         self.set_focus(Pane::UrlBar);
-        self.url_editor = None;
-        self.url_popup = Some(EditorState::new(Lines::from(url.as_str())));
-        self.url_popup_vim.reset();
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.url_editor = None;
+            b.url_popup = Some(EditorState::new(Lines::from(url.as_str())));
+            b.url_popup_vim.reset();
+        }
     }
 
     /// Sets focus, honouring the M6.7 collapse/hide invariants: a collapsed pane
@@ -3147,7 +3453,7 @@ impl App {
     /// URL. Reports the merge and marks dirty. A no-op when nothing is loaded.
     fn commit_url(&mut self, url: String) {
         let (base, pairs) = split_query(&url);
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(selected) = self.selected_mut() else {
             return;
         };
         selected.endpoint.request.url = base;
@@ -3162,16 +3468,24 @@ impl App {
     fn handle_url_edit_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Enter => {
-                if let Some(editor) = self.url_editor.take() {
+                // Take the editor out first so `commit_url` can borrow `&mut self`.
+                let taken = self
+                    .active_endpoint_buffer_mut()
+                    .and_then(|b| b.url_editor.take());
+                if let Some(editor) = taken {
                     // Commit runs the URL→Params query merge (deliverable 3).
                     self.commit_url(editor.text());
                 }
             }
             KeyCode::Esc => {
-                self.url_editor = None; // revert (discard the editor's text)
+                if let Some(b) = self.active_endpoint_buffer_mut() {
+                    b.url_editor = None; // revert (discard the editor's text)
+                }
             }
             _ => {
-                if let Some(editor) = self.url_editor.as_mut() {
+                if let Some(b) = self.active_endpoint_buffer_mut()
+                    && let Some(editor) = b.url_editor.as_mut()
+                {
                     editor.handle_key(key);
                 }
             }
@@ -3181,7 +3495,7 @@ impl App {
 
     /// Cycles the loaded request's method (GET→POST→…→GET).
     fn cycle_method(&mut self) {
-        if let Some(selected) = self.selected.as_mut() {
+        if let Some(selected) = self.selected_mut() {
             let m = selected.endpoint.request.method;
             selected.endpoint.request.method = m.cycle();
         } else {
@@ -3191,7 +3505,7 @@ impl App {
 
     /// Opens the one-key method-picker menu (focuses the URL bar).
     fn open_method_menu(&mut self) {
-        if self.selected.is_none() {
+        if self.selected().is_none() {
             self.message = Some(Message::new("no endpoint selected"));
             return;
         }
@@ -3207,7 +3521,7 @@ impl App {
         }
         if let KeyCode::Char(c) = key.code
             && let Some(method) = method_menu::method_for(c)
-            && let Some(selected) = self.selected.as_mut()
+            && let Some(selected) = self.selected_mut()
         {
             selected.endpoint.request.method = method;
             self.mode = Mode::Normal;
@@ -3219,10 +3533,11 @@ impl App {
 
     /// The number of rows on the active tab of the live request.
     fn active_tab_row_count(&self) -> usize {
-        let Some(request) = self.live_request() else {
+        let Some(b) = self.active_endpoint_buffer() else {
             return 0;
         };
-        match self.tabs.active {
+        let request = b.live_request();
+        match b.tabs.active {
             RequestTab::Params => request.params.len(),
             RequestTab::Headers => request.headers.len(),
             RequestTab::Auth => auth_field_count(request.auth.as_ref()),
@@ -3232,18 +3547,19 @@ impl App {
 
     /// `a`: add a row on the Params/Headers tab and immediately edit its name.
     fn row_add(&mut self) {
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let request = &mut selected.endpoint.request;
-        let new_row = match self.tabs.active {
+        let request = &mut b.endpoint.endpoint.request;
+        // The count after the push, for the `clamp` (was `active_tab_row_count`).
+        let (new_row, row_count) = match b.tabs.active {
             RequestTab::Params => {
                 request.params.push(Param {
                     name: String::new(),
                     value: String::new(),
                     enabled: true,
                 });
-                request.params.len() - 1
+                (request.params.len() - 1, request.params.len())
             }
             RequestTab::Headers => {
                 request.headers.push(Header {
@@ -3251,19 +3567,19 @@ impl App {
                     value: String::new(),
                     enabled: true,
                 });
-                request.headers.len() - 1
+                (request.headers.len() - 1, request.headers.len())
             }
             // Auth/Body have no add-row.
             _ => return,
         };
-        self.tabs.clamp(self.active_tab_row_count());
+        b.tabs.clamp(row_count);
         // Select and begin editing the new row's name field.
-        match self.tabs.active {
-            RequestTab::Params => self.tabs.params_sel = new_row,
-            RequestTab::Headers => self.tabs.headers_sel = new_row,
+        match b.tabs.active {
+            RequestTab::Params => b.tabs.params_sel = new_row,
+            RequestTab::Headers => b.tabs.headers_sel = new_row,
             _ => {}
         }
-        self.tabs.editing = Some(FieldEdit {
+        b.tabs.editing = Some(FieldEdit {
             row: new_row,
             field: EditField::Name,
             editor: LineEditor::new(""),
@@ -3272,33 +3588,34 @@ impl App {
 
     /// `d`: delete the selected row on the Params/Headers tab (no confirm).
     fn row_delete(&mut self) {
-        let sel = self.tabs.selection();
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let request = &mut selected.endpoint.request;
-        match self.tabs.active {
+        let sel = b.tabs.selection();
+        let request = &mut b.endpoint.endpoint.request;
+        let row_count = match b.tabs.active {
             RequestTab::Params if sel < request.params.len() => {
                 request.params.remove(sel);
+                request.params.len()
             }
             RequestTab::Headers if sel < request.headers.len() => {
                 request.headers.remove(sel);
+                request.headers.len()
             }
             _ => return,
-        }
-        let n = self.active_tab_row_count();
-        self.tabs.clamp(n);
+        };
+        b.tabs.clamp(row_count);
     }
 
     /// `Space`: toggle the selected row's `enabled` flag (Params/Headers), or the
     /// ApiKey placement on the Auth tab's placement row.
     fn row_toggle(&mut self) {
-        let sel = self.tabs.selection();
-        let active = self.tabs.active;
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let request = &mut selected.endpoint.request;
+        let sel = b.tabs.selection();
+        let active = b.tabs.active;
+        let request = &mut b.endpoint.endpoint.request;
         match active {
             RequestTab::Params => {
                 if let Some(param) = request.params.get_mut(sel) {
@@ -3318,8 +3635,12 @@ impl App {
     /// `Enter`/`i`: edit the selected row. On the Auth kind row, opens the auth
     /// kind picker instead.
     fn row_edit(&mut self) {
-        let sel = self.tabs.selection();
-        let active = self.tabs.active;
+        let Some((sel, active)) = self
+            .active_endpoint_buffer()
+            .map(|b| (b.tabs.selection(), b.tabs.active))
+        else {
+            return;
+        };
         // The Auth-tab kind row (row 0) opens the kind picker.
         if active == RequestTab::Auth && sel == 0 {
             self.open_auth_kind_picker();
@@ -3341,11 +3662,13 @@ impl App {
         let Some(text) = self.current_field_text(active, sel, start_field) else {
             return;
         };
-        self.tabs.editing = Some(FieldEdit {
-            row: sel,
-            field: start_field,
-            editor: LineEditor::new(&text),
-        });
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.tabs.editing = Some(FieldEdit {
+                row: sel,
+                field: start_field,
+                editor: LineEditor::new(&text),
+            });
+        }
     }
 
     /// The current text of a given row/field on `tab`, or `None` when out of range
@@ -3378,14 +3701,19 @@ impl App {
                 // Cancel the field edit; a freshly-added row that was never
                 // committed (name and value both still empty) is removed, or
                 // `a` + Esc would leave a nameless ghost row that serializes.
-                if let Some(edit) = self.tabs.editing.take() {
+                let edit = self
+                    .active_endpoint_buffer_mut()
+                    .and_then(|b| b.tabs.editing.take());
+                if let Some(edit) = edit {
                     self.discard_row_if_empty(edit.row);
                 }
             }
             KeyCode::Tab => self.field_edit_advance(false),
             KeyCode::Enter => self.field_edit_advance(true),
             _ => {
-                if let Some(edit) = self.tabs.editing.as_mut() {
+                if let Some(b) = self.active_endpoint_buffer_mut()
+                    && let Some(edit) = b.tabs.editing.as_mut()
+                {
                     edit.editor.handle_key(key);
                 }
             }
@@ -3397,11 +3725,12 @@ impl App {
     /// empty — the ghost a cancelled `a`(dd) would otherwise leave behind (it is
     /// nameless, enabled, and would serialize on save).
     fn discard_row_if_empty(&mut self, row: usize) {
-        let active = self.tabs.active;
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let request = &mut selected.endpoint.request;
+        let active = b.tabs.active;
+        let request = &mut b.endpoint.endpoint.request;
+        // The post-removal row count for the active tab (was `active_tab_row_count`).
         let removed = match active {
             RequestTab::Params
                 if request
@@ -3410,7 +3739,7 @@ impl App {
                     .is_some_and(|p| p.name.is_empty() && p.value.is_empty()) =>
             {
                 request.params.remove(row);
-                true
+                Some(request.params.len())
             }
             RequestTab::Headers
                 if request
@@ -3419,47 +3748,54 @@ impl App {
                     .is_some_and(|h| h.name.is_empty() && h.value.is_empty()) =>
             {
                 request.headers.remove(row);
-                true
+                Some(request.headers.len())
             }
-            _ => false,
+            _ => None,
         };
-        if removed {
-            let n = self.active_tab_row_count();
-            self.tabs.clamp(n);
+        if let Some(n) = removed {
+            b.tabs.clamp(n);
         }
     }
 
     /// Commits the current field edit into the live request. `commit_row` closes
     /// the edit after the value field; otherwise name→value advances.
     fn field_edit_advance(&mut self, commit_row: bool) {
-        let Some(edit) = self.tabs.editing.take() else {
+        let Some(edit) = self
+            .active_endpoint_buffer_mut()
+            .and_then(|b| b.tabs.editing.take())
+        else {
             return;
         };
+        let active = self.active_tab();
         let text = edit.editor.text();
-        self.write_field(self.tabs.active, edit.row, edit.field, text);
+        self.write_field(active, edit.row, edit.field, text);
         match edit.field {
             EditField::Name => {
                 // Advance to the value field, seeded with its current text.
                 let value = self
-                    .current_field_text(self.tabs.active, edit.row, EditField::Value)
+                    .current_field_text(active, edit.row, EditField::Value)
                     .unwrap_or_default();
-                self.tabs.editing = Some(FieldEdit {
-                    row: edit.row,
-                    field: EditField::Value,
-                    editor: LineEditor::new(&value),
-                });
+                if let Some(b) = self.active_endpoint_buffer_mut() {
+                    b.tabs.editing = Some(FieldEdit {
+                        row: edit.row,
+                        field: EditField::Value,
+                        editor: LineEditor::new(&value),
+                    });
+                }
             }
             EditField::Value => {
                 if !commit_row {
                     // Tab from value wraps back to name.
                     let name = self
-                        .current_field_text(self.tabs.active, edit.row, EditField::Name)
+                        .current_field_text(active, edit.row, EditField::Name)
                         .unwrap_or_default();
-                    self.tabs.editing = Some(FieldEdit {
-                        row: edit.row,
-                        field: EditField::Name,
-                        editor: LineEditor::new(&name),
-                    });
+                    if let Some(b) = self.active_endpoint_buffer_mut() {
+                        b.tabs.editing = Some(FieldEdit {
+                            row: edit.row,
+                            field: EditField::Name,
+                            editor: LineEditor::new(&name),
+                        });
+                    }
                 }
                 // Enter on value: editing already taken → committed.
             }
@@ -3468,7 +3804,7 @@ impl App {
 
     /// Writes an edited field back into the live request.
     fn write_field(&mut self, tab: RequestTab, row: usize, field: EditField, text: String) {
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(selected) = self.selected_mut() else {
             return;
         };
         let request = &mut selected.endpoint.request;
@@ -3496,7 +3832,7 @@ impl App {
 
     /// Opens the auth-kind picker (None / Basic / Bearer / ApiKey).
     fn open_auth_kind_picker(&mut self) {
-        if self.selected.is_none() {
+        if self.selected().is_none() {
             return;
         }
         let labels = vec![
@@ -3512,10 +3848,10 @@ impl App {
 
     /// Applies an auth-kind picker choice, swapping in default-empty fields.
     fn set_auth_kind(&mut self, index: usize) {
-        let Some(selected) = self.selected.as_mut() else {
+        let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
-        let auth = &mut selected.endpoint.request.auth;
+        let auth = &mut b.endpoint.endpoint.request.auth;
         *auth = match index {
             0 => None,
             1 => Some(Auth::Basic {
@@ -3532,7 +3868,7 @@ impl App {
             }),
             _ => return,
         };
-        self.tabs.auth_sel = 0;
+        b.tabs.auth_sel = 0;
     }
 
     // ---- Save ----
@@ -3542,7 +3878,7 @@ impl App {
     /// request stays dirty.
     fn save_request(&mut self) {
         self.sync_body_into_selected();
-        let Some(selected) = self.selected.as_ref() else {
+        let Some(selected) = self.selected() else {
             self.message = Some(Message::new("no endpoint to save"));
             return;
         };
@@ -3550,7 +3886,9 @@ impl App {
         let endpoint = selected.endpoint.clone();
         match persistence::save_endpoint(&path, &endpoint) {
             Ok(()) => {
-                self.loaded_snapshot = Some(endpoint.clone());
+                if let Some(b) = self.active_endpoint_buffer_mut() {
+                    b.loaded_snapshot = endpoint.clone();
+                }
                 self.refresh_explorer_endpoint(&path, endpoint.clone());
                 self.message = Some(Message::new(format!("Saved {}", endpoint.name)));
             }
@@ -3691,23 +4029,17 @@ impl App {
     /// `C` / palette: copy the loaded request as a curl one-liner. `resolved`
     /// substitutes `{{var}}`s first (secrets caution — the explicit opt-in).
     fn copy_as_curl(&mut self, resolved: bool) {
-        let Some(selected) = self.selected.clone() else {
+        let Some(selected) = self.selected().cloned() else {
             self.notify("no endpoint selected");
             return;
         };
         let mut endpoint = selected.endpoint.clone();
         // Fold in any unsaved edtui body edits so the copy matches what's shown.
-        let body_text = String::from(self.editor.lines.clone());
-        match endpoint.request.body.as_mut() {
-            Some(body) => body.content = body_text,
-            None if !body_text.is_empty() => {
-                endpoint.request.body = Some(Body {
-                    kind: BodyKind::Text,
-                    content: body_text,
-                });
-            }
-            None => {}
-        }
+        let body_text = self
+            .active_endpoint_buffer()
+            .map(|b| String::from(b.editor.lines.clone()))
+            .unwrap_or_default();
+        overwrite_body_text(&mut endpoint.request, body_text);
         if resolved {
             self.build_resolver(&selected)
                 .substitute_request(&mut endpoint.request);
@@ -3948,19 +4280,19 @@ impl App {
                 };
                 match persistence::rename_endpoint(&path, &new_name) {
                     Ok(new_path) => {
-                        let renamed_loaded = self.selected.as_ref().is_some_and(|s| s.file == path);
-                        if renamed_loaded {
+                        // Path-based: find the buffer loaded from the OLD path
+                        // (Stage 1 has ≤1 buffer; Stage 2 inherits this).
+                        let renamed_idx = self.buffer_index_for_path(&path);
+                        if let Some(idx) = renamed_idx {
                             // Renaming the *loaded* endpoint: update its file
                             // path + name in place so unsaved edits survive —
                             // no reload of the request pane. Repoint before the
                             // reload so remap-by-path sees the live file.
                             let trimmed = new_name.trim().to_owned();
-                            if let Some(selected) = self.selected.as_mut() {
-                                selected.file = new_path.clone();
-                                selected.endpoint.name = trimmed.clone();
-                            }
-                            if let Some(snapshot) = self.loaded_snapshot.as_mut() {
-                                snapshot.name = trimmed;
+                            if let Some(b) = self.buffers[idx].as_endpoint_mut() {
+                                b.endpoint.file = new_path.clone();
+                                b.endpoint.endpoint.name = trimmed.clone();
+                                b.loaded_snapshot.name = trimmed;
                             }
                             self.reload_explorer()?;
                             // Move the cursor onto the renamed row without
@@ -3987,10 +4319,13 @@ impl App {
                         // collection: repoint its file into the new directory
                         // *before* the reload, or remap-by-path would see a
                         // vanished file (and the next save would fail NotFound).
-                        if let Some(selected) = self.selected.as_mut()
-                            && let Ok(rest) = selected.file.strip_prefix(&dir)
-                        {
-                            selected.file = new_dir.join(rest);
+                        // Path-based over all buffers under `dir` (Stage 1: ≤1).
+                        for buf in &mut self.buffers {
+                            if let Some(b) = buf.as_endpoint_mut()
+                                && let Ok(rest) = b.endpoint.file.strip_prefix(&dir)
+                            {
+                                b.endpoint.file = new_dir.join(rest);
+                            }
                         }
                         self.reload_explorer()?;
                         self.message = Some(Message::new(format!("renamed to {new_name}")));
@@ -4042,8 +4377,11 @@ impl App {
                 }
                 KeyCode::Char('d') => {
                     self.mode = Mode::Normal;
-                    // Discard: drop the snapshot so the switch is not re-guarded.
-                    self.loaded_snapshot = None;
+                    // Discard: drop the active buffer so `is_dirty()` is false and
+                    // the switch is not re-guarded. `perform_load` replaces the
+                    // buffer (Stage 1) or clears it (workspace switch) next.
+                    self.buffers.clear();
+                    self.active = 0;
                     if let Some(target) = self.pending_load.take() {
                         self.perform_load(target)?;
                     }
@@ -4064,11 +4402,11 @@ impl App {
     }
 
     /// Rebuilds the explorer tree from disk, preserving expansion + cursor as best
-    /// it can (cursor clamps to the new row count), then re-derives the loaded
-    /// endpoint's indices from its file path (see [`App::remap_selected`]).
+    /// it can (cursor clamps to the new row count), then re-derives each buffer's
+    /// indices from its file path (see [`App::remap_buffers`]).
     fn reload_explorer(&mut self) -> Result<()> {
         self.explorer.reload(self.workspace.as_ref())?;
-        self.remap_selected();
+        self.remap_buffers();
         self.surface_explorer_warnings();
         // A reload can empty the sequence list (e.g. every sequence deleted on
         // disk); reconcile the left-column focus so it never strands on an empty
@@ -4077,32 +4415,38 @@ impl App {
         Ok(())
     }
 
-    /// Re-derives the loaded endpoint's explorer indices from its file path
-    /// after a tree reload. Collections are name-sorted, so creating, renaming,
-    /// or deleting *another* collection shifts indices — a stale
-    /// `selected.collection` would silently read the wrong collection's
-    /// `folder.toml` vars at send time. A vanished file clears the selection
-    /// (the post-delete case).
-    fn remap_selected(&mut self) {
-        let Some(selected) = self.selected.as_mut() else {
-            return;
-        };
-        if !selected.file.exists() {
-            self.selected = None;
-            self.loaded_snapshot = None;
-            self.editor = EditorState::default();
-            return;
-        }
-        if let Some(ci) = self.explorer.collection_index_for_file(&selected.file) {
-            selected.collection = ci;
+    /// Re-derives each buffer's explorer indices from its file path after a tree
+    /// reload. Collections are name-sorted, so creating, renaming, or deleting
+    /// *another* collection shifts indices — a stale `endpoint.collection` would
+    /// silently read the wrong collection's `folder.toml` vars at send time. A
+    /// buffer whose file vanished is removed (the post-delete case); `active` is
+    /// clamped so it still points at a live buffer.
+    fn remap_buffers(&mut self) {
+        let mut i = 0;
+        while i < self.buffers.len() {
+            let file = self.buffers[i].file().to_path_buf();
+            if !file.exists() {
+                self.buffers.remove(i);
+                // A removal before/at `active` shifts it left (never below 0).
+                if self.active > i || self.active >= self.buffers.len() {
+                    self.active = self.active.saturating_sub(1);
+                }
+                continue;
+            }
+            if let Some(ci) = self.explorer.collection_index_for_file(&file)
+                && let Some(b) = self.buffers[i].as_endpoint_mut()
+            {
+                b.endpoint.collection = ci;
+            }
+            i += 1;
         }
     }
 
     /// Moves the explorer cursor onto the endpoint at `file` (expanding its
-    /// collection) and loads it into the request pane.
+    /// collection) and loads it into a buffer.
     fn select_endpoint_file(&mut self, file: &Path) -> Result<()> {
         if let Some(selected) = self.explorer.select_file(file)? {
-            self.load_endpoint(selected);
+            self.open_or_focus_buffer(selected);
         }
         Ok(())
     }
@@ -4132,7 +4476,7 @@ impl App {
 
     /// Whether `target` refers to the endpoint that is already loaded.
     fn target_is_same_endpoint(&self, target: &PendingLoad) -> bool {
-        let Some(selected) = self.selected.as_ref() else {
+        let Some(selected) = self.selected() else {
             return false;
         };
         match target {
@@ -4150,10 +4494,8 @@ impl App {
     /// collection row is never "other" (toggling needs no guard).
     fn target_is_other(&self, target: &PendingLoad) -> bool {
         match target {
-            PendingLoad::Row(_) => self
-                .explorer
-                .cursor_is_other_endpoint(self.selected.as_ref()),
-            PendingLoad::File(file) => self.selected.as_ref().is_none_or(|s| &s.file != file),
+            PendingLoad::Row(_) => self.explorer.cursor_is_other_endpoint(self.selected()),
+            PendingLoad::File(file) => self.selected().is_none_or(|s| &s.file != file),
             // A workspace switch always replaces the loaded endpoint's context, so
             // a dirty switch must defer to the discard-changes confirm.
             PendingLoad::Workspace(_) => true,
@@ -4166,7 +4508,7 @@ impl App {
             PendingLoad::Row(row) => {
                 self.explorer.cursor = row;
                 if let Some(selected) = self.explorer.select()? {
-                    self.load_endpoint(selected);
+                    self.open_or_focus_buffer(selected);
                 }
             }
             PendingLoad::File(file) => self.select_endpoint_file(&file)?,
@@ -4190,10 +4532,13 @@ impl App {
         };
         let name = new_ws.manifest().name.clone();
 
-        // Abort any in-flight request from the old workspace (its response is no
-        // longer relevant); dropping the handle also drops the stale generation.
-        if let Some(in_flight) = self.in_flight.take() {
-            in_flight.handle.abort();
+        // Abort any in-flight request from the old workspace's buffers (their
+        // responses are no longer relevant); dropping the handle also drops the
+        // stale generation.
+        for buf in &mut self.buffers {
+            if let Some(in_flight) = buf.as_endpoint_mut().and_then(|b| b.in_flight.take()) {
+                in_flight.handle.abort();
+            }
         }
 
         // Swap in the new workspace and rebuild the explorer against it.
@@ -4201,23 +4546,14 @@ impl App {
         self.explorer.reload(self.workspace.as_ref())?;
         self.explorer.cursor = 0;
 
-        // Reset all endpoint/workspace-scoped state.
-        self.selected = None;
-        self.loaded_snapshot = None; // clears derived dirty state
-        self.editor = EditorState::default();
-        self.editor_vim.reset();
-        self.tabs = RequestTabs::default();
-        self.url_editor = None;
-        self.url_popup = None;
+        // Drop every buffer — all endpoint/response/dirty/editor state lives
+        // inside them, so a clear resets it all in one move (nothing from the old
+        // workspace leaks in).
+        self.buffers.clear();
+        self.active = 0;
         // The active profile is defined per-workspace; a stale name could
         // accidentally resolve against the new workspace's profiles.
         self.active_profile = None;
-        self.response = ResponseState::Idle;
-        self.response_scroll = 0;
-        self.response_cursor = 0;
-        self.response_total_rows = 0;
-        self.pending_highlight = None;
-        self.highlight_cache.clear();
         self.pending_load = None;
         self.zoom = None;
         // Clean slate for the sequences sub-pane: the new workspace may have no
@@ -4414,7 +4750,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (vim-style `/query`), shadowing any transient message.
     let body_search_input: Option<String> = (app.mode == Mode::BodySearch).then(|| {
         let q = app.body_search_editor.text();
-        let matches = match &app.response {
+        let matches = match app.response() {
             ResponseState::Done { view } => view.search().map(|s| s.count()).unwrap_or(0),
             _ => 0,
         };
@@ -4481,7 +4817,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // The loaded endpoint's file while dirty — its explorer row gets the accent
     // ● suffix (matched by path in the explorer render).
     let dirty_file: Option<std::path::PathBuf> = dirty
-        .then(|| app.selected.as_ref().map(|s| s.file.clone()))
+        .then(|| app.selected().map(|s| s.file.clone()))
         .flatten();
     if let Some(explorer_area) = explorer_area {
         if app.sequences_shown {
@@ -4547,25 +4883,73 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
     }
-    let selected_request = app
-        .selected
-        .as_ref()
-        .map(|selected| &selected.endpoint.request);
+    // Bind the active endpoint buffer by *field* access (not the `&mut self`
+    // accessor) so `app.jump`/`app.focus`/`app.theme`/`app.highlight_tx`/… stay
+    // independently borrowable while we hold the buffer mutably (the design's
+    // render borrow-split). The request/editor/tabs/response/cache all live in
+    // the same buffer as disjoint fields, so they co-borrow cleanly. When no
+    // buffer is loaded, we render against fresh defaults — byte-identical to the
+    // pre-refactor flat fields, which were always default with nothing loaded.
+    let active = app.active;
+    let buf = app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut);
+    let mut default_editor = EditorState::default();
+    let mut default_tabs = RequestTabs::default();
+    let default_response = ResponseState::Idle;
+    let default_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
+
+    // Split the buffer into the disjoint pieces the render fns take.
+    let (
+        selected_request,
+        editor,
+        tabs,
+        response,
+        cache,
+        url_editor,
+        resp_scroll,
+        resp_cursor,
+    ) = match buf {
+        Some(b) => (
+            Some(&b.endpoint.endpoint.request),
+            &mut b.editor,
+            &mut b.tabs,
+            &b.response,
+            &b.highlight_cache,
+            b.url_editor.as_mut(),
+            b.response_scroll,
+            b.response_cursor,
+        ),
+        None => (
+            None,
+            &mut default_editor,
+            &mut default_tabs,
+            &default_response,
+            &default_cache,
+            None,
+            0,
+            0,
+        ),
+    };
+    let req_focused = app.focus == Pane::Request && app.mode == Mode::Normal;
+    let resp_focused =
+        app.focus == Pane::Response && (app.mode == Mode::Normal || app.mode == Mode::BodySearch);
+    let jump = app.jump.as_ref();
+    let tick_count = app.tick_count;
+
     urlbar::render(
         frame,
         urlbar_area,
         urlbar::UrlBarCtx {
             request: selected_request,
             focused: app.focus == Pane::UrlBar && app.mode == Mode::Normal,
-            editor: app.url_editor.as_mut(),
+            editor: url_editor,
             dirty,
-            jump_label: app
-                .jump
-                .as_ref()
-                .and_then(|j| j.label_for_pane(Pane::UrlBar)),
+            jump_label: jump.and_then(|j| j.label_for_pane(Pane::UrlBar)),
         },
         &theme,
     );
+    // Captured from `response::render`'s outcome so the buffer's response
+    // geometry + highlight guard can be written back after the buffer borrow.
+    let mut resp_outcome: Option<response::RenderOutcome> = None;
     match app.zoom {
         Some(ZoomPane::Request) => {
             // Request is zoomed: render it full-size, show collapsed summary for response.
@@ -4574,73 +4958,49 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 request_area,
                 request::RenderCtx {
                     request: selected_request,
-                    editor: &mut app.editor,
-                    tabs: &mut app.tabs,
-                    focused: app.focus == Pane::Request && app.mode == Mode::Normal,
+                    editor,
+                    tabs,
+                    focused: req_focused,
                     theme: &theme,
-                    jump: app.jump.as_ref(),
+                    jump,
                 },
             );
-            let summary = response::collapsed_summary(&app.response, &theme);
+            let summary = response::collapsed_summary(response, &theme);
             render_collapsed_stub(
                 frame,
                 response_area,
                 "Response",
-                app.jump
-                    .as_ref()
-                    .and_then(|j| j.label_for_pane(Pane::Response)),
+                jump.and_then(|j| j.label_for_pane(Pane::Response)),
                 summary,
                 &theme,
             );
         }
         Some(ZoomPane::Response) => {
             // Response is zoomed: render it full-size, show collapsed summary for request.
-            let summary = request::collapsed_summary(selected_request, &app.tabs, &theme);
+            let summary = request::collapsed_summary(selected_request, tabs, &theme);
             render_collapsed_stub(
                 frame,
                 request_area,
                 "Request",
-                app.jump
-                    .as_ref()
-                    .and_then(|j| j.label_for_pane(Pane::Request)),
+                jump.and_then(|j| j.label_for_pane(Pane::Request)),
                 summary,
                 &theme,
             );
-            let outcome = response::render(
+            resp_outcome = Some(response::render(
                 frame,
                 response_area,
                 response::RenderCtx {
-                    state: &app.response,
+                    state: response,
                     request: selected_request,
-                    focused: app.focus == Pane::Response
-                        && (app.mode == Mode::Normal || app.mode == Mode::BodySearch),
-                    scroll: app.response_scroll,
-                    cursor: app.response_cursor,
-                    cache: &app.highlight_cache,
+                    focused: resp_focused,
+                    scroll: resp_scroll,
+                    cursor: resp_cursor,
+                    cache,
                     theme: &theme,
-                    jump_label: app
-                        .jump
-                        .as_ref()
-                        .and_then(|j| j.label_for_pane(Pane::Response)),
-                    tick_count: app.tick_count,
+                    jump_label: jump.and_then(|j| j.label_for_pane(Pane::Response)),
+                    tick_count,
                 },
-            );
-            app.response_scroll = outcome.clamped_scroll;
-            app.response_cursor = outcome.clamped_cursor;
-            app.response_total_rows = outcome.total_rows;
-            app.response_viewport_height = outcome.viewport_height;
-            app.response_viewport_width = outcome.viewport_width;
-            if let Some(job) = outcome.job {
-                let dup = app.pending_highlight == Some(job.hash);
-                if !dup && let Some(tx) = &app.highlight_tx {
-                    // Mark in-flight only when the send actually succeeded — a
-                    // dead worker must not wedge the guard.
-                    let hash = job.hash;
-                    if tx.send(job).is_ok() {
-                        app.pending_highlight = Some(hash);
-                    }
-                }
-            }
+            ));
         }
         None => {
             // Normal split: render both.
@@ -4649,46 +5009,49 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 request_area,
                 request::RenderCtx {
                     request: selected_request,
-                    editor: &mut app.editor,
-                    tabs: &mut app.tabs,
-                    focused: app.focus == Pane::Request && app.mode == Mode::Normal,
+                    editor,
+                    tabs,
+                    focused: req_focused,
                     theme: &theme,
-                    jump: app.jump.as_ref(),
+                    jump,
                 },
             );
-            let outcome = response::render(
+            resp_outcome = Some(response::render(
                 frame,
                 response_area,
                 response::RenderCtx {
-                    state: &app.response,
+                    state: response,
                     request: selected_request,
-                    focused: app.focus == Pane::Response
-                        && (app.mode == Mode::Normal || app.mode == Mode::BodySearch),
-                    scroll: app.response_scroll,
-                    cursor: app.response_cursor,
-                    cache: &app.highlight_cache,
+                    focused: resp_focused,
+                    scroll: resp_scroll,
+                    cursor: resp_cursor,
+                    cache,
                     theme: &theme,
-                    jump_label: app
-                        .jump
-                        .as_ref()
-                        .and_then(|j| j.label_for_pane(Pane::Response)),
-                    tick_count: app.tick_count,
+                    jump_label: jump.and_then(|j| j.label_for_pane(Pane::Response)),
+                    tick_count,
                 },
-            );
-            app.response_scroll = outcome.clamped_scroll;
-            app.response_cursor = outcome.clamped_cursor;
-            app.response_total_rows = outcome.total_rows;
-            app.response_viewport_height = outcome.viewport_height;
-            app.response_viewport_width = outcome.viewport_width;
-            if let Some(job) = outcome.job {
-                let dup = app.pending_highlight == Some(job.hash);
-                if !dup && let Some(tx) = &app.highlight_tx {
-                    // Mark in-flight only when the send actually succeeded — a
-                    // dead worker must not wedge the guard.
-                    let hash = job.hash;
-                    if tx.send(job).is_ok() {
-                        app.pending_highlight = Some(hash);
-                    }
+            ));
+        }
+    }
+    // Write the response outcome (geometry + highlight guard/job) back into the
+    // active buffer, and enqueue a highlight job. Done after the borrow split so
+    // it targets the same buffer the render read from.
+    if let Some(outcome) = resp_outcome
+        && let Some(b) = app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut)
+    {
+        b.response_scroll = outcome.clamped_scroll;
+        b.response_cursor = outcome.clamped_cursor;
+        b.response_total_rows = outcome.total_rows;
+        b.response_viewport_height = outcome.viewport_height;
+        b.response_viewport_width = outcome.viewport_width;
+        if let Some(job) = outcome.job {
+            let dup = b.pending_highlight == Some(job.hash);
+            if !dup && let Some(tx) = &app.highlight_tx {
+                // Mark in-flight only when the send actually succeeded — a dead
+                // worker must not wedge the guard.
+                let hash = job.hash;
+                if tx.send(job).is_ok() {
+                    b.pending_highlight = Some(hash);
                 }
             }
         }
@@ -4697,7 +5060,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // endpoint/workspace, profile, dirty, and the in-flight spinner. Transient
     // messages live in the dedicated row below. The in-flight spinner still
     // derives from state so it appears/disappears instantly.
-    let in_flight = app.in_flight.is_some();
+    let in_flight = app
+        .active_endpoint_buffer()
+        .is_some_and(|b| b.in_flight.is_some());
     statusline::render(
         frame,
         status,
@@ -4723,8 +5088,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // CRUD / method overlays render over the whole main area.
     match app.mode {
         Mode::MethodMenu => {
-            if let Some(request) = selected_request {
-                method_menu::render(frame, main, request.method, &theme);
+            if let Some(method) = app.live_request().map(|r| r.method) {
+                method_menu::render(frame, main, method, &theme);
             }
         }
         Mode::Prompt(purpose) => {
@@ -4755,50 +5120,89 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
             SeqView::Run => {
                 let tick = app.tick_count;
-                let job = {
-                    let cache = &app.highlight_cache;
-                    match app.sequence_runner.as_mut() {
-                        Some(runner) => {
-                            sequence_runner::render(frame, main, runner, tick, cache, &theme)
-                        }
-                        None => None,
+                let active = app.active;
+                // These overlays share the active endpoint buffer's highlight
+                // cache/guard (keyed by viewport hash, so no cross-contamination);
+                // with no buffer loaded they fall back to a per-frame empty cache
+                // (first-frame render is identical — only cross-frame caching is
+                // skipped, which is invisible to snapshots/behaviour).
+                let mut scratch_cache = HashMap::new();
+                let mut scratch_pending = None;
+                let cache = app
+                    .buffers
+                    .get(active)
+                    .and_then(Buffer::as_endpoint)
+                    .map(|b| &b.highlight_cache)
+                    .unwrap_or(&scratch_cache);
+                let job = match app.sequence_runner.as_mut() {
+                    Some(runner) => {
+                        sequence_runner::render(frame, main, runner, tick, cache, &theme)
                     }
+                    None => None,
                 };
                 if let Some(job) = job {
-                    let dup = app.pending_highlight == Some(job.hash);
+                    let pending = app
+                        .buffers
+                        .get(active)
+                        .and_then(Buffer::as_endpoint)
+                        .map(|b| b.pending_highlight)
+                        .unwrap_or(scratch_pending);
+                    let dup = pending == Some(job.hash);
                     if !dup && let Some(tx) = &app.highlight_tx {
                         let hash = job.hash;
                         if tx.send(job).is_ok() {
-                            app.pending_highlight = Some(hash);
+                            match app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut) {
+                                Some(b) => b.pending_highlight = Some(hash),
+                                None => scratch_pending = Some(hash),
+                            }
                         }
                     }
                 }
+                let _ = scratch_pending;
             }
         },
         Mode::LoadRunner => {
             let tick = app.tick_count;
-            let job = {
-                let cache = &app.highlight_cache;
-                match app.load_runner.as_mut() {
-                    Some(runner) => load_runner::render(frame, main, runner, tick, cache, &theme),
-                    None => None,
-                }
+            let active = app.active;
+            let mut scratch_cache = HashMap::new();
+            let mut scratch_pending = None;
+            let cache = app
+                .buffers
+                .get(active)
+                .and_then(Buffer::as_endpoint)
+                .map(|b| &b.highlight_cache)
+                .unwrap_or(&scratch_cache);
+            let job = match app.load_runner.as_mut() {
+                Some(runner) => load_runner::render(frame, main, runner, tick, cache, &theme),
+                None => None,
             };
             if let Some(job) = job {
-                let dup = app.pending_highlight == Some(job.hash);
+                let pending = app
+                    .buffers
+                    .get(active)
+                    .and_then(Buffer::as_endpoint)
+                    .map(|b| b.pending_highlight)
+                    .unwrap_or(scratch_pending);
+                let dup = pending == Some(job.hash);
                 if !dup && let Some(tx) = &app.highlight_tx {
                     let hash = job.hash;
                     if tx.send(job).is_ok() {
-                        app.pending_highlight = Some(hash);
+                        match app.buffers.get_mut(active).and_then(Buffer::as_endpoint_mut) {
+                            Some(b) => b.pending_highlight = Some(hash),
+                            None => scratch_pending = Some(hash),
+                        }
                     }
                 }
             }
+            let _ = scratch_pending;
         }
         _ => {}
     }
 
     // The URL vim-popup editor (deliverable 7) renders over the main area.
-    if let Some(editor) = app.url_popup.as_mut() {
+    if let Some(b) = app.active_endpoint_buffer_mut()
+        && let Some(editor) = b.url_popup.as_mut()
+    {
         urlbar::render_popup(frame, main, editor, &theme);
     }
 
