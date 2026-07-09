@@ -114,12 +114,15 @@ pub enum Action {
     Delete,
     /// Toggle the explorer sidebar (hide / reopen).
     ToggleExplorer,
-    /// Toggle the sequences sub-pane on/off at the bottom of the explorer column
-    /// (PR 2b). Off by default; turning it on focuses it.
-    ToggleSequencesPane,
     /// Switch focus/zoom between the endpoints tree and the sequences sub-pane
-    /// inside the (focused) explorer column (PR 2b). Auto-shows the sub-pane.
+    /// inside the (focused) explorer column (PR 2b).
     FocusSequencesToggle,
+    /// Cycle forward within the focused region (M7.10 stage B, shipped UNBOUND):
+    /// left column ⇒ Endpoints⇄Sequences; right column ⇒ next buffer/tab.
+    CycleRegionFwd,
+    /// Cycle backward within the focused region (M7.10 stage B, shipped UNBOUND):
+    /// left column ⇒ Endpoints⇄Sequences; right column ⇒ previous buffer/tab.
+    CycleRegionBack,
     /// Zoom the focused pane (Request/Response), collapsing the other.
     Zoom,
     /// Open the `?` help overlay (effective keymap).
@@ -252,14 +255,19 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         "toggle explorer sidebar",
     ),
     (
-        Action::ToggleSequencesPane,
-        "toggle-sequences-pane",
-        "toggle sequences sub-pane",
-    ),
-    (
         Action::FocusSequencesToggle,
         "focus-sequences-toggle",
         "switch endpoints / sequences",
+    ),
+    (
+        Action::CycleRegionFwd,
+        "cycle-region-fwd",
+        "cycle region forward (sub-pane / buffer)",
+    ),
+    (
+        Action::CycleRegionBack,
+        "cycle-region-back",
+        "cycle region back (sub-pane / buffer)",
     ),
     (Action::Zoom, "zoom", "zoom pane"),
     (Action::Help, "help", "help overlay"),
@@ -609,12 +617,10 @@ impl Default for KeyMap {
         // Direct root actions. `s` (formerly Send) now descends into the
         // sequences submenu — Send stays Ctrl-S ONLY (bound in `map` above).
         root_bind(key!(e), LeaderEntry::Act(Action::ToggleExplorer));
-        // `<leader>S` (Shift-s) toggles the sequences sub-pane — a sibling of
-        // `<leader>e`. Distinct from the lowercase-`s` sequences submenu descent.
-        root_bind(
-            key!(shift - s),
-            LeaderEntry::Act(Action::ToggleSequencesPane),
-        );
+        // `<leader>S` was removed in M7.10 stage B: the sequences sub-pane is
+        // always peek-visible, so a show/hide toggle had no job. Reaching the
+        // sequences sub-pane stays covered by the Explorer `s` overlay, `f`-jump
+        // (`s` label) and the `<leader>s f` picker.
         root_bind(key!(c), LeaderEntry::Act(Action::Cancel));
         root_bind(key!(p), LeaderEntry::Act(Action::SwitchProfile));
         // `<leader>v` opens the environments & variables editor (`v` is free).

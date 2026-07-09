@@ -3,11 +3,11 @@ source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
 ┌ Explorer [e] ──────────────┐┌ URL [u] ───────────────────────────────────────┐
-│a ▸ orders                  ││no endpoint selected                            │
-│d ▾ users                   │└────────────────────────────────────────────────┘
-│f   List users              │┌ Request [r] ───────────────────────────────────┐
-│g   Create user             ││                                                │
-│h   Get user                ││no endpoint selected                            │
+│  ▸ orders                  ││no endpoint selected                            │
+│> ▾ users                   │└────────────────────────────────────────────────┘
+│    List users              │┌ Request [r] ───────────────────────────────────┐
+│    Create user             ││                                                │
+│    Get user                ││no endpoint selected                            │
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
@@ -15,14 +15,14 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
-│                            │┌ Response [s] ──────────────────────────────────┐
+│                            │┌ Response [p] ──────────────────────────────────┐
 │                            ││no response yet                                 │
 │                            ││                                                │
 │                            ││no endpoint selected                            │
 │                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘│                                                │
-┌ Sequences ─────────────────┐│                                                │
+┌ Sequences [s] ─────────────┐│                                                │
 │<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

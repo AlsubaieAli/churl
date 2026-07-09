@@ -117,9 +117,9 @@ fn palette_overlay() {
 
 #[test]
 fn jump_overlay_shows_labels() {
-    // Expand a collection so visible rows get labels, then enter jump-mode: the
-    // pane titles carry their mnemonics `[e]`/`[u]`/`[r]`/`[s]` and the visible
-    // rows carry row labels (all visible in the TestBackend text buffer).
+    // Enter jump-mode: the five region titles carry their mnemonics
+    // `[e]`ndpoints, `[s]`equences, `[u]`rl, `[r]`equest, res`[p]`onse. `f`-jump
+    // is pane-only now (M7.10 stage B) — NO endpoint rows are labelled.
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char('j')); // onto "users"
@@ -667,28 +667,26 @@ fn fixture_with_sequences(root: &Path) -> App {
     App::new(workspace, KeyMap::default()).unwrap()
 }
 
-/// `<leader>S` (Space then Shift-s) shows the sequences sub-pane and focuses it:
-/// the endpoints tree collapses to a 3-row stub on top, sequences fill below.
+/// The explorer overlay `s` focuses the sequences sub-pane: the endpoints tree
+/// collapses to a 3-row stub on top, sequences fill below. (M7.10 stage B — the
+/// removed `<leader>S` toggle used to reach this; the `s` overlay is now the
+/// keyboard path.)
 #[test]
 fn sequences_subpane_on_sequences_focused() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = fixture_with_sequences(dir.path());
-    press(&mut app, KeyCode::Char(' ')); // leader
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    press(&mut app, KeyCode::Char('s')); // explorer overlay: switch to sequences
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// After showing the sub-pane, `s` (explorer overlay) switches focus back to the
-/// endpoints tree: endpoints fill the top, the sequences sub-pane collapses to a
-/// 3-row stub at the bottom.
+/// After focusing the sub-pane, `s` again switches focus back to the endpoints
+/// tree: endpoints fill the top, the sequences sub-pane collapses to a 3-row
+/// stub at the bottom.
 #[test]
 fn sequences_subpane_on_endpoints_focused() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = fixture_with_sequences(dir.path());
-    press(&mut app, KeyCode::Char(' ')); // leader
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    press(&mut app, KeyCode::Char('s')); // switch to sequences
     press(&mut app, KeyCode::Char('s')); // switch back to endpoints
     insta::assert_snapshot!(snapshot(&mut app));
 }
@@ -715,12 +713,15 @@ fn sequences_subpane_peek_symmetry_both_present() {
         "endpoints tree visible on launch: {launch}"
     );
 
-    // Focus-switch to Sequences: now Explorer collapses to a stub, Sequences
-    // fills. Both titles still render — neither pane vanished.
-    press(&mut app, KeyCode::Char(' ')); // leader
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    // Focus-switch to Sequences via the Explorer `s` overlay: now Explorer
+    // collapses to a stub, Sequences fills. Both titles still render — neither
+    // pane vanished — and the render must actually change (fill/stub inverts).
+    press(&mut app, KeyCode::Char('s')); // Explorer `s` = focus-sequences-toggle
     let switched = snapshot(&mut app);
+    assert_ne!(
+        switched, launch,
+        "focusing Sequences must invert the fill/stub, not leave the render unchanged: {switched}"
+    );
     assert!(
         switched.contains("Explorer"),
         "Explorer stub must be present when Sequences is focused: {switched}"
@@ -730,14 +731,13 @@ fn sequences_subpane_peek_symmetry_both_present() {
         "Sequences sub-pane fills when focused: {switched}"
     );
 
-    // Pressing `<leader>S` again never hides — it switches focus back.
-    press(&mut app, KeyCode::Char(' '));
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
-        .unwrap();
+    // Pressing `s` again never hides — it toggles focus back to the launch
+    // state exactly (round-trip), proving it's a focus switch, not a hide.
+    press(&mut app, KeyCode::Char('s'));
     let back = snapshot(&mut app);
-    assert!(
-        back.contains("Sequences"),
-        "Sequences pane still present after switching back — never hidden: {back}"
+    assert_eq!(
+        back, launch,
+        "toggling back must restore the launch render exactly — never hides: {back}"
     );
 }
 
@@ -989,12 +989,6 @@ fn every_palette_command_dispatches() {
             Action::ToggleHeadersView | Action::ToggleWrap => {
                 assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
             }
-            // Toggling the sequences sub-pane focuses the explorer and shows the
-            // sub-pane (no overlay, no workspace needed).
-            Action::ToggleSequencesPane => {
-                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
-                assert_eq!(app.focus, Pane::Explorer);
-            }
             Action::FocusExplorer => assert_eq!(app.focus, Pane::Explorer),
             Action::FocusUrlBar => assert_eq!(app.focus, Pane::UrlBar),
             Action::FocusRequest => assert_eq!(app.focus, Pane::Request),
@@ -1188,11 +1182,13 @@ fn search_switch_while_dirty_opens_new_buffer() {
     assert!(!contents.contains("ZZZ"), "edit must not persist");
 }
 
-/// Stage 2: switching endpoints via a *jump-mode row label* while dirty opens the
-/// target as its own buffer directly (no confirm). The dirty edit stays in its
-/// own buffer, unsaved — it is NOT force-written on switch.
+/// Stage 2: switching endpoints while dirty opens the target as its own buffer
+/// directly (no confirm). The dirty edit stays in its own buffer, unsaved — it
+/// is NOT force-written on switch. (M7.10 stage B: `f`-jump is pane-only now, so
+/// row precision moves to the explorer cursor + Enter, the equivalent
+/// dirty-safe switch.)
 #[test]
-fn jump_switch_while_dirty_opens_new_buffer() {
+fn switch_while_dirty_opens_new_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     load_first_users_endpoint(&mut app); // List users (row 2)
@@ -1201,14 +1197,14 @@ fn jump_switch_while_dirty_opens_new_buffer() {
     press(&mut app, KeyCode::Char('i'));
     type_str(&mut app, "/active");
     press(&mut app, KeyCode::Enter);
-    // Jump to the "Create user" row: panes hold the e/u/r/s mnemonics, rows
-    // take a/d/f/g/… from row 0 → row 3 (Create user) is 'g'.
-    press(&mut app, KeyCode::Char('f'));
-    press(&mut app, KeyCode::Char('g'));
+    // Move the explorer cursor onto the "Create user" row (row 3) and open it.
+    app.focus = Pane::Explorer;
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
     assert_eq!(
         app.mode,
         Mode::Normal,
-        "jump-mode endpoint switch opens directly — no confirm"
+        "endpoint switch opens directly — no confirm"
     );
     assert!(
         app.selected().unwrap().file.ends_with("users/create.toml"),

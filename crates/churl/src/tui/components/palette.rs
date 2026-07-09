@@ -54,7 +54,6 @@ pub const COMMANDS: &[(&str, Action)] = &[
         "copy request as curl (resolved vars)",
         Action::CopyAsCurlResolved,
     ),
-    ("toggle sequences sub-pane", Action::ToggleSequencesPane),
     ("next buffer", Action::BufferNext),
     ("previous buffer", Action::BufferPrev),
     ("close buffer", Action::BufferClose),
@@ -125,6 +124,8 @@ mod tests {
             Action::EditUrl,
             Action::FocusNext,
             Action::FocusPrev,
+            Action::CycleRegionFwd,
+            Action::CycleRegionBack,
             // Response-pane actions that need cursor/pane context stay keymap-only.
             Action::OpenBodySearch,
             Action::SearchNext,

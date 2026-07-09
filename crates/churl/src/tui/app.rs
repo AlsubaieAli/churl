@@ -662,13 +662,11 @@ pub struct App {
     zoom: Option<ZoomPane>,
     /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
     explorer_hidden: bool,
-    /// Which sub-pane inside the left column has focus/zoom (PR 2b). Forced to
-    /// `Endpoints` whenever `sequences_shown` is false.
+    /// Which sub-pane inside the left column has focus/zoom (PR 2b). The
+    /// sequences sub-pane is always present (peek-symmetric, M7.10 stage B), so
+    /// this is only forced back to `Endpoints` when the workspace has no
+    /// sequences at all.
     left_active: LeftPane,
-    /// Whether the sequences sub-pane is visible at the bottom of the explorer
-    /// column (PR 2b). Off by default — the left column then renders endpoints
-    /// full-height, byte-identical to the pre-2b behaviour.
-    sequences_shown: bool,
     /// The pane focus held before focus last moved INTO the left column from a
     /// non-left pane (PR 2b / owner #2B). `<leader>e` hiding a focused explorer
     /// restores this, instead of falling back to the URL bar.
@@ -821,11 +819,6 @@ impl App {
             zoom: None,
             explorer_hidden: false,
             left_active: LeftPane::Endpoints,
-            // D1: the Sequences sub-pane is always present (peek-symmetric with
-            // Explorer). It defaults on so the left column always splits; whichever
-            // sub-pane is not `left_active` collapses to a peeking stub, never
-            // vanishes. `<leader>S` is an interim focus-switch, not a hide-toggle.
-            sequences_shown: true,
             focus_before_explorer: None,
             leader: None,
             help_open: false,
@@ -969,6 +962,19 @@ impl App {
     /// Mutable access to the active endpoint's [`SelectedEndpoint`] (tests).
     pub fn selected_mut(&mut self) -> Option<&mut SelectedEndpoint> {
         self.active_endpoint_buffer_mut().map(|b| &mut b.endpoint)
+    }
+
+    /// The endpoint under the explorer cursor (the *hovered* endpoint), when the
+    /// left column is on the endpoints tree and the cursor sits on an endpoint
+    /// row (M7.10 stage B). A read-only peek — it does not load a buffer or move
+    /// the cursor. Used as a fallback for one-shot read actions (copy-as-curl,
+    /// the load runner) when no endpoint is loaded, so they act on what the user
+    /// is pointing at rather than refusing.
+    fn hovered_endpoint(&self) -> Option<SelectedEndpoint> {
+        if self.left_active != LeftPane::Endpoints {
+            return None;
+        }
+        self.explorer.hovered_endpoint()
     }
 
     /// The active buffer's response state for internal readers (render). Always
@@ -1583,8 +1589,9 @@ impl App {
             Action::FocusRequest => self.set_focus(Pane::Request),
             Action::FocusResponse => self.set_focus(Pane::Response),
             Action::ToggleExplorer => self.toggle_explorer(),
-            Action::ToggleSequencesPane => self.toggle_sequences_pane(),
             Action::FocusSequencesToggle => self.focus_sequences_toggle(),
+            Action::CycleRegionFwd => self.cycle_region(true),
+            Action::CycleRegionBack => self.cycle_region(false),
             Action::Zoom => self.toggle_zoom(),
             Action::Help => self.help_open = true,
             Action::Leader => self.leader = Some(LeaderState::Root),
@@ -1721,9 +1728,7 @@ impl App {
     /// in-pane focus/zoom (PR 2b). Guards the sequence-specific `h/j/k/l/Enter/r`
     /// routing so it never fires while the endpoints tree is active.
     fn left_column_on_sequences(&self) -> bool {
-        self.focus == Pane::Explorer
-            && self.sequences_shown
-            && self.left_active == LeftPane::Sequences
+        self.focus == Pane::Explorer && self.left_active == LeftPane::Sequences
     }
 
     fn explorer_action(&mut self, action: Action) -> Result<()> {
@@ -1731,7 +1736,7 @@ impl App {
         // column, in-pane nav drives the sequence cursor (a flat list — h/l
         // no-op) and Enter opens the unified surface (Edit face) on the hovered
         // sequence.
-        if self.left_active == LeftPane::Sequences && self.sequences_shown {
+        if self.left_active == LeftPane::Sequences {
             match action {
                 Action::Up => self.explorer.seq_move_up(),
                 Action::Down => self.explorer.seq_move_down(),
@@ -2498,14 +2503,10 @@ impl App {
         self.mode = Mode::Palette;
     }
 
-    /// Enters jump-mode, labelling the three panes and every visible explorer row.
+    /// Enters jump-mode, labelling the five pane regions (M7.10 stage B —
+    /// pane-only, no row labels; row precision is the leader pickers' job).
     fn open_jump(&mut self) {
-        // Label from the first visible row (scroll offset), not the top of the
-        // tree — in a scrolled explorer the offscreen top rows must not eat the
-        // label alphabet while the viewport goes unlabelled.
-        let first_row = self.explorer.first_visible();
-        let row_count = self.explorer.rows().len();
-        self.jump = Some(JumpState::new(first_row, row_count));
+        self.jump = Some(JumpState::new());
         self.mode = Mode::Jump;
     }
 
@@ -2528,9 +2529,9 @@ impl App {
             self.close_jump();
             return Ok(());
         };
-        // An assigned label wins first — the default Jump key `f` also labels the
-        // first explorer row, so a label lookup must take precedence over the
-        // "Jump key again cancels" rule, or that target would be unreachable.
+        // An assigned label wins first: `f` (the default Jump key) is not one of
+        // the region mnemonics (e/s/u/r/p), so no target shadows it, but a label
+        // lookup taking precedence keeps this robust against a remap.
         if let KeyCode::Char(c) = key.code
             && let Some(target) = jump.target_for(c)
         {
@@ -2541,12 +2542,12 @@ impl App {
                 // zoomed pane rather than holding focus while collapsed (the
                 // set_focus invariant).
                 JumpTarget::Pane(pane) => self.set_focus(pane),
-                JumpTarget::Row(row) => {
+                // The sequences sub-pane lives inside the left column: focus it
+                // and make it the active sub-pane (auto-shows if empty is fine —
+                // the invariant only forces Endpoints on a zero-sequence list).
+                JumpTarget::Sequences => {
+                    self.left_active = LeftPane::Sequences;
                     self.set_focus(Pane::Explorer);
-                    // An endpoint row selects it (same as Enter) — through the
-                    // guarded seam so dirty edits are never lost silently; a
-                    // sequence row opens the runner.
-                    self.activate_explorer_row(row)?;
                 }
             }
             return Ok(());
@@ -3095,7 +3096,10 @@ impl App {
     /// batch hits the same URL/vars/auth as a normal send, and prefills the config
     /// from the load defaults. Never auto-runs — the user reviews/edits first.
     fn open_load_runner(&mut self) {
-        let Some(selected) = self.selected().cloned() else {
+        // One-shot read: fall back to the hovered endpoint when nothing is loaded
+        // (M7.10 stage B). Its on-disk request is used (no active buffer to fold
+        // unsaved body edits from — `body_text` below resolves empty).
+        let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.notify("no endpoint selected — select one to load-test");
             return;
         };
@@ -3767,13 +3771,13 @@ impl App {
         self.enforce_left_active_invariant();
     }
 
-    /// A hidden — or empty — sequences sub-pane can never hold the left-column
-    /// focus: when `!sequences_shown` OR the workspace has no sequences,
-    /// `left_active` is forced back to `Endpoints` (PR 2b). The empty-list case
-    /// catches a workspace switch/reload into a sequence-less workspace, which
-    /// would otherwise strand focus on an empty pane.
+    /// An empty sequences sub-pane can never hold the left-column focus: when the
+    /// workspace has no sequences, `left_active` is forced back to `Endpoints`.
+    /// This catches a workspace switch/reload into a sequence-less workspace,
+    /// which would otherwise strand focus on an empty pane. (The sub-pane itself
+    /// is always present now — peek-symmetric, M7.10 stage B.)
     fn enforce_left_active_invariant(&mut self) {
-        if !self.sequences_shown || self.explorer.sequences_len() == 0 {
+        if self.explorer.sequences_len() == 0 {
             self.left_active = LeftPane::Endpoints;
         }
     }
@@ -3796,29 +3800,33 @@ impl App {
         }
     }
 
-    /// `<leader>S`: interim focus-switch (D1). The Sequences sub-pane is always
-    /// present now (peek-symmetric with Explorer), so there is nothing to
-    /// hide-toggle — pressing this flips `left_active` between Endpoints⇄Sequences
-    /// and focuses the left column, never setting `sequences_shown = false`. It
-    /// delegates to `focus_sequences_toggle` so the Sequences pane never vanishes
-    /// mid-demo. (Full `<leader>S` removal / nav-model rework is M7.10.)
-    fn toggle_sequences_pane(&mut self) {
-        self.focus_sequences_toggle();
-    }
-
     /// Explorer overlay `s`: switches focus/zoom between the endpoints tree and
-    /// the sequences sub-pane (PR 2b). Auto-shows the sub-pane if hidden, toggles
-    /// which sub-pane is active, and ensures the left column is focused. This is
-    /// the endpoints⇄sequences mutually-exclusive-zoom switch.
+    /// the sequences sub-pane (PR 2b). Toggles which sub-pane is active and
+    /// ensures the left column is focused. This is the endpoints⇄sequences
+    /// mutually-exclusive-zoom switch — the canonical way to reach the sequences
+    /// sub-pane by keyboard (alongside `f`-jump `s` and the `<leader>s f`
+    /// picker).
     fn focus_sequences_toggle(&mut self) {
-        if !self.sequences_shown {
-            self.sequences_shown = true;
-        }
         self.left_active = match self.left_active {
             LeftPane::Endpoints => LeftPane::Sequences,
             LeftPane::Sequences => LeftPane::Endpoints,
         };
         self.set_focus(Pane::Explorer);
+    }
+
+    /// `cycle-region-fwd`/`cycle-region-back` (M7.10 stage B — shipped UNBOUND).
+    /// Region-aware within-column cycling: when the left column is focused it
+    /// cycles its sub-panes (Endpoints⇄Sequences, reusing the same switch as the
+    /// Explorer `s` overlay); otherwise it cycles the open buffers/tabs (reusing
+    /// `buffer_cycle`). Direction (`forward`) only matters for the buffer ring —
+    /// the two-way left-column toggle ignores it. Ctrl-Tab is deliberately NOT a
+    /// default here (terminal-unreliable); the owner maps a portable key later.
+    fn cycle_region(&mut self, forward: bool) {
+        if self.focus == Pane::Explorer {
+            self.focus_sequences_toggle();
+        } else {
+            self.buffer_cycle(forward);
+        }
     }
 
     /// `z`: zooms the focused Request/Response pane (collapsing the other), or
@@ -4417,7 +4425,9 @@ impl App {
     /// `C` / palette: copy the loaded request as a curl one-liner. `resolved`
     /// substitutes `{{var}}`s first (secrets caution — the explicit opt-in).
     fn copy_as_curl(&mut self, resolved: bool) {
-        let Some(selected) = self.selected().cloned() else {
+        // One-shot read: fall back to the hovered endpoint when nothing is loaded
+        // (M7.10 stage B), so copy acts on what the cursor points at.
+        let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.notify("no endpoint selected");
             return;
         };
@@ -5000,10 +5010,9 @@ impl App {
         self.pending_load = None;
         self.zoom = None;
         // Clean slate for the sequences sub-pane: the new workspace's list is
-        // unrelated to the old one. D1: the sub-pane is always present, so reset
-        // to shown + endpoints-zoomed; `set_focus` below re-runs the invariant
-        // (which forces Endpoints when the new workspace has no sequences).
-        self.sequences_shown = true;
+        // unrelated to the old one. Reset to endpoints-zoomed; `set_focus` below
+        // re-runs the invariant (which forces Endpoints when the new workspace
+        // has no sequences).
         self.left_active = LeftPane::Endpoints;
         self.focus_before_explorer = None;
         // set_focus(Explorer) also un-hides the explorer if it was hidden.
@@ -5274,66 +5283,75 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .map(|b| b.file().to_path_buf())
         .collect();
     if let Some(explorer_area) = explorer_area {
-        if app.sequences_shown {
-            // PR 2b: split the left column vertically. The focused sub-pane
-            // (`left_active`) gets Fill(1); the other collapses to a 3-row stub.
-            // Endpoints on top, sequences on the bottom.
-            let seq_focused = explorer_focused && app.left_active == LeftPane::Sequences;
-            let tree_focused = explorer_focused && app.left_active == LeftPane::Endpoints;
-            let (tree_area, seq_area) = if app.left_active == LeftPane::Sequences {
-                let [tree, seq] =
-                    Layout::vertical([Constraint::Length(COLLAPSED_HEIGHT), Constraint::Fill(1)])
-                        .areas(explorer_area);
-                (tree, seq)
-            } else {
-                let [tree, seq] =
-                    Layout::vertical([Constraint::Fill(1), Constraint::Length(COLLAPSED_HEIGHT)])
-                        .areas(explorer_area);
-                (tree, seq)
-            };
-            if app.left_active == LeftPane::Endpoints {
-                explorer::render(
-                    frame,
-                    tree_area,
-                    &mut app.explorer,
-                    tree_focused,
-                    has_ws,
-                    &theme,
-                    app.jump.as_ref(),
-                    &dirty_files,
-                );
-            } else {
-                // Endpoints collapsed to a stub summarizing the current selection.
-                let summary = app
-                    .explorer
-                    .selected_name()
-                    .map(|name| Line::from(ratatui::text::Span::styled(name, theme.statusline)))
-                    .unwrap_or_else(|| Line::from(""));
-                render_collapsed_stub(frame, tree_area, "Explorer", None, summary, &theme);
-            }
-            if app.left_active == LeftPane::Sequences {
-                explorer::render_sequences_pane(
-                    frame,
-                    seq_area,
-                    &mut app.explorer,
-                    seq_focused,
-                    &theme,
-                );
-            } else {
-                let summary = explorer::sequences_stub_summary(&app.explorer, &theme);
-                render_collapsed_stub(frame, seq_area, "Sequences", None, summary, &theme);
-            }
+        // The left column always splits into endpoints + sequences (M7.10 stage
+        // B — the sequences sub-pane is peek-symmetric, always present). The
+        // focused sub-pane (`left_active`) gets Fill(1); the other collapses to
+        // a 3-row stub. Endpoints on top, sequences on the bottom.
+        let seq_focused = explorer_focused && app.left_active == LeftPane::Sequences;
+        let tree_focused = explorer_focused && app.left_active == LeftPane::Endpoints;
+        // In jump-mode the endpoints/sequences regions carry their `e`/`s`
+        // mnemonics on whichever face is drawn (full-height or collapsed stub).
+        let explorer_jump_label = app
+            .jump
+            .as_ref()
+            .and_then(|j| j.label_for_pane(Pane::Explorer));
+        let seq_jump_label = app.jump.as_ref().and_then(|j| j.label_for_sequences());
+        let (tree_area, seq_area) = if app.left_active == LeftPane::Sequences {
+            let [tree, seq] =
+                Layout::vertical([Constraint::Length(COLLAPSED_HEIGHT), Constraint::Fill(1)])
+                    .areas(explorer_area);
+            (tree, seq)
         } else {
-            // Sub-pane off: endpoints full-height (byte-identical to pre-2b).
+            let [tree, seq] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(COLLAPSED_HEIGHT)])
+                    .areas(explorer_area);
+            (tree, seq)
+        };
+        if app.left_active == LeftPane::Endpoints {
             explorer::render(
                 frame,
-                explorer_area,
+                tree_area,
                 &mut app.explorer,
-                explorer_focused,
+                tree_focused,
                 has_ws,
                 &theme,
                 app.jump.as_ref(),
                 &dirty_files,
+            );
+        } else {
+            // Endpoints collapsed to a stub summarizing the current selection.
+            let summary = app
+                .explorer
+                .selected_name()
+                .map(|name| Line::from(ratatui::text::Span::styled(name, theme.statusline)))
+                .unwrap_or_else(|| Line::from(""));
+            render_collapsed_stub(
+                frame,
+                tree_area,
+                "Explorer",
+                explorer_jump_label,
+                summary,
+                &theme,
+            );
+        }
+        if app.left_active == LeftPane::Sequences {
+            explorer::render_sequences_pane(
+                frame,
+                seq_area,
+                &mut app.explorer,
+                seq_focused,
+                &theme,
+                seq_jump_label,
+            );
+        } else {
+            let summary = explorer::sequences_stub_summary(&app.explorer, &theme);
+            render_collapsed_stub(
+                frame,
+                seq_area,
+                "Sequences",
+                seq_jump_label,
+                summary,
+                &theme,
             );
         }
     }
@@ -6773,55 +6791,55 @@ mod tests {
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
         assert!(app.jump.is_some());
-        // 's' is the Response pane mnemonic (e/u/r/s for
-        // Explorer/UrlBar/Request/Response).
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        // `p` is the Response mnemonic (M7.10 stage B — `s` moved to Sequences,
+        // Response took `p` for res`p`onse).
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.jump.is_none());
         assert_eq!(app.focus, Pane::Response);
     }
 
-    /// A row label focuses the explorer, moves the cursor, and selects an endpoint.
+    /// M7.10 stage B: `f`-jump labels NO endpoint rows — a row-alphabet key that
+    /// used to select a row is now inert (jump-mode stays open, ignoring it).
     #[test]
-    fn jump_row_label_selects_endpoint() {
+    fn jump_labels_no_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = workspace_fixture(dir.path());
-        // Expand the collection so a leaf row is visible and labellable.
         app.explorer.expand().unwrap();
         assert_eq!(app.explorer.rows().len(), 2);
+        let cursor_before = app.explorer.cursor;
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
-        // Rows use the row alphabet (panes hold e/u/r/s) → row 0 is 'a', row 1 is 'd'.
+        // `d` was a row label pre-B; now it maps to nothing in jump-mode.
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.focus, Pane::Explorer);
-        assert_eq!(app.explorer.cursor, 1);
-        // The endpoint row was selected and loaded.
-        assert!(app.selected().is_some());
-        assert_eq!(app.selected().unwrap().endpoint.name, "Get user");
+        assert_eq!(
+            app.mode,
+            Mode::Jump,
+            "a non-label key does not exit jump-mode"
+        );
+        assert_eq!(app.explorer.cursor, cursor_before, "no row was selected");
+        assert!(
+            app.selected().is_none(),
+            "nothing loaded — rows are unlabelled"
+        );
     }
 
-    /// The default Jump key `f` is also a row label (3rd row): when assigned,
-    /// the label wins over the "Jump key again cancels" rule so that row stays
-    /// reachable by pressing `f` twice.
+    /// M7.10 stage B: `f` no longer labels a row, so pressing the Jump key again
+    /// falls through to the "Jump key again cancels" rule.
     #[test]
-    fn jump_f_acts_as_row_label_not_cancel() {
+    fn jump_f_again_cancels() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("zoo")).unwrap();
         let mut app = workspace_fixture(dir.path());
-        // Expand "users" → 3 visible rows (users, Get user, zoo) = labels a/d/f.
         app.explorer.expand().unwrap();
-        assert_eq!(app.explorer.rows().len(), 3);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Jump);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.mode, Mode::Normal, "f must act as a label, not cancel");
-        assert_eq!(app.focus, Pane::Explorer);
-        assert_eq!(app.explorer.cursor, 2);
+        assert_eq!(app.mode, Mode::Normal, "f (no longer a label) cancels");
+        assert!(app.jump.is_none());
     }
 
     /// Esc cancels jump-mode without focusing anything.
@@ -7425,51 +7443,35 @@ mod tests {
         App::new(ws, KeyMap::default()).unwrap()
     }
 
-    /// D1: `<leader>S` is now an interim focus-switch, never a hide-toggle. The
-    /// Sequences sub-pane defaults on (always present) and `<leader>S` only flips
-    /// `left_active` Endpoints⇄Sequences — `sequences_shown` never goes false.
+    /// M7.10 stage B: the Explorer `s` overlay (`focus-sequences-toggle`) flips
+    /// `left_active` Endpoints⇄Sequences and focuses the left column. The
+    /// sub-pane is always present (peek-symmetric), so nothing ever hides.
     #[test]
-    fn toggle_sequences_pane_is_a_focus_switch_never_hides() {
+    fn focus_sequences_toggle_is_a_focus_switch_never_hides() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        assert!(app.sequences_shown, "sub-pane defaults on (always present)");
         assert_eq!(
             app.left_active,
             LeftPane::Endpoints,
             "Explorer zoomed default"
         );
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
-        assert!(app.sequences_shown, "still shown");
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Sequences, "focus switched to it");
         assert_eq!(app.focus, Pane::Explorer);
-        // Pressing again switches back — it never hides the sub-pane.
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
-        assert!(app.sequences_shown, "never hidden");
+        // Pressing again switches back — peek-symmetry both directions.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Endpoints);
     }
 
+    /// M7.10 stage B: the empty-list invariant still holds — a workspace with no
+    /// sequences forces `left_active` back to Endpoints on the next focus (the
+    /// `sequences_shown` clause is gone, but the empty guard survives).
     #[test]
-    fn focus_sequences_toggle_unhides_and_switches() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = seq_pane_app(dir.path());
-        // `s` from the explorer: auto-shows + moves to sequences.
-        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
-        assert!(app.sequences_shown);
-        assert_eq!(app.left_active, LeftPane::Sequences);
-        assert_eq!(app.focus, Pane::Explorer);
-        // `s` again: back to endpoints (mutually-exclusive zoom), still shown.
-        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
-        assert_eq!(app.left_active, LeftPane::Endpoints);
-        assert!(app.sequences_shown);
-    }
-
-    #[test]
-    fn left_active_forced_endpoints_when_hidden() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = seq_pane_app(dir.path());
-        // Force an inconsistent state, then set_focus enforces the invariant.
+    fn left_active_forced_endpoints_when_no_sequences() {
+        // A workspace with an endpoint but zero sequences.
+        let mut app = App::new(None, KeyMap::default()).unwrap();
         app.left_active = LeftPane::Sequences;
-        app.sequences_shown = false;
+        assert_eq!(app.explorer.sequences_len(), 0);
         app.set_focus(Pane::Explorer);
         assert_eq!(app.left_active, LeftPane::Endpoints);
     }
@@ -7478,9 +7480,10 @@ mod tests {
     fn tab_cycle_never_changes_left_active() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Sequences);
-        // Full Tab cycle back to the explorer must not touch left_active.
+        // Full Tab cycle back to the explorer must not touch left_active — Tab
+        // lands on the left column and RESTORES its last sub-pane (not Endpoints).
         for _ in 0..4 {
             app.dispatch(Action::FocusNext, None).unwrap();
         }
@@ -7488,7 +7491,7 @@ mod tests {
         assert_eq!(
             app.left_active,
             LeftPane::Sequences,
-            "Tab is cross-pane only; it never switches the sub-pane"
+            "Tab is cross-pane only; it restores the last sub-pane"
         );
     }
 
@@ -7496,7 +7499,7 @@ mod tests {
     fn explorer_nav_routes_to_seq_cursor_when_sequences_active() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.explorer.seq_cursor(), 0);
         let tree_cursor = app.explorer.cursor;
         // j/Down moves the sequence cursor, not the tree cursor.
@@ -7562,7 +7565,7 @@ mod tests {
     fn r_on_sequences_subpane_runs_hovered_sequence() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         // `r` maps to Rename, but on the sequences sub-pane it runs the sequence.
         app.dispatch(Action::Rename, None).unwrap();
         assert_eq!(app.mode, Mode::Sequence);
@@ -7722,7 +7725,7 @@ mod tests {
     fn z_still_noop_from_explorer() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.focus, Pane::Explorer);
         assert_eq!(app.zoom, None);
         app.dispatch(Action::Zoom, None).unwrap();
@@ -7740,7 +7743,7 @@ mod tests {
         let mut app = seq_pane_app(dir.path());
         // Put the tree cursor on the collection so `d`/`n`/`N` would target it.
         app.explorer.cursor = 0;
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert!(app.left_column_on_sequences());
 
         // `d` → no tree delete prompt; mode stays Normal.
@@ -7771,7 +7774,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
         // Sub-pane shown but endpoints active (the default occupant).
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         app.dispatch(Action::FocusSequencesToggle, None).unwrap(); // → Endpoints
         assert_eq!(app.left_active, LeftPane::Endpoints);
         app.explorer.cursor = 0; // on collection "api"
@@ -7792,9 +7795,8 @@ mod tests {
     fn workspace_switch_into_sequenceless_resets_to_endpoints() {
         let dir_a = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir_a.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Sequences);
-        assert!(app.sequences_shown);
 
         // A second workspace with NO sequences.
         let dir_b = tempfile::tempdir().unwrap();
@@ -7809,12 +7811,8 @@ mod tests {
 
         app.switch_workspace(dir_b.path().to_path_buf()).unwrap();
         assert_eq!(app.explorer.sequences_len(), 0);
-        // D1: the sub-pane stays present (always-on); the invariant instead forces
+        // The sub-pane stays present (always-on); the invariant instead forces
         // `left_active` back to Endpoints so focus never strands on an empty pane.
-        assert!(
-            app.sequences_shown,
-            "sub-pane stays present for the new workspace (D1 always-on)"
-        );
         assert_eq!(
             app.left_active,
             LeftPane::Endpoints,
@@ -7829,7 +7827,7 @@ mod tests {
     fn reload_emptying_sequences_forces_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = seq_pane_app(dir.path());
-        app.dispatch(Action::ToggleSequencesPane, None).unwrap();
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Sequences);
         // Delete every sequence file on disk, then reload.
         std::fs::remove_dir_all(dir.path().join("sequences")).unwrap();
@@ -7839,6 +7837,190 @@ mod tests {
             app.left_active,
             LeftPane::Endpoints,
             "an emptied sub-pane never keeps focus"
+        );
+    }
+
+    // ---- M7.10 stage B: 4-region Tab, cycle-region, f-jump, hover-fallback ----
+
+    /// B1: Tab cycles the 4 regions Explorer→UrlBar→Request→Response→Explorer, and
+    /// landing back on the left column RESTORES its last sub-pane (Sequences),
+    /// never force-resetting to Endpoints.
+    #[test]
+    fn tab_cycles_four_regions_and_restores_left_sub_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Put the left column on Sequences, then tab away and all the way back.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        assert_eq!(app.focus, Pane::Explorer);
+        let order = [Pane::UrlBar, Pane::Request, Pane::Response, Pane::Explorer];
+        for expected in order {
+            app.dispatch(Action::FocusNext, None).unwrap();
+            assert_eq!(app.focus, expected);
+        }
+        assert_eq!(
+            app.left_active,
+            LeftPane::Sequences,
+            "landing on the left column restores its last sub-pane, not Endpoints"
+        );
+    }
+
+    /// B1: Tab into the left column restores the Request/Response zoom too — the
+    /// zoom-follows-focus invariant survives the 4-region model.
+    #[test]
+    fn tab_restores_request_response_zoom() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // Zoom Response, then Tab forward one step: Response→Explorer keeps the
+        // Response zoom parked (it only transfers between Request⇄Response).
+        app.set_focus(Pane::Response);
+        app.dispatch(Action::Zoom, None).unwrap();
+        assert_eq!(app.zoom, Some(ZoomPane::Response));
+        app.dispatch(Action::FocusNext, None).unwrap(); // → Explorer
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.zoom, Some(ZoomPane::Response), "zoom parked across Tab");
+        // Tab to Request: zoom-follows-focus flips it to Request (collapsed pane
+        // never holds focus).
+        app.dispatch(Action::FocusNext, None).unwrap(); // → UrlBar
+        app.dispatch(Action::FocusNext, None).unwrap(); // → Request
+        assert_eq!(app.focus, Pane::Request);
+        assert_eq!(app.zoom, Some(ZoomPane::Request));
+    }
+
+    /// B2: `cycle-region-fwd`/`back` cycles the left column's sub-panes when the
+    /// left column is focused (Endpoints⇄Sequences), and the buffer/tab ring when
+    /// a right-column pane is focused.
+    #[test]
+    fn cycle_region_switches_sub_pane_on_left_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.set_focus(Pane::Explorer);
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+        app.dispatch(Action::CycleRegionFwd, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        app.dispatch(Action::CycleRegionBack, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Endpoints);
+    }
+
+    /// B2: `cycle-region` ships with NO default key binding (Ctrl-Tab is
+    /// deliberately not hardcoded — terminal-unreliable). It must be unbound in
+    /// the global map, every pane overlay AND the leader tree.
+    #[test]
+    fn cycle_region_is_unbound_by_default() {
+        let keymap = KeyMap::default();
+        for action in [Action::CycleRegionFwd, Action::CycleRegionBack] {
+            assert!(
+                keymap.combos_for(action).is_empty(),
+                "{action:?} must have no global default"
+            );
+            assert!(
+                keymap.leader_combos_for(action).is_empty(),
+                "{action:?} must have no leader default"
+            );
+            for ctx in [
+                PaneCtx::Explorer,
+                PaneCtx::UrlBar,
+                PaneCtx::Request,
+                PaneCtx::Response,
+            ] {
+                assert!(
+                    keymap.overlay_combos_for(ctx, action).is_empty(),
+                    "{action:?} must have no {ctx:?} overlay default"
+                );
+            }
+        }
+    }
+
+    /// B4: `f`-jump labels the five pane regions only (no rows) and the Sequences
+    /// label focuses the left column on the sequences sub-pane.
+    #[test]
+    fn f_jump_reaches_the_sequences_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        // Enter jump-mode and verify the five region labels are assigned.
+        app.dispatch(Action::Jump, None).unwrap();
+        let jump = app.jump.as_ref().expect("jump-mode active");
+        assert_eq!(jump.label_for_pane(Pane::Explorer), Some('e'));
+        assert_eq!(jump.label_for_sequences(), Some('s'));
+        assert_eq!(jump.label_for_pane(Pane::UrlBar), Some('u'));
+        assert_eq!(jump.label_for_pane(Pane::Request), Some('r'));
+        assert_eq!(jump.label_for_pane(Pane::Response), Some('p'));
+        // Pressing `s` jumps to the sequences sub-pane.
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Normal, "a label jump closes jump-mode");
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(app.left_active, LeftPane::Sequences);
+    }
+
+    /// A workspace with one collection holding two endpoints (distinct URLs), for
+    /// the hover-vs-selection fallback tests.
+    fn hover_fallback_ws(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("a.toml"),
+            "seq = 0\nname = \"alpha\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/alpha\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            coll.join("b.toml"),
+            "seq = 1\nname = \"beta\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/beta\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        App::new(ws, KeyMap::default()).unwrap()
+    }
+
+    /// B5: copy-as-curl falls back to the HOVERED endpoint when nothing is loaded.
+    #[test]
+    fn copy_as_curl_falls_back_to_hovered_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = hover_fallback_ws(dir.path());
+        // Expand the collection and hover the first endpoint; nothing is loaded.
+        app.explorer.expand().unwrap();
+        app.explorer.move_down(); // onto "alpha"
+        app.set_focus(Pane::Explorer);
+        assert!(app.selected().is_none(), "no buffer loaded");
+        assert!(
+            app.hovered_endpoint().is_some(),
+            "cursor hovers an endpoint"
+        );
+        app.copy_as_curl(false);
+        let job = app.pending_clipboard.as_ref().expect("copy enqueued a job");
+        assert!(
+            job.payload.contains("api.test/alpha"),
+            "copy fell back to the hovered endpoint's request: {}",
+            job.payload
+        );
+    }
+
+    /// B5: with an endpoint LOADED, copy-as-curl prefers the loaded one even when
+    /// the explorer cursor hovers a different endpoint.
+    #[test]
+    fn copy_as_curl_prefers_loaded_over_hover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = hover_fallback_ws(dir.path());
+        app.explorer.expand().unwrap();
+        app.explorer.move_down(); // onto "alpha"
+        // Load "alpha" into a buffer.
+        let alpha = app.explorer.select().unwrap().expect("alpha selected");
+        app.load_endpoint(alpha);
+        assert!(app.selected().is_some(), "alpha loaded");
+        // Move the cursor onto "beta" so the hover differs from the load.
+        app.set_focus(Pane::Explorer);
+        app.explorer.move_down(); // onto "beta"
+        assert!(
+            app.hovered_endpoint()
+                .is_some_and(|h| h.endpoint.request.url.contains("beta")),
+            "cursor now hovers beta"
+        );
+        app.copy_as_curl(false);
+        let job = app.pending_clipboard.as_ref().expect("copy enqueued a job");
+        assert!(
+            job.payload.contains("api.test/alpha") && !job.payload.contains("api.test/beta"),
+            "copy prefers the loaded endpoint (alpha) over the hover (beta): {}",
+            job.payload
         );
     }
 
