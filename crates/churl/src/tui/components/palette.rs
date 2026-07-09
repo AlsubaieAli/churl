@@ -54,6 +54,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
         "copy request as curl (resolved vars)",
         Action::CopyAsCurlResolved,
     ),
+    ("toggle sequences sub-pane", Action::ToggleSequencesPane),
     ("focus explorer", Action::FocusExplorer),
     ("focus URL bar", Action::FocusUrlBar),
     ("focus request", Action::FocusRequest),

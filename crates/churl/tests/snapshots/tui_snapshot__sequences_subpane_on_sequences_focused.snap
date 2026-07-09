@@ -1,0 +1,29 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 679
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│orders                      ││no endpoint selected                            │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+┏ Sequences ━━━━━━━━━━━━━━━━━┓┌ Request ───────────────────────────────────────┐
+┃> Login flow                ┃│                                                │
+┃  Checkout                  ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

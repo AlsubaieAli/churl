@@ -23,16 +23,16 @@ pub enum RowKind {
     Collection,
     /// An endpoint file (leaf row).
     Endpoint,
-    /// The dim `SEQUENCES` section header (non-selectable, M7.4).
-    SequenceHeader,
-    /// A request sequence (leaf row, M7.4). Enter opens the runner.
-    Sequence,
 }
 
 /// One visible row of the flattened explorer tree.
+///
+/// Sequences no longer live in the tree (PR 2b): they render in a dedicated
+/// toggle-able sub-pane at the bottom of the explorer column, keyed off
+/// [`ExplorerState::seq_cursor`] rather than tree rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// Nesting depth (collections 0, endpoints 1; sequence header 0, sequence 1).
+    /// Nesting depth (collections 0, endpoints 1).
     pub depth: usize,
     /// Container or leaf.
     pub kind: RowKind,
@@ -44,8 +44,6 @@ pub struct Row {
     pub collection: usize,
     /// Index of the endpoint within its collection, for leaf rows.
     pub endpoint: Option<usize>,
-    /// Index into the explorer's sequence list, for `Sequence` rows.
-    pub sequence: Option<usize>,
 }
 
 /// A request sequence the user selected in the explorer, ready to run or edit.
@@ -135,6 +133,12 @@ pub struct ExplorerState {
     ///
     /// [`scroll_to_fit`]: ExplorerState::scroll_to_fit
     scroll: usize,
+    /// Cursor into [`ExplorerState::sequences`] for the sequences sub-pane
+    /// (PR 2b). Independent of the tree `cursor`.
+    seq_cursor: usize,
+    /// First visible sequence row, keeping the sequence cursor in view when the
+    /// sub-pane is shorter than the sequence list.
+    seq_scroll: usize,
 }
 
 impl ExplorerState {
@@ -170,6 +174,8 @@ impl ExplorerState {
             expanded: HashSet::new(),
             cursor: 0,
             scroll: 0,
+            seq_cursor: 0,
+            seq_scroll: 0,
         })
     }
 
@@ -200,7 +206,9 @@ impl ExplorerState {
         self.scroll
     }
 
-    /// Flattens the tree into the currently visible rows.
+    /// Flattens the tree into the currently visible rows (collections and, when
+    /// expanded, their endpoints). Sequences are NOT tree rows since PR 2b —
+    /// they live in the dedicated sub-pane.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         for (ci, node) in self.collections.iter().enumerate() {
@@ -212,7 +220,6 @@ impl ExplorerState {
                 expanded,
                 collection: ci,
                 endpoint: None,
-                sequence: None,
             });
             if expanded && let Some(endpoints) = &node.endpoints {
                 for (ei, (_, endpoint)) in endpoints.iter().enumerate() {
@@ -223,37 +230,9 @@ impl ExplorerState {
                         expanded: false,
                         collection: ci,
                         endpoint: Some(ei),
-                        sequence: None,
                     });
                 }
             }
-        }
-        // The SEQUENCES section (M7.4): a dim header followed by one row per
-        // sequence. Shown only when the workspace has sequences (a bare workspace
-        // stays uncluttered); creating the first one goes through the palette /
-        // `<leader>a` editor.
-        if self.sequences.is_empty() {
-            return rows;
-        }
-        rows.push(Row {
-            depth: 0,
-            kind: RowKind::SequenceHeader,
-            name: "SEQUENCES".to_owned(),
-            expanded: false,
-            collection: 0,
-            endpoint: None,
-            sequence: None,
-        });
-        for (si, (_, sequence)) in self.sequences.iter().enumerate() {
-            rows.push(Row {
-                depth: 1,
-                kind: RowKind::Sequence,
-                name: sequence.name.clone(),
-                expanded: false,
-                collection: 0,
-                endpoint: None,
-                sequence: Some(si),
-            });
         }
         rows
     }
@@ -300,24 +279,69 @@ impl ExplorerState {
                 Ok(None)
             }
             RowKind::Endpoint => Ok(self.selected_endpoint(&row)),
-            // Sequence rows and the section header don't load an endpoint; the app
-            // handles a sequence row (opens the runner) before reaching here.
-            RowKind::Sequence | RowKind::SequenceHeader => Ok(None),
         }
     }
 
-    /// The sequence under the cursor, if a `Sequence` row is selected.
+    /// The sequence under the sub-pane cursor (PR 2b), if any. Read by the run
+    /// and edit paths; no tree-cursor gate — the sub-pane owns the selection.
     pub fn selected_sequence(&self) -> Option<SelectedSequence> {
-        let row = self.current_row()?;
-        if row.kind != RowKind::Sequence {
-            return None;
-        }
-        let (file, sequence) = self.sequences.get(row.sequence?)?;
+        let (file, sequence) = self.sequences.get(self.seq_cursor)?;
         Some(SelectedSequence {
             name: sequence.name.clone(),
             file: file.clone(),
             sequence: sequence.clone(),
         })
+    }
+
+    /// Number of loaded sequences (drives the sub-pane + stub summary).
+    pub fn sequences_len(&self) -> usize {
+        self.sequences.len()
+    }
+
+    /// The sub-pane cursor into the sequence list.
+    pub fn seq_cursor(&self) -> usize {
+        self.seq_cursor
+    }
+
+    /// Moves the sequence sub-pane cursor up one (clamped at the top).
+    pub fn seq_move_up(&mut self) {
+        self.seq_cursor = self.seq_cursor.saturating_sub(1);
+    }
+
+    /// Moves the sequence sub-pane cursor down one (clamped at the bottom).
+    pub fn seq_move_down(&mut self) {
+        if self.seq_cursor + 1 < self.sequences.len() {
+            self.seq_cursor += 1;
+        }
+    }
+
+    /// Jumps the sequence cursor to the first sequence.
+    pub fn seq_top(&mut self) {
+        self.seq_cursor = 0;
+    }
+
+    /// Jumps the sequence cursor to the last sequence.
+    pub fn seq_bottom(&mut self) {
+        self.seq_cursor = self.sequences.len().saturating_sub(1);
+    }
+
+    /// Keeps the sequence cursor within a `height`-row viewport, returning the
+    /// scroll offset (mirrors [`scroll_to_fit`] for the endpoints tree).
+    ///
+    /// [`scroll_to_fit`]: ExplorerState::scroll_to_fit
+    fn seq_scroll_to_fit(&mut self, height: usize) -> usize {
+        if height == 0 {
+            self.seq_scroll = 0;
+            return 0;
+        }
+        if self.seq_cursor < self.seq_scroll {
+            self.seq_scroll = self.seq_cursor;
+        } else if self.seq_cursor >= self.seq_scroll + height {
+            self.seq_scroll = self.seq_cursor + 1 - height;
+        }
+        let max_scroll = self.sequences.len().saturating_sub(height);
+        self.seq_scroll = self.seq_scroll.min(max_scroll);
+        self.seq_scroll
     }
 
     /// `h`: collapse the current collection, or jump from an endpoint to its
@@ -340,15 +364,6 @@ impl ExplorerState {
                     .position(|r| r.kind == RowKind::Collection && r.collection == row.collection)
                     .unwrap_or(0);
             }
-            RowKind::Sequence => {
-                // Jump to the SEQUENCES header (the pseudo-parent).
-                self.cursor = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.kind == RowKind::SequenceHeader)
-                    .unwrap_or(self.cursor);
-            }
-            RowKind::SequenceHeader => {}
         }
     }
 
@@ -430,6 +445,19 @@ impl ExplorerState {
             .collect()
     }
 
+    /// Moves the sequence sub-pane cursor onto the sequence backed by `file`, if
+    /// it is loaded. Keeps run/edit consistent with a `<leader>s o` pick — a
+    /// later `<leader>s r` runs the picked sequence, not sequence #0. Returns
+    /// whether a match was found.
+    pub fn select_sequence_file(&mut self, file: &Path) -> bool {
+        if let Some(idx) = self.sequences.iter().position(|(p, _)| p == file) {
+            self.seq_cursor = idx;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Loads every collection's endpoints (for fuzzy search) and returns
     /// `(display path, collection index, endpoint index)` for each endpoint.
     pub fn all_endpoints(&mut self) -> Result<Vec<(String, usize, usize)>, PersistenceError> {
@@ -470,6 +498,10 @@ impl ExplorerState {
         }
         self.cursor = cursor;
         self.clamp_cursor();
+        // Keep the sequence sub-pane cursor in range after a reload changes the
+        // sequence count.
+        self.seq_cursor = self.seq_cursor.min(self.sequences.len().saturating_sub(1));
+        self.seq_scroll = 0;
         Ok(())
     }
 
@@ -669,19 +701,10 @@ pub fn render(
         .skip(offset)
         .take(height)
         .map(|(i, row)| {
-            // The dim SEQUENCES header is a non-selectable label.
-            if row.kind == RowKind::SequenceHeader {
-                let indent = "  ".repeat(row.depth);
-                return Line::from(Span::styled(
-                    format!("  {indent}{}", row.name),
-                    theme.statusline,
-                ));
-            }
             let marker = match row.kind {
                 RowKind::Collection if row.expanded => "▾ ",
                 RowKind::Collection => "▸ ",
-                RowKind::Endpoint | RowKind::Sequence => "",
-                RowKind::SequenceHeader => unreachable!("handled above"),
+                RowKind::Endpoint => "",
             };
             let indent = "  ".repeat(row.depth);
             // The loaded-and-dirty endpoint's row gets an accent ● suffix,
@@ -717,6 +740,73 @@ pub fn render(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Renders the sequences sub-pane (PR 2b): a flat list of sequence names keyed
+/// off [`ExplorerState::seq_cursor`], with a `Sequences` title, a thick border
+/// when focused, and empty-state text when the workspace has none. Pure and
+/// deterministic (snapshot-safe). Takes `&mut` to update the scroll offset.
+pub fn render_sequences_pane(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut ExplorerState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let (border_type, border_style) = if focused {
+        (BorderType::Thick, theme.border_focused)
+    } else {
+        (BorderType::Plain, theme.border_unfocused)
+    };
+    let block = Block::bordered()
+        .border_type(border_type)
+        .border_style(border_style)
+        .title(" Sequences ")
+        .title_style(theme.title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.sequences.is_empty() {
+        let hint = Paragraph::new(vec![
+            Line::from(""),
+            Line::from("no sequences"),
+            Line::from(""),
+            Line::from("<leader>s a to add"),
+        ]);
+        frame.render_widget(hint, inner);
+        return;
+    }
+
+    let height = inner.height as usize;
+    let offset = state.seq_scroll_to_fit(height);
+    let lines: Vec<Line> = state
+        .sequences
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(i, (_, sequence))| {
+            let cursor = if i == state.seq_cursor { "> " } else { "  " };
+            let line = Line::from(Span::raw(format!("{cursor}{}", sequence.name)));
+            if i == state.seq_cursor && focused {
+                line.style(theme.selection)
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A one-line summary for the sequences sub-pane's collapsed stub (the count of
+/// sequences, or an empty-state note).
+pub fn sequences_stub_summary(state: &ExplorerState, theme: &Theme) -> Line<'static> {
+    let text = match state.sequences.len() {
+        0 => "no sequences".to_owned(),
+        1 => "1 sequence".to_owned(),
+        n => format!("{n} sequences"),
+    };
+    Line::from(Span::styled(text, theme.statusline))
 }
 
 #[cfg(test)]
@@ -918,5 +1008,74 @@ mod tests {
         state.bottom();
         assert_eq!(state.cursor, 0);
         assert!(state.select().unwrap().is_none());
+    }
+
+    /// A fixture with two named sequences (in `seq` order) plus the endpoint
+    /// collections, for the PR-2b sub-pane tests.
+    fn explorer_with_sequences(root: &Path) -> ExplorerState {
+        let _ws = fixture(root);
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        for (i, name) in ["Login flow", "Checkout"].iter().enumerate() {
+            std::fs::write(
+                seq_dir.join(format!("seq{i}.toml")),
+                format!("seq = {i}\nname = \"{name}\"\non_error = \"halt\"\n"),
+            )
+            .unwrap();
+        }
+        let ws = OpenWorkspace::open(root).unwrap();
+        ExplorerState::new(Some(&ws)).unwrap()
+    }
+
+    #[test]
+    fn rows_never_contain_a_sequence_even_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = explorer_with_sequences(dir.path());
+        assert_eq!(state.sequences_len(), 2, "sequences load into the sub-pane");
+        // Expand every collection so every possible row is materialized.
+        for ci in 0..state.collections.len() {
+            state.collections[ci].load().unwrap();
+            state.expanded.insert(ci);
+        }
+        assert!(
+            state
+                .rows()
+                .iter()
+                .all(|r| matches!(r.kind, RowKind::Collection | RowKind::Endpoint)),
+            "the tree lists only collections/endpoints — sequences moved to the sub-pane"
+        );
+    }
+
+    #[test]
+    fn selected_sequence_reads_seq_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = explorer_with_sequences(dir.path());
+        // Sequences sort by `seq`: "Login flow" (0), "Checkout" (1).
+        assert_eq!(state.seq_cursor(), 0);
+        assert_eq!(state.selected_sequence().unwrap().name, "Login flow");
+        state.seq_move_down();
+        assert_eq!(state.selected_sequence().unwrap().name, "Checkout");
+        state.seq_move_down(); // clamped at the last sequence
+        assert_eq!(state.seq_cursor(), 1);
+        state.seq_top();
+        assert_eq!(state.selected_sequence().unwrap().name, "Login flow");
+        state.seq_bottom();
+        assert_eq!(state.selected_sequence().unwrap().name, "Checkout");
+    }
+
+    #[test]
+    fn all_sequences_still_lists_every_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = explorer_with_sequences(dir.path());
+        let names: Vec<String> = state.all_sequences().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Login flow", "Checkout"]);
+    }
+
+    #[test]
+    fn no_sequences_means_none_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = explorer(dir.path());
+        assert_eq!(state.sequences_len(), 0);
+        assert!(state.selected_sequence().is_none());
     }
 }
