@@ -50,7 +50,7 @@ crates/
                            #   Sequence/SequenceStep/OnError (M7.4 request sequences)
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (M9 plugin guardrail); execute/export apply effects, never match Auth
-      persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge), lazy OpenWorkspace/Collection;
+      persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge; atomic_write: temp→fsync→rename→dir-fsync, R0), lazy OpenWorkspace/Collection;
                            #   Collection::endpoints() strict + endpoints_lenient() -> CollectionLoad (skip one bad file →
                            #   warning; both skip folder.toml AND churl.toml — M7.3 crash fix);
                            #   CollectionMeta (folder.toml [vars]) load/save (M6); CRUD seams (M6.6):
@@ -109,6 +109,7 @@ crates/
         highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, theme-aware, returns Highlighted
         clipboard.rs       # OSC 52 clipboard writes (no native dep; works over SSH/tmux), 1 MB cap
         components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
+                           #   response also carries ResponseState::Dropped (R0 memory-bound placeholder: status/timing/size, no body),
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
                            #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy),
                            #   fold (JSON fold-region scanner), env_editor (M7.3 environments & vars editor:
@@ -120,7 +121,8 @@ crates/
                            #   sequence_runner (M7.4 run view: live per-step status/timing + reused response viewer,
                            #     masked extracted values; UI-only, App drives via core primitives),
                            #   sequence_editor (M7.4 §4: steps + extraction-rule CRUD + reorder + on_error, save_sequence),
-                           #   load_runner (M7.5 Mode::LoadRunner: editable config header + live O(viewport) results
+                           #   load_runner (M7.5 Mode::LoadRunner: editable config header + live O(viewport) results;
+                           #     R0 memory bound — retains full Done views only for last K=16 + selected row, older→Dropped
                            #     list + reused response viewer + stats line; UI-only, App owns the single
                            #     buffer_unordered launcher + load_abort + generation guard + [load] guardrail)
     tests/

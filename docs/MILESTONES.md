@@ -22,7 +22,7 @@
 | M7.5 | Concurrent requests (throttle / load testing) | **done** |
 | M7.5.3 | Clipboard cross-platform compat (native + OSC-52 passthrough) | **done** |
 | **D1** | Demo-stabilize (regression fixes) | **done** |
-| **R0** | Cheap-P0 durability (atomic writes · load-runner memory bound) | planned |
+| **R0** | Cheap-P0 durability (atomic writes · load-runner memory bound) | **done** |
 | **M7.10** | Navigation & keymap unification (design-first) | planned |
 | M7.7 | Response formatting + help search (+ control-char sanitize) | planned |
 | **R1** | Durability & concurrency (reserved-names · merge-comments · SQLite WAL · pruning · buffer/channel bounds) | planned |
@@ -114,10 +114,10 @@ Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in p
 
 **Scope**: The two catastrophic-but-invisible P0s from the sweep — both self-contained, both foundational, ~1 session.
 
-**Deliverables**:
-- **Atomic saves** — every `save_*` writes to a sibling temp file → `fsync` → atomic `rename` (+ dir fsync). One helper covers `save_endpoint`/`save_sequence`/`save_workspace_manifest`/`save_collection_meta`. Kills the crash-mid-write data-loss on the sole source of truth.
-- **Load-runner memory bound** — stop retaining a full `ResponseView`/body per completed copy. Keep only status/timing per row for the list + stats; retain bodies for a bounded window (last-K or the selected row, rebuilt lazily). Memory becomes O(concurrency), not O(total).
-- Tests: crash/torn-write recovery (a partial file never replaces a good one); a high-`total` load run holds bounded memory (assert the retained-body count is capped).
+**Deliverables** (all done, 2026-07-09):
+- **Atomic saves** — the single `std::fs::write` in `save_value` now funnels through `persistence::atomic_write`: sibling temp file → `write_all` → `sync_all` → atomic `rename` → parent-dir fsync (degrades gracefully where dir-fsync is unsupported), with best-effort temp cleanup on any error. One helper covers `save_endpoint`/`save_sequence`/`save_workspace_manifest`/`save_collection_meta` (they all route through `save_value`). Error contract unchanged (`PersistenceError::Write { path, source }`). Kills the crash-mid-write data-loss on the sole source of truth.
+- **Load-runner memory bound** — retention is now O(concurrency + K). `LoadRunnerState` keeps a full `ResponseState::Done { view }` only for a bounded window (last **K=16** completions + the selected row, which is never evicted); an overflowing completion downgrades the oldest non-selected retained row to a new `ResponseState::Dropped { status, timing, size }` that the viewer renders honestly ("response body not retained (memory-bounded)"). Dropped rows keep no body bytes and are **not** reconstructable (accepted load-test tradeoff). Per-row status/timing and the outcomes-driven stats are untouched.
+- Tests: `persistence::tests::torn_write_never_replaces_a_good_file` (a failed write leaves the good file byte-intact and no stray temp) + `atomic_write_replaces_content_and_leaves_no_temp`; the format-preserving corpus stays byte-identical. `load_runner::tests::high_total_run_bounds_retained_views` (500 completions → retained `Done` count ≤ K+1, every row Done-or-Dropped, stats correct over all 500) + `selected_row_is_never_evicted`.
 
 **Next**: M7.10
 

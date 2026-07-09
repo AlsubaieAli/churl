@@ -84,6 +84,18 @@ pub enum ResponseState {
         /// The virtualised view over the response body.
         view: ResponseView,
     },
+    /// A completed response whose body was deliberately not retained by the
+    /// load runner's memory bound (R0). The status/timing/size are kept for an
+    /// honest placeholder, but the body bytes are gone and NOT reconstructable —
+    /// selecting this row shows a "not retained" note instead of the viewer.
+    Dropped {
+        /// The HTTP status code.
+        status: u16,
+        /// The request timing, when it completed with one.
+        timing: Option<Duration>,
+        /// The response body size in bytes (for the placeholder).
+        size: usize,
+    },
 }
 
 impl ResponseState {
@@ -255,6 +267,16 @@ impl ResponseView {
     /// The active search, if any.
     pub fn search(&self) -> Option<&SearchState> {
         self.search.as_ref()
+    }
+
+    /// The HTTP status code of this response.
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The retained body size in bytes (the truncated size when truncated).
+    pub fn body_len(&self) -> usize {
+        self.byte_size
     }
 
     /// The logical line shown at display-row `row`, computed through the current
@@ -834,6 +856,28 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
                 body_area,
             );
         }
+        ResponseState::Dropped {
+            status,
+            timing,
+            size,
+        } => {
+            let status_area = status_area_opt.unwrap();
+            let body_area = body_area_opt.unwrap();
+            frame.render_widget(
+                Paragraph::new(Line::from(dropped_status(*status, *timing, *size))),
+                status_area,
+            );
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from("response body not retained (memory-bounded)"),
+                    Line::from(""),
+                    Line::from("only a bounded window of load-test responses is kept;"),
+                    Line::from("this one was evicted and cannot be shown."),
+                ])
+                .wrap(Wrap { trim: false }),
+                body_area,
+            );
+        }
         ResponseState::Done { view } => {
             let body_area = body_area_opt.unwrap();
             render_done(frame, body_area, view, &ctx, &mut outcome);
@@ -841,6 +885,18 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     }
 
     outcome
+}
+
+/// The one-line status readout for a memory-evicted (`Dropped`) load-runner row,
+/// e.g. `200 · 142 ms · 4.1 KB · not retained`.
+fn dropped_status(status: u16, timing: Option<Duration>, size: usize) -> String {
+    let mut parts = vec![status.to_string()];
+    if let Some(t) = timing {
+        parts.push(fmt_ms(t));
+    }
+    parts.push(fmt_bytes(size));
+    parts.push("not retained".to_owned());
+    parts.join(" · ")
 }
 
 /// Renders the body of a `Done` response through the full pipeline
@@ -1127,6 +1183,11 @@ pub fn collapsed_summary(state: &ResponseState, _theme: &Theme) -> Line<'static>
         ResponseState::InFlight { .. } => "sending…".to_owned(),
         ResponseState::Cancelled => "cancelled".to_owned(),
         ResponseState::Failed { .. } => "request failed".to_owned(),
+        ResponseState::Dropped {
+            status,
+            timing,
+            size,
+        } => dropped_status(*status, *timing, *size),
         ResponseState::Done { view } => status_summary(view),
     };
     Line::from(text)

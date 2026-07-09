@@ -759,10 +759,57 @@ fn save_value<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceErr
         }
     };
 
-    std::fs::write(path, output).map_err(|source| PersistenceError::Write {
+    atomic_write(path, output.as_bytes()).map_err(|source| PersistenceError::Write {
         path: path.to_owned(),
         source,
     })
+}
+
+/// Durably writes `bytes` to `path`, replacing any existing file atomically.
+///
+/// A crash mid-write must never leave the source-of-truth file torn: we write to a
+/// sibling temp file in the same directory (same filesystem → `rename` is atomic),
+/// `fsync` the data, then `rename` over `path`. Finally we `fsync` the parent
+/// directory so the rename itself survives power loss. On any error the temp file is
+/// removed best-effort and the underlying I/O error is returned.
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "churl".to_owned());
+
+    // Unique-ish sibling name so concurrent writers don't collide on one temp path.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_path = dir.join(format!(".{}.{}.{}.tmp", file_name, std::process::id(), seq));
+
+    // Write + fsync the data into the temp file, then rename it over the target.
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp_path, path)
+    })();
+
+    if let Err(err) = result {
+        // Best-effort cleanup; the original file is untouched (rename never ran, or
+        // the earlier steps failed before it).
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    // fsync the parent directory so the rename is durable across power loss. Opening
+    // a directory for fsync is unsupported on some platforms (notably Windows); a
+    // failure here must not fail an otherwise-successful save, so we degrade quietly.
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+
+    Ok(())
 }
 
 /// Normalizes a freshly serialized table in place so it renders as idiomatic TOML:
@@ -880,5 +927,65 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                 })
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.toml");
+
+        atomic_write(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        atomic_write(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+
+        // The sibling temp file is renamed away on success — nothing left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+    }
+
+    /// A failing write must never replace a good pre-existing file, and must not
+    /// leave a torn temp file behind. We inject the failure by making the parent
+    /// directory read-only so the temp `File::create` fails before any rename.
+    #[cfg(unix)]
+    #[test]
+    fn torn_write_never_replaces_a_good_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.toml");
+
+        atomic_write(&path, b"good original").unwrap();
+
+        // Make the directory read+execute but not writable: temp creation fails.
+        let ro = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(dir.path(), ro).unwrap();
+
+        let result = atomic_write(&path, b"torn replacement");
+
+        // Restore writability so the tempdir can be cleaned up regardless.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "write into a read-only dir should fail");
+        // The original file is completely intact — the rename never ran.
+        assert_eq!(std::fs::read(&path).unwrap(), b"good original");
+
+        // No torn temp file survives the failure.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
     }
 }
