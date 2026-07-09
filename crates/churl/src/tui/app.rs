@@ -5701,15 +5701,25 @@ mod tests {
         app
     }
 
-    /// Insert mode + Ctrl-S dispatches Send instead of reaching edtui; the editor
-    /// is untouched (no text typed) and stays in insert mode. (With an endpoint
-    /// loaded and no HTTP client, Send is a silent runtime-free no-op — the proof
-    /// of interception is that Ctrl-S produced no text and did not quit.)
-    #[test]
-    fn insert_mode_ctrl_s_dispatches_send() {
+    /// Insert mode + Ctrl-S dispatches Send instead of reaching edtui. Proof of
+    /// interception is an OBSERVABLE Send effect that only Send produces: with a
+    /// request already in flight, Send's in-flight guard emits the distinctive
+    /// "already in flight" message. If Ctrl-S instead reached edtui (interception
+    /// removed), edtui would ignore the Ctrl-modified char and leave `message`
+    /// None — so this fails when the insert-mode `control_intercept` block is
+    /// removed. The editor is also untouched and insert mode is preserved.
+    #[tokio::test]
+    async fn insert_mode_ctrl_s_dispatches_send() {
         let mut app = insert_mode_app(KeyMap::default());
+        // A request already in flight: Send's guard produces an observable message.
+        set_active_in_flight(&mut app, 1);
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .unwrap();
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("request already in flight — ctrl-c to cancel"),
+            "Ctrl-S must dispatch Send (observable via its in-flight guard)"
+        );
         assert_eq!(String::from(app.test_editor().lines.clone()), "");
         assert_eq!(app.test_editor().mode, EditorMode::Insert);
         assert!(!app.should_quit);
@@ -5754,15 +5764,22 @@ mod tests {
     }
 
     /// The interception resolves through the keymap: a remapped send key with
-    /// CONTROL is intercepted in insert mode too.
-    #[test]
-    fn insert_mode_remapped_ctrl_send_is_intercepted() {
+    /// CONTROL is intercepted in insert mode too. Discriminated by the same
+    /// observable Send effect (the in-flight guard's message), so it fails if the
+    /// insert-mode `control_intercept` block is removed.
+    #[tokio::test]
+    async fn insert_mode_remapped_ctrl_send_is_intercepted() {
         let overrides =
             std::collections::BTreeMap::from([("ctrl-b".to_string(), "send".to_string())]);
         let mut app = insert_mode_app(KeyMap::with_overrides(&overrides).unwrap());
+        set_active_in_flight(&mut app, 1);
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .unwrap();
-        // Intercepted as Send (silent no-op with no client), not typed as text.
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("request already in flight — ctrl-c to cancel"),
+            "remapped Ctrl-B must dispatch Send (observable via its in-flight guard)"
+        );
         assert_eq!(String::from(app.test_editor().lines.clone()), "");
     }
 
@@ -8157,6 +8174,35 @@ mod tests {
             app.active_endpoint_buffer().unwrap().endpoint.file,
             PathBuf::from("b.toml")
         );
+    }
+
+    /// Response/scroll/in-flight are now PER-ENDPOINT (see DECISIONS.md, PR-3a):
+    /// loading a different endpoint shows its OWN fresh `Idle` response, not the
+    /// previous endpoint's stale one. On master (global `response`), A's completed
+    /// response bled through under B until a send; this locks in the fix.
+    #[test]
+    fn loading_a_new_endpoint_shows_a_fresh_response_not_the_previous() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        // Endpoint A: drive it to a completed response with a non-zero scroll.
+        app.open_or_focus_buffer(selected_with("a.toml", None));
+        *app.response_mut() = ResponseState::Done {
+            view: ResponseView::build(&response(), 1),
+        };
+        app.active_endpoint_buffer_mut().unwrap().response_scroll = 7;
+        assert!(matches!(app.response(), ResponseState::Done { .. }));
+
+        // Load a DIFFERENT endpoint B (no send): B gets its own fresh response.
+        app.open_or_focus_buffer(selected_with("b.toml", None));
+        let b = app.active_endpoint_buffer().unwrap();
+        assert!(
+            matches!(b.response, ResponseState::Idle),
+            "B shows its own Idle response, not A's stale Done"
+        );
+        assert_eq!(
+            b.response_scroll, 0,
+            "B starts unscrolled, not at A's scroll"
+        );
+        assert!(b.in_flight.is_none(), "B has no in-flight from A");
     }
 
     /// `is_dirty` is derived per-`EndpointBuffer`: an in-memory body edit that
