@@ -1744,6 +1744,92 @@ fn sequence_editor_modal() {
     insta::assert_snapshot!(rendered);
 }
 
+/// C1: the runner shows its mode in a top row inside the pane (not jammed into the
+/// title), and the `^R edit` face-flip hint lives in the footer — not the title.
+#[test]
+fn sequence_runner_mode_in_top_row_shortcut_in_footer() {
+    use churl::tui::components::sequence_runner::SequenceRunnerState;
+    use churl_core::model::OnError;
+    let mut state = SequenceRunnerState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        OnError::Halt,
+        vec![runner_step("auth/login.toml")],
+    );
+    let out = render_runner(&mut state);
+    let lines: Vec<&str> = out.lines().collect();
+    // Title row (index 1) names the sequence but carries no mode/shortcut.
+    assert!(lines[1].contains("Sequence · Auth flow"), "title:\n{out}");
+    assert!(!lines[1].contains("RUN"), "mode leaked into title:\n{out}");
+    assert!(
+        !lines[1].contains("^R"),
+        "shortcut leaked into title:\n{out}"
+    );
+    // Mode shows in the first inner row.
+    assert!(lines[2].contains("Mode: RUN"), "mode row missing:\n{out}");
+    // The `^R edit` hint lives in the footer (the last text row before the bottom
+    // border), not the title/mode rows.
+    let footer = lines
+        .iter()
+        .rfind(|l| l.contains("q close"))
+        .expect("footer row");
+    assert!(
+        footer.contains("^R edit"),
+        "footer shortcut missing:\n{out}"
+    );
+}
+
+/// C1: the editor mirrors the runner — mode in a top row, `^R run` in the footer,
+/// title carries only the name (+ dirty marker).
+#[test]
+fn sequence_editor_mode_in_top_row_shortcut_in_footer() {
+    use churl::tui::components::sequence_editor::{self, SequenceEditorState};
+    use churl::tui::theme::Theme;
+    use churl_core::model::{OnError, Sequence};
+    let sequence = Sequence {
+        seq: 0,
+        name: "Auth flow".to_owned(),
+        on_error: OnError::Halt,
+        steps: vec![],
+    };
+    let state = SequenceEditorState::new(
+        "Auth flow".to_owned(),
+        std::path::PathBuf::from("sequences/auth-flow.toml"),
+        &sequence,
+        vec![],
+    );
+    let backend = TestBackend::new(90, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    terminal
+        .draw(|frame| sequence_editor::render(frame, frame.area(), &state, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let out = (0..24)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[1].contains("Sequence · Auth flow"), "title:\n{out}");
+    assert!(!lines[1].contains("EDIT"), "mode leaked into title:\n{out}");
+    assert!(
+        !lines[1].contains("^R"),
+        "shortcut leaked into title:\n{out}"
+    );
+    assert!(lines[2].contains("Mode: EDIT"), "mode row missing:\n{out}");
+    // The `^R run` hint lives in the footer (the key-hint row), which starts with
+    // the step-navigation keys — never in the title or mode rows.
+    let footer = lines
+        .iter()
+        .rfind(|l| l.contains("j/k step"))
+        .expect("footer row");
+    assert!(footer.contains("^R run"), "footer shortcut missing:\n{out}");
+}
+
 /// The `?` help overlay renders the effective keymap, sectioned.
 #[test]
 fn help_overlay() {

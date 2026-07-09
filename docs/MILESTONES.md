@@ -23,7 +23,7 @@
 | M7.5.3 | Clipboard cross-platform compat (native + OSC-52 passthrough) | **done** |
 | **D1** | Demo-stabilize (regression fixes) | **done** |
 | **R0** | Cheap-P0 durability (atomic writes · load-runner memory bound) | **done** |
-| **M7.10** | Navigation & keymap unification (design-first) | planned |
+| **M7.10** | Navigation & keymap unification (design-first) | **done** |
 | M7.7 | Response formatting + help search (+ control-char sanitize) | planned |
 | **R1** | Durability & concurrency (reserved-names · merge-comments · SQLite WAL · pruning · buffer/channel bounds) | planned |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
@@ -130,7 +130,9 @@ Clean bill on: churl-core has zero TUI-dep leakage · zero `unwrap`/`panic` in p
 **Staging** (three reviewable PRs — A ships alone as the riskiest refactor):
 - **Stage A — keymap (dynamic submenus + conflict warnings): DONE** (branch `feat/m7.10a-keymap`). Removed the closed `LeaderMenu` enum + hardcoded `sub_*` fields for data-driven `submenus: HashMap<String, Submenu>` + `LeaderEntry::Submenu(String)`; built-in three seeded as defaults (default config byte-identical); `[keys.leader.<name>]` creates/extends any submenu. Added `KeyMap::validate` load-time conflict/shadow warnings (5 defect classes, genuine defects only) surfaced in three non-blocking channels (stderr pre-raw-mode · first-frame toast · `churl keymaps` `⚠ Conflicts` section). Added `<leader>s f` sequence finder (aliases `s o`). Verified + tested picker uniformity (no silent run-last). See the 2026-07-09 M7.10 Stage A ADRs in DECISIONS.md.
 - **Stage B — nav model: DONE** (branch `feat/m7.10b-nav`). Refined the 4-region Tab so the Explorer stop = "left-column region" (Tab restores `left_active`'s sub-pane + zoom, no Endpoints force-reset; `skip_hidden_explorer` for a collapsed left column preserved). Added `cycle-region-fwd`/`back` actions shipped **unbound** (left column ⇒ Endpoints⇄Sequences, right column ⇒ buffer ring). Removed `<leader>S` + the `ToggleSequencesPane` action + `toggle_sequences_pane` fn; retired the `sequences_shown` field (sub-pane always peek-visible; no dead-end — reachable via `s` overlay, `f`-jump `s`, `<leader>s f`). Made `f`-jump pane-only (5 regions, zero row labels; mnemonics e/s/u/r/**p**, `s`=Sequences, Response→`p`). Added `hovered_endpoint()` fallback wired into copy-as-curl + the direct load runner (`send_request` stays loaded-only). See the 2026-07-09 M7.10 Stage B ADRs in DECISIONS.md.
-- **Stage C — legibility**: sequence/runner header convention + load-runner reorg. *Pending.*
+- **Stage C — legibility: DONE** (branch `feat/m7.10c-legibility`). Adopted a symmetric sequence-surface header convention on both the editor and runner: the title now carries only `Sequence · <name>` (+ dirty `●`); the mode shows in a top row inside the pane (`Mode: EDIT` / `Mode: RUN`); the `^R run` / `^R edit` face-flip hint moved to the footer alongside the other key hints. Reorged the load-runner top-left block to **name → url → config → stats**, one row each (title reduced to `Load`). Added a dim one-line purpose hint to the sequence editor, sequence runner, and load panes so a first-time user reads each surface at a glance. Render-only — no keymap/nav/focus behavior changed. See the 2026-07-09 M7.10 Stage C ADR in DECISIONS.md.
+
+**M7.10 complete** (all three stages merged). Milestone status → done; roadmap advances to **M7.7**.
 
 **Deliverables**:
 - **4-region Tab model** (decision 6): `Left column → URL → Request → Response`, Shift-Tab reverses; left column is one stop showing the active sub-pane; returning restores last-active sub-pane + zoom.
