@@ -16,8 +16,8 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
 │                            │┏ R 200 OK · 142 ms · 13 B · 2 headers · headers ┓
-│                            │┃Content-Type: application/json                  ┃
-│                            │┃X-Request-Id: abc-123                           ┃
+│                            │┃1 Content-Type: application/json                ┃
+│                            │┃2 X-Request-Id: abc-123                         ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃

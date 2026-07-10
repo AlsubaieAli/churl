@@ -10,7 +10,7 @@ expression: snapshot(&mut app)
 │    Get user                ││ Params(0)   Headers(0)   Auth   Body           │
 │                            │└────────────────────────────────────────────────┘
 │                            │┏ Response 200 OK · 142 ms · 2 B · 1 header  [h] ┓
-│                            │┃{}                                              ┃
+│                            │┃1 {}                                            ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃

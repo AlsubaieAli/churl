@@ -987,7 +987,7 @@ fn every_palette_command_dispatches() {
             // no-op gracefully (the pane is Idle), so just assert no crash / mode
             // stays Normal. `TogglePretty` additionally warns (pretty is JSON-body
             // only) rather than silently doing nothing.
-            Action::ToggleHeadersView | Action::ToggleWrap => {
+            Action::ToggleHeadersView | Action::ToggleWrap | Action::ToggleLineNumbers => {
                 assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
             }
             Action::TogglePretty => expect_status(&mut app, "pretty: JSON body only"),

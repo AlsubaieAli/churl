@@ -16,12 +16,12 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            │└────────────────────────────────────────────────┘
 │                            │┏ 200 OK · 142 ms · 171 B · 1 header  [h] · wrap ┓
-│                            │┃{                                               ┃
-│                            │┃  "data": "wrap-me-wrap-me-wrap-me-wrap-me-wrap-┃
-│                            │┃me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-┃
-│                            │┃me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-┃
-│                            │┃me-wrap-me-wrap-me-wrap-me-"                    ┃
-└────────────────────────────┘┃}                                               ┃
+│                            │┃1 {                                             ┃
+│                            │┃2   "data": "wrap-me-wrap-me-wrap-me-wrap-me-wra┃
+│                            │┃  p-me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-me-w┃
+│                            │┃  rap-me-wrap-me-wrap-me-wrap-me-wrap-me-wrap-me┃
+│                            │┃  -wrap-me-wrap-me-wrap-me-wrap-me-"            ┃
+└────────────────────────────┘┃3 }                                             ┃
 ┌ Sequences ─────────────────┐┃                                                ┃
 │<leader>s a to add          │┃                                                ┃
 └────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

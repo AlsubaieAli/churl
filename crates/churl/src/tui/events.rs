@@ -139,6 +139,8 @@ pub enum Action {
     TogglePretty,
     /// Toggle A→Z alphabetical sorting of pretty JSON object keys (M7.7).
     ToggleSortKeys,
+    /// Toggle the response viewer's left-hand line-number gutter (default on).
+    ToggleLineNumbers,
     /// Open incremental literal search over the response body.
     OpenBodySearch,
     /// Jump to the next response-search match.
@@ -296,6 +298,11 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::ToggleSortKeys,
         "toggle-sort-keys",
         "sort response keys A→Z",
+    ),
+    (
+        Action::ToggleLineNumbers,
+        "toggle-line-numbers",
+        "toggle line-number gutter",
     ),
     (
         Action::OpenBodySearch,
@@ -644,6 +651,9 @@ impl Default for KeyMap {
         // in the Response overlay; the leader `s` (sequences submenu) lives behind
         // the leader, not this pane overlay.
         overlay(PaneCtx::Response, key!(s), Action::ToggleSortKeys);
+        // `#` toggles the line-number gutter (default on; drive-test note #8). `#`
+        // is free in the Response overlay and everywhere else in the keymap.
+        overlay(PaneCtx::Response, key!('#'), Action::ToggleLineNumbers);
         overlay(PaneCtx::Response, key!('/'), Action::OpenBodySearch);
         overlay(PaneCtx::Response, key!(n), Action::SearchNext);
         overlay(PaneCtx::Response, key!(shift - n), Action::SearchPrev);

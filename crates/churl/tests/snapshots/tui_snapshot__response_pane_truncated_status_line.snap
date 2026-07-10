@@ -16,7 +16,7 @@ expression: "lines.join(\"\\n\")"
 │                            ││                                                                                                                                                    │
 │                            │└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 │                            │┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 200 OK · 142 ms · 10.0 MB · 1 header  [h] · truncated at 10.0 MB ┓
-│                            │┃xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx┃
+│                            │┃1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx┃
 │                            │┃                                                                                                                                                    ┃
 │                            │┃                                                                                                                                                    ┃
 │                            │┃                                                                                                                                                    ┃

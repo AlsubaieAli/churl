@@ -1709,6 +1709,7 @@ impl App {
             Action::ToggleWrap => self.response_toggle_wrap(),
             Action::TogglePretty => self.response_toggle_pretty(),
             Action::ToggleSortKeys => self.response_toggle_sort_keys(),
+            Action::ToggleLineNumbers => self.response_toggle_line_numbers(),
             Action::OpenBodySearch => self.open_body_search(),
             Action::SearchNext => self.response_search_step(true),
             Action::SearchPrev => self.response_search_step(false),
@@ -2268,6 +2269,19 @@ impl App {
         if let Some(view) = self.response_view_mut() {
             view.toggle_sort_keys();
             self.reset_response_geometry(true);
+        }
+    }
+
+    /// `#`: toggle the line-number gutter (default on; drive-test note #8). The
+    /// gutter shrinks the effective body width, so wrap boundaries and the total
+    /// display-row count can change — reset cursor/scroll geometry (as `W` does).
+    /// The displayed text is untouched, so the highlight cache is kept (it is
+    /// keyed on `line_numbers`, so the correctly-windowed lines are re-highlighted
+    /// on demand); works in any view (body or headers).
+    fn response_toggle_line_numbers(&mut self) {
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_line_numbers();
+            self.reset_response_geometry(false);
         }
     }
 
