@@ -32,6 +32,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("toggle response headers view", Action::ToggleHeadersView),
     ("toggle response wrap", Action::ToggleWrap),
     ("toggle response pretty/raw", Action::TogglePretty),
+    ("sort response keys A→Z", Action::ToggleSortKeys),
     ("import collection (JSON)", Action::ImportCollection),
     (
         "export collection · Postman v2.1",

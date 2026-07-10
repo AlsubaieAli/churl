@@ -64,6 +64,10 @@ binary, so the built commit is recorded below every pass.
 - [ ] `p` toggles raw↔pretty; in raw mode the body shows the **exact on-the-wire bytes**, and toggling back and forth is stable. Toggling resets any open folds. (M7.7)
 - [ ] A malformed/non-JSON body with a JSON content-type renders **raw with no error or crash** (silent fallback). (M7.7)
 - [ ] Copy body (`y`) / copy line (`Y`) copy the **raw bytes** even while the body is displayed pretty — pasting round-trips the server's actual JSON. (M7.7)
+- [ ] `s` on a pretty JSON body toggles **A→Z key sort** — every object's keys sort alphabetically at every nesting level; arrays keep element order. (M7.7)
+- [ ] With sort **off**, pretty JSON keeps the **server wire order** (keys in response order, not alphabetical). (M7.7)
+- [ ] `s` on a raw or non-JSON view **no-ops with a notice** (`sort: pretty JSON only`), no text change. (M7.7)
+- [ ] Copy body (`y`) returns the **exact raw on-the-wire bytes** even with pretty + sort both on. (M7.7)
 
 ## Persistence durability
 - [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)

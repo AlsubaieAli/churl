@@ -137,6 +137,8 @@ pub enum Action {
     ToggleWrap,
     /// Toggle raw↔pretty (reformatted) rendering of the response body.
     TogglePretty,
+    /// Toggle A→Z alphabetical sorting of pretty JSON object keys (M7.7).
+    ToggleSortKeys,
     /// Open incremental literal search over the response body.
     OpenBodySearch,
     /// Jump to the next response-search match.
@@ -285,6 +287,11 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::TogglePretty,
         "toggle-pretty",
         "toggle response pretty/raw",
+    ),
+    (
+        Action::ToggleSortKeys,
+        "toggle-sort-keys",
+        "sort response keys A→Z",
     ),
     (
         Action::OpenBodySearch,
@@ -620,6 +627,10 @@ impl Default for KeyMap {
         // in the Response overlay (the global `<leader>p` switch-profile lives
         // behind the leader, not in this pane overlay).
         overlay(PaneCtx::Response, key!(p), Action::TogglePretty);
+        // `s` (sort) toggles A→Z key sorting on the pretty JSON body (M7.7). Free
+        // in the Response overlay; the leader `s` (sequences submenu) lives behind
+        // the leader, not this pane overlay.
+        overlay(PaneCtx::Response, key!(s), Action::ToggleSortKeys);
         overlay(PaneCtx::Response, key!('/'), Action::OpenBodySearch);
         overlay(PaneCtx::Response, key!(n), Action::SearchNext);
         overlay(PaneCtx::Response, key!(shift - n), Action::SearchPrev);
