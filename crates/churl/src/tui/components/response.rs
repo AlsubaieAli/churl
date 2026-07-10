@@ -615,47 +615,10 @@ impl ResponseView {
 
     /// Computes literal, smart-case substring matches over the active source.
     fn compute_matches(&self, query: &str) -> Vec<(usize, usize, usize)> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let case_sensitive = query.chars().any(|c| c.is_uppercase());
-        let needle_lower = query.to_lowercase();
-        let mut out = Vec::new();
-        for idx in 0..self.source_line_count() {
-            let line = self.logical_line(idx);
-            if case_sensitive {
-                let mut start = 0;
-                while let Some(pos) = line[start..].find(query) {
-                    let at = start + pos;
-                    out.push((idx, at, at + query.len()));
-                    start = at + query.len().max(1);
-                    if start > line.len() {
-                        break;
-                    }
-                }
-            } else {
-                // Case-insensitive: search a lowercased copy and map every match
-                // position back through a per-char byte-offset table — exact for
-                // any case folding, including per-char length shifts whose totals
-                // cancel out (e.g. `İ` 2→3 and `ẞ` 3→2 on one line). No length
-                // heuristics, no whole-line fallback.
-                let (hay, offset_map) = lowercase_with_offsets(line);
-                let mut start = 0;
-                while start <= hay.len().saturating_sub(needle_lower.len()) {
-                    let Some(pos) = hay[start..].find(&needle_lower) else {
-                        break;
-                    };
-                    let at = start + pos;
-                    let orig_start = map_lowered_offset(&offset_map, at, false);
-                    let orig_end = map_lowered_offset(&offset_map, at + needle_lower.len(), true);
-                    if orig_start < orig_end {
-                        out.push((idx, orig_start, orig_end));
-                    }
-                    start = at + needle_lower.len().max(1);
-                }
-            }
-        }
-        out
+        smart_case_matches(
+            (0..self.source_line_count()).map(|idx| self.logical_line(idx)),
+            query,
+        )
     }
 
     /// Advances to the next (`forward`) or previous match, wrapping. Auto-unfolds
@@ -1226,7 +1189,7 @@ fn overlay_search<'a>(
 /// match: reversed (stands in for `theme.selection` without a theme handle);
 /// others: dim + underlined. Byte offsets in `hits` are absolute (into the
 /// logical line); `base_byte` is the slice's start offset.
-fn build_search_spans(
+pub(crate) fn build_search_spans(
     slice: &str,
     base_byte: usize,
     hits: &[(usize, usize, bool)],
@@ -1275,6 +1238,58 @@ fn apply_cursor<'a>(line: Line<'a>, is_cursor: bool, theme: &Theme) -> Line<'a> 
 fn char_slice(s: &str, start: usize, end: usize) -> &str {
     let (bs, be) = char_range_to_bytes(s, start, end);
     &s[bs..be]
+}
+
+/// The shared smart-case substring matcher used by both the response body
+/// search and the `?` help-overlay search — one algorithm, so their matching
+/// semantics can never fork. Yields `(line index, byte start, byte end)` per
+/// match, in reading order, over the given `lines`.
+///
+/// Smart-case: an all-lowercase `query` matches case-insensitively; any
+/// uppercase char makes it case-sensitive. Case-insensitive matching searches a
+/// lowercased copy of each line and maps match positions back through a per-char
+/// byte-offset table — exact for any case folding, including per-char length
+/// shifts whose totals cancel out (e.g. `İ` 2→3 and `ẞ` 3→2 on one line). No
+/// length heuristics, no whole-line fallback. An empty query yields no matches.
+pub(crate) fn smart_case_matches<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    query: &str,
+) -> Vec<(usize, usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let case_sensitive = query.chars().any(|c| c.is_uppercase());
+    let needle_lower = query.to_lowercase();
+    let mut out = Vec::new();
+    for (idx, line) in lines.into_iter().enumerate() {
+        if case_sensitive {
+            let mut start = 0;
+            while let Some(pos) = line[start..].find(query) {
+                let at = start + pos;
+                out.push((idx, at, at + query.len()));
+                start = at + query.len().max(1);
+                if start > line.len() {
+                    break;
+                }
+            }
+        } else {
+            let (hay, offset_map) = lowercase_with_offsets(line);
+            let mut start = 0;
+            while start <= hay.len().saturating_sub(needle_lower.len()) {
+                let Some(pos) = hay[start..].find(&needle_lower) else {
+                    break;
+                };
+                let at = start + pos;
+                let orig_start = map_lowered_offset(&offset_map, at, false);
+                let orig_end = map_lowered_offset(&offset_map, at + needle_lower.len(), true);
+                if orig_start < orig_end {
+                    out.push((idx, orig_start, orig_end));
+                }
+                start = at + needle_lower.len().max(1);
+            }
+        }
+    }
+    out
 }
 
 /// Lowercases `s`, returning the lowered string plus a byte-offset mapping

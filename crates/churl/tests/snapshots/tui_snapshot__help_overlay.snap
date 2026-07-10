@@ -4,7 +4,7 @@ expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
 ┃> ▸ orders                  ┃│no endpoint selected                            │
-┃  ▸ users  ┏ Help — keys (?/esc/q to close) ━━━━━━━━━━━━━━━━━━━━━━┓───────────┘
+┃  ▸ users  ┏ Help — keys (?/esc/q · / search) ━━━━━━━━━━━━━━━━━━━━┓───────────┘
 ┃           ┃Global                                                ┃───────────┐
 ┃           ┃  Ctrl-c, q           quit                            ┃           │
 ┃           ┃  Tab                 focus next pane                 ┃           │

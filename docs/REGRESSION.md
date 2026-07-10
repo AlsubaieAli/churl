@@ -69,6 +69,13 @@ binary, so the built commit is recorded below every pass.
 - [ ] `s` on a raw or non-JSON view **no-ops with a notice** (`sort: pretty JSON only`), no text change. (M7.7)
 - [ ] Copy body (`y`) returns the **exact raw on-the-wire bytes** even with pretty + sort both on. (M7.7)
 
+## Help overlay
+- [ ] `?` opens the help overlay; it renders every section (Global / Explorer / URL bar / Request / Response / Leader) and `j`/`k`/`d`/`u` scroll; `?`/`Esc`/`q` close.
+- [ ] `/` inside the help overlay opens a search; typing a substring of a known binding label **highlights matches in place and jumps to the current one** — **non-matching rows stay visible** (highlight-and-jump, not a filter). The title shows the query + a `k/N` counter. (M7.7 Stage B)
+- [ ] `n`/`N` cycle to the next/previous match and **wrap** around; the view scrolls the current match into view. (M7.7 Stage B)
+- [ ] `Esc` in help search **clears the search but keeps the overlay open**; `Enter` **commits** (matches stay highlighted, input closes, `n`/`N` still cycle). (M7.7 Stage B)
+- [ ] Smart-case parity with body search: a lowercase query matches case-insensitively; a query with any uppercase char is case-sensitive. (M7.7 Stage B)
+
 ## Persistence durability
 - [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)
 - [ ] Save leaves no `.<name>.<pid>.<n>.tmp` sibling files behind in the collection/workspace directory. (R0)
