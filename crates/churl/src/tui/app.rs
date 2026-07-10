@@ -1658,6 +1658,7 @@ impl App {
             Action::ToggleHeadersView => self.response_toggle_headers(),
             Action::ToggleWrap => self.response_toggle_wrap(),
             Action::TogglePretty => self.response_toggle_pretty(),
+            Action::ToggleSortKeys => self.response_toggle_sort_keys(),
             Action::OpenBodySearch => self.open_body_search(),
             Action::SearchNext => self.response_search_step(true),
             Action::SearchPrev => self.response_search_step(false),
@@ -2185,6 +2186,31 @@ impl App {
         }
         if let Some(view) = self.response_view_mut() {
             view.toggle_pretty();
+            self.reset_response_geometry(true);
+        }
+    }
+
+    /// `s`: toggle A→Z alphabetical sorting of pretty JSON object keys (M7.7).
+    /// Only meaningful on a pretty JSON body — sorting a raw or non-JSON view
+    /// would silently do nothing, so guard and notify instead (mirrors the
+    /// pretty-outside-JSON notice). The displayed text and line count change (and
+    /// `toggle_sort_keys` resets folds), so reset cursor/scroll and clear the
+    /// highlight cache like the pretty handler.
+    fn response_toggle_sort_keys(&mut self) {
+        let is_pretty_json_body = match self.active_response() {
+            ResponseState::Done { view } => {
+                view.view_mode() == ViewMode::Body
+                    && view.syntax() == crate::tui::highlight::SyntaxToken::Json
+                    && view.pretty()
+            }
+            _ => false,
+        };
+        if !is_pretty_json_body {
+            self.notify("sort: pretty JSON only");
+            return;
+        }
+        if let Some(view) = self.response_view_mut() {
+            view.toggle_sort_keys();
             self.reset_response_geometry(true);
         }
     }

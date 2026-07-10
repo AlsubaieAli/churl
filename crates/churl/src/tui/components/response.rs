@@ -209,6 +209,11 @@ pub struct ResponseView {
     /// body is not parseable JSON, the reformat silently falls back to raw and
     /// `text == raw_text`.
     pretty: bool,
+    /// Whether pretty JSON object keys are sorted A→Z (recursively). Defaults to
+    /// `false` (server wire order) and resets per response. Only affects display
+    /// when `pretty` is on and the body is JSON; a no-op otherwise. Toggled by
+    /// `s` in the Response overlay (M7.7).
+    sort_keys: bool,
     /// The active body search, when a search is live.
     search: Option<SearchState>,
 }
@@ -227,7 +232,9 @@ impl ResponseView {
         // everything else. The reformat is a transform *before* the fold/wrap/
         // viewport stages — `text`/`line_offsets` describe what is displayed.
         let pretty = syntax == SyntaxToken::Json;
-        let text = reformat_body_if_needed(&raw_text, syntax, pretty);
+        // Wire order by default (decision): sorting is an explicit opt-in via `s`.
+        let sort_keys = false;
+        let text = reformat_body_if_needed(&raw_text, syntax, pretty, sort_keys);
         let line_offsets = index_lines(&text);
         // Build the headers text eagerly — it is tiny and lets the headers view
         // reuse the exact same pipeline with no lazy-init branches.
@@ -256,6 +263,7 @@ impl ResponseView {
             folded: HashSet::new(),
             wrap: false,
             pretty,
+            sort_keys,
             search: None,
         }
     }
@@ -288,6 +296,12 @@ impl ResponseView {
     /// Whether the body is currently rendered pretty (reformatted).
     pub fn pretty(&self) -> bool {
         self.pretty
+    }
+
+    /// Whether pretty JSON object keys are sorted A→Z. Only affects display while
+    /// `pretty` is on and the body is JSON.
+    pub fn sort_keys(&self) -> bool {
+        self.sort_keys
     }
 
     /// Whether the body was truncated at the size cap (only meaningful for the
@@ -404,7 +418,8 @@ impl ResponseView {
     /// Returns the new `pretty` state.
     pub fn toggle_pretty(&mut self) -> bool {
         self.pretty = !self.pretty;
-        self.text = reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty);
+        self.text =
+            reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty, self.sort_keys);
         self.line_offsets = index_lines(&self.text);
         self.generation = self.generation.wrapping_add(1);
         self.folds = None;
@@ -415,6 +430,28 @@ impl ResponseView {
         // leave a lying `k/N` counter and mispainted overlays.
         self.search = None;
         self.pretty
+    }
+
+    /// Toggles A→Z alphabetical sorting of pretty JSON object keys (`s`). Like
+    /// `toggle_pretty` this is a display-geometry change: it rebuilds the shown
+    /// `text` and its line index (through the same reformat path, now honouring
+    /// `sort_keys`), bumps the generation to invalidate the highlight cache,
+    /// **resets folds** (opener positions shift), and **clears any live search**
+    /// (its `(line, byte, byte)` matches point at the old layout). `sort_keys` is
+    /// independent of `pretty`; when pretty is off (or the body is not JSON) the
+    /// reformat is a no-op and the displayed text is unchanged — the toggle then
+    /// just records the flag for when pretty is next turned on. Returns the new
+    /// `sort_keys` state.
+    pub fn toggle_sort_keys(&mut self) -> bool {
+        self.sort_keys = !self.sort_keys;
+        self.text =
+            reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty, self.sort_keys);
+        self.line_offsets = index_lines(&self.text);
+        self.generation = self.generation.wrapping_add(1);
+        self.folds = None;
+        self.folded.clear();
+        self.search = None;
+        self.sort_keys
     }
 
     // ---- folding ----
@@ -685,13 +722,55 @@ impl ResponseView {
 /// `text` is returned unchanged (silent raw fallback; never errors, never
 /// panics, decision 2). Returns an owned string so the caller can store it as the
 /// displayed body.
-fn reformat_body_if_needed(text: &str, syntax: SyntaxToken, pretty: bool) -> String {
+///
+/// When `sort_keys` is set, every JSON object's keys are sorted A→Z recursively
+/// before emission (arrays keep element order); otherwise objects keep their
+/// server wire order (`serde_json`'s `preserve_order` feature is on, so the
+/// parsed `Value` is insertion-ordered).
+fn reformat_body_if_needed(
+    text: &str,
+    syntax: SyntaxToken,
+    pretty: bool,
+    sort_keys: bool,
+) -> String {
     if !pretty || syntax != SyntaxToken::Json {
         return text.to_owned();
     }
     match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned()),
+        Ok(mut value) => {
+            if sort_keys {
+                sort_value_keys(&mut value);
+            }
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned())
+        }
         Err(_) => text.to_owned(),
+    }
+}
+
+/// Recursively sorts the keys of every JSON object in `value` A→Z, in place.
+/// Object entries are rebuilt in sorted order (and each value recursed into);
+/// array elements keep their order but are each recursed into; scalars are left
+/// untouched. Relies on `serde_json`'s `preserve_order` feature so the rebuilt
+/// map's iteration order is the sorted insertion order we write here.
+fn sort_value_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Drain into a sorted vec, then reinsert in key order. `std::mem::take`
+            // leaves an empty map we can push the sorted entries back into.
+            let taken = std::mem::take(map);
+            let mut entries: Vec<(String, serde_json::Value)> = taken.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (k, mut v) in entries {
+                sort_value_keys(&mut v);
+                map.insert(k, v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                sort_value_keys(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1343,6 +1422,9 @@ fn viewport_hash(view: &ResponseView, scroll: usize, height: usize) -> u64 {
     // Raw↔pretty changes the displayed text, so it must key the highlight cache
     // (belt-and-braces alongside the generation bump `toggle_pretty` already does).
     view.pretty.hash(&mut hasher);
+    // Sort-keys likewise changes the pretty text; key it too (belt-and-braces
+    // alongside the generation bump `toggle_sort_keys` does).
+    view.sort_keys.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1920,6 +2002,107 @@ mod tests {
         assert!(v.pretty());
         assert_ne!(v.text, raw, "displayed text is pretty");
         assert_eq!(v.copy_all(), raw, "copy must be the raw bytes");
+    }
+
+    // ---- M7.7: optional A→Z key-sort toggle ----
+
+    #[test]
+    fn sort_keys_sorts_object_keys_recursively() {
+        // Nested object with out-of-order keys at every level.
+        let mut v = json_view(r#"{"z":{"b":1,"a":2},"a":3}"#);
+        assert!(v.pretty());
+        assert!(!v.sort_keys(), "sort defaults off");
+        assert!(v.toggle_sort_keys(), "toggle turns sort on");
+        // Keys A→Z at every level: top-level "a" before "z"; inner "a" before "b".
+        let expected = serde_json::to_string_pretty(&serde_json::json!({
+            "a": 3,
+            "z": {"a": 2, "b": 1},
+        }))
+        .unwrap();
+        assert_eq!(v.text, expected);
+        // The line where each key appears confirms ordering (a before z at top).
+        let a_line = v.text.find("\"a\"").unwrap();
+        let z_line = v.text.find("\"z\"").unwrap();
+        assert!(a_line < z_line, "top-level a must precede z when sorted");
+    }
+
+    #[test]
+    fn sort_keys_off_preserves_wire_order() {
+        // Same input, sort off → preserve_order keeps server wire order (z first).
+        let v = json_view(r#"{"z":{"b":1,"a":2},"a":3}"#);
+        assert!(!v.sort_keys());
+        let z_pos = v.text.find("\"z\"").unwrap();
+        let a_pos = v.text.find("\"a\"").unwrap();
+        assert!(z_pos < a_pos, "wire order: z precedes a when sort is off");
+        // And inner keys stay wire order too: "b" before "a".
+        let b_inner = v.text.find("\"b\"").unwrap();
+        let a_inner = v.text.rfind("\"a\"").unwrap();
+        assert!(b_inner < a_inner, "inner wire order: b precedes a");
+    }
+
+    #[test]
+    fn sort_keys_only_affects_pretty() {
+        // Non-JSON view: `s` is a display no-op (reformat returns text unchanged),
+        // so toggling the flag leaves the displayed text byte-identical.
+        let mut v = view(r#"{"z":1,"a":2}"#);
+        assert!(!v.pretty(), "plain-text body is not pretty");
+        let before = v.text.clone();
+        v.toggle_sort_keys();
+        assert_eq!(v.text, before, "sort must not alter a non-pretty/raw view");
+
+        // JSON view with pretty toggled OFF: sort flips but text stays raw bytes.
+        let raw = r#"{"z":1,"a":2}"#;
+        let mut v = json_view(raw);
+        v.toggle_pretty(); // now raw
+        assert!(!v.pretty());
+        let raw_text = v.text.clone();
+        assert_eq!(raw_text, raw);
+        v.toggle_sort_keys();
+        assert_eq!(v.text, raw, "sort is inert while pretty is off");
+    }
+
+    #[test]
+    fn toggle_sort_keys_clears_search_and_resets_folds() {
+        let mut v = json_view(r#"{"needle":{"b":1},"a":2}"#);
+        let gen0 = v.generation();
+        // Fold something and set a live search on the pretty text.
+        assert!(v.toggle_all_folds());
+        assert!(!v.folded.is_empty());
+        v.set_search("needle".to_owned());
+        assert!(v.search().is_some());
+        // Toggle sort: search clears, folds reset, generation bumps.
+        v.toggle_sort_keys();
+        assert!(
+            v.search().is_none(),
+            "toggle_sort_keys must clear the search"
+        );
+        assert!(v.folds.is_none(), "folds must reset to unscanned");
+        assert!(v.folded.is_empty(), "folded openers must clear");
+        assert_ne!(v.generation(), gen0, "generation must bump on toggle");
+    }
+
+    #[test]
+    fn copy_all_is_raw_even_when_sorted() {
+        // `y` copies raw on-the-wire bytes even with pretty + sort both on.
+        let raw = r#"{"z":1,"a":2}"#;
+        let mut v = json_view(raw);
+        assert!(v.pretty());
+        assert!(v.toggle_sort_keys());
+        assert_ne!(v.text, raw, "displayed text is pretty + sorted");
+        assert_eq!(v.copy_all(), raw, "copy must be the exact raw bytes");
+    }
+
+    #[test]
+    fn sort_keys_preserves_array_order() {
+        // Arrays keep element order; only object keys sort. Elements that are
+        // objects have their own keys sorted, but the array sequence is intact.
+        let mut v = json_view(r#"{"list":[{"z":1,"a":2},{"y":3,"b":4}]}"#);
+        assert!(v.toggle_sort_keys());
+        let expected = serde_json::to_string_pretty(&serde_json::json!({
+            "list": [{"a": 2, "z": 1}, {"b": 4, "y": 3}],
+        }))
+        .unwrap();
+        assert_eq!(v.text, expected);
     }
 
     #[test]
