@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::prompt;
-use super::response::{self, RenderCtx, ResponseState};
+use super::response::{self, RenderCtx, ResponseGeometry, ResponseState};
 use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
 
@@ -187,14 +187,10 @@ pub struct SequenceRunnerState {
     pub finished: bool,
     /// Which sub-pane has focus.
     pub focus: RunnerFocus,
-    /// Response viewer cursor (display row) for the selected step.
-    pub resp_cursor: usize,
-    /// Response viewer scroll offset for the selected step.
-    pub resp_scroll: usize,
-    /// Total display rows in the selected response, from the last render.
-    resp_total_rows: usize,
-    /// Body viewport height from the last render (half-page scrolling).
-    resp_viewport_height: usize,
+    /// Response viewer cursor/scroll/viewport geometry for the selected step. Same
+    /// shape as the main pane's so the shared `response_*` handlers drive it when
+    /// the Response region is focused (note #2).
+    pub geometry: ResponseGeometry,
     /// Monotonic counter minting a unique generation for each step's
     /// [`ResponseView`], so the shared highlight cache never collides two steps'
     /// viewports (the viewport hash folds in the generation).
@@ -219,10 +215,7 @@ impl SequenceRunnerState {
             run_generation: 0,
             finished: false,
             focus: RunnerFocus::Steps,
-            resp_cursor: 0,
-            resp_scroll: 0,
-            resp_total_rows: 0,
-            resp_viewport_height: 0,
+            geometry: ResponseGeometry::default(),
             view_seq: 0,
             confirming_close: false,
         }
@@ -254,8 +247,8 @@ impl SequenceRunnerState {
         self.current = None;
         self.finished = false;
         self.selected = 0;
-        self.resp_cursor = 0;
-        self.resp_scroll = 0;
+        self.geometry.cursor = 0;
+        self.geometry.scroll = 0;
         self.confirming_close = false;
     }
 
@@ -263,8 +256,8 @@ impl SequenceRunnerState {
     fn select(&mut self, index: usize) {
         if index < self.steps.len() {
             self.selected = index;
-            self.resp_cursor = 0;
-            self.resp_scroll = 0;
+            self.geometry.cursor = 0;
+            self.geometry.scroll = 0;
         }
     }
 
@@ -311,7 +304,12 @@ impl SequenceRunnerState {
             _ => {
                 match self.focus {
                     RunnerFocus::Steps => self.handle_steps_key(key),
-                    RunnerFocus::Response => self.handle_response_key(key),
+                    // Response-region keys are routed by `App` through the shared
+                    // `response_*` handlers BEFORE this delegate (note #2 — one
+                    // code path, full parity with the main pane). Anything that
+                    // reaches here in Response focus is not a response action, so
+                    // it is a harmless no-op.
+                    RunnerFocus::Response => {}
                 }
                 RunnerOutcome::Consumed
             }
@@ -339,47 +337,25 @@ impl SequenceRunnerState {
         }
     }
 
-    /// Response-viewer keys (reuse the `ResponseView` mutators — no duplication).
-    fn handle_response_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let max = self.resp_total_rows.saturating_sub(1);
-        let half = (self.resp_viewport_height / 2).max(1);
-        // Scrolling always works; view mutators only on a Done response.
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.resp_cursor = (self.resp_cursor + 1).min(max);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.resp_cursor = self.resp_cursor.saturating_sub(1);
-            }
-            KeyCode::Char('d') if ctrl => self.resp_cursor = (self.resp_cursor + half).min(max),
-            KeyCode::Char('u') if ctrl => self.resp_cursor = self.resp_cursor.saturating_sub(half),
-            KeyCode::Char('g') | KeyCode::Home => self.resp_cursor = 0,
-            KeyCode::Char('G') | KeyCode::End => self.resp_cursor = max,
-            KeyCode::Char('h') => self.with_view(|view| {
-                view.toggle_view_mode();
-            }),
-            KeyCode::Char('W') => self.with_view(|view| view.toggle_wrap()),
-            KeyCode::Char('o') => {
-                let cursor = self.resp_cursor;
-                self.with_view(|view| {
-                    view.toggle_fold_at(cursor);
-                });
-            }
-            KeyCode::Char('O') => self.with_view(|view| {
-                view.toggle_all_folds();
-            }),
-            _ => {}
-        }
+    /// Whether a runner sub-state currently owns the keyboard, so `App` must NOT
+    /// route Response actions into the shared handlers (note #2). The sequence
+    /// runner's only such state is the running-close confirm (no field editor).
+    pub fn response_input_captured(&self) -> bool {
+        self.confirming_close
     }
 
-    /// Applies `f` to the selected step's `ResponseView`, if it has a response.
-    fn with_view(&mut self, f: impl FnOnce(&mut response::ResponseView)) {
-        if let Some(row) = self.steps.get_mut(self.selected)
-            && let ResponseState::Done { view } = &mut row.response
-        {
-            f(view);
-        }
+    /// The selected step's response state, for the shared `response_*` handlers
+    /// (note #2). `None` when there is no step — the caller falls back to an idle
+    /// no-op.
+    pub fn selected_response(&self) -> Option<&ResponseState> {
+        self.steps.get(self.selected).map(|row| &row.response)
+    }
+
+    /// Mutable selected-step response state (see [`Self::selected_response`]).
+    pub fn selected_response_mut(&mut self) -> Option<&mut ResponseState> {
+        self.steps
+            .get_mut(self.selected)
+            .map(|row| &mut row.response)
     }
 }
 
@@ -611,8 +587,8 @@ fn render_response(
             state: &row.response,
             request: None,
             focused,
-            scroll: state.resp_scroll,
-            cursor: state.resp_cursor,
+            scroll: state.geometry.scroll,
+            cursor: state.geometry.cursor,
             cache,
             theme,
             jump_label: None,
@@ -620,10 +596,13 @@ fn render_response(
         },
     );
     // Store clamp geometry for the next key press (mirrors the top-level render).
-    state.resp_scroll = outcome.clamped_scroll;
-    state.resp_cursor = outcome.clamped_cursor;
-    state.resp_total_rows = outcome.total_rows;
-    state.resp_viewport_height = outcome.viewport_height;
+    state.geometry.apply_render_outcome(&outcome);
+    // Write the clamped horizontal scroll back onto the selected view so an
+    // over-pan self-corrects on the next frame — mirrors the main pane (M7.7),
+    // now reachable in the runner via the shared hscroll parity (note #2).
+    if let Some(ResponseState::Done { view }) = state.selected_response_mut() {
+        view.set_h_scroll(outcome.clamped_h_scroll);
+    }
     outcome.job
 }
 
@@ -634,7 +613,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceRunnerState, the
             "j/k step · tab response · r re-run · ^R edit · ctrl-c cancel · q close"
         }
         RunnerFocus::Response => {
-            "j/k scroll · h headers · W wrap · o/O fold · tab steps · ^R edit · q close"
+            "j/k scroll · h hdrs · p/s pretty · / search · y copy · tab steps · ^R edit · q close"
         }
     };
     frame.render_widget(
