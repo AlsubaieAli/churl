@@ -680,6 +680,16 @@ pub struct App {
     help_scroll: usize,
     /// Last rendered inner height of the help overlay, for half-page scrolling.
     help_viewport_height: usize,
+    /// Live `/` search inside the `?` help overlay (highlight-and-jump), when the
+    /// help-search input is open or committed. `None` = no help search. Mirrors
+    /// the response body search (shared smart-case matcher, `n`/`N`, Esc/Enter).
+    help_search: Option<help::HelpSearch>,
+    /// The incremental input editor for the help-overlay `/` search, live while
+    /// `help_search` is open before Enter commits.
+    help_search_editor: LineEditor,
+    /// Whether the help-search input is still open (typing). Enter closes the
+    /// input but keeps `help_search` (matches stay highlighted for `n`/`N`).
+    help_search_input: bool,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
     /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
@@ -824,6 +834,9 @@ impl App {
             help_open: false,
             help_scroll: 0,
             help_viewport_height: 10,
+            help_search: None,
+            help_search_editor: LineEditor::default(),
+            help_search_input: false,
             url_edit_mode: UrlEditMode::Inline,
             env_editor: None,
             sequence_runner: None,
@@ -1464,11 +1477,21 @@ impl App {
     /// Handles one key while the `?` help overlay is open: `?`/Esc/`q` close;
     /// `j`/`k`/arrows scroll.
     fn handle_help_key(&mut self, key: KeyEvent) -> Result<()> {
+        // While the `/` search input is open, every keystroke feeds the search.
+        if self.help_search_input {
+            self.handle_help_search_key(key);
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
                 self.help_open = false;
                 self.help_scroll = 0;
+                self.help_search = None;
+                self.help_search_input = false;
             }
+            KeyCode::Char('/') => self.open_help_search(),
+            KeyCode::Char('n') if self.help_search.is_some() => self.help_search_step(true),
+            KeyCode::Char('N') if self.help_search.is_some() => self.help_search_step(false),
             KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
             KeyCode::Char('k') | KeyCode::Up => {
                 self.help_scroll = self.help_scroll.saturating_sub(1);
@@ -1484,6 +1507,72 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// `/` inside the help overlay: open the incremental help-search input,
+    /// mirroring [`Self::open_body_search`]. Seeds an empty (live) search so
+    /// highlighting/feedback engage immediately.
+    fn open_help_search(&mut self) {
+        self.help_search_editor = LineEditor::new("");
+        let mut search = help::HelpSearch::default();
+        search.set_query(String::new(), &self.keymap, &self.theme);
+        self.help_search = Some(search);
+        self.help_search_input = true;
+    }
+
+    /// Handles one key while the help-search input is open. Every keystroke
+    /// recomputes matches (smart-case, via the shared matcher) and jumps to the
+    /// current one; Enter commits (keeps matches for `n`/`N`, closes the input),
+    /// Esc cancels (clears the search, keeps the help overlay open). Mirrors
+    /// [`Self::handle_body_search_key`].
+    fn handle_help_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.help_search = None;
+                self.help_search_input = false;
+            }
+            KeyCode::Enter => {
+                self.help_search_input = false;
+                self.help_center_on_match();
+            }
+            _ => {
+                self.help_search_editor.handle_key(key);
+                let query = self.help_search_editor.text();
+                if let Some(search) = self.help_search.as_mut() {
+                    search.set_query(query, &self.keymap, &self.theme);
+                }
+                self.help_center_on_match();
+            }
+        }
+    }
+
+    /// `n`/`N` inside the help overlay: step to the next/previous match
+    /// (wrapping), scrolling it into view. Mirrors [`Self::response_search_step`].
+    fn help_search_step(&mut self, forward: bool) {
+        let stepped = self
+            .help_search
+            .as_mut()
+            .and_then(|s| s.step(forward))
+            .is_some();
+        if stepped {
+            self.help_center_on_match();
+        }
+    }
+
+    /// Scrolls the help overlay so the current search match's line is visible,
+    /// keeping it within the last-rendered viewport (jump-to-match).
+    fn help_center_on_match(&mut self) {
+        let Some(line) = self.help_search.as_ref().and_then(|s| s.current_line()) else {
+            return;
+        };
+        let vh = self.help_viewport_height.max(1);
+        // Bring the match into the viewport: scroll down if it's below, up if
+        // it's above the current window.
+        if line < self.help_scroll {
+            self.help_scroll = line;
+        } else if line >= self.help_scroll + vh {
+            self.help_scroll = line + 1 - vh;
+        }
     }
 
     /// Handles one key in the URL vim-popup editor. Mode-aware:
@@ -5775,7 +5864,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // The `?` help overlay (deliverable 8), rendered from the live keymap.
     if app.help_open {
-        let outcome = help::render(frame, main, &app.keymap, app.help_scroll, &theme);
+        let outcome = help::render(
+            frame,
+            main,
+            &app.keymap,
+            app.help_scroll,
+            &theme,
+            app.help_search.as_ref(),
+        );
         app.help_scroll = app.help_scroll.min(outcome.total.saturating_sub(1));
         app.help_viewport_height = outcome.viewport_height;
     }
@@ -7084,6 +7180,62 @@ mod tests {
     fn esc(app: &mut App) {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
+    }
+
+    fn enter(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    /// `/` in the help overlay opens a live search; Esc restores (search cleared,
+    /// help still open); Enter commits (matches retained, input closed).
+    #[test]
+    fn help_search_esc_restores_enter_commits() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        press(&mut app, '?');
+        assert!(app.help_open, "? opens the help overlay");
+
+        // `/` opens the search input with a live (empty) search.
+        press(&mut app, '/');
+        assert!(app.help_search_input, "/ opens the help-search input");
+        assert!(app.help_search.is_some());
+
+        // Type a query that matches a known label.
+        for c in "explorer".chars() {
+            press(&mut app, c);
+        }
+        let count = app.help_search.as_ref().unwrap().count();
+        assert!(count > 0, "typing `explorer` matches help rows");
+
+        // Esc restores: search cleared, help still open.
+        esc(&mut app);
+        assert!(app.help_search.is_none(), "esc clears the help search");
+        assert!(!app.help_search_input);
+        assert!(app.help_open, "esc keeps the help overlay open");
+
+        // Re-open, type, and Enter commits: matches retained, input closed.
+        press(&mut app, '/');
+        for c in "explorer".chars() {
+            press(&mut app, c);
+        }
+        enter(&mut app);
+        assert!(!app.help_search_input, "enter closes the search input");
+        assert!(
+            app.help_search.as_ref().map(|s| s.count()).unwrap_or(0) > 0,
+            "enter retains the matches for n/N"
+        );
+        assert!(app.help_open, "enter keeps the help overlay open");
+
+        // `n` still cycles after commit (input closed).
+        let before = app.help_search.as_ref().unwrap().current_ordinal();
+        press(&mut app, 'n');
+        let after = app.help_search.as_ref().unwrap().current_ordinal();
+        assert_ne!(before, after, "n cycles matches after enter commits");
+
+        // Closing the overlay clears the search state entirely.
+        press(&mut app, '?');
+        assert!(!app.help_open);
+        assert!(app.help_search.is_none());
     }
 
     /// Space enters the root which-key; a direct bind dispatches and dismisses.
