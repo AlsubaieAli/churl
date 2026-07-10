@@ -47,7 +47,9 @@ use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
 use super::components::message::Message;
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
-use super::components::response::{ResponseMeta, ResponseState, ResponseView, ViewMode};
+use super::components::response::{
+    ResponseGeometry, ResponseMeta, ResponseState, ResponseView, ViewMode,
+};
 use churl_core::sequence::StepResult;
 
 use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
@@ -316,6 +318,19 @@ pub enum ZoomPane {
     Response,
 }
 
+/// Which surface the shared `response_*` handlers operate on (note #2). The main
+/// endpoint buffer by default; a runner's selected row/step when that runner's
+/// Response region is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseSurface {
+    /// The active endpoint buffer (Normal mode; today's behaviour).
+    Main,
+    /// The load runner's selected results row.
+    LoadRunner,
+    /// The sequence runner's selected step.
+    Sequence,
+}
+
 /// Bookkeeping for the single in-flight request.
 struct InFlightRequest {
     handle: AbortHandle,
@@ -352,16 +367,10 @@ struct EndpointBuffer {
     /// Normal-mode motion extensions for the URL popup editor.
     url_popup_vim: VimExt,
     response: ResponseState,
-    /// Response body scroll offset (clamped to the viewport at render time).
-    response_scroll: usize,
-    /// Response viewer cursor as a display-row index (post-fold, post-wrap).
-    response_cursor: usize,
-    /// Total display rows in the response viewer as of the last render.
-    response_total_rows: usize,
-    /// Last rendered response body height, for half-page scrolling.
-    response_viewport_height: usize,
-    /// Last rendered response body width, for cursor→logical mapping (wrap).
-    response_viewport_width: usize,
+    /// Cursor/scroll/viewport geometry for this buffer's response viewer. Shared
+    /// shape with the runner states so the `response_*` handlers are mode-aware
+    /// (note #2).
+    geometry: ResponseGeometry,
     /// The highlight hash last enqueued but not yet returned.
     pending_highlight: Option<u64>,
     /// Viewport-hash → highlighted-lines cache (capped, cleared on new response).
@@ -396,11 +405,7 @@ impl EndpointBuffer {
             url_popup_events: EditorEventHandler::default(),
             url_popup_vim: VimExt::default(),
             response: ResponseState::Idle,
-            response_scroll: 0,
-            response_cursor: 0,
-            response_total_rows: 0,
-            response_viewport_height: 0,
-            response_viewport_width: 0,
+            geometry: ResponseGeometry::default(),
             pending_highlight: None,
             highlight_cache: HashMap::new(),
             in_flight: None,
@@ -593,6 +598,9 @@ pub struct App {
     /// buffer — so this stays `Idle`; the render's no-buffer branch falls back to
     /// it. Cannot be `#[cfg(test)]`-gated: that flag is off for `tests/`.
     orphan_response: ResponseState,
+    /// Geometry for [`Self::orphan_response`] (isolation snapshots, no loaded
+    /// endpoint). In production the orphan is `Idle`, so this stays at 0.
+    orphan_geometry: ResponseGeometry,
     /// A clipboard copy queued by a key handler, flushed by the run loop after
     /// the key is handled (native copy needs no terminal, but the OSC 52
     /// fallback writes to the terminal backend, which dispatch has no handle
@@ -601,6 +609,11 @@ pub struct App {
     pending_clipboard: Option<PendingCopy>,
     /// The incremental body-search input editor while `Mode::BodySearch` is open.
     body_search_editor: LineEditor,
+    /// The mode to restore when the body-search input closes. `Mode::Normal` for
+    /// the main pane; `Mode::LoadRunner`/`Mode::Sequence` when search was opened
+    /// over a runner Response region (note #2), so closing search returns to the
+    /// runner rather than dropping the user into Normal mode.
+    body_search_return: Mode,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
     /// History store; `None` when disabled (open failed or no data dir).
@@ -787,8 +800,10 @@ impl App {
             execute_options: ExecuteOptions::default(),
             generation: 0,
             orphan_response: ResponseState::Idle,
+            orphan_geometry: ResponseGeometry::default(),
             pending_clipboard: None,
             body_search_editor: LineEditor::default(),
+            body_search_return: Mode::Normal,
             highlight_tx: None,
             history: None,
             message: None,
@@ -961,27 +976,146 @@ impl App {
         self.explorer.hovered_endpoint()
     }
 
-    /// The active buffer's response state for internal readers (render). Always
-    /// compiled. Falls back to the test-only orphan slot (isolation snapshots)
-    /// when nothing is loaded, else [`ResponseState::Idle`].
-    fn active_response(&self) -> &ResponseState {
-        match self.active_endpoint_buffer() {
-            Some(b) => &b.response,
-            None => &self.orphan_response,
+    /// Which surface owns the "active response" the shared `response_*` handlers
+    /// act on (note #2). Resolves by mode + runner focus: a runner whose Response
+    /// region is focused routes the response actions onto its selected row/step;
+    /// otherwise the main endpoint buffer (today's behaviour) is active. When the
+    /// body-search input is open it resolves against the mode search was opened
+    /// over ([`Self::body_search_return`]), so search-into-view keeps targeting the
+    /// runner response the `/` was launched from.
+    fn active_response_surface(&self) -> ResponseSurface {
+        let effective = if self.mode == Mode::BodySearch {
+            self.body_search_return
+        } else {
+            self.mode
+        };
+        match effective {
+            Mode::LoadRunner => match &self.load_runner {
+                Some(runner)
+                    if runner.focus == load_runner::RunnerFocus::Response
+                        && !runner.response_input_captured() =>
+                {
+                    ResponseSurface::LoadRunner
+                }
+                _ => ResponseSurface::Main,
+            },
+            Mode::Sequence if self.sequence_view == SeqView::Run => match &self.sequence_runner {
+                Some(runner)
+                    if runner.focus == sequence_runner::RunnerFocus::Response
+                        && !runner.response_input_captured() =>
+                {
+                    ResponseSurface::Sequence
+                }
+                _ => ResponseSurface::Main,
+            },
+            _ => ResponseSurface::Main,
         }
     }
 
-    /// Mutable active response, or the orphan slot when nothing is loaded. In
-    /// production the orphan is always `Idle`, so actions on it are harmless
-    /// no-ops; isolation snapshots use it without a loaded endpoint.
+    /// The active response state for internal readers (render + `response_*`
+    /// handlers). Resolves the runner's selected row/step when a runner Response
+    /// region is focused (note #2), else the active endpoint buffer, else the
+    /// test-only orphan slot (isolation snapshots) when nothing is loaded.
+    fn active_response(&self) -> &ResponseState {
+        match self.active_response_surface() {
+            ResponseSurface::LoadRunner => self
+                .load_runner
+                .as_ref()
+                .and_then(|r| r.selected_response())
+                .unwrap_or(&self.orphan_response),
+            ResponseSurface::Sequence => self
+                .sequence_runner
+                .as_ref()
+                .and_then(|r| r.selected_response())
+                .unwrap_or(&self.orphan_response),
+            ResponseSurface::Main => match self.active_endpoint_buffer() {
+                Some(b) => &b.response,
+                None => &self.orphan_response,
+            },
+        }
+    }
+
+    /// Mutable active response, resolving the runner's selected row/step when a
+    /// runner Response region is focused (note #2), else the active buffer, else
+    /// the orphan slot when nothing is loaded (isolation snapshots).
     fn active_response_mut(&mut self) -> &mut ResponseState {
-        match self
-            .buffers
-            .get_mut(self.active)
-            .and_then(Buffer::as_endpoint_mut)
-        {
-            Some(b) => &mut b.response,
-            None => &mut self.orphan_response,
+        match self.active_response_surface() {
+            ResponseSurface::LoadRunner => self
+                .load_runner
+                .as_mut()
+                .and_then(|r| r.selected_response_mut())
+                .unwrap_or(&mut self.orphan_response),
+            ResponseSurface::Sequence => self
+                .sequence_runner
+                .as_mut()
+                .and_then(|r| r.selected_response_mut())
+                .unwrap_or(&mut self.orphan_response),
+            ResponseSurface::Main => match self
+                .buffers
+                .get_mut(self.active)
+                .and_then(Buffer::as_endpoint_mut)
+            {
+                Some(b) => &mut b.response,
+                None => &mut self.orphan_response,
+            },
+        }
+    }
+
+    /// The active response geometry (cursor/scroll/viewport), mode + focus-aware:
+    /// the same [`ResponseSurface`] resolution as [`Self::active_response`], so a
+    /// runner Response region's motion/search/copy operate on the runner's own
+    /// geometry (note #2).
+    fn active_response_geometry(&self) -> &ResponseGeometry {
+        match self.active_response_surface() {
+            ResponseSurface::LoadRunner => self
+                .load_runner
+                .as_ref()
+                .map(|r| &r.geometry)
+                .unwrap_or(&self.orphan_geometry),
+            ResponseSurface::Sequence => self
+                .sequence_runner
+                .as_ref()
+                .map(|r| &r.geometry)
+                .unwrap_or(&self.orphan_geometry),
+            ResponseSurface::Main => match self.active_endpoint_buffer() {
+                Some(b) => &b.geometry,
+                None => &self.orphan_geometry,
+            },
+        }
+    }
+
+    /// Mutable active response geometry (see [`Self::active_response_geometry`]).
+    fn active_response_geometry_mut(&mut self) -> &mut ResponseGeometry {
+        match self.active_response_surface() {
+            ResponseSurface::LoadRunner => self
+                .load_runner
+                .as_mut()
+                .map(|r| &mut r.geometry)
+                .unwrap_or(&mut self.orphan_geometry),
+            ResponseSurface::Sequence => self
+                .sequence_runner
+                .as_mut()
+                .map(|r| &mut r.geometry)
+                .unwrap_or(&mut self.orphan_geometry),
+            ResponseSurface::Main => match self
+                .buffers
+                .get_mut(self.active)
+                .and_then(Buffer::as_endpoint_mut)
+            {
+                Some(b) => &mut b.geometry,
+                None => &mut self.orphan_geometry,
+            },
+        }
+    }
+
+    /// Clears the highlight cache + pending-highlight guard for the active response
+    /// surface. The runners share the active endpoint buffer's cache/guard (they
+    /// render through it), so all three surfaces route here to the same place — the
+    /// active buffer's cache when one is loaded (a no-op on the orphan slot).
+    fn clear_active_highlight(&mut self) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.pending_highlight = None;
+            b.highlight_cache.clear();
         }
     }
 
@@ -2075,8 +2209,8 @@ impl App {
                 meta,
             });
             b.response = ResponseState::InFlight { started };
-            b.response_scroll = 0;
-            b.response_cursor = 0;
+            b.geometry.scroll = 0;
+            b.geometry.cursor = 0;
             b.pending_highlight = None;
             b.highlight_cache.clear();
         }
@@ -2113,47 +2247,44 @@ impl App {
     }
 
     /// The coarse maximum cursor row (total display rows minus one, as of the
-    /// last render); render clamps further. `0` when nothing is loaded.
+    /// last render) for the *active response surface* (main pane or a focused
+    /// runner Response — note #2); render clamps further. `0` when nothing is
+    /// loaded.
     fn response_max_cursor(&self) -> usize {
-        self.active_endpoint_buffer()
-            .map(|b| b.response_total_rows.saturating_sub(1))
-            .unwrap_or(0)
+        self.active_response_geometry().total_rows.saturating_sub(1)
     }
 
-    /// Moves the response viewer *cursor* for a navigation action. Scroll follows
-    /// the cursor at render time (see `response::render`). `g`/`G` jump to the
-    /// first/last visible display row.
+    /// Moves the response viewer *cursor* for a navigation action, on the active
+    /// response surface. Scroll follows the cursor at render time (see
+    /// `response::render`). `g`/`G` jump to the first/last visible display row.
     fn response_scroll(&mut self, action: Action) {
         let max = self.response_max_cursor();
-        let Some(b) = self.active_endpoint_buffer_mut() else {
-            return;
-        };
-        if !matches!(b.response, ResponseState::Done { .. }) {
+        if !matches!(self.active_response(), ResponseState::Done { .. }) {
             return;
         }
+        let g = self.active_response_geometry_mut();
         match action {
-            Action::Up => b.response_cursor = b.response_cursor.saturating_sub(1),
-            Action::Down => b.response_cursor = (b.response_cursor + 1).min(max),
-            Action::Top => b.response_cursor = 0,
-            Action::Bottom => b.response_cursor = max,
+            Action::Up => g.cursor = g.cursor.saturating_sub(1),
+            Action::Down => g.cursor = (g.cursor + 1).min(max),
+            Action::Top => g.cursor = 0,
+            Action::Bottom => g.cursor = max,
             _ => {}
         }
     }
 
-    /// Moves the response cursor by half a viewport (scroll follows at render).
+    /// Moves the response cursor by half a viewport (scroll follows at render), on
+    /// the active response surface.
     fn response_half_page(&mut self, down: bool) {
         let max = self.response_max_cursor();
-        let Some(b) = self.active_endpoint_buffer_mut() else {
-            return;
-        };
-        if !matches!(b.response, ResponseState::Done { .. }) {
+        if !matches!(self.active_response(), ResponseState::Done { .. }) {
             return;
         }
-        let half = (b.response_viewport_height / 2).max(1);
-        b.response_cursor = if down {
-            (b.response_cursor + half).min(max)
+        let g = self.active_response_geometry_mut();
+        let half = (g.viewport_height / 2).max(1);
+        g.cursor = if down {
+            (g.cursor + half).min(max)
         } else {
-            b.response_cursor.saturating_sub(half)
+            g.cursor.saturating_sub(half)
         };
     }
 
@@ -2169,28 +2300,28 @@ impl App {
         }
     }
 
-    /// Resets the active buffer's response cursor/scroll (+ optionally the
-    /// highlight guard) after a view-geometry change. No-op when nothing is
-    /// loaded — the orphan slot has no geometry (it starts at 0).
+    /// Resets the active response surface's cursor/scroll (+ optionally the shared
+    /// highlight guard/cache) after a view-geometry change. Works on the main pane
+    /// or the focused runner Response (note #2). The highlight cache/guard is
+    /// shared with the active endpoint buffer even for runner responses (they
+    /// render through it), so it is cleared via [`Self::clear_active_highlight`].
     fn reset_response_geometry(&mut self, clear_cache: bool) {
-        if let Some(b) = self.active_endpoint_buffer_mut() {
-            b.response_cursor = 0;
-            b.response_scroll = 0;
+        let g = self.active_response_geometry_mut();
+        g.cursor = 0;
+        g.scroll = 0;
+        if clear_cache {
+            self.clear_active_highlight();
+        } else if let Some(b) = self.active_endpoint_buffer_mut() {
             b.pending_highlight = None;
-            if clear_cache {
-                b.highlight_cache.clear();
-            }
         }
     }
 
     /// The logical line under the response cursor (through the last render's
-    /// fold/wrap geometry), or `None` when there is no response. With no loaded
-    /// endpoint the cursor/width are 0 (orphan slot).
+    /// fold/wrap geometry), or `None` when there is no response — on the active
+    /// response surface (note #2).
     fn response_cursor_logical(&self) -> Option<usize> {
-        let (width, cursor) = self
-            .active_endpoint_buffer()
-            .map(|b| (b.response_viewport_width, b.response_cursor))
-            .unwrap_or((0, 0));
+        let g = self.active_response_geometry();
+        let (width, cursor) = (g.viewport_width, g.cursor);
         match self.active_response() {
             ResponseState::Done { view } => view.logical_at_display_row(cursor, width),
             _ => None,
@@ -2314,10 +2445,7 @@ impl App {
         if let Some(view) = self.response_view_mut() {
             view.toggle_fold_at(logical);
         }
-        if let Some(b) = self.active_endpoint_buffer_mut() {
-            b.pending_highlight = None;
-            b.highlight_cache.clear();
-        }
+        self.clear_active_highlight();
     }
 
     /// `O`: collapse all top-level JSON regions, or expand all. Non-JSON no-ops
@@ -2344,6 +2472,9 @@ impl App {
         if let Some(view) = self.response_view_mut() {
             view.set_search(String::new());
         }
+        // Remember where to return: Normal for the main pane, or the live runner
+        // mode when search was opened over a runner Response region (note #2).
+        self.body_search_return = self.mode;
         self.mode = Mode::BodySearch;
     }
 
@@ -2353,13 +2484,13 @@ impl App {
     fn handle_body_search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = self.body_search_return;
                 if let Some(view) = self.response_view_mut() {
                     view.clear_search();
                 }
             }
             KeyCode::Enter => {
-                self.mode = Mode::Normal;
+                self.mode = self.body_search_return;
                 self.response_center_on_match();
             }
             _ => {
@@ -2385,10 +2516,7 @@ impl App {
         }
         let stepped = self.response_view_mut().and_then(|v| v.step_match(forward));
         if stepped.is_some() {
-            if let Some(b) = self.active_endpoint_buffer_mut() {
-                b.pending_highlight = None;
-                b.highlight_cache.clear();
-            }
+            self.clear_active_highlight();
             self.response_center_on_match();
             if let Some(view) = self.response_view_mut()
                 && let Some(search) = view.search()
@@ -2407,21 +2535,22 @@ impl App {
     /// window so an unwrapped match that lies past the right edge is brought into
     /// view (M7.7 horizontal search-into-view); inert while wrap is on.
     fn response_center_on_match(&mut self) {
-        let Some(b) = self.active_endpoint_buffer_mut() else {
+        // Read the surface's width first (immutable), then take the view mutably —
+        // the cursor lives in the geometry, the view in the response, both on the
+        // same surface, so they cannot be borrowed together. Compute the target row
+        // + pan the window through the view, then write the cursor back.
+        let width = self.active_response_geometry().viewport_width;
+        let Some(view) = self.response_view_mut() else {
             return;
         };
-        let width = b.response_viewport_width;
-        let ResponseState::Done { view } = &mut b.response else {
-            return;
-        };
-        if let Some(row) = view
+        let row = view
             .current_match_line()
-            .and_then(|logical| view.display_row_for_logical(logical, width))
-        {
-            b.response_cursor = row;
-        }
+            .and_then(|logical| view.display_row_for_logical(logical, width));
         if let Some((start, end)) = view.current_match_columns() {
             view.ensure_column_visible(start, end, width);
+        }
+        if let Some(row) = row {
+            self.active_response_geometry_mut().cursor = row;
         }
     }
 
@@ -2552,8 +2681,8 @@ impl App {
         };
         b.in_flight = None;
         b.highlight_cache.clear();
-        b.response_scroll = 0;
-        b.response_cursor = 0;
+        b.geometry.scroll = 0;
+        b.geometry.cursor = 0;
         b.pending_highlight = None;
         match outcome {
             Ok(response) => {
@@ -2958,8 +3087,8 @@ impl App {
                     started: Instant::now(),
                 };
                 runner.selected = index;
-                runner.resp_cursor = 0;
-                runner.resp_scroll = 0;
+                runner.geometry.cursor = 0;
+                runner.geometry.scroll = 0;
                 // No client (snapshot tests): leave the step running, no spawn.
                 let Some(client) = self.client.clone() else {
                     return;
@@ -3099,6 +3228,58 @@ impl App {
         self.notify("run cancelled");
     }
 
+    /// Routes a runner Response-region key through the SAME dispatch + `response_*`
+    /// handlers the main pane uses (note #2 — one code path, so the runner viewer
+    /// can never drift). Returns `true` when the key resolved to a response action
+    /// and was consumed; `false` when the caller must delegate to the runner for
+    /// its own keys.
+    ///
+    /// Only fires when a runner Response region is the active response surface (so
+    /// Config/Results/Steps focus is untouched, and the runner's own guard/edit
+    /// sub-states — via `active_response_surface`'s `response_input_captured` gate —
+    /// keep their keys). The key is looked up through the shared `[keys.response]`
+    /// overlay (so remapping a Response key updates the runners too), then matched
+    /// against the response action set: the overlay's parity actions PLUS the
+    /// viewer cursor-nav actions (routed through the same `response_scroll` /
+    /// `response_half_page` the main pane uses). Runner-owned keys (Tab/BackTab,
+    /// Ctrl-R, Ctrl-C, q/Esc, and everything else) are not in the set, so they fall
+    /// through to the runner unchanged.
+    fn try_route_runner_response_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(self.active_response_surface(), ResponseSurface::Main) {
+            return false;
+        }
+        let Some(action) = self.keymap.lookup_ctx(key, PaneCtx::Response) else {
+            return false;
+        };
+        match action {
+            // Viewer cursor nav — the SAME movement path the main Response pane
+            // uses, operating on the mode-aware geometry (note #2).
+            Action::Up | Action::Down | Action::Top | Action::Bottom => {
+                self.response_scroll(action)
+            }
+            Action::HalfPageDown => self.response_half_page(true),
+            Action::HalfPageUp => self.response_half_page(false),
+            // Response-overlay parity actions — identical handlers to the main pane.
+            Action::ToggleHeadersView => self.response_toggle_headers(),
+            Action::ToggleWrap => self.response_toggle_wrap(),
+            Action::TogglePretty => self.response_toggle_pretty(),
+            Action::ToggleSortKeys => self.response_toggle_sort_keys(),
+            Action::ToggleLineNumbers => self.response_toggle_line_numbers(),
+            Action::OpenBodySearch => self.open_body_search(),
+            Action::SearchNext => self.response_search_step(true),
+            Action::SearchPrev => self.response_search_step(false),
+            Action::ToggleFold => self.response_toggle_fold(),
+            Action::ToggleAllFolds => self.response_toggle_all_folds(),
+            Action::CopyResponse => self.response_copy_view(),
+            Action::CopyLine => self.response_copy_line(),
+            Action::ScrollBodyLeft => self.response_scroll_h(false),
+            Action::ScrollBodyRight => self.response_scroll_h(true),
+            // Not a response action — the runner keeps it (nav-law, run/cancel/close).
+            _ => return false,
+        }
+        true
+    }
+
     /// Routes a key to the unified sequence surface. `Ctrl-R` flips the Edit⇄Run
     /// face (a switcher, not a nav-law key, free in both components); otherwise
     /// the key goes to the active face's handler. Per-face `Esc`/`q` semantics
@@ -3129,10 +3310,16 @@ impl App {
                 }
             }
             SeqView::Run => {
-                let Some(runner) = self.sequence_runner.as_mut() else {
+                if self.sequence_runner.is_none() {
                     self.close_sequence_surface();
                     return Ok(());
-                };
+                }
+                // Response-region keys route through the shared response path FIRST
+                // (note #2); anything not a response action delegates to the runner.
+                if self.try_route_runner_response_key(key) {
+                    return Ok(());
+                }
+                let runner = self.sequence_runner.as_mut().expect("checked above");
                 match runner.handle_key(key) {
                     RunnerOutcome::Consumed => {}
                     RunnerOutcome::Rerun => self.start_sequence_run(),
@@ -3515,10 +3702,16 @@ impl App {
 
     /// Routes a key to the open load runner and acts on its outcome.
     fn handle_load_runner_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(runner) = self.load_runner.as_mut() else {
+        if self.load_runner.is_none() {
             self.mode = Mode::Normal;
             return Ok(());
-        };
+        }
+        // Response-region keys route through the shared response path FIRST (note
+        // #2); anything not a response action delegates to the runner below.
+        if self.try_route_runner_response_key(key) {
+            return Ok(());
+        }
+        let runner = self.load_runner.as_mut().expect("checked above");
         match runner.handle_key(key) {
             LoadOutcome::Consumed => {}
             LoadOutcome::Run => self.request_load_run(),
@@ -5480,8 +5673,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 &b.response,
                 &b.highlight_cache,
                 b.url_editor.as_mut(),
-                b.response_scroll,
-                b.response_cursor,
+                b.geometry.scroll,
+                b.geometry.cursor,
             ),
             None => (
                 None,
@@ -5604,11 +5797,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .get_mut(active)
             .and_then(Buffer::as_endpoint_mut)
     {
-        b.response_scroll = outcome.clamped_scroll;
-        b.response_cursor = outcome.clamped_cursor;
-        b.response_total_rows = outcome.total_rows;
-        b.response_viewport_height = outcome.viewport_height;
-        b.response_viewport_width = outcome.viewport_width;
+        b.geometry.apply_render_outcome(&outcome);
         // Write the clamped horizontal scroll back onto the view so an over-pan
         // (past the widest visible line) self-corrects on the next frame (M7.7).
         if let ResponseState::Done { view } = &mut b.response {
@@ -5655,7 +5844,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     // CRUD / method overlays render over the whole main area.
-    match app.mode {
+    // While the body-search input is open OVER a runner Response region (note #2),
+    // keep drawing that runner (with the `/query` row overlaid) instead of falling
+    // through to the main two-column layout — the search targets the runner's
+    // response. The overlay render decision uses this effective mode; every other
+    // overlay still keys on the live `app.mode`.
+    let overlay_mode = if app.mode == Mode::BodySearch {
+        app.body_search_return
+    } else {
+        app.mode
+    };
+    match overlay_mode {
         Mode::MethodMenu => {
             if let Some(method) = app.live_request().map(|r| r.method) {
                 method_menu::render(frame, main, method, &theme);
@@ -6442,6 +6641,171 @@ mod tests {
         assert!(
             runner.steps.iter().all(|s| s.status == StepStatus::Skipped),
             "all non-terminal steps must be skipped on cancel"
+        );
+    }
+
+    // ---- note #2: unified sequence-runner response viewer ----
+
+    /// Opens the sequence runner, lands a JSON `Done` response on step 0, selects
+    /// it, and focuses the Response region — the shared setup for parity tests.
+    /// Uses `continue` so a non-200 wouldn't halt (here everything is 200 anyway).
+    fn seq_app_with_response(root: &Path, body: &str) -> App {
+        let mut app = sequence_app(root, "continue", "");
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(json_resp(body)));
+        let runner = app.sequence_runner.as_mut().unwrap();
+        runner.selected = 0;
+        runner.focus = sequence_runner::RunnerFocus::Response;
+        app
+    }
+
+    /// The selected step's live `ResponseView`.
+    fn seq_view(app: &App) -> &ResponseView {
+        match app
+            .sequence_runner
+            .as_ref()
+            .unwrap()
+            .selected_response()
+            .unwrap()
+        {
+            ResponseState::Done { view } => view,
+            other => panic!("selected step is not Done: {other:?}"),
+        }
+    }
+
+    /// Parity: `p`/`s`/`#`/`W`/`h` toggle the selected STEP's view via the shared
+    /// handlers, identical to the main pane.
+    #[test]
+    fn sequence_response_parity_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_app_with_response(dir.path(), "{\"b\":1,\"a\":2}");
+        assert_eq!(app.active_response_surface(), ResponseSurface::Sequence);
+
+        assert!(seq_view(&app).pretty());
+        app.handle_key(norm('p')).unwrap();
+        assert!(!seq_view(&app).pretty(), "p toggled pretty off");
+        app.handle_key(norm('p')).unwrap();
+
+        app.handle_key(norm('s')).unwrap();
+        assert!(seq_view(&app).sort_keys(), "s toggled sort on");
+
+        assert!(seq_view(&app).line_numbers());
+        app.handle_key(norm('#')).unwrap();
+        assert!(!seq_view(&app).line_numbers(), "# toggled gutter off");
+
+        app.handle_key(shift('W')).unwrap();
+        assert!(seq_view(&app).wrap(), "W toggled wrap on");
+
+        app.handle_key(norm('h')).unwrap();
+        assert_eq!(
+            seq_view(&app).view_mode(),
+            ViewMode::Headers,
+            "h switched to headers"
+        );
+    }
+
+    /// `/` searches the step response, and Esc returns to the sequence runner (NOT
+    /// Normal); `y` copies byte-exact raw wire bytes.
+    #[test]
+    fn sequence_response_search_and_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        // Body carries "needle" twice (searchable) plus a tab + NUL that sanitize
+        // rewrites on display — so copy proving byte-exactness must return the RAW
+        // wire bytes, not the sanitized text (the M7.7 invariant, in the runner).
+        let raw = "needle\tval\u{0}needle";
+        let mut app = seq_app_with_response(dir.path(), raw);
+        render_once(&mut app);
+        app.handle_key(norm('/')).unwrap();
+        assert_eq!(app.mode, Mode::BodySearch);
+        assert_eq!(app.body_search_return, Mode::Sequence);
+        for c in "needle".chars() {
+            app.handle_key(norm(c)).unwrap();
+        }
+        assert!(seq_view(&app).search().is_some_and(|s| s.count() >= 2));
+        app.handle_key(keyc(KeyCode::Esc)).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Sequence,
+            "Esc returns to the sequence runner"
+        );
+
+        // Copy returns the raw on-the-wire bytes (tab + NUL intact), not the
+        // sanitized display — matching the load-runner copy-invariant test.
+        app.handle_key(norm('y')).unwrap();
+        assert_eq!(
+            app.pending_clipboard.as_ref().unwrap().payload,
+            raw,
+            "y returns byte-exact raw wire bytes (incl. tab + NUL) in the sequence runner"
+        );
+    }
+
+    /// Cursor nav (`j`/`G`) moves the sequence runner's Response cursor via the
+    /// shared movement path.
+    #[test]
+    fn sequence_response_cursor_nav_shared_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = (0..20)
+            .map(|i| format!("\"k{i}\":{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut app = seq_app_with_response(dir.path(), &format!("{{{body}}}"));
+        render_once(&mut app);
+        assert_eq!(app.sequence_runner.as_ref().unwrap().geometry.cursor, 0);
+        app.handle_key(norm('j')).unwrap();
+        assert_eq!(app.sequence_runner.as_ref().unwrap().geometry.cursor, 1);
+        app.handle_key(shift('G')).unwrap();
+        assert!(app.sequence_runner.as_ref().unwrap().geometry.cursor > 1);
+    }
+
+    /// PRESERVED NAV: from Response focus, Tab still toggles Steps↔Response and `r`
+    /// still re-runs — response actions never eat them. And when Steps-focused,
+    /// `j`/`k` still select steps.
+    #[test]
+    fn sequence_runner_nav_not_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_app_with_response(dir.path(), "{\"a\":1}");
+        assert_eq!(
+            app.sequence_runner.as_ref().unwrap().focus,
+            sequence_runner::RunnerFocus::Response
+        );
+        // Tab toggles Response → Steps (runner-owned; not a response action).
+        app.handle_key(keyc(KeyCode::Tab)).unwrap();
+        assert_eq!(
+            app.sequence_runner.as_ref().unwrap().focus,
+            sequence_runner::RunnerFocus::Steps,
+            "Tab still toggles regions"
+        );
+        // Steps-focused `j`/`k` select steps (not response scroll).
+        app.sequence_runner.as_mut().unwrap().selected = 0;
+        app.handle_key(norm('j')).unwrap();
+        assert_eq!(
+            app.sequence_runner.as_ref().unwrap().selected,
+            1,
+            "j selects the next step when Steps-focused"
+        );
+        // Back to Response; `r` still re-runs (bumps generation).
+        app.sequence_runner.as_mut().unwrap().focus = sequence_runner::RunnerFocus::Response;
+        let g0 = runner_gen(&app);
+        app.handle_key(norm('r')).unwrap();
+        assert!(
+            runner_gen(&app) > g0,
+            "r still re-runs the sequence from Response focus"
+        );
+    }
+
+    /// A response action does nothing when the sequence runner focus is Steps.
+    #[test]
+    fn sequence_response_action_inert_when_steps_focused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_app_with_response(dir.path(), "{\"a\":1}");
+        app.sequence_runner.as_mut().unwrap().focus = sequence_runner::RunnerFocus::Steps;
+        assert_eq!(app.active_response_surface(), ResponseSurface::Main);
+        let before = seq_view(&app).pretty();
+        app.handle_key(norm('p')).unwrap();
+        assert_eq!(
+            seq_view(&app).pretty(),
+            before,
+            "p is inert when Steps-focused"
         );
     }
 
@@ -8946,6 +9310,303 @@ mod tests {
         assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 0);
     }
 
+    // ---- note #2: unified runner response viewer (parity + preserved nav) ----
+
+    /// A JSON response carrying a `content-type` header so the viewer defaults to
+    /// pretty and JSON folding/sort are available (mirrors a real server response).
+    fn json_resp(body: &str) -> Response {
+        Response {
+            status: 200,
+            headers: vec![Header {
+                name: "content-type".to_owned(),
+                value: "application/json".to_owned(),
+                enabled: true,
+            }],
+            body: body.as_bytes().to_vec(),
+            truncated: false,
+            timing: Timing {
+                connect: None,
+                total: Duration::from_millis(5),
+            },
+        }
+    }
+
+    /// Opens the load runner over `ping`, runs one copy that lands a JSON `Done`
+    /// response, and focuses the Response region — the setup every parity test
+    /// shares. `body` is the raw wire body.
+    fn load_app_with_response(root: &Path, body: &str) -> App {
+        let mut app = load_app(root, "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 1;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(json_resp(body)));
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+        app
+    }
+
+    /// The selected load-runner row's live `ResponseView`, for white-box asserts.
+    fn load_view(app: &App) -> &ResponseView {
+        match app
+            .load_runner
+            .as_ref()
+            .unwrap()
+            .selected_response()
+            .unwrap()
+        {
+            ResponseState::Done { view } => view,
+            other => panic!("selected row is not Done: {other:?}"),
+        }
+    }
+
+    fn norm(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn shift(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+
+    fn keyc(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Drives one full-UI render through a `TestBackend` so the runner response
+    /// geometry (total_rows / viewport height+width) is measured — the cursor-nav
+    /// and fold-at-cursor tests need a real geometry, not the zero default.
+    fn render_once(app: &mut App) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(116, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| render(frame, app)).expect("draw");
+    }
+
+    /// The active response surface resolves to the runner ONLY when its Response
+    /// region is focused — so Config/Results focus never routes response actions.
+    #[test]
+    fn load_response_surface_gated_on_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app_with_response(dir.path(), "{\"b\":1,\"a\":2}");
+        assert_eq!(app.active_response_surface(), ResponseSurface::LoadRunner);
+        // Refocus config: a response action must now be a no-op on the runner view.
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::ConfigHeader;
+        assert_eq!(app.active_response_surface(), ResponseSurface::Main);
+        let before = load_view(&app).pretty();
+        app.handle_key(norm('p')).unwrap();
+        assert_eq!(
+            load_view(&app).pretty(),
+            before,
+            "p on Config focus must not touch the runner view"
+        );
+    }
+
+    /// `p`/`s`/`#`/`W`/`h` toggle the SELECTED row's `ResponseView` exactly as the
+    /// main pane does — proving one shared path, not a re-plumbed subset.
+    #[test]
+    fn load_response_parity_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app_with_response(dir.path(), "{\"b\":1,\"a\":2}");
+
+        // p: pretty on by default for JSON → toggles to raw.
+        assert!(load_view(&app).pretty());
+        app.handle_key(norm('p')).unwrap();
+        assert!(!load_view(&app).pretty(), "p toggled pretty off");
+        app.handle_key(norm('p')).unwrap();
+        assert!(load_view(&app).pretty(), "p toggled pretty back on");
+
+        // s: A→Z key sort on the pretty JSON body.
+        assert!(!load_view(&app).sort_keys());
+        app.handle_key(norm('s')).unwrap();
+        assert!(load_view(&app).sort_keys(), "s toggled sort on");
+
+        // #: line-number gutter (default on) toggles off.
+        assert!(load_view(&app).line_numbers());
+        app.handle_key(norm('#')).unwrap();
+        assert!(!load_view(&app).line_numbers(), "# toggled gutter off");
+
+        // W: wrap.
+        assert!(!load_view(&app).wrap());
+        app.handle_key(shift('W')).unwrap();
+        assert!(load_view(&app).wrap(), "W toggled wrap on");
+
+        // h: headers view.
+        assert_eq!(load_view(&app).view_mode(), ViewMode::Body);
+        app.handle_key(norm('h')).unwrap();
+        assert_eq!(
+            load_view(&app).view_mode(),
+            ViewMode::Headers,
+            "h switched to headers"
+        );
+    }
+
+    /// `o` folds the region at the RUNNER cursor (not the main pane's), and `O`
+    /// folds all — proving fold-at-cursor uses the mode-aware geometry.
+    #[test]
+    fn load_response_fold_uses_runner_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        // A nested object so there is a foldable region.
+        let mut app = load_app_with_response(dir.path(), "{\"outer\":{\"x\":1,\"y\":2}}");
+        // Render once so the runner geometry (total_rows/viewport) is measured.
+        render_once(&mut app);
+        let rows_before = load_view(&app).total_display_rows(40);
+        // Cursor at the opener line (row 0 is `{`, row 1 is `"outer": {`).
+        app.load_runner.as_mut().unwrap().geometry.cursor = 1;
+        app.handle_key(norm('o')).unwrap();
+        let rows_after = load_view(&app).total_display_rows(40);
+        assert!(
+            rows_after < rows_before,
+            "fold at the runner cursor collapsed rows ({rows_before} → {rows_after})"
+        );
+    }
+
+    /// `/` opens body search over the RUNNER response, `n` steps matches, and Esc
+    /// returns to the runner (NOT to Normal mode — the runner stays open).
+    #[test]
+    fn load_response_search_targets_runner_and_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app_with_response(dir.path(), "{\"needle\":\"needle\"}");
+        render_once(&mut app);
+        app.handle_key(norm('/')).unwrap();
+        assert_eq!(app.mode, Mode::BodySearch);
+        assert_eq!(
+            app.body_search_return,
+            Mode::LoadRunner,
+            "search remembers to return to the runner"
+        );
+        for c in "needle".chars() {
+            app.handle_key(norm(c)).unwrap();
+        }
+        assert!(
+            load_view(&app).search().is_some_and(|s| s.count() >= 2),
+            "search found matches in the runner view"
+        );
+        app.handle_key(keyc(KeyCode::Esc)).unwrap();
+        assert_eq!(app.mode, Mode::LoadRunner, "Esc returns to the runner");
+    }
+
+    /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
+    /// returns the BYTE-EXACT raw wire bytes (M7.7 invariant holds in the runner).
+    #[test]
+    fn load_response_hscroll_and_byte_exact_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        // A raw body with a tab + control byte: pretty-off so copy sees wire bytes.
+        let raw = "{\"k\":\"a\tb\"}";
+        let mut app = load_app_with_response(dir.path(), raw);
+        // Turn pretty off so the displayed text is the sanitized raw (tab expanded)
+        // while copy must still return the exact tab byte.
+        app.handle_key(norm('p')).unwrap();
+        assert!(!load_view(&app).pretty());
+
+        // L pans the horizontal window right (wrap is off).
+        assert_eq!(load_view(&app).h_scroll(), 0);
+        app.handle_key(shift('L')).unwrap();
+        assert!(load_view(&app).h_scroll() > 0, "L panned h_scroll right");
+
+        // y copies the full raw body byte-exact (the tab survives).
+        app.handle_key(norm('y')).unwrap();
+        let copied = app.pending_clipboard.as_ref().unwrap().payload.clone();
+        assert_eq!(
+            copied, raw,
+            "y returns byte-exact raw wire bytes (tab intact)"
+        );
+    }
+
+    /// `j`/`k`/`g`/`G`/`Ctrl-D` move the runner Response cursor through the SAME
+    /// path the main pane uses (mode-aware geometry), not a local table.
+    #[test]
+    fn load_response_cursor_nav_shared_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = (0..30)
+            .map(|i| format!("\"k{i}\":{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut app = load_app_with_response(dir.path(), &format!("{{{body}}}"));
+        render_once(&mut app);
+        assert_eq!(app.load_runner.as_ref().unwrap().geometry.cursor, 0);
+        app.handle_key(norm('j')).unwrap();
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().geometry.cursor,
+            1,
+            "j moved the runner cursor down via the shared path"
+        );
+        app.handle_key(shift('G')).unwrap();
+        let bottom = app.load_runner.as_ref().unwrap().geometry.cursor;
+        assert!(bottom > 1, "G jumped to the bottom row");
+        app.handle_key(norm('k')).unwrap();
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().geometry.cursor,
+            bottom - 1,
+            "k moved up one"
+        );
+    }
+
+    /// PRESERVED NAV: from Response focus, Tab still cycles regions and Ctrl-R
+    /// still re-runs — a response action never eats these runner-owned keys.
+    #[test]
+    fn load_runner_nav_not_shadowed_by_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app_with_response(dir.path(), "{\"a\":1}");
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().focus,
+            load_runner::RunnerFocus::Response
+        );
+        // Tab cycles Response → ConfigHeader (runner-owned; not a response action).
+        app.handle_key(keyc(KeyCode::Tab)).unwrap();
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().focus,
+            load_runner::RunnerFocus::ConfigHeader,
+            "Tab still cycles regions"
+        );
+        // Back to Response; Ctrl-R still (re-)runs the batch (bumps generation).
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+        let g0 = load_gen(&app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(
+            load_gen(&app) > g0,
+            "Ctrl-R still re-runs from Response focus"
+        );
+    }
+
+    /// PRESERVED NAV: `q` from Response focus still closes the runner when idle
+    /// (a response action never eats it).
+    #[test]
+    fn load_runner_q_closes_from_response_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app_with_response(dir.path(), "{\"a\":1}");
+        // The one-copy batch has finished (not running), so q closes immediately.
+        assert!(!app.load_runner.as_ref().unwrap().is_running());
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().focus,
+            load_runner::RunnerFocus::Response
+        );
+        app.handle_key(norm('q')).unwrap();
+        assert!(app.load_runner.is_none(), "q still closes the runner");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// PRESERVED NAV: when Results-focused, `j`/`k` still select rows (the response
+    /// nav must not shadow the results list).
+    #[test]
+    fn load_results_selection_not_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 3;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Ok(json_resp("{\"a\":1}")));
+        app.on_load_result(g, 1, Ok(json_resp("{\"b\":2}")));
+        app.on_load_result(g, 2, Ok(json_resp("{\"c\":3}")));
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Results;
+        app.load_runner.as_mut().unwrap().selected = 0;
+        app.handle_key(norm('j')).unwrap();
+        assert_eq!(
+            app.load_runner.as_ref().unwrap().selected,
+            1,
+            "j selects the next results row (not response scroll)"
+        );
+    }
+
     #[test]
     fn load_stale_result_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
@@ -9315,7 +9976,7 @@ mod tests {
         *app.response_mut() = ResponseState::Done {
             view: ResponseView::build(&response(), 1),
         };
-        app.active_endpoint_buffer_mut().unwrap().response_scroll = 7;
+        app.active_endpoint_buffer_mut().unwrap().geometry.scroll = 7;
         assert!(matches!(app.response(), ResponseState::Done { .. }));
 
         // Load a DIFFERENT endpoint B (no send): B gets its own fresh response.
@@ -9326,7 +9987,7 @@ mod tests {
             "B shows its own Idle response, not A's stale Done"
         );
         assert_eq!(
-            b.response_scroll, 0,
+            b.geometry.scroll, 0,
             "B starts unscrolled, not at A's scroll"
         );
         assert!(b.in_flight.is_none(), "B has no in-flight from A");

@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::line_editor::LineEditor;
 use super::prompt;
-use super::response::{self, RenderCtx, ResponseState};
+use super::response::{self, RenderCtx, ResponseGeometry, ResponseState};
 use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
 
@@ -229,14 +229,10 @@ pub struct LoadRunnerState {
     pub cancelled: bool,
     /// Live latency + count stats, recomputed as results land.
     pub stats: LoadStats,
-    /// Response viewer cursor (display row) for the selected row.
-    pub resp_cursor: usize,
-    /// Response viewer scroll offset for the selected row.
-    pub resp_scroll: usize,
-    /// Total display rows in the selected response, from the last render.
-    resp_total_rows: usize,
-    /// Body viewport height from the last render (half-page scrolling).
-    resp_viewport_height: usize,
+    /// Response viewer cursor/scroll/viewport geometry for the selected row. Same
+    /// shape as the main pane's so the shared `response_*` handlers drive it when
+    /// the Response region is focused (note #2).
+    pub geometry: ResponseGeometry,
     /// First visible results-list row from the last render (scroll offset).
     list_offset: usize,
     /// Results-list viewport height from the last render.
@@ -278,10 +274,7 @@ impl LoadRunnerState {
             finished: false,
             cancelled: false,
             stats: LoadStats::default(),
-            resp_cursor: 0,
-            resp_scroll: 0,
-            resp_total_rows: 0,
-            resp_viewport_height: 0,
+            geometry: ResponseGeometry::default(),
             list_offset: 0,
             list_viewport_height: 0,
             view_seq: 0,
@@ -323,8 +316,7 @@ impl LoadRunnerState {
         self.finished = false;
         self.cancelled = false;
         self.stats = LoadStats::default();
-        self.resp_cursor = 0;
-        self.resp_scroll = 0;
+        self.geometry = ResponseGeometry::default();
         self.list_offset = 0;
         self.pending_confirm = None;
         self.confirming_close = false;
@@ -364,8 +356,8 @@ impl LoadRunnerState {
         self.stats = churl_core::load::stats(&self.outcomes);
         if self.follow {
             self.selected = index;
-            self.resp_cursor = 0;
-            self.resp_scroll = 0;
+            self.geometry.cursor = 0;
+            self.geometry.scroll = 0;
         }
         // R0 memory bound: track the newly-retained view and evict the oldest
         // ones beyond the window. Done *after* the follow-selection update so the
@@ -414,8 +406,8 @@ impl LoadRunnerState {
     fn select(&mut self, index: usize) {
         if index < self.results.len() {
             self.selected = index;
-            self.resp_cursor = 0;
-            self.resp_scroll = 0;
+            self.geometry.cursor = 0;
+            self.geometry.scroll = 0;
         }
     }
 
@@ -488,7 +480,12 @@ impl LoadRunnerState {
                 match self.focus {
                     RunnerFocus::ConfigHeader => self.handle_config_key(key),
                     RunnerFocus::Results => self.handle_results_key(key),
-                    RunnerFocus::Response => self.handle_response_key(key),
+                    // Response-region keys are routed by `App` through the shared
+                    // `response_*` handlers BEFORE this delegate (note #2 — one
+                    // code path, full parity with the main pane). Anything that
+                    // reaches here in Response focus is not a response action, so
+                    // it is a harmless no-op.
+                    RunnerFocus::Response => {}
                 }
                 LoadOutcome::Consumed
             }
@@ -616,46 +613,26 @@ impl LoadRunnerState {
         }
     }
 
-    /// Response-viewer keys (reuse the `ResponseView` mutators — no duplication).
-    fn handle_response_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let max = self.resp_total_rows.saturating_sub(1);
-        let half = (self.resp_viewport_height / 2).max(1);
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.resp_cursor = (self.resp_cursor + 1).min(max);
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.resp_cursor = self.resp_cursor.saturating_sub(1);
-            }
-            KeyCode::Char('d') if ctrl => self.resp_cursor = (self.resp_cursor + half).min(max),
-            KeyCode::Char('u') if ctrl => self.resp_cursor = self.resp_cursor.saturating_sub(half),
-            KeyCode::Char('g') | KeyCode::Home => self.resp_cursor = 0,
-            KeyCode::Char('G') | KeyCode::End => self.resp_cursor = max,
-            KeyCode::Char('h') => self.with_view(|view| {
-                view.toggle_view_mode();
-            }),
-            KeyCode::Char('W') => self.with_view(|view| view.toggle_wrap()),
-            KeyCode::Char('o') => {
-                let cursor = self.resp_cursor;
-                self.with_view(|view| {
-                    view.toggle_fold_at(cursor);
-                });
-            }
-            KeyCode::Char('O') => self.with_view(|view| {
-                view.toggle_all_folds();
-            }),
-            _ => {}
-        }
+    /// Whether a runner sub-state currently owns the keyboard, so `App` must NOT
+    /// route Response actions into the shared handlers (note #2): the guardrail
+    /// confirm, the running-close confirm, or an in-progress config-field edit. In
+    /// any of these the runner's own `handle_key` interception takes the key.
+    pub fn response_input_captured(&self) -> bool {
+        self.pending_confirm.is_some() || self.confirming_close || self.editing.is_some()
     }
 
-    /// Applies `f` to the selected row's `ResponseView`, if it has a response.
-    fn with_view(&mut self, f: impl FnOnce(&mut response::ResponseView)) {
-        if let Some(row) = self.results.get_mut(self.selected)
-            && let ResponseState::Done { view } = &mut row.response
-        {
-            f(view);
-        }
+    /// The selected results row's response state, for the shared `response_*`
+    /// handlers (note #2). `None` when there is no selectable row (pre-run) — the
+    /// caller falls back to an idle no-op.
+    pub fn selected_response(&self) -> Option<&ResponseState> {
+        self.results.get(self.selected).map(|row| &row.response)
+    }
+
+    /// Mutable selected-row response state (see [`Self::selected_response`]).
+    pub fn selected_response_mut(&mut self) -> Option<&mut ResponseState> {
+        self.results
+            .get_mut(self.selected)
+            .map(|row| &mut row.response)
     }
 }
 
@@ -972,18 +949,21 @@ fn render_response(
             state: render_state,
             request: None,
             focused,
-            scroll: state.resp_scroll,
-            cursor: state.resp_cursor,
+            scroll: state.geometry.scroll,
+            cursor: state.geometry.cursor,
             cache,
             theme,
             jump_label: None,
             tick_count,
         },
     );
-    state.resp_scroll = outcome.clamped_scroll;
-    state.resp_cursor = outcome.clamped_cursor;
-    state.resp_total_rows = outcome.total_rows;
-    state.resp_viewport_height = outcome.viewport_height;
+    state.geometry.apply_render_outcome(&outcome);
+    // Write the clamped horizontal scroll back onto the selected view so an
+    // over-pan self-corrects on the next frame — mirrors the main pane (M7.7),
+    // now reachable in the runner via the shared hscroll parity (note #2).
+    if let Some(ResponseState::Done { view }) = state.selected_response_mut() {
+        view.set_h_scroll(outcome.clamped_h_scroll);
+    }
     outcome.job
 }
 
@@ -997,7 +977,9 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &LoadRunnerState, theme: 
                 "h/l field · j/k adjust · enter edit · ^R run · tab results · ctrl-c cancel · q close"
             }
             RunnerFocus::Results => "j/k row · tab response · ^R re-run · ctrl-c cancel · q close",
-            RunnerFocus::Response => "j/k scroll · W wrap · o/O fold · tab config · q close",
+            RunnerFocus::Response => {
+                "j/k scroll · h hdrs · p/s pretty · / search · y copy · tab config · q close"
+            }
         }
     };
     frame.render_widget(

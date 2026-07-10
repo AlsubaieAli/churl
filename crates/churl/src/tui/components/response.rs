@@ -1194,6 +1194,42 @@ pub struct RenderOutcome {
     pub clamped_h_scroll: usize,
 }
 
+/// The per-response cursor/scroll geometry that lives *outside* the
+/// [`ResponseView`] (which owns view-mode/folds/wrap/pretty/search state). One of
+/// these is carried by the main-pane endpoint buffer AND by each runner state, so
+/// the shared `response_*` action handlers can operate on whichever surface is the
+/// active response (note #2: unified viewer). The `h_scroll` lives on the view
+/// itself; the highlight cache + pending-highlight guard stay on the endpoint
+/// buffer (the runners share it in render).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseGeometry {
+    /// Body scroll offset (clamped to the viewport at render time).
+    pub scroll: usize,
+    /// Viewer cursor as a display-row index (post-fold, post-wrap).
+    pub cursor: usize,
+    /// Total display rows in the viewer as of the last render.
+    pub total_rows: usize,
+    /// Last rendered body height, for half-page scrolling.
+    pub viewport_height: usize,
+    /// Last rendered body width, for cursor→logical mapping (wrap geometry).
+    pub viewport_width: usize,
+}
+
+impl ResponseGeometry {
+    /// Writes the render outcome's clamped scroll/cursor + measured geometry back
+    /// into this struct after a [`render`] call (the caller still applies the
+    /// clamped `h_scroll` to the view + enqueues the highlight job — those live
+    /// elsewhere). Shared by the main pane and both runner render paths so the
+    /// write-back can never drift.
+    pub fn apply_render_outcome(&mut self, outcome: &RenderOutcome) {
+        self.scroll = outcome.clamped_scroll;
+        self.cursor = outcome.clamped_cursor;
+        self.total_rows = outcome.total_rows;
+        self.viewport_height = outcome.viewport_height;
+        self.viewport_width = outcome.viewport_width;
+    }
+}
+
 /// Renders the response pane. Pure aside from the returned enqueue request; the
 /// caller decides whether a highlight worker exists (none under `TestBackend`,
 /// so snapshots deterministically show plain text).
