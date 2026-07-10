@@ -175,6 +175,11 @@ pub struct ResponseView {
     raw_text: String,
     /// Byte offset of each line start (into `text`). Empty for an empty body.
     line_offsets: Vec<usize>,
+    /// Byte offset of each line start (into `raw_text`). Sanitize is
+    /// line-count-preserving, so on the **non-reformatted** path (sanitize-only,
+    /// no pretty JSON change) this has the same length as `line_offsets` and line
+    /// `i` maps 1:1 — copy-line (`Y`) slices `raw_text` here to stay byte-exact.
+    raw_line_offsets: Vec<usize>,
     /// The headers rendered as `name: value` lines, built lazily on first use.
     headers_text: String,
     /// Line-start offsets into `headers_text`, built alongside it.
@@ -248,6 +253,10 @@ impl ResponseView {
             &raw_text, syntax, pretty, sort_keys,
         ));
         let line_offsets = index_lines(&text);
+        // Indexed once: `raw_text` never changes after build (the pretty/sort
+        // toggles only rebuild the displayed `text`). Copy-line reads it on the
+        // non-reformatted path so `Y` returns the exact on-the-wire line bytes.
+        let raw_line_offsets = index_lines(&raw_text);
         // Build the headers text eagerly — it is tiny and lets the headers view
         // reuse the exact same pipeline with no lazy-init branches.
         let headers_text = response
@@ -266,6 +275,7 @@ impl ResponseView {
             header_count: response.headers.len(),
             generation,
             line_offsets,
+            raw_line_offsets,
             text,
             raw_text,
             headers_text,
@@ -514,6 +524,7 @@ impl ResponseView {
             self.sort_keys,
         ));
         self.line_offsets = index_lines(&self.text);
+        self.h_scroll = 0;
         self.generation = self.generation.wrapping_add(1);
         self.folds = None;
         self.folded.clear();
@@ -767,15 +778,58 @@ impl ResponseView {
         }
     }
 
-    /// The text of the logical line at `logical` (the copy-line action, `Y`) — the
-    /// line currently under the cursor as displayed. Returns an owned string
-    /// because CRLF stripping may borrow a sub-slice.
+    /// The text of the logical line at `logical` for the copy-line action (`Y`).
+    ///
+    /// Copy must stay byte-exact (the D1 invariant): the displayed `text` is
+    /// sanitized (ANSI stripped, tabs expanded, controls → `·`, `\r\n` → `\n`), so
+    /// returning the *displayed* line would leak sanitized bytes. Instead:
+    ///
+    /// - **Headers view**: the headers text (no reformat/sanitize applies).
+    /// - **Body, non-reformatted path** (`text` derived from `raw_text` by
+    ///   sanitize only — detected by equal line counts, since sanitize preserves
+    ///   `\n`): return the raw on-the-wire line at the same index, byte-exact
+    ///   (raw ANSI/tabs/controls and all). CRLF is left intact here — `Y` copies
+    ///   what the wire carried.
+    /// - **Body, reformatted path** (pretty JSON active *and* reformat changed the
+    ///   line layout → line counts differ): return the displayed pretty line.
+    ///   serde-escaped JSON carries no raw control chars to mangle, and the raw
+    ///   line index no longer corresponds to the displayed one.
     pub fn copy_line(&self, logical: usize) -> String {
-        if logical < self.source_line_count() {
+        if self.view_mode == ViewMode::Headers {
+            return if logical < self.source_line_count() {
+                self.logical_line(logical).to_owned()
+            } else {
+                String::new()
+            };
+        }
+        // Body view. The non-reformatted path is exactly when the sanitized
+        // displayed text and the raw text have the same line count (sanitize never
+        // adds/removes a `\n`); the pretty-JSON reformat is the only thing that can
+        // change line counts.
+        if self.line_offsets.len() == self.raw_line_offsets.len() {
+            match self.raw_logical_line(logical) {
+                Some(line) => line.to_owned(),
+                None => String::new(),
+            }
+        } else if logical < self.source_line_count() {
             self.logical_line(logical).to_owned()
         } else {
             String::new()
         }
+    }
+
+    /// The `idx`-th logical line of the untouched `raw_text` (the on-the-wire
+    /// bytes), or `None` when out of range. Unlike [`Self::logical_line`] this does
+    /// **not** strip a trailing `\r` — copy-line returns exactly what the wire
+    /// carried.
+    fn raw_logical_line(&self, idx: usize) -> Option<&str> {
+        let start = *self.raw_line_offsets.get(idx)?;
+        let end = self
+            .raw_line_offsets
+            .get(idx + 1)
+            .map(|&next| next - 1)
+            .unwrap_or(self.raw_text.len());
+        Some(&self.raw_text[start..end])
     }
 }
 
@@ -2332,7 +2386,10 @@ mod tests {
         assert!(!v.folded.is_empty());
         v.set_search("needle".to_owned());
         assert!(v.search().is_some());
-        // Toggle sort: search clears, folds reset, generation bumps.
+        // Pan the horizontal window so we can prove the toggle resets it.
+        v.scroll_h(true, 16);
+        assert_eq!(v.h_scroll(), 16);
+        // Toggle sort: search clears, folds reset, generation bumps, h_scroll resets.
         v.toggle_sort_keys();
         assert!(
             v.search().is_none(),
@@ -2341,6 +2398,11 @@ mod tests {
         assert!(v.folds.is_none(), "folds must reset to unscanned");
         assert!(v.folded.is_empty(), "folded openers must clear");
         assert_ne!(v.generation(), gen0, "generation must bump on toggle");
+        assert_eq!(
+            v.h_scroll(),
+            0,
+            "toggle_sort_keys must reset the horizontal scroll (matching toggle_pretty/wrap)"
+        );
     }
 
     #[test]
@@ -2457,8 +2519,60 @@ mod tests {
         assert!(!v.pretty(), "text/plain is not pretty");
         // Displayed: ESC[31m stripped, tab at col 1 → 3 spaces (to col 4), NUL → ·.
         assert_eq!(v.text, "a   b·c");
-        // Copy is byte-exact, controls and all.
+        // Copy is byte-exact, controls and all — BOTH copy paths.
+        assert_eq!(v.copy_all(), raw, "copy-all (y) is the raw bytes");
+        assert_eq!(
+            v.copy_line(0),
+            raw,
+            "copy-line (Y) must ALSO be the raw bytes, not the sanitized display"
+        );
+    }
+
+    #[test]
+    fn copy_line_is_raw_on_multiline_text_plain_body() {
+        // Multi-line text/plain: line 1 carries ANSI + tab + NUL. copy-line must
+        // return the EXACT raw line bytes (the D1 invariant), never the sanitized
+        // display. `copy_all` returns the whole raw body.
+        let raw = "plain first\nsecond\u{1B}[31m\tx\u{00}y\nthird";
+        let v = view(raw);
+        assert!(!v.pretty());
+        // Displayed line 1 is sanitized...
+        assert_eq!(v.copy_line(0), "plain first");
+        // ...but the mangled line's copy is byte-exact.
+        assert_eq!(v.copy_line(1), "second\u{1B}[31m\tx\u{00}y");
+        assert_eq!(v.copy_line(2), "third");
         assert_eq!(v.copy_all(), raw);
+    }
+
+    #[test]
+    fn copy_line_over_pretty_json_returns_displayed_line() {
+        // On the reformatted (pretty-JSON) path the raw line index no longer maps
+        // to the displayed line, so copy-line returns the DISPLAYED pretty line
+        // (serde-escaped JSON has no raw controls to leak). This is the
+        // pre-existing behaviour the fix must not regress.
+        let v = json_view(r#"{"a":1,"b":2}"#);
+        assert!(v.pretty());
+        assert!(v.line_count() > 1, "minified input rendered pretty");
+        // Line 0 of the pretty text is `{`.
+        assert_eq!(v.copy_line(0), "{");
+        // A middle line is the displayed pretty content (indented).
+        let line1 = v.copy_line(1);
+        assert!(
+            line1.contains("\"a\": 1"),
+            "copy-line returns the displayed pretty line, got {line1:?}"
+        );
+    }
+
+    #[test]
+    fn copy_line_preserves_raw_crlf_bytes() {
+        // A CRLF body: the display collapses `\r\n`→`\n`, but copy-line returns the
+        // raw line INCLUDING its `\r` (exactly what the wire carried).
+        let raw = "a\r\nb\r\nc";
+        let v = view(raw);
+        assert_eq!(v.line_count(), 3);
+        assert_eq!(v.copy_line(0), "a\r");
+        assert_eq!(v.copy_line(1), "b\r");
+        assert_eq!(v.copy_line(2), "c");
     }
 
     // ---- M7.7: horizontal-window slice for unwrapped long lines ----
@@ -2557,12 +2671,23 @@ mod tests {
 
     #[test]
     fn copy_line_returns_full_raw_line_despite_h_scroll() {
-        // Panning the window must never truncate what copy-line returns — copy
-        // reads the whole logical line, independent of h_scroll.
-        let body = "x".repeat(100);
+        // Panning the window must never truncate NOR sanitize what copy-line
+        // returns. The body carries ANSI + a tab + a NUL amid a long run so both
+        // the h_scroll window AND the sanitize pass would corrupt a naive copy —
+        // copy-line must return the exact raw line bytes regardless.
+        let body = format!("{}\u{1B}[31m\tmid\u{00}{}", "x".repeat(60), "y".repeat(60));
         let mut v = view(&body);
+        // Sanitize actually changed the display (so this can catch the leak).
+        assert_ne!(
+            v.text, body,
+            "displayed text is sanitized, not the raw body"
+        );
         v.scroll_h(true, 50);
-        assert_eq!(v.copy_line(0), body, "copy-line returns the full line");
+        assert_eq!(
+            v.copy_line(0),
+            body,
+            "copy-line returns the full RAW line, unaffected by h_scroll or sanitize"
+        );
         assert_eq!(v.copy_all(), body, "copy-all returns the full raw body");
     }
 }
