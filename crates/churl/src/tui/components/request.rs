@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
 use super::jump::JumpState;
 use super::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
+use super::tab_strip::{CHIP_LEFT, CHIP_OVERHEAD, CHIP_RIGHT, chip_window};
 use crate::tui::theme::Theme;
 
 /// Everything [`render`] needs.
@@ -72,7 +73,13 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
     let [tabbar_area, content_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(tab_bar(request, tabs, theme, focused)),
+        Paragraph::new(tab_bar(
+            request,
+            tabs,
+            theme,
+            focused,
+            tabbar_area.width as usize,
+        )),
         tabbar_area,
     );
 
@@ -120,14 +127,23 @@ pub fn collapsed_summary(
     if request.is_none() {
         return Line::from("no endpoint selected");
     }
-    // Collapsed = not focused, so no digit prefixes.
-    tab_bar_line(request, tabs, theme, false)
+    // Collapsed = not focused, so no digit prefixes; the stub truncates at its
+    // own edge (`usize::MAX` = never scroll — preserves the collapsed behaviour).
+    tab_bar_line(request, tabs, theme, false, usize::MAX)
 }
 
 /// The tab-bar line with the active tab highlighted and per-tab row counts.
-/// When `focused` is true, each tab is prefixed with its 1-based digit.
-fn tab_bar<'a>(request: &Request, tabs: &RequestTabs, theme: &Theme, focused: bool) -> Line<'a> {
-    tab_bar_line(Some(request), tabs, theme, focused)
+/// When `focused` is true, each tab is prefixed with its 1-based digit. `width`
+/// is the columns the strip will occupy — when the chips overflow it, the bar
+/// scrolls to keep the active chip visible (same logic as the top tab strip).
+fn tab_bar<'a>(
+    request: &Request,
+    tabs: &RequestTabs,
+    theme: &Theme,
+    focused: bool,
+    width: usize,
+) -> Line<'a> {
+    tab_bar_line(Some(request), tabs, theme, focused, width)
 }
 
 fn tab_bar_line(
@@ -135,6 +151,7 @@ fn tab_bar_line(
     tabs: &RequestTabs,
     theme: &Theme,
     focused: bool,
+    width: usize,
 ) -> Line<'static> {
     let counts = |tab: RequestTab| match (request, tab) {
         (Some(req), RequestTab::Params) => Some(req.params.len()),
@@ -142,30 +159,70 @@ fn tab_bar_line(
         (Some(req), RequestTab::Auth) => req.auth.as_ref().map(|_| 1),
         _ => None,
     };
+    // Build each tab's label first (padding, focused `[N]` prefix, `(n)` counts).
+    let labels: Vec<String> = RequestTab::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let tab_label = tab.label();
+            if focused {
+                // Prefix with 1-based digit when focused (tab-jump keys are live)
+                match counts(*tab) {
+                    Some(n) => format!(" [{}] {tab_label}({n}) ", i + 1),
+                    None => format!(" [{}] {tab_label} ", i + 1),
+                }
+            } else {
+                match counts(*tab) {
+                    Some(n) => format!(" {tab_label}({n}) "),
+                    None => format!(" {tab_label} "),
+                }
+            }
+        })
+        .collect();
+
+    // Scroll to keep the ACTIVE chip fully visible when the chips overflow
+    // `width`, mirroring the top tab strip: chip width = label + edges + gap.
+    let active = RequestTab::ALL
+        .iter()
+        .position(|t| *t == tabs.active)
+        .unwrap_or(0);
+    let widths: Vec<usize> = labels
+        .iter()
+        .map(|l| l.chars().count() + CHIP_OVERHEAD)
+        .collect();
+    let (start, left_marker) = chip_window(&widths, active, width);
+
+    // Each tab is a filled "chip" — `▐` left edge, label, `▌` right edge on the
+    // chip bg — with a single raw space gap between chips. Active = bright
+    // `selection`; inactive = the dim `tab_inactive` fill (both carry a real bg).
     let mut spans: Vec<Span> = Vec::new();
-    for (i, tab) in RequestTab::ALL.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" "));
+    let mut used = 0usize;
+    if left_marker {
+        spans.push(Span::styled("‹", theme.title));
+        used += 1;
+    }
+    let mut clipped_right = false;
+    for (i, tab) in RequestTab::ALL.iter().enumerate().skip(start) {
+        // Reserve a column for the `›` marker when more tabs follow (incl. the
+        // active one), so the exactly-full case still leaves room for the marker.
+        let reserve = usize::from(i < RequestTab::ALL.len() - 1);
+        if used + widths[i] + reserve > width {
+            clipped_right = true;
+            break;
         }
-        let tab_label = tab.label();
-        let label = if focused {
-            // Prefix with 1-based digit when focused (tab-jump keys are live)
-            match counts(*tab) {
-                Some(n) => format!(" [{}] {tab_label}({n}) ", i + 1),
-                None => format!(" [{}] {tab_label} ", i + 1),
-            }
-        } else {
-            match counts(*tab) {
-                Some(n) => format!(" {tab_label}({n}) "),
-                None => format!(" {tab_label} "),
-            }
-        };
         let style = if *tab == tabs.active {
             theme.selection
         } else {
-            Style::default().add_modifier(Modifier::DIM)
+            theme.tab_inactive
         };
-        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(CHIP_LEFT, style));
+        spans.push(Span::styled(labels[i].clone(), style));
+        spans.push(Span::styled(CHIP_RIGHT, style));
+        spans.push(Span::raw(" "));
+        used += widths[i];
+    }
+    if clipped_right && used < width {
+        spans.push(Span::styled("›", theme.title));
     }
     Line::from(spans)
 }
@@ -362,5 +419,78 @@ fn row_line<'a>(text: String, selected: bool, enabled: bool, theme: &Theme) -> L
         line.style(Style::default().add_modifier(Modifier::DIM))
     } else {
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Flattens a rendered tab-bar `Line` into its plain text (all span content).
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The `▐ Body ▌` chip whose tab is active must render at every pane width —
+    /// when it doesn't fit, the bar scrolls (dropping earlier chips behind a `‹`
+    /// marker) so the active chip is never clipped off-screen.
+    #[test]
+    fn narrow_tab_bar_keeps_active_body_visible_with_marker() {
+        let theme = Theme::dark();
+        let mut tabs = RequestTabs::default();
+        tabs.tab_jump(3); // Body
+        // 20 cols cannot hold all four chips; Body is active and last.
+        let line = tab_bar_line(None, &tabs, &theme, false, 20);
+        let text = line_text(&line);
+        assert!(text.contains("Body"), "active Body chip renders: {text:?}");
+        assert!(
+            text.contains('‹'),
+            "clipped-left marker shows when scrolled: {text:?}"
+        );
+        // The active chip fits within the pane (rendered spans never exceed width).
+        let painted: usize = text.chars().count();
+        assert!(painted <= 20, "nothing paints past the pane: {painted}");
+    }
+
+    /// At a wide enough width all four chips render with NO edge markers — the
+    /// window scroll engages only when the chips overflow.
+    #[test]
+    fn wide_tab_bar_shows_all_four_chips_no_markers() {
+        let theme = Theme::dark();
+        let tabs = RequestTabs::default(); // active = Params (first)
+        let line = tab_bar_line(None, &tabs, &theme, false, 60);
+        let text = line_text(&line);
+        for label in ["Params", "Headers", "Auth", "Body"] {
+            assert!(text.contains(label), "{label} chip renders: {text:?}");
+        }
+        assert!(
+            !text.contains('‹') && !text.contains('›'),
+            "no scroll markers when everything fits: {text:?}"
+        );
+    }
+
+    /// The focused digit prefix `[N]` and `(n)` counts stay inside the chips; the
+    /// active chip carries the bright `selection` bg and inactive chips the dim
+    /// `tab_inactive` bg.
+    #[test]
+    fn chips_carry_active_and_inactive_backgrounds() {
+        let theme = Theme::dark();
+        let tabs = RequestTabs::default(); // active = Params
+        let line = tab_bar_line(None, &tabs, &theme, true, 80);
+        let text = line_text(&line);
+        assert!(
+            text.contains("[1]"),
+            "focused digit prefix inside chip: {text:?}"
+        );
+        // The active (Params) chip spans use the bright selection style; some
+        // inactive chip spans use the dim tab_inactive style.
+        assert!(
+            line.spans.iter().any(|s| s.style == theme.selection),
+            "active chip uses the bright selection bg"
+        );
+        assert!(
+            line.spans.iter().any(|s| s.style == theme.tab_inactive),
+            "inactive chips use the dim tab_inactive bg"
+        );
     }
 }

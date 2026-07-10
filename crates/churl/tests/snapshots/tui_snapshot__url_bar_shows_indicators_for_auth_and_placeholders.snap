@@ -2,12 +2,12 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: rendered
 ---
-┏ Explorer ━━━━━━━━━━━━━━━━━━┓ List items                                       
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓▐ List items ▌                                    
 ┃  ▾ api                     ┃┌ URL ───────────────────────────────────────────┐
 ┃>   List items              ┃│GET  https://{{host}}/items   auth:basic  {{2}} │
 ┃                            ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Request ───────────────────────────────────────┐
-┃                            ┃│ Params(0)   Headers(0)   Auth(1)   Body        │
+┃                            ┃│▐ Params(0) ▌ ▐ Headers(0) ▌ ▐ Auth(1) ▌ ›      │
 ┃                            ┃│  (no params — a to add)                        │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
