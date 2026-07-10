@@ -21,7 +21,7 @@ expression: snapshot(&mut app)
 ┃           ┃  Ctrl-s              send request                    ┃           │
 ┃           ┃  /                   search endpoints                ┃           │
 ┃           ┃  :                   command palette                 ┃           │
-┗━━━━━━━━━━━┃  f                   jump to pane / row              ┃           │
+┗━━━━━━━━━━━┃  f                   jump to pane                    ┃           │
 ┌ Sequences ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 │<leader>s a to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

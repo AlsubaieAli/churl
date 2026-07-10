@@ -203,6 +203,13 @@ pub struct ResponseView {
     folded: HashSet<usize>,
     /// Whether soft-wrap is on.
     wrap: bool,
+    /// Horizontal scroll offset in *char columns* for unwrapped long lines
+    /// (M7.7). When wrap is off, each logical line's display row shows the char
+    /// window `[h_scroll, h_scroll + viewport_width)` instead of the whole line,
+    /// bounding render cost and letting the user pan a minified/non-JSON line past
+    /// the first screenful. Reset to 0 on build, on any generation bump, and on
+    /// `ToggleWrap`. Inert while wrap is on (wrapped rows already fit the width).
+    h_scroll: usize,
     /// Whether the body is rendered pretty (reformatted) rather than raw.
     /// Defaults to `true` on arrival for json-ish content-types (decision 2),
     /// `false` otherwise. Toggled by `p` in the Response overlay. When on but the
@@ -234,7 +241,12 @@ impl ResponseView {
         let pretty = syntax == SyntaxToken::Json;
         // Wire order by default (decision): sorting is an explicit opt-in via `s`.
         let sort_keys = false;
-        let text = reformat_body_if_needed(&raw_text, syntax, pretty, sort_keys);
+        // Sanitize the reformatted (displayed) text: strip ANSI, expand tabs, and
+        // replace remaining control chars. `raw_text` stays the untouched decode so
+        // copy remains byte-exact (M7.7).
+        let text = sanitize_for_display(&reformat_body_if_needed(
+            &raw_text, syntax, pretty, sort_keys,
+        ));
         let line_offsets = index_lines(&text);
         // Build the headers text eagerly — it is tiny and lets the headers view
         // reuse the exact same pipeline with no lazy-init branches.
@@ -262,6 +274,7 @@ impl ResponseView {
             folds: None,
             folded: HashSet::new(),
             wrap: false,
+            h_scroll: 0,
             pretty,
             sort_keys,
             search: None,
@@ -330,7 +343,7 @@ impl ResponseView {
     /// the cursor row back to a logical line for fold-at-cursor and copy-line.
     pub fn logical_at_display_row(&self, row: usize, width: usize) -> Option<usize> {
         let visible = self.visible_map();
-        let rows = expand_wrap(self, &visible, self.wrap, width);
+        let rows = expand_wrap(self, &visible, self.wrap, width, self.h_scroll);
         rows.get(row).map(|dr| visible[dr.visible_idx].logical())
     }
 
@@ -340,7 +353,7 @@ impl ResponseView {
     /// happen after auto-unfold).
     pub fn display_row_for_logical(&self, logical: usize, width: usize) -> Option<usize> {
         let visible = self.visible_map();
-        let rows = expand_wrap(self, &visible, self.wrap, width);
+        let rows = expand_wrap(self, &visible, self.wrap, width, self.h_scroll);
         rows.iter()
             .position(|dr| visible[dr.visible_idx].logical() == logical)
     }
@@ -348,7 +361,7 @@ impl ResponseView {
     /// The total number of display rows through the current pipeline at `width`.
     pub fn total_display_rows(&self, width: usize) -> usize {
         let visible = self.visible_map();
-        expand_wrap(self, &visible, self.wrap, width).len()
+        expand_wrap(self, &visible, self.wrap, width, self.h_scroll).len()
     }
 
     // ---- source selection (body vs headers) ----
@@ -404,9 +417,56 @@ impl ResponseView {
         self.view_mode
     }
 
-    /// Toggles soft-wrap.
+    /// Toggles soft-wrap. Resets the horizontal scroll (h_scroll only applies
+    /// while wrap is off, and its clamp depends on wrap geometry).
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
+        self.h_scroll = 0;
+    }
+
+    /// The current horizontal scroll offset (char columns) for unwrapped lines.
+    pub fn h_scroll(&self) -> usize {
+        self.h_scroll
+    }
+
+    /// Pans the horizontal window left (`right == false`) or right by `amount`
+    /// char columns. A no-op while wrap is on. The offset is clamped at render
+    /// time against the longest currently-visible line, so this only needs to
+    /// guard the left edge; over-scrolling right is corrected on the next render.
+    pub fn scroll_h(&mut self, right: bool, amount: usize) {
+        if self.wrap {
+            return;
+        }
+        self.h_scroll = if right {
+            self.h_scroll.saturating_add(amount)
+        } else {
+            self.h_scroll.saturating_sub(amount)
+        };
+    }
+
+    /// Sets the horizontal scroll offset directly (used to clamp it after a
+    /// render computes the true max, and by search-into-view).
+    pub fn set_h_scroll(&mut self, h_scroll: usize) {
+        self.h_scroll = h_scroll;
+    }
+
+    /// The maximum lawful horizontal scroll for the current view at pane `width`:
+    /// the longest currently-*visible* logical line's char length minus `width`
+    /// (so the last screenful of the widest line stays on screen), mirroring
+    /// [`clamp_scroll`] for the vertical axis. Fold-headers keep full width, so
+    /// their opener line counts. `0` while wrap is on or with no width — h_scroll
+    /// is inert there.
+    fn max_h_scroll(&self, width: usize) -> usize {
+        if self.wrap || width == 0 {
+            return 0;
+        }
+        let visible = self.visible_map();
+        let widest = visible
+            .iter()
+            .map(|v| self.logical_line(v.logical()).chars().count())
+            .max()
+            .unwrap_or(0);
+        widest.saturating_sub(width)
     }
 
     /// Toggles raw↔pretty rendering of the body (`p`). Rebuilds the displayed
@@ -418,9 +478,14 @@ impl ResponseView {
     /// Returns the new `pretty` state.
     pub fn toggle_pretty(&mut self) -> bool {
         self.pretty = !self.pretty;
-        self.text =
-            reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty, self.sort_keys);
+        self.text = sanitize_for_display(&reformat_body_if_needed(
+            &self.raw_text,
+            self.syntax,
+            self.pretty,
+            self.sort_keys,
+        ));
         self.line_offsets = index_lines(&self.text);
+        self.h_scroll = 0;
         self.generation = self.generation.wrapping_add(1);
         self.folds = None;
         self.folded.clear();
@@ -442,8 +507,12 @@ impl ResponseView {
     /// next on. Returns the new `sort_keys` state.
     pub fn toggle_sort_keys(&mut self) -> bool {
         self.sort_keys = !self.sort_keys;
-        self.text =
-            reformat_body_if_needed(&self.raw_text, self.syntax, self.pretty, self.sort_keys);
+        self.text = sanitize_for_display(&reformat_body_if_needed(
+            &self.raw_text,
+            self.syntax,
+            self.pretty,
+            self.sort_keys,
+        ));
         self.line_offsets = index_lines(&self.text);
         self.generation = self.generation.wrapping_add(1);
         self.folds = None;
@@ -651,6 +720,40 @@ impl ResponseView {
         Some(search.matches[i].0)
     }
 
+    /// The `(char_start, char_end)` column range of the current match within its
+    /// logical line, if any (byte offsets mapped to char columns). Used by
+    /// horizontal search-into-view so a far-right match on an unwrapped line is
+    /// panned into the visible window.
+    pub fn current_match_columns(&self) -> Option<(usize, usize)> {
+        let search = self.search.as_ref()?;
+        let i = search.current?;
+        let (logical, byte_start, byte_end) = search.matches[i];
+        let line = self.logical_line(logical);
+        let char_start = line[..byte_start.min(line.len())].chars().count();
+        let char_end = line[..byte_end.min(line.len())].chars().count();
+        Some((char_start, char_end))
+    }
+
+    /// Adjusts `h_scroll` so the char column range `[start, end)` is inside the
+    /// horizontal window `[h_scroll, h_scroll + width)` (M7.7 search-into-view). A
+    /// no-op while wrap is on or the range already fits. Mirrors the vertical
+    /// scroll-into-view for the match *row*: pans left when the match is off the
+    /// left edge, right when it is off the right edge, preferring to reveal the
+    /// match start.
+    pub fn ensure_column_visible(&mut self, start: usize, end: usize, width: usize) {
+        if self.wrap || width == 0 {
+            return;
+        }
+        if start < self.h_scroll {
+            // Off the left edge: bring the match start to the left of the window.
+            self.h_scroll = start;
+        } else if end > self.h_scroll + width {
+            // Off the right edge: place the window so the match end is the last
+            // visible column (revealing the start when the match fits in `width`).
+            self.h_scroll = end.saturating_sub(width);
+        }
+    }
+
     // ---- copy payloads ----
 
     /// The full text of the current view for the copy-view action (`y`). In the
@@ -735,6 +838,119 @@ fn sort_value_keys(value: &mut serde_json::Value) {
     }
 }
 
+/// Tab-stop width used when expanding `\t` for display. A fixed constant, NOT a
+/// config knob (M7.7): tabs advance to the next multiple of this many columns.
+const TAB_WIDTH: usize = 4;
+
+/// The visible placeholder substituted for control characters that would
+/// otherwise be invisible or hostile in the terminal (U+00B7 MIDDLE DOT).
+const CONTROL_PLACEHOLDER: char = '·';
+
+/// Sanitizes the *displayed* body/text so a hostile or careless server can never
+/// move the cursor, recolour the pane, write the clipboard (OSC 52), or smuggle
+/// invisible control bytes into the viewer. Applied to the reformatted text
+/// *before* `index_lines`; the untouched `raw_text` is what copy reads, so this
+/// never affects byte-exact copy (M7.7). A single left-to-right scan:
+///
+/// 1. **Strip ANSI escapes** — CSI (`ESC [` … final byte `0x40..=0x7E`), OSC
+///    (`ESC ]` … terminated by BEL `0x07` or ST `ESC \`), and any other lone
+///    `ESC` — removed entirely (zero-width).
+/// 2. **Expand tabs** — `\t` advances to the next multiple of [`TAB_WIDTH`],
+///    measured in display columns *within the current logical line* (the column
+///    counter resets at each `\n`).
+/// 3. **Normalize CR** — `\r\n` collapses to `\n`; a lone `\r` is treated like
+///    any other control char (step 4), so no phantom blank line appears.
+/// 4. **Replace remaining control chars** — every other C0 (`0x00..=0x1F`), DEL
+///    (`0x7F`), and C1 (`0x80..=0x9F`) becomes [`CONTROL_PLACEHOLDER`]. `\n` and
+///    the already-expanded `\t` are exempt.
+///
+/// Correct JSON has its controls escaped, so pretty (serde) output is already
+/// clean — the teeth are on the raw / parse-failed / `text/plain` path. Clean
+/// text is returned byte-identical. Runs once per response build, not per frame.
+fn sanitize_for_display(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // Display column within the current logical line, for tab-stop math.
+    let mut col = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{1B}' => {
+                // ANSI escape. Peek the introducer to decide the terminator rule.
+                match chars.peek() {
+                    Some('[') => {
+                        // CSI: consume until a final byte in 0x40..=0x7E.
+                        chars.next();
+                        for c in chars.by_ref() {
+                            if ('\u{40}'..='\u{7E}').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') => {
+                        // OSC: consume until BEL (0x07) or ST (ESC \).
+                        chars.next();
+                        while let Some(c) = chars.next() {
+                            if c == '\u{07}' {
+                                break;
+                            }
+                            if c == '\u{1B}' {
+                                // ST is ESC \; swallow the trailing backslash when present.
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // A lone ESC (or ESC followed by anything else): drop just the
+                    // ESC; the following char is handled by the next iteration.
+                    _ => {}
+                }
+            }
+            '\n' => {
+                out.push('\n');
+                col = 0;
+            }
+            '\r' => {
+                // `\r\n` → `\n`; a lone `\r` → placeholder (a control char).
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    out.push('\n');
+                    col = 0;
+                } else {
+                    out.push(CONTROL_PLACEHOLDER);
+                    col += 1;
+                }
+            }
+            '\t' => {
+                // Advance to the next tab stop (next multiple of TAB_WIDTH).
+                let next_stop = (col / TAB_WIDTH + 1) * TAB_WIDTH;
+                for _ in col..next_stop {
+                    out.push(' ');
+                }
+                col = next_stop;
+            }
+            // Remaining C0, DEL, and C1 control chars → the visible placeholder.
+            c if is_control_char(c) => {
+                out.push(CONTROL_PLACEHOLDER);
+                col += 1;
+            }
+            c => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `c` is a control character that must be replaced by the sanitizer:
+/// any C0 (`0x00..=0x1F`), DEL (`0x7F`), or C1 (`0x80..=0x9F`). `\n` and `\t` are
+/// handled earlier and never reach here.
+fn is_control_char(c: char) -> bool {
+    matches!(c, '\u{00}'..='\u{1F}' | '\u{7F}' | '\u{80}'..='\u{9F}')
+}
+
 /// Indexes the line starts of `text` in one pass (byte offset of each line's
 /// first byte). Empty for empty input.
 fn index_lines(text: &str) -> Vec<usize> {
@@ -764,24 +980,41 @@ struct DisplayRow {
 }
 
 /// Expands the visible map into display rows for a given wrap width. When wrap is
-/// off (or `width == 0`), each visible line is exactly one display row covering
-/// the whole line. When on, long logical lines split at display-width boundaries
-/// (`unicode-width`); fold-headers never wrap.
+/// off (or `width == 0`), each visible line is exactly one display row; a normal
+/// line's row is the horizontal window `[h_scroll, h_scroll + width)` (M7.7),
+/// while a fold-header keeps its full width. When wrap is on, long logical lines
+/// split at display-width boundaries (`unicode-width`); fold-headers never wrap.
+///
+/// The row *count* is unchanged by h_scroll (still one row per unwrapped line),
+/// so the fold/wrap→logical mapping helpers stay correct; only the char span
+/// each unwrapped normal row exposes is bounded.
 fn expand_wrap(
     view: &ResponseView,
     visible: &[Visible],
     wrap: bool,
     width: usize,
+    h_scroll: usize,
 ) -> Vec<DisplayRow> {
     let mut rows = Vec::new();
     for (vi, v) in visible.iter().enumerate() {
         let logical = v.logical();
         let char_len = view.logical_line(logical).chars().count();
-        if !wrap || width == 0 || matches!(v, Visible::FoldHeader { .. }) {
+        let is_fold_header = matches!(v, Visible::FoldHeader { .. });
+        if !wrap || width == 0 || is_fold_header {
+            // Unwrapped: one row per line. A normal line is windowed to the
+            // horizontal scroll span (fold-headers and `width == 0` geometry
+            // callers keep the full line).
+            let (char_start, char_end) = if !wrap && width > 0 && !is_fold_header {
+                let start = h_scroll.min(char_len);
+                let end = start.saturating_add(width).min(char_len);
+                (start, end)
+            } else {
+                (0, char_len)
+            };
             rows.push(DisplayRow {
                 visible_idx: vi,
-                char_start: 0,
-                char_end: char_len,
+                char_start,
+                char_end,
             });
             continue;
         }
@@ -867,6 +1100,10 @@ pub struct RenderOutcome {
     /// Total display rows in the current view (post-fold, post-wrap), for
     /// cursor/scroll motion clamping by the caller.
     pub total_rows: usize,
+    /// The horizontal scroll offset after clamping to the widest visible line
+    /// (M7.7). The caller writes it back onto the view so an over-pan self-corrects
+    /// on the next frame; `0` while wrap is on.
+    pub clamped_h_scroll: usize,
 }
 
 /// Renders the response pane. Pure aside from the returned enqueue request; the
@@ -923,6 +1160,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
         viewport_height,
         viewport_width: 0,
         total_rows: 0,
+        clamped_h_scroll: 0,
     };
 
     match ctx.state {
@@ -1028,7 +1266,12 @@ fn render_done(
     let width = body_area.width as usize;
     let height = body_area.height as usize;
     let visible = view.visible_map();
-    let rows = expand_wrap(view, &visible, view.wrap, width);
+    // Clamp the horizontal scroll so it can't pan past the last screenful of the
+    // widest visible line (mirror of `clamp_scroll` for the vertical axis). The
+    // caller writes the clamped value back so an over-pan self-corrects.
+    let h_scroll = view.h_scroll.min(view.max_h_scroll(width));
+    outcome.clamped_h_scroll = h_scroll;
+    let rows = expand_wrap(view, &visible, view.wrap, width, h_scroll);
     let total = rows.len();
     outcome.total_rows = total;
     outcome.viewport_width = width;
@@ -1049,8 +1292,9 @@ fn render_done(
 
     // Syntax highlighting operates on the *logical* lines shown in the viewport.
     // The cache key covers generation + view mode + fold/wrap/scroll geometry so
-    // a fold/wrap/mode change re-highlights.
-    let hash = viewport_hash(view, scroll, height);
+    // a fold/wrap/mode change re-highlights; h_scroll is included so a horizontal
+    // pan (which changes the char window each row shows) also re-highlights.
+    let hash = viewport_hash(view, scroll, height, h_scroll);
     let highlighted: Option<&Vec<Line<'static>>> = if view.wrap {
         // Under wrap we render plain (styled overlays only) — highlighting wrapped
         // spans is deferred (see the module + DECISIONS notes). Skip the cache.
@@ -1093,13 +1337,17 @@ fn render_done(
 
     frame.render_widget(Paragraph::new(out_lines), body_area);
 
-    // Enqueue a highlight job on a cache miss (unwrapped mode only).
+    // Enqueue a highlight job on a cache miss (unwrapped mode only). The lines are
+    // the horizontal window each row actually shows (fold-headers keep full width),
+    // so the cached highlight lines up 1:1 with the painted slice under h_scroll.
     if !view.wrap && highlighted.is_none() {
         let job_lines: Vec<String> = rows[scroll..end]
             .iter()
             .map(|row| match visible[row.visible_idx] {
                 Visible::FoldHeader { line, .. } => view.logical_line(line).to_owned(),
-                Visible::Line(logical) => view.logical_line(logical).to_owned(),
+                Visible::Line(logical) => {
+                    char_slice(view.logical_line(logical), row.char_start, row.char_end).to_owned()
+                }
             })
             .collect();
         outcome.job = Some(HighlightJob {
@@ -1418,9 +1666,10 @@ fn status_summary(view: &ResponseView, focused: bool) -> String {
 }
 
 /// The viewport cache key: response generation, view mode, fold signature,
-/// scroll, and height. Width is excluded (unwrapped mode truncates at draw time;
-/// wrapped mode bypasses the cache entirely).
-fn viewport_hash(view: &ResponseView, scroll: usize, height: usize) -> u64 {
+/// scroll, height, and horizontal scroll. Width is excluded (unwrapped mode
+/// windows at draw time; wrapped mode bypasses the cache entirely), but h_scroll
+/// is keyed since panning changes each unwrapped row's char slice.
+fn viewport_hash(view: &ResponseView, scroll: usize, height: usize, h_scroll: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     view.generation.hash(&mut hasher);
@@ -1431,6 +1680,8 @@ fn viewport_hash(view: &ResponseView, scroll: usize, height: usize) -> u64 {
     folded.hash(&mut hasher);
     scroll.hash(&mut hasher);
     height.hash(&mut hasher);
+    // Horizontal window: a pan changes each row's char slice, so re-highlight.
+    h_scroll.hash(&mut hasher);
     view.syntax.hash(&mut hasher);
     // Pretty and sort_keys both change the displayed text, so they key the cache
     // (belt-and-braces alongside the generation bump their toggles already do).
@@ -1716,7 +1967,7 @@ mod tests {
         let v = view("abcdefghij");
         let visible = v.visible_map();
         // Width 4 → 3 rows (4+4+2).
-        let rows = expand_wrap(&v, &visible, true, 4);
+        let rows = expand_wrap(&v, &visible, true, 4, 0);
         assert_eq!(rows.len(), 3);
         assert_eq!((rows[0].char_start, rows[0].char_end), (0, 4));
         assert_eq!((rows[1].char_start, rows[1].char_end), (4, 8));
@@ -1727,7 +1978,7 @@ mod tests {
     fn wrap_off_is_one_row_per_line() {
         let v = view("a\nbb\nccc");
         let visible = v.visible_map();
-        let rows = expand_wrap(&v, &visible, false, 2);
+        let rows = expand_wrap(&v, &visible, false, 2, 0);
         assert_eq!(rows.len(), 3);
     }
 
@@ -1736,7 +1987,7 @@ mod tests {
         // Two 2-cell CJK chars per row at width 4.
         let v = view("日本語漢字");
         let visible = v.visible_map();
-        let rows = expand_wrap(&v, &visible, true, 4);
+        let rows = expand_wrap(&v, &visible, true, 4, 0);
         // 5 wide chars * 2 cells = 10 cells; width 4 → 2,2,1 chars → 3 rows.
         assert_eq!(rows.len(), 3);
         assert_eq!((rows[0].char_start, rows[0].char_end), (0, 2));
@@ -1748,7 +1999,7 @@ mod tests {
     fn wrap_exact_width_line_is_one_row() {
         let v = view("abcd");
         let visible = v.visible_map();
-        let rows = expand_wrap(&v, &visible, true, 4);
+        let rows = expand_wrap(&v, &visible, true, 4, 0);
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].char_start, rows[0].char_end), (0, 4));
     }
@@ -1960,7 +2211,7 @@ mod tests {
         // Wrap expansion over the pretty lines yields >= line_count rows.
         v.toggle_all_folds(); // expand back
         let visible = v.visible_map();
-        let rows = expand_wrap(&v, &visible, true, 4);
+        let rows = expand_wrap(&v, &visible, true, 4, 0);
         assert!(rows.len() >= v.line_count());
     }
 
@@ -2124,5 +2375,194 @@ mod tests {
         assert_eq!(line.spans[0].content, "ab");
         assert_eq!(line.spans[1].content, "cd");
         assert_eq!(line.spans[2].content, "ef");
+    }
+
+    // ---- M7.7: control-char / ANSI sanitize + explicit tab-width ----
+
+    #[test]
+    fn sanitize_strips_ansi_csi_osc_and_lone_esc() {
+        // CSI colour + cursor-move sequences, an OSC-52 clipboard write (BEL- and
+        // ST-terminated), and a bare ESC — all must vanish, leaving only the text.
+        let csi = "a\u{1B}[31mred\u{1B}[0m\u{1B}[2Jb";
+        assert_eq!(sanitize_for_display(csi), "aredb");
+        // OSC-52 clipboard hijack, BEL-terminated.
+        let osc_bel = "x\u{1B}]52;c;aGVsbG8=\u{07}y";
+        assert_eq!(sanitize_for_display(osc_bel), "xy");
+        // OSC terminated by ST (ESC \).
+        let osc_st = "x\u{1B}]0;title\u{1B}\\y";
+        assert_eq!(sanitize_for_display(osc_st), "xy");
+        // A lone ESC with no introducer is dropped; the following char survives.
+        assert_eq!(sanitize_for_display("a\u{1B}b"), "ab");
+    }
+
+    #[test]
+    fn sanitize_expands_tabs_to_next_stop() {
+        // Tab at column 0 → 4 spaces (next multiple of 4).
+        assert_eq!(sanitize_for_display("\tx"), "    x");
+        // "ab\t" → "ab" is 2 cols, tab advances to col 4 → 2 spaces.
+        assert_eq!(sanitize_for_display("ab\tx"), "ab  x");
+        // "abcd\t" sits exactly on a stop (col 4) → advances a full TAB_WIDTH.
+        assert_eq!(sanitize_for_display("abcd\tx"), "abcd    x");
+        // Tab stops reset at each newline: second line's tab starts from col 0.
+        assert_eq!(sanitize_for_display("ab\tx\n\ty"), "ab  x\n    y");
+        // Two consecutive tabs from col 0 → 4 then 4 more = 8 spaces.
+        assert_eq!(sanitize_for_display("\t\tx"), "        x");
+    }
+
+    #[test]
+    fn sanitize_replaces_control_chars_with_placeholder() {
+        // NUL, BEL, VT, and a lone CR → the visible middle-dot placeholder.
+        assert_eq!(sanitize_for_display("a\u{00}b"), "a·b");
+        assert_eq!(sanitize_for_display("a\u{07}b"), "a·b");
+        assert_eq!(sanitize_for_display("a\u{0B}b"), "a·b");
+        // A lone CR (not part of CRLF) is a control char → placeholder, NOT a
+        // newline (so it must not add a phantom line).
+        let out = sanitize_for_display("a\rb");
+        assert_eq!(out, "a·b");
+        assert_eq!(index_lines(&out).len(), 1);
+        // A C1 control (0x85 NEL) is also replaced.
+        assert_eq!(sanitize_for_display("a\u{85}b"), "a·b");
+    }
+
+    #[test]
+    fn sanitize_preserves_newlines_and_line_count() {
+        // `\n` survives untouched; line count is exactly the newline count + 1.
+        let out = sanitize_for_display("one\ntwo\nthree");
+        assert_eq!(out, "one\ntwo\nthree");
+        assert_eq!(index_lines(&out).len(), 3);
+    }
+
+    #[test]
+    fn sanitize_collapses_crlf_without_phantom_blank_lines() {
+        // `\r\n` → `\n`: three CRLF lines become three lines, not six.
+        let out = sanitize_for_display("a\r\nb\r\nc");
+        assert_eq!(out, "a\nb\nc");
+        assert_eq!(index_lines(&out).len(), 3);
+    }
+
+    #[test]
+    fn sanitize_returns_clean_text_byte_identical() {
+        // A body with no control chars/ANSI/tabs is returned unchanged.
+        let clean = "the quick brown fox\njumps over 123 {\"a\": 1}";
+        assert_eq!(sanitize_for_display(clean), clean);
+    }
+
+    #[test]
+    fn build_sanitizes_displayed_text_but_copy_stays_raw() {
+        // A text/plain body carrying ANSI + a tab + a NUL: the DISPLAYED text is
+        // sanitized (ANSI gone, tab expanded, NUL → ·) but copy returns the exact
+        // on-the-wire bytes including the raw ANSI/tab/control.
+        let raw = "a\u{1B}[31m\tb\u{00}c";
+        let v = view(raw);
+        assert!(!v.pretty(), "text/plain is not pretty");
+        // Displayed: ESC[31m stripped, tab at col 1 → 3 spaces (to col 4), NUL → ·.
+        assert_eq!(v.text, "a   b·c");
+        // Copy is byte-exact, controls and all.
+        assert_eq!(v.copy_all(), raw);
+    }
+
+    // ---- M7.7: horizontal-window slice for unwrapped long lines ----
+
+    /// A response whose single body line is `n` chars wide (unwrapped test fixture).
+    fn wide_line_view(width_chars: usize) -> ResponseView {
+        view(&"x".repeat(width_chars))
+    }
+
+    #[test]
+    fn unwrapped_long_line_renders_bounded_slice() {
+        // A 100-char line in a 10-wide viewport: the built row spans at most the
+        // viewport width, NOT the whole line.
+        let v = wide_line_view(100);
+        let visible = v.visible_map();
+        let rows = expand_wrap(&v, &visible, false, 10, 0);
+        assert_eq!(rows.len(), 1, "still one row per unwrapped line");
+        let (s, e) = (rows[0].char_start, rows[0].char_end);
+        assert_eq!((s, e), (0, 10));
+        assert!(e - s <= 10, "slice width must be bounded by the viewport");
+        // Panned right by 30: the window is [30, 40).
+        let rows = expand_wrap(&v, &visible, false, 10, 30);
+        assert_eq!((rows[0].char_start, rows[0].char_end), (30, 40));
+    }
+
+    #[test]
+    fn h_scroll_pans_and_clamps_both_ends() {
+        let mut v = wide_line_view(50);
+        assert_eq!(v.h_scroll(), 0);
+        // Pan left at the left edge stays clamped at 0.
+        v.scroll_h(false, 8);
+        assert_eq!(v.h_scroll(), 0);
+        // Pan right accumulates.
+        v.scroll_h(true, 8);
+        assert_eq!(v.h_scroll(), 8);
+        v.scroll_h(true, 8);
+        assert_eq!(v.h_scroll(), 16);
+        // The right-edge clamp is max_h_scroll(width) = 50 - width.
+        assert_eq!(v.max_h_scroll(10), 40);
+        assert_eq!(
+            v.max_h_scroll(60),
+            0,
+            "line narrower than viewport → no scroll"
+        );
+        // Over-pan is clamped by render via min(max_h_scroll); simulate it.
+        v.set_h_scroll(999);
+        let clamped = v.h_scroll().min(v.max_h_scroll(10));
+        assert_eq!(clamped, 40);
+    }
+
+    #[test]
+    fn h_scroll_is_inert_when_wrap_on() {
+        let mut v = wide_line_view(50);
+        v.toggle_wrap(); // wrap on, resets h_scroll to 0
+        assert!(v.wrap());
+        v.scroll_h(true, 8);
+        assert_eq!(v.h_scroll(), 0, "scroll_h is a no-op while wrap is on");
+        assert_eq!(v.max_h_scroll(10), 0, "no horizontal scroll under wrap");
+    }
+
+    #[test]
+    fn toggle_wrap_resets_h_scroll() {
+        let mut v = wide_line_view(50);
+        v.scroll_h(true, 24);
+        assert_eq!(v.h_scroll(), 24);
+        v.toggle_wrap();
+        assert_eq!(
+            v.h_scroll(),
+            0,
+            "toggling wrap must reset the horizontal scroll"
+        );
+    }
+
+    #[test]
+    fn search_jump_brings_far_right_match_into_window() {
+        // A single line with a needle far to the right; a 10-wide window at
+        // h_scroll 0 would not show it. ensure_column_visible must pan so the
+        // match columns fall inside [h_scroll, h_scroll+width).
+        let body = format!("{}NEEDLE tail", "x".repeat(40));
+        let mut v = view(&body);
+        v.set_search("NEEDLE".to_owned());
+        let (start, end) = v.current_match_columns().expect("a match");
+        assert_eq!(start, 40, "match starts at column 40");
+        assert_eq!(end, 46);
+        // Off the right edge of a 10-wide window at h_scroll 0.
+        assert!(end > 10);
+        v.ensure_column_visible(start, end, 10);
+        // The match end is now the last visible column: window = [36, 46).
+        assert_eq!(v.h_scroll(), 36);
+        assert!(v.h_scroll() <= start && end <= v.h_scroll() + 10);
+        // A subsequent left-edge match pans back left.
+        v.set_h_scroll(30);
+        v.ensure_column_visible(2, 8, 10); // match at cols 2..8, left of window
+        assert_eq!(v.h_scroll(), 2);
+    }
+
+    #[test]
+    fn copy_line_returns_full_raw_line_despite_h_scroll() {
+        // Panning the window must never truncate what copy-line returns — copy
+        // reads the whole logical line, independent of h_scroll.
+        let body = "x".repeat(100);
+        let mut v = view(&body);
+        v.scroll_h(true, 50);
+        assert_eq!(v.copy_line(0), body, "copy-line returns the full line");
+        assert_eq!(v.copy_all(), body, "copy-all returns the full raw body");
     }
 }

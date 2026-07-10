@@ -111,7 +111,8 @@ crates/
         components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
                            #   response also carries ResponseState::Dropped (R0 memory-bound placeholder: status/timing/size, no body),
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),
-                           #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy),
+                           #   response (virtualised viewer + M7 pipeline: cursor/headers/wrap/fold/search/copy;
+                           #     M7.7 sanitize_for_display (strip ANSI/controls, tab-width 4) + h_scroll horizontal window),
                            #   fold (JSON fold-region scanner), env_editor (M7.3 environments & vars editor:
                            #     EnvEditorState split-view over workspace/collection/profile scopes — profile CRUD,
                            #     dirty/discard guard, secret mask+refuse, live precedence display; core stays UI-free),
