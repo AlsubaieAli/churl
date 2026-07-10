@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use churl_core::model::{OnError, Sequence, SequenceStep};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -263,6 +263,26 @@ impl SequenceEditorState {
     }
 
     fn handle_steps_key(&mut self, key: KeyEvent) {
+        // Ctrl-j / Ctrl-k reorder the selected step (down / up), an alias for the
+        // Shift-J/Shift-K + [ / ] bindings (owner drive-test #4 — Ctrl-j/k is the
+        // reorder convention they reached for). Intercepted before the plain match
+        // so it isn't swallowed by the bare `j`/`k` selection-nav arms. Note:
+        // Ctrl-j (ASCII LF) is only distinct from Enter under the enhanced keyboard
+        // protocol; on legacy terminals it arrives as Enter, so the portable
+        // Shift-J/[ ] bindings remain the reliable path.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('j') => {
+                    self.move_step(false);
+                    return;
+                }
+                KeyCode::Char('k') => {
+                    self.move_step(true);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.selected_step + 1 < self.steps.len() {
@@ -824,6 +844,23 @@ mod tests {
         assert_eq!(out.steps[0].seq, 0);
         assert_eq!(out.steps[0].endpoint, "b/two.toml");
         assert_eq!(out.steps[1].seq, 1);
+    }
+
+    #[test]
+    fn ctrl_j_k_also_reorder_steps() {
+        // Ctrl-j / Ctrl-k are aliases for Shift-J / Shift-K reordering (owner
+        // drive-test #4). Ctrl must NOT fall through to the bare j/k selection nav.
+        let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+        let mut ed = editor();
+        // Select the second step, then Ctrl-k moves it up.
+        ed.handle_key(key(KeyCode::Char('j')));
+        ed.handle_key(ctrl(KeyCode::Char('k')));
+        assert_eq!(ed.steps[0].endpoint, "b/two.toml");
+        assert_eq!(ed.steps[1].endpoint, "a/one.toml");
+        // Ctrl-j moves it back down.
+        ed.handle_key(ctrl(KeyCode::Char('j')));
+        assert_eq!(ed.steps[0].endpoint, "a/one.toml");
+        assert_eq!(ed.steps[1].endpoint, "b/two.toml");
     }
 
     #[test]
