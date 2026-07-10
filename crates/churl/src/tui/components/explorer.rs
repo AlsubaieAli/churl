@@ -772,11 +772,18 @@ pub fn render_sequences_pane(
     frame.render_widget(block, area);
 
     if state.sequences.is_empty() {
+        // Informative empty state for the EXPANDED/focused pane (note #3): when
+        // `f s` (or the `s` overlay) zooms in on a sequence-less workspace, tell
+        // the user how to add one rather than showing a blank body. Dim-hint
+        // styling (`theme.statusline`) matches the collapsed peek stub.
         let hint = Paragraph::new(vec![
             Line::from(""),
-            Line::from("no sequences"),
+            Line::from(Span::styled("No sequences yet", theme.statusline)),
             Line::from(""),
-            Line::from("<leader>s a to add"),
+            Line::from(Span::styled(
+                "Press <leader>s a to add one",
+                theme.statusline,
+            )),
         ]);
         frame.render_widget(hint, inner);
         return;

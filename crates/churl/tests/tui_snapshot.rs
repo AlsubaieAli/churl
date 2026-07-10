@@ -757,6 +757,50 @@ fn zero_sequence_workspace_shows_add_affordance() {
     );
 }
 
+/// Note #3: focusing the Sequences sub-pane on a workspace with NO sequences
+/// (the `s` overlay, mirroring `f s`) now STICKS — the pane zooms in and renders
+/// the informative expanded empty state rather than reverting to Endpoints. This
+/// is the "zoom in on focus" the drive-test asked for.
+#[test]
+fn focused_empty_sequences_pane_shows_expanded_empty_state() {
+    let dir = tempfile::tempdir().unwrap();
+    // `fixture` builds a workspace with endpoints but NO sequences dir.
+    fixture(dir.path());
+    let workspace = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(workspace, KeyMap::default()).unwrap();
+    // Explorer `s` overlay = focus-sequences-toggle: zoom into the empty pane.
+    press(&mut app, KeyCode::Char('s'));
+    let rendered = snapshot(&mut app);
+    // The expanded pane body carries the informative affordance, not just the
+    // one-line collapsed peek stub.
+    assert!(
+        rendered.contains("No sequences yet"),
+        "focused empty Sequences pane shows the expanded empty state: {rendered}"
+    );
+    assert!(
+        rendered.contains("Press <leader>s a to add one"),
+        "expanded empty state names the add gesture: {rendered}"
+    );
+}
+
+/// Note #3 companion: a NON-empty focused Sequences pane still lists its
+/// sequences (the empty-state branch never regresses the populated view).
+#[test]
+fn focused_nonempty_sequences_pane_lists_sequences() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = fixture_with_sequences(dir.path());
+    press(&mut app, KeyCode::Char('s')); // focus the sequences sub-pane
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("Login flow"),
+        "focused non-empty Sequences pane lists its sequences: {rendered}"
+    );
+    assert!(
+        !rendered.contains("No sequences yet"),
+        "the empty state must not show when sequences exist: {rendered}"
+    );
+}
+
 /// The URL bar shows `METHOD  url` + right-aligned indicators when an endpoint
 /// with auth and `{{var}}` placeholders is selected.
 #[test]
