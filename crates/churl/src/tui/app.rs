@@ -1716,6 +1716,8 @@ impl App {
             Action::ToggleAllFolds => self.response_toggle_all_folds(),
             Action::CopyResponse => self.response_copy_view(),
             Action::CopyLine => self.response_copy_line(),
+            Action::ScrollBodyLeft => self.response_scroll_h(false),
+            Action::ScrollBodyRight => self.response_scroll_h(true),
             // `<leader>f` reuses the endpoint-search overlay as the request picker.
             Action::QuickJumpRequests => self.open_search()?,
             Action::QuickJumpWorkspaces => self.open_workspace_picker(),
@@ -2211,6 +2213,19 @@ impl App {
         }
     }
 
+    /// `H`/`L` (or Left/Right): pan the response horizontal window for unwrapped
+    /// long lines (M7.7). A no-op while wrap is on (the view guards internally) —
+    /// wrapped rows already fit the width, so there is nothing to pan. The pan
+    /// amount is a fixed column step; render clamps the offset to the widest
+    /// visible line and writes the clamped value back, so an over-pan self-corrects.
+    fn response_scroll_h(&mut self, right: bool) {
+        /// Columns panned per keypress.
+        const H_STEP: usize = 8;
+        if let Some(view) = self.response_view_mut() {
+            view.scroll_h(right, H_STEP);
+        }
+    }
+
     /// `p`: toggle raw↔pretty body rendering (M7.7). Body text/line count change
     /// (and `toggle_pretty` resets folds), so reset cursor/scroll geometry and
     /// clear the highlight cache. Pretty is JSON-only in v1 — no-op with a notice
@@ -2374,20 +2389,25 @@ impl App {
     }
 
     /// Moves the response cursor onto the current search match's logical line,
-    /// so scroll follows it into view at the next render.
+    /// so scroll follows it into view at the next render. Also pans the horizontal
+    /// window so an unwrapped match that lies past the right edge is brought into
+    /// view (M7.7 horizontal search-into-view); inert while wrap is on.
     fn response_center_on_match(&mut self) {
         let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
         };
         let width = b.response_viewport_width;
-        let row = match &b.response {
-            ResponseState::Done { view } => view
-                .current_match_line()
-                .and_then(|logical| view.display_row_for_logical(logical, width)),
-            _ => None,
+        let ResponseState::Done { view } = &mut b.response else {
+            return;
         };
-        if let Some(row) = row {
+        if let Some(row) = view
+            .current_match_line()
+            .and_then(|logical| view.display_row_for_logical(logical, width))
+        {
             b.response_cursor = row;
+        }
+        if let Some((start, end)) = view.current_match_columns() {
+            view.ensure_column_visible(start, end, width);
         }
     }
 
@@ -5575,6 +5595,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         b.response_total_rows = outcome.total_rows;
         b.response_viewport_height = outcome.viewport_height;
         b.response_viewport_width = outcome.viewport_width;
+        // Write the clamped horizontal scroll back onto the view so an over-pan
+        // (past the widest visible line) self-corrects on the next frame (M7.7).
+        if let ResponseState::Done { view } = &mut b.response {
+            view.set_h_scroll(outcome.clamped_h_scroll);
+        }
         if let Some(job) = outcome.job {
             let dup = b.pending_highlight == Some(job.hash);
             if !dup && let Some(tx) = &app.highlight_tx {

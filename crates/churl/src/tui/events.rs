@@ -153,6 +153,10 @@ pub enum Action {
     CopyResponse,
     /// Copy the response cursor's logical line to the clipboard.
     CopyLine,
+    /// Pan the response horizontal window left (unwrapped long lines, M7.7).
+    ScrollBodyLeft,
+    /// Pan the response horizontal window right (unwrapped long lines, M7.7).
+    ScrollBodyRight,
     /// Open the quick-jump request picker (fuzzy over all endpoints). Reuses the
     /// endpoint-search overlay; bound to `<leader>f`.
     QuickJumpRequests,
@@ -213,7 +217,7 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Cancel, "cancel", "cancel request"),
     (Action::OpenSearch, "open-search", "search endpoints"),
     (Action::OpenPalette, "open-palette", "command palette"),
-    (Action::Jump, "jump", "jump to pane / row"),
+    (Action::Jump, "jump", "jump to pane"),
     (Action::SwitchProfile, "switch-profile", "switch profile"),
     (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
     (Action::RunSequence, "run-sequence", "run sequence"),
@@ -308,6 +312,16 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     ),
     (Action::CopyResponse, "copy-response", "copy response"),
     (Action::CopyLine, "copy-line", "copy line"),
+    (
+        Action::ScrollBodyLeft,
+        "scroll-body-left",
+        "scroll response left",
+    ),
+    (
+        Action::ScrollBodyRight,
+        "scroll-body-right",
+        "scroll response right",
+    ),
     (
         Action::QuickJumpRequests,
         "quick-jump-requests",
@@ -637,6 +651,15 @@ impl Default for KeyMap {
         overlay(PaneCtx::Response, key!(shift - o), Action::ToggleAllFolds);
         overlay(PaneCtx::Response, key!(y), Action::CopyResponse);
         overlay(PaneCtx::Response, key!(shift - y), Action::CopyLine);
+        // Horizontal window pan for unwrapped long lines (M7.7). `H`/`L`
+        // (shift-h/shift-l) were free in the Response overlay; Left/Right arrows are
+        // aliases (also free here — global Left/Right are unbound, only the Explorer
+        // overlay uses them). No-op while wrap is on. Wrap-off-only is enforced in
+        // the handler, not the binding, so the keys stay reserved for panning.
+        overlay(PaneCtx::Response, key!(shift - h), Action::ScrollBodyLeft);
+        overlay(PaneCtx::Response, key!(shift - l), Action::ScrollBodyRight);
+        overlay(PaneCtx::Response, key!(left), Action::ScrollBodyLeft);
+        overlay(PaneCtx::Response, key!(right), Action::ScrollBodyRight);
 
         // The leader chord: Space, then a continuation key. Root binds are either
         // direct actions or descents into a nested submenu (two-level which-key).
