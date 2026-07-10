@@ -3,10 +3,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// HTTP request method.
-///
-/// Covers the standard methods used in REST APIs. Additional methods (e.g. CONNECT, TRACE)
-/// can be added in later milestones if needed.
+/// HTTP request method. Covers the standard REST methods; CONNECT/TRACE can be
+/// added later if needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
@@ -89,12 +87,12 @@ impl<'de> Deserialize<'de> for Method {
     }
 }
 
-/// Returns `true`; serde default for the `enabled` flag on [`Header`] and [`Param`].
+/// Serde default for the `enabled` flag on [`Header`] and [`Param`].
 fn default_true() -> bool {
     true
 }
 
-/// Returns whether a bool is `true`; used to omit `enabled = true` from serialized output.
+/// Used to omit `enabled = true` from serialized output.
 fn is_true(b: &bool) -> bool {
     *b
 }

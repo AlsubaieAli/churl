@@ -88,7 +88,6 @@ impl LineEditor {
             }
             self.scroll += 1;
         }
-        // Collect visible chars from `scroll` up to `width` cells.
         let mut text = String::new();
         let mut cells = 0usize;
         let mut end = self.scroll;

@@ -171,7 +171,7 @@ pub struct ResponseView {
     text: String,
     /// The raw, on-the-wire body — a lossy-UTF-8 decode of the exact response
     /// bytes, never reformatted. Copy (`y`/`Y`) reads from here so it stays
-    /// byte-exact regardless of the pretty toggle.
+    /// byte-exact regardless of the pretty toggle (decision 3).
     raw_text: String,
     /// Byte offset of each line start (into `text`). Empty for an empty body.
     line_offsets: Vec<usize>,
@@ -434,14 +434,12 @@ impl ResponseView {
 
     /// Toggles A→Z alphabetical sorting of pretty JSON object keys (`s`). Like
     /// `toggle_pretty` this is a display-geometry change: it rebuilds the shown
-    /// `text` and its line index (through the same reformat path, now honouring
-    /// `sort_keys`), bumps the generation to invalidate the highlight cache,
+    /// `text`/line index, bumps the generation (highlight-cache invalidation),
     /// **resets folds** (opener positions shift), and **clears any live search**
     /// (its `(line, byte, byte)` matches point at the old layout). `sort_keys` is
     /// independent of `pretty`; when pretty is off (or the body is not JSON) the
-    /// reformat is a no-op and the displayed text is unchanged — the toggle then
-    /// just records the flag for when pretty is next turned on. Returns the new
-    /// `sort_keys` state.
+    /// reformat is a no-op — the toggle just records the flag for when pretty is
+    /// next on. Returns the new `sort_keys` state.
     pub fn toggle_sort_keys(&mut self) -> bool {
         self.sort_keys = !self.sort_keys;
         self.text =
@@ -885,7 +883,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
         None => " Response ".to_owned(),
     };
 
-    // For Done state, embed the stats as a right-aligned block title.
+    // Done state: stats as a right-aligned block title.
     let stats_title: Option<String> = if let ResponseState::Done { view } = ctx.state {
         Some(status_summary(view, ctx.focused))
     } else {
@@ -904,8 +902,8 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // For Done state, use the full inner area as body (no status_area split).
-    // For non-Done states, keep the status_area split for status messages.
+    // Done state uses the full inner area as body; other states split off a
+    // status_area for their status message.
     let (viewport_height, body_area_opt, status_area_opt) = if stats_title.is_some() {
         (inner.height as usize, Some(inner), None)
     } else {
@@ -1035,7 +1033,7 @@ fn render_done(
     outcome.total_rows = total;
     outcome.viewport_width = width;
 
-    // Clamp cursor and scroll into range; keep the cursor within the viewport.
+    // Clamp cursor and scroll into range, keeping the cursor within the viewport.
     let cursor = ctx.cursor.min(total.saturating_sub(1));
     let mut scroll = clamp_scroll(ctx.scroll, total, height);
     if cursor < scroll {
@@ -1434,11 +1432,9 @@ fn viewport_hash(view: &ResponseView, scroll: usize, height: usize) -> u64 {
     scroll.hash(&mut hasher);
     height.hash(&mut hasher);
     view.syntax.hash(&mut hasher);
-    // Raw↔pretty changes the displayed text, so it must key the highlight cache
-    // (belt-and-braces alongside the generation bump `toggle_pretty` already does).
+    // Pretty and sort_keys both change the displayed text, so they key the cache
+    // (belt-and-braces alongside the generation bump their toggles already do).
     view.pretty.hash(&mut hasher);
-    // Sort-keys likewise changes the pretty text; key it too (belt-and-braces
-    // alongside the generation bump `toggle_sort_keys` does).
     view.sort_keys.hash(&mut hasher);
     hasher.finish()
 }

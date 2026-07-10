@@ -66,8 +66,8 @@ pub struct HighlightJob {
 
 /// Spawns the highlight worker thread and returns the job sender. `light`
 /// selects the embedded syntect theme (Nord for dark, InspiredGithub for light)
-/// so response bodies match the pane palette. The worker runs until the sender is
-/// dropped or the app channel closes.
+/// so response bodies match the pane palette. Runs until the sender drops or the
+/// app channel closes.
 pub fn spawn(app_tx: UnboundedSender<AppMsg>, light: bool) -> Sender<HighlightJob> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<HighlightJob>();
     std::thread::Builder::new()

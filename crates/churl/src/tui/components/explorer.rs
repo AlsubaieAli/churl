@@ -179,9 +179,6 @@ impl ExplorerState {
         })
     }
 
-    /// Adjusts the scroll offset so the cursor stays within a `height`-row
-    /// viewport, clamped so we never scroll past the last screenful, and returns
-    /// the offset. Called by [`render`] with the pane's inner height.
     /// Index of the first visible row (the scroll offset as of the last
     /// [`scroll_to_fit`] call). Jump-mode uses it to start labelling at the
     /// viewport instead of the top of the tree.
@@ -191,6 +188,9 @@ impl ExplorerState {
         self.scroll
     }
 
+    /// Adjusts the scroll offset so the cursor stays within a `height`-row
+    /// viewport, clamped so we never scroll past the last screenful, and returns
+    /// the offset. Called by [`render`] with the pane's inner height.
     pub fn scroll_to_fit(&mut self, height: usize) -> usize {
         if height == 0 {
             self.scroll = 0;

@@ -39,7 +39,6 @@ pub fn render_prompt(
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
-    // Render the text with a block cursor at the cursor column.
     let text = editor.text();
     let cursor = editor.cursor();
     let chars: Vec<char> = text.chars().collect();

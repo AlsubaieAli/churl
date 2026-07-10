@@ -96,9 +96,7 @@ pub enum InterchangeError {
     Persistence(#[from] PersistenceError),
 }
 
-// ---------------------------------------------------------------------------
 // Import — Postman Collection v2.1 → churl
-// ---------------------------------------------------------------------------
 
 /// Parses a Postman Collection v2.1 document into a [`CollectionImport`].
 ///
@@ -474,9 +472,7 @@ fn derive_name(url: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Write imported endpoints into a workspace
-// ---------------------------------------------------------------------------
 
 /// Writes an imported collection into the workspace rooted at `root`, creating
 /// one churl collection per top-level folder (nested folders are flattened by
@@ -585,9 +581,7 @@ fn ensure_collection(root: &Path, name: &str) -> Result<std::path::PathBuf, Inte
     }
 }
 
-// ---------------------------------------------------------------------------
 // Export — churl → JSON (Postman v2.1 | native)
-// ---------------------------------------------------------------------------
 
 /// Exports the whole workspace to a JSON string in `dialect`. Every collection
 /// directory is read and grouped; the secrets gate applies per endpoint.

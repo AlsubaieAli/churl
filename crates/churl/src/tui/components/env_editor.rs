@@ -216,7 +216,6 @@ impl EnvEditorState {
         self.scopes != self.snapshot || self.active_profile != self.snapshot_active_profile
     }
 
-    /// The currently-selected scope.
     fn scope(&self) -> &EnvScope {
         &self.scopes[self.selected_scope]
     }
