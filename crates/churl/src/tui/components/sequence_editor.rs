@@ -684,6 +684,21 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
         }
         lines.push(line);
     }
+    // Guidance on the extraction grammar (owner drive-test #5 — adding a rule gave
+    // no hint how to extract a value). Shown while the Rules pane is focused/edited
+    // so the syntax is in view as you type. Mirrors the M7.4 grammar subset:
+    // `status`, `header:<name>`, and `$.json.path` (with `[i]` array indexing).
+    if focused {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "extract from response:",
+            theme.statusline,
+        )));
+        lines.push(Line::from(Span::styled(
+            "  status · header:<name> · $.json.path · $.list[0].id",
+            theme.statusline,
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -844,6 +859,36 @@ mod tests {
         assert_eq!(out.steps[0].seq, 0);
         assert_eq!(out.steps[0].endpoint, "b/two.toml");
         assert_eq!(out.steps[1].seq, 1);
+    }
+
+    fn render_to_text(state: &SequenceEditorState) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state, &theme))
+            .expect("draw");
+        format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn rules_pane_shows_extraction_grammar_hint_when_focused() {
+        // Owner drive-test #5: adding a rule gave no guidance on the extract
+        // syntax. The hint shows while the Rules pane is focused, and stays hidden
+        // while on the Steps list.
+        let mut ed = editor();
+        // Steps-focused: no extraction hint yet.
+        assert!(!render_to_text(&ed).contains("extract from response"));
+        // Move focus to the Rules pane (l from a non-empty step list).
+        ed.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(ed.focus, Focus::Rules);
+        let out = render_to_text(&ed);
+        assert!(out.contains("extract from response"));
+        assert!(out.contains("status"));
+        assert!(out.contains("header:<name>"));
+        assert!(out.contains("$.json.path"));
     }
 
     #[test]
