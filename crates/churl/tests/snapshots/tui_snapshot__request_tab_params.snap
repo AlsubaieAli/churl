@@ -2,12 +2,12 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┌ Explorer ──────────────────┐ Search                                           
+┌ Explorer ──────────────────┐▐ Search ▌                                        
 │  ▾ api                     │┌ URL ───────────────────────────────────────────┐
 │>   Search                  ││GET  https://api.test/search                    │
 │                            │└────────────────────────────────────────────────┘
 │                            │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                            │┃ [1] Params(2)   [2] Headers(0)   [3] Auth   [4]┃
+│                            │┃▐ [1] Params(2) ▌ ▐ [2] Headers(0) ▌ ›          ┃
 │                            │┃> ✓ q = rust                                    ┃
 │                            │┃  ✗ page = 1                                    ┃
 │                            │┃                                                ┃

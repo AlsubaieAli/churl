@@ -2,12 +2,12 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: snapshot(&mut app)
 ---
-┌ Explorer ──────────────────┐ List users ●                                     
+┌ Explorer ──────────────────┐▐ List users ● ▌                                  
 │  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
 │  ▾ users                   ││GET  https://api.test/usersZZZ              ●   │
 │>   List users ●            │└────────────────────────────────────────────────┘
 │    Create user             │┌ Request ───────────────────────────────────────┐
-│    Get user                ││ Params(0)   Headers(0)   Auth   Body           │
+│    Get user                ││▐ Params(0) ▌ ▐ Headers(0) ▌ ▐ Auth ▌ ▐ Body ▌  │
 │                            ││  (no params — a to add)                        │
 │                            ││                                                │
 │                            ││                                                │

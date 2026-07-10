@@ -23,8 +23,13 @@ pub struct Theme {
     pub border_unfocused: Style,
     /// Pane titles.
     pub title: Style,
-    /// Selected/cursor row in the explorer and pickers.
+    /// Selected/cursor row in the explorer and pickers. Also the bright,
+    /// filled background of the ACTIVE tab chip in both tab bars.
     pub selection: Style,
+    /// The dim, filled background of an INACTIVE tab chip in both tab bars —
+    /// a notch off the pane background so a chip reads as filled-but-dim,
+    /// clearly distinct from the bright active `selection` chip.
+    pub tab_inactive: Style,
     /// The status line.
     pub statusline: Style,
     /// An error/warning message in the status line.
@@ -50,6 +55,9 @@ impl Theme {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
             selection: Style::default().fg(Color::Black).bg(Color::Cyan),
+            // Dim filled chip: light-gray text on a dark-gray fill — a notch
+            // off the black pane bg, clearly dimmer than the bright cyan active.
+            tab_inactive: Style::default().fg(Color::Gray).bg(Color::DarkGray),
             statusline: Style::default().fg(Color::Gray),
             status_error: Style::default().fg(Color::Red),
             auth_mask: Style::default().fg(Color::DarkGray),
@@ -71,6 +79,9 @@ impl Theme {
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
             selection: Style::default().fg(Color::White).bg(Color::Blue),
+            // Dim filled chip: dark-gray text on a light-gray fill — a notch off
+            // the white pane bg, clearly dimmer than the bright blue active.
+            tab_inactive: Style::default().fg(Color::DarkGray).bg(Color::Gray),
             statusline: Style::default().fg(Color::DarkGray),
             status_error: Style::default().fg(Color::Red),
             auth_mask: Style::default().fg(Color::Gray),
@@ -118,6 +129,7 @@ impl Theme {
             "border_unfocused" => &mut self.border_unfocused,
             "title" => &mut self.title,
             "selection" => &mut self.selection,
+            "tab_inactive" => &mut self.tab_inactive,
             "statusline" => &mut self.statusline,
             "status_error" => &mut self.status_error,
             "auth_mask" => &mut self.auth_mask,
