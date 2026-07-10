@@ -2791,16 +2791,16 @@ impl App {
                 // The `e` label must land on the endpoints tree (mirroring `s` →
                 // Sequences). Without resetting `left_active`, an `f e` from a
                 // focused Sequences sub-pane would stay on Sequences and appear to
-                // do nothing (owner drive-test 2026-07-10). Safe: the invariant
-                // only *forces* Endpoints when the list is empty, so an explicit
-                // Endpoints here never fights it.
+                // do nothing (owner drive-test 2026-07-10).
                 JumpTarget::Pane(Pane::Explorer) => {
                     self.left_active = LeftPane::Endpoints;
                     self.set_focus(Pane::Explorer);
                 }
                 JumpTarget::Pane(pane) => self.set_focus(pane),
                 // Sequences sub-pane lives in the left column: focus it and make
-                // it active (the invariant only forces Endpoints on an empty list).
+                // it active. An EXPLICIT `f s` sticks even on an empty list — the
+                // pane zooms in and shows an informative empty state (note #3);
+                // `set_focus` no longer force-reverts to Endpoints.
                 JumpTarget::Sequences => {
                     self.left_active = LeftPane::Sequences;
                     self.set_focus(Pane::Explorer);
@@ -4064,13 +4064,16 @@ impl App {
             _ => {}
         }
         self.focus = pane;
-        self.enforce_left_active_invariant();
     }
 
-    /// An empty sequences sub-pane can never hold the left-column focus: with no
-    /// sequences, `left_active` is forced back to `Endpoints`. Catches a workspace
-    /// switch/reload into a sequence-less workspace that would otherwise strand
-    /// focus on an empty pane. (Sub-pane always present now — M7.10 stage B.)
+    /// Reconciles the left-column focus after a *passive* transition that may have
+    /// emptied the sequence list (a disk reload / workspace switch): a focus that
+    /// was resting on the sequences sub-pane is dropped back to `Endpoints` so it
+    /// never strands on a list that vanished under it. This is NOT called from the
+    /// generic focus path (`set_focus`) — an EXPLICIT focus on an empty Sequences
+    /// pane (`f s`, the `s` overlay) is honored and shows an informative empty
+    /// state (note #3); only passive emptying reconciles here. (Sub-pane always
+    /// present — M7.10 stage B; empty pane focusable — note #3.)
     fn enforce_left_active_invariant(&mut self) {
         if self.explorer.sequences_len() == 0 {
             self.left_active = LeftPane::Endpoints;
@@ -5284,9 +5287,8 @@ impl App {
         self.pending_load = None;
         self.zoom = None;
         // Clean slate for the sequences sub-pane: the new workspace's list is
-        // unrelated to the old one. Reset to endpoints-zoomed; `set_focus` below
-        // re-runs the invariant (which forces Endpoints when the new workspace
-        // has no sequences).
+        // unrelated to the old one. Reset to endpoints-zoomed — a fresh workspace
+        // always lands on the endpoints tree regardless of its sequence count.
         self.left_active = LeftPane::Endpoints;
         self.focus_before_explorer = None;
         // set_focus(Explorer) also un-hides the explorer if it was hidden.
@@ -7942,6 +7944,22 @@ mod tests {
         App::new(ws, KeyMap::default()).unwrap()
     }
 
+    /// A workspace with one collection (one endpoint) and NO sequences dir, for
+    /// the note #3 focused-empty-pane tests. Mirrors [`seq_pane_app`] minus the
+    /// `sequences/` dir.
+    fn empty_seq_pane_app(root: &Path) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        App::new(ws, KeyMap::default()).unwrap()
+    }
+
     /// M7.10 stage B: the Explorer `s` overlay (`focus-sequences-toggle`) flips
     /// `left_active` Endpoints⇄Sequences and focuses the left column. The
     /// sub-pane is always present (peek-symmetric), so nothing ever hides.
@@ -7986,17 +8004,118 @@ mod tests {
         );
     }
 
-    /// M7.10 stage B: the empty-list invariant still holds — a workspace with no
-    /// sequences forces `left_active` back to Endpoints on the next focus (the
-    /// `sequences_shown` clause is gone, but the empty guard survives).
+    /// Note #3: an EXPLICIT focus on the empty sequences sub-pane now STICKS —
+    /// `set_focus` no longer force-reverts to Endpoints on a zero-length list.
+    /// (Previously this asserted the blanket force-Endpoints behavior; that crutch
+    /// is gone — the empty pane is focusable and renders an informative empty
+    /// state. The reload/switch reconcile path keeps its own guard, exercised by
+    /// `reload_emptying_sequences_forces_endpoints`.)
     #[test]
-    fn left_active_forced_endpoints_when_no_sequences() {
+    fn explicit_focus_sticks_on_empty_sequences_pane() {
         // A workspace with an endpoint but zero sequences.
         let mut app = App::new(None, KeyMap::default()).unwrap();
         app.left_active = LeftPane::Sequences;
         assert_eq!(app.explorer.sequences_len(), 0);
         app.set_focus(Pane::Explorer);
+        assert_eq!(
+            app.left_active,
+            LeftPane::Sequences,
+            "an explicit focus on the empty sequences pane is honored (note #3)"
+        );
+    }
+
+    /// Note #3: `f s` (the jump `s` label) focuses+zooms the empty sequences
+    /// sub-pane and it STICKS — the old empty-list invariant no longer reverts it.
+    #[test]
+    fn f_jump_s_sticks_on_empty_sequences_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = empty_seq_pane_app(dir.path());
+        assert_eq!(app.explorer.sequences_len(), 0);
+        app.dispatch(Action::Jump, None).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, Pane::Explorer);
+        assert_eq!(
+            app.left_active,
+            LeftPane::Sequences,
+            "`f s` on an empty workspace zooms the sequences pane, not reverts"
+        );
+    }
+
+    /// Note #3 — NOT a dead-end: from a focused-empty Sequences pane, `Tab`
+    /// (FocusNext all the way round) and `f e` both return to the endpoints tree.
+    #[test]
+    fn focused_empty_sequences_pane_is_not_a_dead_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = empty_seq_pane_app(dir.path());
+        // Zoom into the empty sequences pane.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        // Way out #1: Tab genuinely LEAVES the left column — the first FocusNext
+        // moves focus off Explorer (not a no-op that traps you on the empty pane);
+        // a full 4-region cycle then returns to it.
+        app.dispatch(Action::FocusNext, None).unwrap();
+        assert_ne!(
+            app.focus,
+            Pane::Explorer,
+            "Tab must move focus off the empty sequences pane, not trap on it"
+        );
+        assert_eq!(app.focus, Pane::UrlBar);
+        for _ in 0..3 {
+            app.dispatch(Action::FocusNext, None).unwrap();
+        }
+        assert_eq!(app.focus, Pane::Explorer);
+        // Way out #2: `f e` jumps back to the endpoints tree.
+        app.dispatch(Action::Jump, None).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "`f e` escapes the empty sequences pane back to endpoints"
+        );
+        // Way out #3: the `s` overlay toggles straight back too.
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert_eq!(app.left_active, LeftPane::Endpoints);
+    }
+
+    /// Note #3 — the add path works from the focused-empty pane: `<leader>s a`
+    /// (`EditSequence`) opens the new-sequence prompt (the add entry point) with
+    /// zero sequences, and none of the in-pane nav keys panic on an empty list.
+    #[test]
+    fn empty_sequences_pane_add_and_nav_never_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = empty_seq_pane_app(dir.path());
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        // In-pane nav with an empty list is a no-op — no index-out-of-range panic.
+        for action in [
+            Action::Down,
+            Action::Up,
+            Action::Top,
+            Action::Bottom,
+            Action::Select, // Enter on no selection → new-sequence prompt
+        ] {
+            app.dispatch(action, None).unwrap();
+        }
+        // Select (Enter) with no sequence opened the new-sequence name prompt.
+        assert_eq!(app.mode, Mode::Prompt(PromptPurpose::NewSequence));
+        assert_eq!(app.explorer.seq_cursor(), 0, "cursor stays pinned at 0");
+        assert!(app.explorer.selected_sequence().is_none());
+
+        // `<leader>s a` (EditSequence) reaches the same add entry point.
+        app.mode = Mode::Normal;
+        app.dispatch(Action::EditSequence, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Prompt(PromptPurpose::NewSequence),
+            "<leader>s a opens the add-sequence prompt from the empty pane"
+        );
+        // `r` (RunSequence) with nothing selected is a safe no-op (no panic).
+        app.mode = Mode::Normal;
+        app.dispatch(Action::RunSequence, None).unwrap();
     }
 
     #[test]
@@ -8335,8 +8454,9 @@ mod tests {
 
         app.switch_workspace(dir_b.path().to_path_buf()).unwrap();
         assert_eq!(app.explorer.sequences_len(), 0);
-        // The sub-pane stays present (always-on); the invariant instead forces
-        // `left_active` back to Endpoints so focus never strands on an empty pane.
+        // A workspace switch is a clean slate: `switch_workspace` always lands on
+        // the endpoints tree (it sets `left_active = Endpoints` directly), so the
+        // old workspace's Sequences focus never carries into the new one.
         assert_eq!(
             app.left_active,
             LeftPane::Endpoints,
