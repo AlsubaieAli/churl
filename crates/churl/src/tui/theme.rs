@@ -128,10 +128,9 @@ impl Theme {
         })
     }
 
-    /// The syntect embedded theme name matching this built-in, used by the
-    /// highlight worker so response bodies match the pane palette.
+    /// Whether this is the light built-in, so the highlight worker can match
+    /// response bodies to the pane palette.
     pub fn is_light(&self) -> bool {
-        // Only the light built-in uses a light selection background.
         *self == Self::light()
     }
 }

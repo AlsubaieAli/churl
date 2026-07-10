@@ -31,6 +31,7 @@
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
 | **R3** | Secret & request safety (placeholder-gate · redirect policy · env grandfather+warn) | planned |
 | M7.9 | Unified creation flow (`<leader>n`: collection/endpoint/sequence; endpoint from curl) | planned |
+| **M7.11** | Modularization refactor (split oversized files; behaviour-preserving) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
 
@@ -811,6 +812,42 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - **Endpoint creation picks a collection**: creating an endpoint prompts for a target collection (reuse the picker); if none is chosen, create it at the **workspace root**.
 - **Endpoint from curl**: creating an endpoint can start from a **pasted curl command** — parse it into an endpoint (reuse the `churl-core::import` curl parser + the in-TUI curl-paste seam from M7.1).
 - Tests: submenu routing; endpoint-create in a chosen collection vs. root; curl-paste → endpoint round-trip.
+
+**Next**: M8
+
+---
+
+## M7.11 — Modularization refactor (behaviour-preserving)
+
+**Class**: refactor / internal-quality (a fourth class alongside F/R/D — no user-facing change, no new behaviour). **Owner request 2026-07-10**: the codebase has grown to files well over 1k lines and is getting hard to navigate; split them into smaller, single-responsibility modules to make the code simpler to move around in — **only where it does not change behaviour or risk breaking the app**.
+
+**The problem (measured 2026-07-10, master `9803863`)** — src is ~32k lines across 45 files, ~16% comments (a separate cleanup pass is landing in the chore/m7.7-comment-cleanup PR). Oversized files:
+
+| File | Lines | Note |
+|---|---|---|
+| `tui/app.rs` | ~9.8k | **god file** — the `App` struct + every mode/key handler + response/help/search/sequence/load orchestration in one module. Top priority. |
+| `tui/components/response.rs` | ~2.1k | viewer: reformat, fold, wrap, search, highlight, render |
+| `tui/events.rs` | ~1.9k | keymap + action table + dispatch |
+| `tui/components/env_editor.rs` | ~1.7k | |
+| `tui/components/load_runner.rs` | ~1.6k | |
+| `churl-core/interchange.rs` | ~1.2k | Postman/OpenAPI import+export |
+| `tui/components/explorer.rs` | ~1.1k | |
+
+**Target**: no non-test src file over ~800–1000 lines where a clean split exists; `app.rs` in particular broken into a folder module (`tui/app/` = `mod.rs` re-exporting + `handlers/` by concern: normal-mode, search, help, response actions, sequence, load-runner, palette dispatch). Rust module system only — public paths preserved or re-exported so no downstream churn.
+
+**Hard constraints (this is the "if it does not break the app" the owner asked for)**:
+- **Pure moves, zero behaviour change.** Each commit relocates items between modules and adjusts `mod`/`use`/visibility only — no logic edits, no signature changes, no renames of public items (use `pub use` re-exports if a path must move). If a rename genuinely helps, it is a *separate* follow-up commit, never mixed with a move.
+- **Green before and after every step.** `cargo test --all` (all ~470 tests) + clippy `-D warnings` + fmt must pass after each file's split, not just at the end. Snapshot tests are the safety net for render-path moves.
+- **Incremental, one oversized file per commit/PR** (app.rs likely needs several) — small reviewable diffs, easy to bisect if something regresses. Never a single big-bang refactor.
+- Update `.serena` index and any `ARCHITECTURE.md` module-map after moves land.
+
+**Deliverables**:
+- `app.rs` decomposed into `tui/app/` submodules by concern (biggest win; do first, in stages).
+- `response.rs`, `events.rs`, and the other >1k files split along their natural seams (viewer sub-concerns; keymap-table vs dispatch; editor state vs render).
+- ARCHITECTURE.md module map refreshed; a short DECISIONS ADR recording the module-boundary conventions so future files don't re-bloat.
+- No new tests required (behaviour unchanged) beyond keeping the existing suite green; add a note to the regression checklist that file-size is now watched.
+
+**Sequencing / open question**: placed before M9 deliberately — cleaner module boundaries make the M9 plugin-API seams easier to define and freeze. But it is behaviour-neutral, so the owner can reprioritise it earlier (e.g. right after the M7.x feature run) or slice it (do `app.rs` now, the rest later). **Owner to confirm placement + whether to tackle `app.rs` opportunistically before then.**
 
 **Next**: M8
 

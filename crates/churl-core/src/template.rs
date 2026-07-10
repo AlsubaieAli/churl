@@ -142,7 +142,6 @@ fn substitute_with(input: &str, mut lookup: impl FnMut(&str) -> Option<String>) 
 fn parse_placeholder(input: &str, start: usize) -> Option<(&str, usize)> {
     let inner_start = start + 2; // skip "{{"
     let rest = &input[inner_start..];
-    // Find the closing "}}".
     let close = rest.find("}}")?;
     let name = &rest[..close];
     let trimmed = name.trim();

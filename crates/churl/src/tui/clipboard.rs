@@ -92,12 +92,10 @@ pub fn copy(payload: &str, out: &mut impl Write) -> CopyOutcome {
     }
 }
 
-/// Attempts a native OS-clipboard write via [`arboard`]. Returns whether it
-/// succeeded. Never panics; any error (no display, no clipboard server, etc.)
-/// is treated as "unavailable" so the caller falls back to OSC 52.
-///
-/// Not exercised by `cargo test` — headless CI has no display/clipboard, and
-/// the unit tests only cover the pure framing/wrapping logic below.
+/// Attempts a native OS-clipboard write via [`arboard`]. Never panics; any error
+/// (no display, no clipboard server, etc.) is treated as "unavailable" so the
+/// caller falls back to OSC 52. Not exercised by `cargo test` (headless CI has
+/// no clipboard); the unit tests only cover the pure framing logic below.
 fn copy_native(payload: &str) -> bool {
     match arboard::Clipboard::new() {
         Ok(mut clipboard) => clipboard.set_text(payload).is_ok(),
@@ -142,10 +140,8 @@ fn osc52_sequence(payload: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
-/// Wraps a raw OSC 52 sequence in tmux's DCS passthrough: `ESC P tmux ; ESC
-/// <osc52-with-each-ESC-doubled> ESC \`. tmux forwards the inner string to the
-/// outer terminal; every `ESC` in the payload must be doubled so tmux does not
-/// treat it as the end of the passthrough.
+/// Wraps a raw OSC 52 sequence in tmux's DCS passthrough so it reaches the outer
+/// terminal. See the inline note for the ESC-doubling rule (load-bearing).
 fn wrap_tmux(osc52: &str) -> String {
     // tmux DCS passthrough is `ESC P tmux ; <data> ESC \`, where every ESC inside
     // `<data>` is doubled so it survives tmux's un-doubling (tmux turns each

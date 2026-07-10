@@ -284,7 +284,6 @@ impl SequenceRunnerState {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            // Cancel a running batch.
             KeyCode::Char('c') if ctrl => {
                 if self.is_running() {
                     RunnerOutcome::Cancel
@@ -292,7 +291,7 @@ impl SequenceRunnerState {
                     RunnerOutcome::Consumed
                 }
             }
-            // Close (confirm first if a run is in progress).
+            // Close, confirming first if a run is in progress.
             KeyCode::Char('q') | KeyCode::Esc => {
                 if self.is_running() {
                     self.confirming_close = true;
@@ -301,9 +300,7 @@ impl SequenceRunnerState {
                     RunnerOutcome::Close
                 }
             }
-            // Re-run from the top.
             KeyCode::Char('r') => RunnerOutcome::Rerun,
-            // Toggle focus between the step list and the response viewer.
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     RunnerFocus::Steps => RunnerFocus::Response,
@@ -429,13 +426,12 @@ fn progress_line(state: &SequenceRunnerState) -> String {
     parts.join(" · ")
 }
 
-/// Renders the sequence runner over `area`. Returns a [`HighlightJob`] for the
-/// selected step's response viewport on a cache miss, for the caller to enqueue
-/// into the highlight worker (mirrors the main response pane). The `cache` is the
-/// app's shared viewport-hash → highlighted-lines cache.
+/// Renders the runner (the Run face of the unified sequence surface; title
+/// carries the `Ctrl-R` edit hint). Returns a [`HighlightJob`] for the selected
+/// step's response viewport on a cache miss, for the caller to enqueue into the
+/// highlight worker (mirrors the main response pane). `cache` is the app's shared
+/// viewport-hash → highlighted-lines cache.
 #[must_use]
-/// Renders the runner — the Run face of the unified sequence surface (title
-/// carries the `Ctrl-R` edit hint).
 pub fn render(
     frame: &mut Frame,
     area: Rect,

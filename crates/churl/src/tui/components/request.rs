@@ -69,7 +69,6 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
         return;
     };
 
-    // Tab bar on top, content below.
     let [tabbar_area, content_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
     frame.render_widget(
@@ -121,7 +120,7 @@ pub fn collapsed_summary(
     if request.is_none() {
         return Line::from("no endpoint selected");
     }
-    // Render the tab bar without digit prefixes (collapsed = not focused)
+    // Collapsed = not focused, so no digit prefixes.
     tab_bar_line(request, tabs, theme, false)
 }
 

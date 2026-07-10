@@ -259,14 +259,13 @@ fn run_import(curl: &str, name: Option<String>, out: Option<PathBuf>) -> Result<
 fn install_hooks() -> Result<()> {
     let (panic_hook, eyre_hook) = color_eyre::config::HookBuilder::default().into_hooks();
 
-    // Wrap the panic hook so the terminal is restored first.
+    // Restore the terminal before the panic hook prints.
     let panic_hook = panic_hook.into_panic_hook();
     std::panic::set_hook(Box::new(move |info| {
         churl::tui::restore();
         panic_hook(info);
     }));
 
-    // Wrap the eyre hook similarly.
     let eyre_hook = eyre_hook.into_eyre_hook();
     color_eyre::eyre::set_hook(Box::new(move |e| {
         churl::tui::restore();

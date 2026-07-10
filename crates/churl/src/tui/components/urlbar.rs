@@ -2,8 +2,7 @@
 //! plus right-aligned indicators (auth kind, placeholder count, unsaved dot).
 //!
 //! Focusable since M6.6: it joins the Tab cycle / jump-mode, edits its URL inline
-//! (via a [`LineEditor`]), and switches the method (cycle key / menu). The bar is
-//! always 3 lines tall (1 border top + 1 content line + 1 border bottom).
+//! (via a [`LineEditor`]), and switches the method (cycle key / menu).
 //!
 //! [`LineEditor`]: crate::tui::components::line_editor::LineEditor
 
@@ -134,8 +133,6 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
         indicators.push(format!("{{{{{n}}}}}"));
     }
     let rest_str = indicators.join("  ");
-    // Total display width: the accent dot (+ 2-space gap when both present) +
-    // the dim rest.
     let indicator_str = match (ctx.dirty, rest_str.is_empty()) {
         (true, true) => "●".to_owned(),
         (true, false) => format!("●  {rest_str}"),
@@ -171,7 +168,6 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
             if view.clipped_left {
                 spans.push(Span::raw("…"));
             }
-            // Draw the visible text with a block cursor at cursor_col (in chars).
             let chars: Vec<char> = view.text.chars().collect();
             let mut s = String::new();
             for (col, c) in chars.iter().enumerate() {

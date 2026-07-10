@@ -109,11 +109,10 @@ impl Pane {
     }
 }
 
-/// Which sub-pane inside the left (explorer) column has focus/zoom (PR 2b). The
-/// left column is modelled on a separate axis from [`Pane`]: `Pane::Explorer`
-/// means "left column focused", and `LeftPane` decides which sub-pane inside it.
-/// This keeps `Pane` at its four variants (no Tab-cycle/zoom-pairing churn) and
-/// lets the sequences sub-pane be independently toggled off.
+/// Which sub-pane inside the left (explorer) column has focus/zoom (PR 2b).
+/// Modelled on a separate axis from [`Pane`]: `Pane::Explorer` means "left column
+/// focused", `LeftPane` decides which sub-pane. Keeps `Pane` at four variants (no
+/// Tab-cycle/zoom-pairing churn) and lets the sequences sub-pane toggle off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftPane {
     /// The endpoints tree (default; the only occupant when the sub-pane is off).
@@ -257,9 +256,7 @@ pub enum AppMsg {
     /// the error is stringified at the task boundary to keep core errors out of
     /// the render path.
     Response {
-        /// The generation of the request that produced this result.
         generation: u64,
-        /// The response, or a stringified error.
         outcome: Result<Response, String>,
         /// Metadata captured at send time.
         meta: ResponseMeta,
@@ -268,36 +265,24 @@ pub enum AppMsg {
     Highlighted {
         /// Viewport hash these lines belong to (the cache key).
         hash: u64,
-        /// The highlighted lines.
         lines: Vec<Line<'static>>,
     },
     /// A sequence step completed (M7.4). `run_generation` is matched against the
     /// runner's generation so results from a cancelled/superseded run are dropped.
     SequenceStep {
-        /// The run generation this step belonged to.
         run_generation: u64,
-        /// The step index within the runner.
         index: usize,
-        /// The response, or a stringified transport error.
         outcome: Result<Response, String>,
     },
     /// One copy of a concurrent-load batch actually started executing (M7.5) —
     /// sent by the launcher when the copy enters the concurrency window, so its
     /// row shows the in-flight glyph honestly. `run_generation`-guarded.
-    LoadStarted {
-        /// The run generation this copy belonged to.
-        run_generation: u64,
-        /// The copy's index within the batch.
-        index: usize,
-    },
+    LoadStarted { run_generation: u64, index: usize },
     /// One copy of a concurrent-load batch completed (M7.5). `run_generation`
     /// guards against results from a cancelled/superseded batch.
     LoadResult {
-        /// The run generation this copy belonged to.
         run_generation: u64,
-        /// The copy's index within the batch.
         index: usize,
-        /// The response, or a stringified transport error.
         outcome: Result<Response, String>,
     },
 }
@@ -333,9 +318,7 @@ pub enum ZoomPane {
 
 /// Bookkeeping for the single in-flight request.
 struct InFlightRequest {
-    /// Abort handle for the spawned execution task.
     handle: AbortHandle,
-    /// The generation this request was issued under.
     generation: u64,
     /// Metadata, reused when writing the history row on cancel.
     meta: ResponseMeta,
@@ -365,11 +348,9 @@ struct EndpointBuffer {
     /// The edtui popup URL editor (`e` on the URL bar / `url_edit = "popup"`),
     /// present while the popup is open.
     url_popup: Option<EditorState>,
-    /// edtui event handler for the URL popup.
     url_popup_events: EditorEventHandler,
     /// Normal-mode motion extensions for the URL popup editor.
     url_popup_vim: VimExt,
-    /// The response pane state.
     response: ResponseState,
     /// Response body scroll offset (clamped to the viewport at render time).
     response_scroll: usize,
@@ -385,7 +366,6 @@ struct EndpointBuffer {
     pending_highlight: Option<u64>,
     /// Viewport-hash → highlighted-lines cache (capped, cleared on new response).
     highlight_cache: HashMap<u64, Vec<Line<'static>>>,
-    /// The single in-flight request for this buffer, if any.
     in_flight: Option<InFlightRequest>,
 }
 
@@ -435,7 +415,7 @@ impl EndpointBuffer {
     /// Whether the live endpoint (incl. the edtui body) differs from the pristine
     /// snapshot. Derived — no dirty flag to keep in sync.
     fn is_dirty(&self) -> bool {
-        // Compare with the live body folded in (without mutating self).
+        // Fold the live body in without mutating self, then compare.
         let mut live = self.endpoint.endpoint.clone();
         let text = String::from(self.editor.lines.clone());
         fold_body_text(&mut live.request, text);
@@ -551,7 +531,6 @@ struct PendingCopy {
 pub struct App {
     /// The workspace opened from the cwd, if its `churl.toml` exists.
     pub workspace: Option<OpenWorkspace>,
-    /// Explorer tree state.
     pub explorer: ExplorerState,
     /// The open buffers (loaded endpoints). Stage 1 holds at most one
     /// (`buffers.len() <= 1`); Stage 2 adds true dedup-or-push + a tab strip.
@@ -562,7 +541,6 @@ pub struct App {
     active: usize,
     /// Focused pane in [`Mode::Normal`].
     pub focus: Pane,
-    /// Current top-level input mode.
     pub mode: Mode,
     /// The open overlay's picker, when `mode` is Search or Palette.
     pub picker: Option<picker::PickerState>,
@@ -610,14 +588,10 @@ pub struct App {
     /// dropped. Global (not per-buffer) so generations are unique across buffers,
     /// which is how [`App::on_response`] routes a landed response to its buffer.
     generation: u64,
-    /// Orphan response for the response-pane render snapshots, which drive the
-    /// response component in isolation (no loaded endpoint). Real responses
-    /// always live in the active buffer — this state is UNREACHABLE in
-    /// production (a response only exists after sending from a loaded endpoint),
-    /// so this stays `Idle` outside the isolation tests. The render's no-buffer
-    /// branch falls back to it so those snapshots stay byte-identical.
-    /// (Test-support only; integration snapshot tests need it, so it cannot be
-    /// `#[cfg(test)]`-gated — that flag is off for `tests/`.)
+    /// Orphan response driving the response-pane isolation snapshots (no loaded
+    /// endpoint). UNREACHABLE in production — real responses live in the active
+    /// buffer — so this stays `Idle`; the render's no-buffer branch falls back to
+    /// it. Cannot be `#[cfg(test)]`-gated: that flag is off for `tests/`.
     orphan_response: ResponseState,
     /// A clipboard copy queued by a key handler, flushed by the run loop after
     /// the key is handled (native copy needs no terminal, but the OSC 52
@@ -684,8 +658,7 @@ pub struct App {
     /// help-search input is open or committed. `None` = no help search. Mirrors
     /// the response body search (shared smart-case matcher, `n`/`N`, Esc/Enter).
     help_search: Option<help::HelpSearch>,
-    /// The incremental input editor for the help-overlay `/` search, live while
-    /// `help_search` is open before Enter commits.
+    /// The incremental input editor for the help-overlay `/` search.
     help_search_editor: LineEditor,
     /// Whether the help-search input is still open (typing). Enter closes the
     /// input but keeps `help_search` (matches stay highlighted for `n`/`N`).
@@ -904,7 +877,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Sets a transient message in the dedicated message row (auto-expires).
+    /// Sets a transient, auto-expiring message in the message row.
     fn notify(&mut self, text: impl Into<String>) {
         self.message = Some(Message::new(text));
     }
@@ -941,7 +914,6 @@ impl App {
         self.buffers.get(self.active)
     }
 
-    /// The active buffer (mutable), or `None` when nothing is loaded.
     fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
         self.buffers.get_mut(self.active)
     }
@@ -966,8 +938,7 @@ impl App {
     }
 
     /// The active endpoint's live [`SelectedEndpoint`], for tests / snapshot
-    /// drivers that inspect the loaded endpoint. Replaces the old public
-    /// `selected` field.
+    /// drivers that inspect the loaded endpoint.
     pub fn selected(&self) -> Option<&SelectedEndpoint> {
         self.active_endpoint_buffer().map(|b| &b.endpoint)
     }
@@ -1000,10 +971,9 @@ impl App {
         }
     }
 
-    /// Mutable active response: the active buffer's, or the orphan slot when
-    /// nothing is loaded. In production the orphan is always `Idle`, so response
-    /// actions on it are harmless no-ops; the isolation snapshots use it to drive
-    /// the response viewer without a loaded endpoint.
+    /// Mutable active response, or the orphan slot when nothing is loaded. In
+    /// production the orphan is always `Idle`, so actions on it are harmless
+    /// no-ops; isolation snapshots use it without a loaded endpoint.
     fn active_response_mut(&mut self) -> &mut ResponseState {
         match self
             .buffers
@@ -1015,8 +985,7 @@ impl App {
         }
     }
 
-    /// The active buffer's response state (tests / snapshot drivers). Replaces
-    /// the old public `response` field.
+    /// The active buffer's response state (tests / snapshot drivers).
     pub fn response(&self) -> &ResponseState {
         self.active_response()
     }
@@ -1051,7 +1020,7 @@ impl App {
         self.open_or_focus_buffer(selected);
     }
 
-    /// White-box access to the active endpoint buffer's editor (tests).
+    /// White-box: the active endpoint buffer's editor (tests).
     #[cfg(test)]
     fn test_editor(&mut self) -> &mut EditorState {
         &mut self
@@ -1060,7 +1029,7 @@ impl App {
             .editor
     }
 
-    /// White-box access to the active endpoint buffer's request tabs (tests).
+    /// White-box: the active endpoint buffer's request tabs (tests).
     #[cfg(test)]
     fn test_tabs(&mut self) -> &mut RequestTabs {
         &mut self
@@ -1274,11 +1243,10 @@ impl App {
                 maybe_event = events.next() => match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         self.handle_key(key)?;
-                        // Flush any clipboard copy a key handler queued. The
-                        // layered copy tries the native OS clipboard first, then
-                        // falls back to OSC 52 (with tmux/screen passthrough) on
-                        // the terminal's backend writer — which dispatch has no
-                        // handle to, so the run loop owns this step. The message
+                        // Flush any clipboard copy a key handler queued: native
+                        // clipboard first, then OSC 52 (with tmux/screen
+                        // passthrough) on the terminal backend — which dispatch has
+                        // no handle to, so the run loop owns this. The message
                         // reports the real outcome (Constitution: fail loudly).
                         if let Some(pending) = self.pending_clipboard.take() {
                             let outcome = clipboard::copy(
@@ -1299,7 +1267,6 @@ impl App {
                 },
                 _ = tick.tick() => {
                     self.tick_count = self.tick_count.wrapping_add(1);
-                    // Expire transient status messages after ~4 s.
                     if self.message.as_ref().is_some_and(|s| s.is_expired()) {
                         self.message = None;
                     }
@@ -1379,12 +1346,11 @@ impl App {
             self.body_editor_on_key(key);
             return Ok(());
         }
-        // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T)
-        //     win before leader/keymap. `f` becomes find-char inside the Body
-        //     editor, shadowing the global Jump key there (DECISIONS.md — M6.6
-        //     shadowing precedent); the others are unbound today so nothing is
-        //     lost. This precedes the leader/keymap steps so a pending find's
-        //     next char reaches vim_ext even when it's Space or a mapped key.
+        // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T) win
+        //     before leader/keymap. `f` becomes find-char, shadowing the global
+        //     Jump key there (DECISIONS.md — M6.6 shadowing precedent). Precedes
+        //     leader/keymap so a pending find's next char reaches vim_ext even
+        //     when it's Space or a mapped key.
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
             && !self.body_editor_non_normal()
@@ -1509,9 +1475,9 @@ impl App {
         Ok(())
     }
 
-    /// `/` inside the help overlay: open the incremental help-search input,
-    /// mirroring [`Self::open_body_search`]. Seeds an empty (live) search so
-    /// highlighting/feedback engage immediately.
+    /// `/` inside the help overlay: open the incremental help-search input
+    /// (mirrors [`Self::open_body_search`]). Seeds an empty live search so
+    /// highlighting engages immediately.
     fn open_help_search(&mut self) {
         self.help_search_editor = LineEditor::new("");
         let mut search = help::HelpSearch::default();
@@ -1566,8 +1532,7 @@ impl App {
             return;
         };
         let vh = self.help_viewport_height.max(1);
-        // Bring the match into the viewport: scroll down if it's below, up if
-        // it's above the current window.
+        // Bring the match into the viewport.
         if line < self.help_scroll {
             self.help_scroll = line;
         } else if line >= self.help_scroll + vh {
@@ -1576,17 +1541,15 @@ impl App {
     }
 
     /// Handles one key in the URL vim-popup editor. Mode-aware:
-    /// - In `EditorMode::Search`, everything (incl. Enter/Esc) goes to edtui so
-    ///   `/`-search executes: Enter runs FindFirst (jump to match → Normal), Esc
-    ///   cancels the search. Never commits from Search mode.
-    /// - Otherwise Enter commits (running the param merge; the single-logical-line
-    ///   constraint drops any Enter that edtui would turn into a newline); in
-    ///   Normal mode `vim_ext` motions (W/B/^/f/F/t/T) run next — before the
-    ///   Esc-cancel check, so Esc aborts a pending find instead of closing the
-    ///   popup; then Esc in Normal cancels; the rest falls through to edtui.
+    /// - `EditorMode::Search`: everything (incl. Enter/Esc) goes to edtui so
+    ///   `/`-search executes (Enter jumps to match → Normal, Esc cancels). Never
+    ///   commits from Search mode.
+    /// - Otherwise Enter commits (single-logical-line constraint drops any Enter
+    ///   edtui would turn into a newline). In Normal mode `vim_ext` motions run
+    ///   before the Esc-cancel check, so Esc aborts a pending f/F/t/T find instead
+    ///   of closing the popup; then Esc cancels; the rest falls through to edtui.
     ///
-    /// Accepted edge: Enter while an f/F/t/T find is pending still commits (the
-    /// pending find is dropped with the popup).
+    /// Edge: Enter with a find pending still commits (the find drops with the popup).
     fn handle_url_popup_key(&mut self, key: KeyEvent) -> Result<()> {
         let Some(mode) = self
             .active_endpoint_buffer()
@@ -1594,7 +1557,6 @@ impl App {
         else {
             return Ok(());
         };
-        // Search mode: pass everything to edtui — Enter/Esc drive the search.
         if mode == EditorMode::Search {
             if let Some(b) = self.active_endpoint_buffer_mut()
                 && let Some(editor) = b.url_popup.as_mut()
@@ -1721,10 +1683,9 @@ impl App {
             Action::RowDelete => self.row_delete(),
             Action::RowToggle => self.row_toggle(),
             Action::RowEdit => self.row_edit(),
-            // On the sequences sub-pane the tree-mutating overlay keys must NEVER
-            // touch the (hidden, off-screen) endpoints tree cursor: `n` creates a
-            // new sequence (parallels endpoints `n`=new endpoint), while `N`/`d`
-            // no-op with a note. Endpoints keep their normal behaviour.
+            // On the sequences sub-pane, tree-mutating keys must NEVER touch the
+            // hidden endpoints tree cursor: `n` creates a new sequence (parallels
+            // endpoints `n`), `N`/`d` no-op with a note.
             Action::NewEndpoint if self.left_column_on_sequences() => self.new_sequence_prompt(),
             Action::NewEndpoint => self.begin_new_endpoint(),
             Action::NewCollection if self.left_column_on_sequences() => {
@@ -1861,11 +1822,9 @@ impl App {
         Ok(())
     }
 
-    /// Opens `selected` into a buffer (was `load_endpoint`). Dedup-or-push: if a
-    /// buffer for the same endpoint file is already open, focus it (keeping its
-    /// in-memory edits/response); otherwise push a fresh buffer and focus it.
-    /// Never replaces another buffer — each endpoint keeps its own edit/response/
-    /// dirty state. `EndpointBuffer::new` folds today's body/vim/snapshot setup.
+    /// Dedup-or-push: focus an already-open buffer for the same endpoint file
+    /// (keeping its edits/response), else push a fresh buffer. Never replaces
+    /// another buffer — each endpoint keeps its own edit/response/dirty state.
     fn open_or_focus_buffer(&mut self, selected: SelectedEndpoint) {
         if let Some(i) = self.buffer_index_for_path(&selected.file) {
             self.active = i;
@@ -1875,8 +1834,7 @@ impl App {
         self.active = self.buffers.len() - 1;
     }
 
-    /// Cycles the active buffer to the next (`forward`) or previous buffer,
-    /// wrapping. No-op on an empty buffer list.
+    /// Cycles to the next (`forward`) or previous buffer, wrapping. No-op when empty.
     fn buffer_cycle(&mut self, forward: bool) {
         let len = self.buffers.len();
         if len == 0 {
@@ -1944,7 +1902,6 @@ impl App {
     /// a one-at-a-time discard-confirm queue (keyed by path so removals don't
     /// shift the queue). When no dirty buffer remains the list is cleared.
     fn close_all_buffers(&mut self) {
-        // Close clean buffers now; collect dirty paths for the confirm queue.
         let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
         let mut i = 0;
         while i < self.buffers.len() {
@@ -1953,8 +1910,7 @@ impl App {
                 i += 1;
             } else {
                 self.remove_buffer_at(i);
-                // `remove_buffer_at` shifts everything after `i` left, so revisit
-                // the same index.
+                // remove shifts everything after `i` left — revisit the same index.
             }
         }
         if queue.is_empty() {
@@ -1997,7 +1953,7 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    /// The live request currently loaded (with any in-memory edits), or `None`.
+    /// The loaded live request (with in-memory edits), or `None`.
     fn live_request(&self) -> Option<&Request> {
         self.active_endpoint_buffer()
             .map(EndpointBuffer::live_request)
@@ -2060,19 +2016,18 @@ impl App {
             self.message = Some(Message::new("request already in flight — ctrl-c to cancel"));
             return;
         }
-        // Clone the small `SelectedEndpoint` so `build_resolver`/`endpoint_rel_path`
-        // can take `&self`/`&mut self` while we later hold `&mut` the active
-        // buffer (the borrow-checker split noted in the design).
+        // Clone `SelectedEndpoint` so `build_resolver`/`endpoint_rel_path` can
+        // borrow `&self` while we later hold `&mut` the active buffer.
         let Some(selected) = self.selected().cloned() else {
             self.message = Some(Message::new("no endpoint selected — nothing to send"));
             return;
         };
-        // The live edtui body text (read before we borrow the buffer mutably).
+        // Read the live edtui body text before borrowing the buffer mutably.
         let body_text = self
             .active_endpoint_buffer()
             .map(|b| String::from(b.editor.lines.clone()))
             .unwrap_or_default();
-        // No client means runtime-free construction (snapshot tests); do nothing.
+        // No client = runtime-free construction (snapshot tests); do nothing.
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -2256,11 +2211,10 @@ impl App {
         }
     }
 
-    /// `p`: toggle raw↔pretty rendering of the body (M7.7). The body text and its
-    /// line count change (and `toggle_pretty` resets folds), so reset the
-    /// cursor/scroll geometry and clear the highlight cache. No-op with a notice
-    /// outside a JSON body view — pretty is JSON-only in v1 and would silently do
-    /// nothing otherwise.
+    /// `p`: toggle raw↔pretty body rendering (M7.7). Body text/line count change
+    /// (and `toggle_pretty` resets folds), so reset cursor/scroll geometry and
+    /// clear the highlight cache. Pretty is JSON-only in v1 — no-op with a notice
+    /// outside a JSON body view, which would otherwise silently do nothing.
     fn response_toggle_pretty(&mut self) {
         let is_json_body = match self.active_response() {
             ResponseState::Done { view } => {
@@ -2279,12 +2233,10 @@ impl App {
         }
     }
 
-    /// `s`: toggle A→Z alphabetical sorting of pretty JSON object keys (M7.7).
-    /// Only meaningful on a pretty JSON body — sorting a raw or non-JSON view
-    /// would silently do nothing, so guard and notify instead (mirrors the
-    /// pretty-outside-JSON notice). The displayed text and line count change (and
-    /// `toggle_sort_keys` resets folds), so reset cursor/scroll and clear the
-    /// highlight cache like the pretty handler.
+    /// `s`: toggle A→Z sorting of pretty JSON object keys (M7.7). Only meaningful
+    /// on a pretty JSON body — guard and notify otherwise (mirrors the
+    /// pretty-outside-JSON notice). Text/line count change (and `toggle_sort_keys`
+    /// resets folds), so reset cursor/scroll and clear the highlight cache.
     fn response_toggle_sort_keys(&mut self) {
         let is_pretty_json_body = match self.active_response() {
             ResponseState::Done { view } => {
@@ -2304,11 +2256,9 @@ impl App {
         }
     }
 
-    /// `o`: fold/unfold the innermost JSON region at the cursor. Non-JSON views
-    /// notify and no-op.
-    /// Why folding is unsupported right now, or `None` when it is available.
-    /// The headers view of a JSON response gets its own reason — "JSON responses
-    /// only" would be wrong there.
+    /// Why folding is unsupported right now, or `None` when available. The headers
+    /// view of a JSON response gets its own reason — "JSON responses only" would
+    /// be wrong there.
     fn fold_unsupported_notice(&self) -> Option<&'static str> {
         let view = match self.active_response() {
             ResponseState::Done { view } => view,
@@ -2323,6 +2273,7 @@ impl App {
         None
     }
 
+    /// `o`: fold/unfold the innermost JSON region at the cursor.
     fn response_toggle_fold(&mut self) {
         let Some(logical) = self.response_cursor_logical() else {
             return;
@@ -2360,7 +2311,7 @@ impl App {
             return;
         }
         self.body_search_editor = LineEditor::new("");
-        // Seed an empty (live) search so highlighting/feedback engage immediately.
+        // Seed an empty live search so highlighting/feedback engage immediately.
         if let Some(view) = self.response_view_mut() {
             view.set_search(String::new());
         }
@@ -2380,7 +2331,6 @@ impl App {
             }
             KeyCode::Enter => {
                 self.mode = Mode::Normal;
-                // Move the cursor onto the current match, if any.
                 self.response_center_on_match();
             }
             _ => {
@@ -2389,7 +2339,6 @@ impl App {
                 if let Some(view) = self.response_view_mut() {
                     view.set_search(query);
                 }
-                // Jump to the first match live while typing.
                 self.response_center_on_match();
             }
         }
@@ -2412,7 +2361,6 @@ impl App {
                 b.highlight_cache.clear();
             }
             self.response_center_on_match();
-            // Feedback: `match k/N` in the message row.
             if let Some(view) = self.response_view_mut()
                 && let Some(search) = view.search()
                 && let Some(ord) = search.current_ordinal()
@@ -2555,8 +2503,8 @@ impl App {
         }) else {
             return; // stale — no buffer awaits this generation
         };
-        // History write needs `&mut self`; compute the status args first, then
-        // borrow the target buffer to store the response.
+        // History write needs `&mut self`; compute status args before borrowing
+        // the target buffer to store the response.
         let status = outcome.as_ref().ok().map(|r| (r.status, r.timing.total));
         match &outcome {
             Ok(_) => {
@@ -2668,34 +2616,28 @@ impl App {
             self.close_jump();
             return Ok(());
         };
-        // An assigned label wins first: `f` (the default Jump key) is not one of
-        // the region mnemonics (e/s/u/r/p), so no target shadows it, but a label
-        // lookup taking precedence keeps this robust against a remap.
+        // An assigned label wins first: `f` (the default Jump key) isn't a region
+        // mnemonic (e/s/u/r/p), but label-lookup precedence stays robust to a remap.
         if let KeyCode::Char(c) = key.code
             && let Some(target) = jump.target_for(c)
         {
             self.close_jump();
             match target {
-                // Through set_focus, not a raw assignment — jumping into a
-                // collapsed pane transfers the zoom to it, so it becomes the
-                // zoomed pane rather than holding focus while collapsed (the
-                // set_focus invariant).
-                // Jumping to the Explorer via its `e` label must land on the
-                // endpoints tree, mirroring the `s` label landing on Sequences.
-                // Without resetting `left_active`, an `f e` from a focused
-                // Sequences sub-pane would leave you on Sequences and appear to
-                // do nothing (owner drive-test 2026-07-10). Setting Endpoints is
-                // safe: `enforce_left_active_invariant` only *forces* Endpoints
-                // when the list is empty, so an explicit Endpoints here never
-                // fights the invariant.
+                // Via set_focus (not raw assignment) so jumping into a collapsed
+                // pane transfers the zoom to it (the set_focus invariant).
+                // The `e` label must land on the endpoints tree (mirroring `s` →
+                // Sequences). Without resetting `left_active`, an `f e` from a
+                // focused Sequences sub-pane would stay on Sequences and appear to
+                // do nothing (owner drive-test 2026-07-10). Safe: the invariant
+                // only *forces* Endpoints when the list is empty, so an explicit
+                // Endpoints here never fights it.
                 JumpTarget::Pane(Pane::Explorer) => {
                     self.left_active = LeftPane::Endpoints;
                     self.set_focus(Pane::Explorer);
                 }
                 JumpTarget::Pane(pane) => self.set_focus(pane),
-                // The sequences sub-pane lives inside the left column: focus it
-                // and make it the active sub-pane (auto-shows if empty is fine —
-                // the invariant only forces Endpoints on a zero-sequence list).
+                // Sequences sub-pane lives in the left column: focus it and make
+                // it active (the invariant only forces Endpoints on an empty list).
                 JumpTarget::Sequences => {
                     self.left_active = LeftPane::Sequences;
                     self.set_focus(Pane::Explorer);
@@ -2707,7 +2649,6 @@ impl App {
         if self.keymap.lookup(key) == Some(Action::Jump) {
             self.close_jump();
         }
-        // Any other non-label key is ignored; jump-mode stays open.
         Ok(())
     }
 
@@ -2718,7 +2659,6 @@ impl App {
     fn open_profile_picker(&mut self) {
         let active = self.active_profile.as_deref();
         let mut choices: Vec<Option<String>> = vec![None];
-        // Prefix "(none)" with ● when no profile is active.
         let none_label = if active.is_none() {
             "● (none)".to_owned()
         } else {
@@ -2728,7 +2668,6 @@ impl App {
         if let Some(ws) = &self.workspace {
             for profile in &ws.manifest().profiles {
                 choices.push(Some(profile.name.clone()));
-                // Prefix the active profile entry with ●.
                 let label = if active == Some(profile.name.as_str()) {
                     format!("● {}", profile.name)
                 } else {
@@ -3247,9 +3186,8 @@ impl App {
     /// batch hits the same URL/vars/auth as a normal send, and prefills the config
     /// from the load defaults. Never auto-runs — the user reviews/edits first.
     fn open_load_runner(&mut self) {
-        // One-shot read: fall back to the hovered endpoint when nothing is loaded
-        // (M7.10 stage B). Its on-disk request is used (no active buffer to fold
-        // unsaved body edits from — `body_text` below resolves empty).
+        // Fall back to the hovered endpoint when nothing is loaded (M7.10 stage B);
+        // its on-disk request is used (no active buffer → `body_text` resolves empty).
         let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.notify("no endpoint selected — select one to load-test");
             return;
@@ -3399,9 +3337,8 @@ impl App {
     }
 
     /// Lands a completed copy: drops stale results, classifies (mirroring the core
-    /// `classify` seam for the success branch, and mapping the stringified
-    /// transport error itself), records it + recomputes stats, and — when the last
-    /// copy lands — finishes the run and writes the batch summary.
+    /// `classify` seam), records it + recomputes stats, and — when the last copy
+    /// lands — finishes the run and writes the batch summary.
     fn on_load_result(
         &mut self,
         run_generation: u64,
@@ -3509,8 +3446,8 @@ impl App {
         self.notify("load run cancelled");
     }
 
-    /// Persists the current run's one-row summary to the SEPARATE `load_batches`
-    /// table (never per-endpoint history). Best-effort; a write failure warns.
+    /// Persists the run's one-row summary to the SEPARATE `load_batches` table
+    /// (never per-endpoint history). Best-effort; a write failure warns.
     fn write_load_summary(&mut self, cancelled: bool) {
         let Some(runner) = self.load_runner.as_ref() else {
             return;
@@ -3689,10 +3626,9 @@ impl App {
         self.workspace_choices.clear();
         self.sequence_choices.clear();
         self.auth_picker = false;
-        // Clear the one-shot `<leader>l f` intent so an Esc-cancelled pick never
-        // leaks into the NEXT plain `<leader>f` / `/` search.
+        // Clear the one-shot picker intents so an Esc-cancelled pick never leaks
+        // into the next `<leader>f` / `/` search (`<leader>l f`) or sequence pick.
         self.load_runner_after_pick = false;
-        // Same for the `<leader>s r` run-vs-edit sequence-picker intent.
         self.sequence_pick_runs = false;
         self.mode = Mode::Normal;
     }
@@ -3752,16 +3688,13 @@ impl App {
     fn accept_overlay(&mut self) -> Result<()> {
         let mode = self.mode;
         let current = self.picker.as_ref().and_then(picker::PickerState::current);
-        // Capture the profile/workspace choices + auth-picker flag before
-        // close_overlay() clears them.
+        // Capture all choices + one-shot intents BEFORE close_overlay() clears
+        // them, so an empty-result Enter (early-return below) still drops the flags
+        // while a real pick can act on them.
         let profile_choices = std::mem::take(&mut self.profile_choices);
         let workspace_choices = std::mem::take(&mut self.workspace_choices);
         let sequence_choices = std::mem::take(&mut self.sequence_choices);
-        // Capture the one-shot load-runner-after-pick intent BEFORE close_overlay
-        // clears it, so an empty-result Enter (early-return below) still drops the
-        // flag while a real pick can act on it.
         let after_pick = std::mem::take(&mut self.load_runner_after_pick);
-        // Same one-shot capture for the `<leader>s r` run-vs-edit sequence intent.
         let sequence_runs = std::mem::take(&mut self.sequence_pick_runs);
         let auth_picker = self.auth_picker;
         self.close_overlay();
@@ -3774,23 +3707,18 @@ impl App {
         }
         match mode {
             Mode::Search => {
-                // `after_pick` (captured above, always cleared) carries a pending
-                // `<leader>l f` intent — it can never leak into a later plain
-                // `<leader>f` / `/` search.
                 if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
                     self.focus = Pane::Explorer;
-                    // jump_to only navigates (expand + cursor); the load itself
-                    // goes through the guarded seam so dirty edits are never
-                    // lost silently.
+                    // jump_to only navigates; the load goes through the guarded
+                    // seam so dirty edits are never lost silently.
                     if let Some(selected) = self.explorer.jump_to(collection, endpoint)? {
                         self.guarded_load(PendingLoad::File(selected.file.clone()))?;
                     }
                     // Only open the load runner if the endpoint actually loaded.
-                    // When the editor is dirty and the picked endpoint differs,
-                    // `guarded_load` DEFERS into a discard-changes confirm and does
-                    // not load — opening the runner then would fire over the STALE
-                    // selection, so skip it. (The user re-triggers after resolving
-                    // the confirm.)
+                    // A dirty editor + different pick makes `guarded_load` DEFER
+                    // into a discard-changes confirm without loading — opening the
+                    // runner then would fire over the STALE selection. (User
+                    // re-triggers after resolving the confirm.)
                     let deferred =
                         matches!(self.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
                     if after_pick && !deferred {
@@ -3800,9 +3728,7 @@ impl App {
             }
             Mode::SequencePicker => {
                 if let Some(path) = sequence_choices.get(index).cloned() {
-                    // `sequence_runs` (captured above, always cleared) carries the
-                    // `<leader>s r` run-vs-edit intent: run the chosen sequence, or
-                    // open it for editing.
+                    // `sequence_runs` = `<leader>s r` run-vs-edit intent.
                     if sequence_runs {
                         self.run_sequence_at(path);
                     } else {
@@ -3811,8 +3737,8 @@ impl App {
                 }
             }
             Mode::Palette => {
-                // A profile picker (profile_choices set) resolves a profile;
-                // otherwise it is the command palette resolving an action.
+                // profile_choices set → resolve a profile; else the command
+                // palette resolves an action.
                 if !profile_choices.is_empty() {
                     if let Some(choice) = profile_choices.get(index).cloned() {
                         self.set_profile(choice);
@@ -3822,8 +3748,8 @@ impl App {
                 }
             }
             Mode::WorkspacePicker => {
-                // Route the switch through the dirty guard: a workspace target is
-                // always "other", so unsaved edits defer to the discard confirm.
+                // Through the dirty guard: a workspace target is always "other",
+                // so unsaved edits defer to the discard confirm.
                 if let Some(path) = workspace_choices.get(index).cloned() {
                     self.guarded_load(PendingLoad::Workspace(path))?;
                 }
@@ -3877,15 +3803,10 @@ impl App {
         }
     }
 
-    /// Sets focus, honouring the M6.7 collapse/hide invariants: a collapsed pane
-    /// (zoom) cannot hold focus — targeting the counterpart transfers the zoom to
-    /// the newly focused pane, so a collapsed pane still never holds focus — and
-    /// focusing the explorer auto-reopens it when hidden.
-    /// A collapsed explorer (`<leader>e`) drops out of the Tab ring: cycling
-    /// skips it and lands on the next visible region, leaving it hidden until
-    /// `<leader>e` reopens it. Only Explorer is ever hidden, so a single skip
-    /// suffices. Explicit focus (jump-mode, `FocusExplorer`) still auto-reopens
-    /// via `set_focus` below.
+    /// M6.7: a hidden explorer drops out of the Tab ring — cycling skips it and
+    /// lands on the next visible region. Only Explorer is ever hidden, so a single
+    /// skip suffices. Explicit focus (jump-mode, `FocusExplorer`) still auto-reopens
+    /// via `set_focus`.
     fn skip_hidden_explorer(&self, target: Pane, forward: bool) -> Pane {
         if target == Pane::Explorer && self.explorer_hidden {
             if forward {
@@ -3902,9 +3823,8 @@ impl App {
         if pane == Pane::Explorer && self.explorer_hidden {
             self.explorer_hidden = false;
         }
-        // Remember the pane we left when focus moves INTO the left column from a
-        // non-left pane, so `<leader>e` can restore true prior focus on hide
-        // (PR 2b / owner #2B).
+        // Remember the pane we left when focus moves INTO the left column, so
+        // `<leader>e` can restore true prior focus on hide (owner #2B).
         if pane == Pane::Explorer && self.focus != Pane::Explorer {
             self.focus_before_explorer = Some(self.focus);
         }
@@ -3917,16 +3837,13 @@ impl App {
             _ => {}
         }
         self.focus = pane;
-        // Focusing the left column lands on the remembered sub-pane (owner #2B).
-        // The invariant below keeps `left_active` honest when the sub-pane is off.
         self.enforce_left_active_invariant();
     }
 
-    /// An empty sequences sub-pane can never hold the left-column focus: when the
-    /// workspace has no sequences, `left_active` is forced back to `Endpoints`.
-    /// This catches a workspace switch/reload into a sequence-less workspace,
-    /// which would otherwise strand focus on an empty pane. (The sub-pane itself
-    /// is always present now — peek-symmetric, M7.10 stage B.)
+    /// An empty sequences sub-pane can never hold the left-column focus: with no
+    /// sequences, `left_active` is forced back to `Endpoints`. Catches a workspace
+    /// switch/reload into a sequence-less workspace that would otherwise strand
+    /// focus on an empty pane. (Sub-pane always present now — M7.10 stage B.)
     fn enforce_left_active_invariant(&mut self) {
         if self.explorer.sequences_len() == 0 {
             self.left_active = LeftPane::Endpoints;
@@ -3939,7 +3856,6 @@ impl App {
     /// re-focuses the left column, landing on the active sub-pane.
     fn toggle_explorer(&mut self) {
         if self.explorer_hidden {
-            // Show: re-focus the left column (lands on `left_active`).
             self.explorer_hidden = false;
             self.set_focus(Pane::Explorer);
         } else {
@@ -3951,12 +3867,9 @@ impl App {
         }
     }
 
-    /// Explorer overlay `s`: switches focus/zoom between the endpoints tree and
-    /// the sequences sub-pane (PR 2b). Toggles which sub-pane is active and
-    /// ensures the left column is focused. This is the endpoints⇄sequences
-    /// mutually-exclusive-zoom switch — the canonical way to reach the sequences
-    /// sub-pane by keyboard (alongside `f`-jump `s` and the `<leader>s f`
-    /// picker).
+    /// Explorer overlay `s`: the endpoints⇄sequences mutually-exclusive-zoom
+    /// switch — canonical keyboard route to the sequences sub-pane (alongside
+    /// `f`-jump `s` and the `<leader>s f` picker). Focuses the left column.
     fn focus_sequences_toggle(&mut self) {
         self.left_active = match self.left_active {
             LeftPane::Endpoints => LeftPane::Sequences,
@@ -3966,12 +3879,10 @@ impl App {
     }
 
     /// `cycle-region-fwd`/`cycle-region-back` (M7.10 stage B — shipped UNBOUND).
-    /// Region-aware within-column cycling: when the left column is focused it
-    /// cycles its sub-panes (Endpoints⇄Sequences, reusing the same switch as the
-    /// Explorer `s` overlay); otherwise it cycles the open buffers/tabs (reusing
-    /// `buffer_cycle`). Direction (`forward`) only matters for the buffer ring —
-    /// the two-way left-column toggle ignores it. Ctrl-Tab is deliberately NOT a
-    /// default here (terminal-unreliable); the owner maps a portable key later.
+    /// Region-aware cycling: left column focused → cycle its sub-panes
+    /// (Endpoints⇄Sequences); otherwise cycle open buffers/tabs. `forward` only
+    /// matters for the buffer ring — the two-way toggle ignores it. Ctrl-Tab is
+    /// deliberately NOT a default (terminal-unreliable); owner maps a portable key.
     fn cycle_region(&mut self, forward: bool) {
         if self.focus == Pane::Explorer {
             self.focus_sequences_toggle();
@@ -4020,7 +3931,6 @@ impl App {
                     .active_endpoint_buffer_mut()
                     .and_then(|b| b.url_editor.take());
                 if let Some(editor) = taken {
-                    // Commit runs the URL→Params query merge (deliverable 3).
                     self.commit_url(editor.text());
                 }
             }
@@ -4073,7 +3983,6 @@ impl App {
             selected.endpoint.request.method = method;
             self.mode = Mode::Normal;
         }
-        // Any other key is ignored; the menu stays open.
     }
 
     // ---- Request-tab rows ----
@@ -4098,7 +4007,6 @@ impl App {
             return;
         };
         let request = &mut b.endpoint.endpoint.request;
-        // The count after the push, for the `clamp` (was `active_tab_row_count`).
         let (new_row, row_count) = match b.tabs.active {
             RequestTab::Params => {
                 request.params.push(Param {
@@ -4120,7 +4028,7 @@ impl App {
             _ => return,
         };
         b.tabs.clamp(row_count);
-        // Select and begin editing the new row's name field.
+        // Select and edit the new row's name field.
         match b.tabs.active {
             RequestTab::Params => b.tabs.params_sel = new_row,
             RequestTab::Headers => b.tabs.headers_sel = new_row,
@@ -4199,8 +4107,8 @@ impl App {
             self.row_toggle();
             return;
         }
-        // Auth fields have fixed labels — edit the single value directly (no
-        // name→value advance). Param/Header rows start on the name field.
+        // Auth fields have fixed labels — edit the value directly (no name→value
+        // advance). Param/Header rows start on the name field.
         let start_field = if active == RequestTab::Auth {
             EditField::Value
         } else {
@@ -4245,9 +4153,9 @@ impl App {
     fn handle_field_edit_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
-                // Cancel the field edit; a freshly-added row that was never
-                // committed (name and value both still empty) is removed, or
-                // `a` + Esc would leave a nameless ghost row that serializes.
+                // Cancel; a never-committed freshly-added row (name+value both
+                // empty) is removed, else `a`+Esc leaves a nameless ghost row
+                // that serializes.
                 let edit = self
                     .active_endpoint_buffer_mut()
                     .and_then(|b| b.tabs.editing.take());
@@ -4277,7 +4185,6 @@ impl App {
         };
         let active = b.tabs.active;
         let request = &mut b.endpoint.endpoint.request;
-        // The post-removal row count for the active tab (was `active_tab_row_count`).
         let removed = match active {
             RequestTab::Params
                 if request
@@ -4318,7 +4225,7 @@ impl App {
         self.write_field(active, edit.row, edit.field, text);
         match edit.field {
             EditField::Name => {
-                // Advance to the value field, seeded with its current text.
+                // Advance to the value field, seeded with its text.
                 let value = self
                     .current_field_text(active, edit.row, EditField::Value)
                     .unwrap_or_default();
@@ -4583,7 +4490,7 @@ impl App {
             return;
         };
         let mut endpoint = selected.endpoint.clone();
-        // Fold in any unsaved edtui body edits so the copy matches what's shown.
+        // Fold in unsaved body edits so the copy matches what's shown.
         let body_text = self
             .active_endpoint_buffer()
             .map(|b| String::from(b.editor.lines.clone()))
@@ -4720,7 +4627,7 @@ impl App {
                 return Ok(());
             }
         };
-        // Overwrite the default endpoint with the imported request, keeping the
+        // Overwrite the default endpoint with the import, keeping the
         // collection-assigned seq.
         let mut endpoint = result.endpoint;
         endpoint.seq = persistence::load_endpoint(&path)
@@ -4768,8 +4675,8 @@ impl App {
                     Ok(path) => {
                         self.reload_explorer()?;
                         self.message = Some(Message::new(format!("created {text}")));
-                        // Open the new endpoint as its own buffer (File target —
-                        // no cross-endpoint confirm in the multi-buffer model).
+                        // File target — no cross-endpoint confirm in the
+                        // multi-buffer model.
                         self.guarded_load(PendingLoad::File(path))?;
                     }
                     Err(err) => self.crud_error(err),
@@ -4829,14 +4736,12 @@ impl App {
                 };
                 match persistence::rename_endpoint(&path, &new_name) {
                     Ok(new_path) => {
-                        // Path-based: find the buffer loaded from the OLD path
-                        // (Stage 1 has ≤1 buffer; Stage 2 inherits this).
                         let renamed_idx = self.buffer_index_for_path(&path);
                         if let Some(idx) = renamed_idx {
-                            // Renaming the *loaded* endpoint: update its file
-                            // path + name in place so unsaved edits survive —
-                            // no reload of the request pane. Repoint before the
-                            // reload so remap-by-path sees the live file.
+                            // Renaming the *loaded* endpoint: update file path +
+                            // name in place so unsaved edits survive (no request-
+                            // pane reload). Repoint before the reload so
+                            // remap-by-path sees the live file.
                             let trimmed = new_name.trim().to_owned();
                             if let Some(b) = self.buffers[idx].as_endpoint_mut() {
                                 b.endpoint.file = new_path.clone();
@@ -4864,11 +4769,9 @@ impl App {
                 };
                 match persistence::rename_collection(&dir, &new_name) {
                     Ok(new_dir) => {
-                        // The loaded endpoint may live inside the renamed
-                        // collection: repoint its file into the new directory
-                        // *before* the reload, or remap-by-path would see a
-                        // vanished file (and the next save would fail NotFound).
-                        // Path-based over all buffers under `dir` (Stage 1: ≤1).
+                        // Repoint any buffer under the renamed dir into the new
+                        // directory *before* the reload, or remap-by-path sees a
+                        // vanished file (and the next save fails NotFound).
                         for buf in &mut self.buffers {
                             if let Some(b) = buf.as_endpoint_mut()
                                 && let Ok(rest) = b.endpoint.file.strip_prefix(&dir)
@@ -4917,14 +4820,12 @@ impl App {
             ConfirmPurpose::DiscardChanges => match key.code {
                 KeyCode::Char('s') => {
                     self.mode = Mode::Normal;
-                    // The switch destroys ALL buffers, so "save changes before
-                    // switching" must save EVERY dirty buffer — not just the
-                    // active one (else a non-active dirty buffer is lost silently).
+                    // The switch destroys ALL buffers, so save EVERY dirty buffer,
+                    // not just the active one (else a non-active one is lost).
                     self.save_all_dirty_buffers();
-                    // Only switch once every buffer is clean: a refused save
-                    // (e.g. literal secret auth) leaves that buffer dirty and the
-                    // error on the statusline — switching anyway would destroy the
-                    // unsaved edits it just refused to write.
+                    // Only switch once every buffer is clean: a refused save (e.g.
+                    // literal secret auth) leaves that buffer dirty with the error
+                    // on the statusline — switching would destroy those edits.
                     if !self.any_buffer_dirty() {
                         if let Some(target) = self.pending_load.take() {
                             self.perform_load(target)?;
@@ -4935,9 +4836,8 @@ impl App {
                 }
                 KeyCode::Char('d') => {
                     self.mode = Mode::Normal;
-                    // Discard: drop the active buffer so `is_dirty()` is false and
-                    // the switch is not re-guarded. `perform_load` replaces the
-                    // buffer (Stage 1) or clears it (workspace switch) next.
+                    // Discard: drop buffers so `is_dirty()` is false and the switch
+                    // is not re-guarded. `perform_load` replaces/clears next.
                     self.buffers.clear();
                     self.active = 0;
                     if let Some(target) = self.pending_load.take() {
@@ -4966,7 +4866,6 @@ impl App {
             Some(PendingClose::All(q)) => match q.front() {
                 Some(p) => p.clone(),
                 None => {
-                    // Queue empty — nothing to prompt; finish the op.
                     self.pending_close = None;
                     self.mode = Mode::Normal;
                     return Ok(());
@@ -4985,7 +4884,6 @@ impl App {
                 self.active = idx;
                 self.save_request();
                 if !self.is_dirty() {
-                    // Save took — close it and advance.
                     let i = self.active;
                     self.remove_buffer_at(i);
                     self.advance_close(true);
@@ -5011,10 +4909,9 @@ impl App {
         Ok(())
     }
 
-    /// Advances a resolved close-confirm: for a single close, finishes; for a
-    /// close-all queue, drops the resolved front and prompts the next dirty
-    /// buffer (or finishes the op when the queue drains). `resolved` marks the
-    /// current front as handled (pop it).
+    /// Advances a resolved close-confirm: a single close finishes; a close-all
+    /// queue drops the resolved front (`resolved` = pop it) and prompts the next
+    /// dirty buffer, finishing when the queue drains.
     fn advance_close(&mut self, resolved: bool) {
         match self.pending_close.as_mut() {
             Some(PendingClose::One(_)) => {
@@ -5086,14 +4983,14 @@ impl App {
         Ok(())
     }
 
-    /// The endpoint-switch seam: every path that opens/focuses an endpoint
-    /// (explorer Enter, jump-mode row, search overlay, CRUD reselect) or switches
-    /// workspace goes through here. Multi-buffer removed the cross-endpoint
-    /// discard guard: opening endpoint Y no longer destroys X (each keeps its own
-    /// buffer), so `Row`/`File` targets open-or-focus directly with NO confirm.
-    /// Only a `Workspace` switch destroys every buffer, so a dirty workspace
-    /// switch still defers behind a single [`ConfirmPurpose::DiscardChanges`]
-    /// (discard-all) overlay with the target parked in `pending_load`.
+    /// The endpoint-switch seam: every path that opens/focuses an endpoint or
+    /// switches workspace goes through here. Multi-buffer removed the
+    /// cross-endpoint discard guard — opening endpoint Y no longer destroys X
+    /// (each keeps its own buffer), so `Row`/`File` targets open-or-focus with NO
+    /// confirm. Only a `Workspace` switch destroys every buffer, so a dirty
+    /// workspace switch still defers behind a single
+    /// [`ConfirmPurpose::DiscardChanges`] (discard-all) overlay, target parked in
+    /// `pending_load`.
     fn guarded_load(&mut self, target: PendingLoad) -> Result<()> {
         // The guard fires when ANY buffer is dirty (not just the active one) — a
         // switch destroys every buffer, so a non-active dirty buffer must still
@@ -5145,7 +5042,6 @@ impl App {
             }
         }
 
-        // Swap in the new workspace and rebuild the explorer against it.
         self.workspace = Some(new_ws);
         self.explorer.reload(self.workspace.as_ref())?;
         self.explorer.cursor = 0;
@@ -5347,11 +5243,10 @@ fn toggle_auth_placement(auth: Option<&mut Auth>, row: usize) {
 ///
 /// Pure (no I/O) and deterministic — `TestBackend` snapshots stay stable.
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // The dedicated message row (deliverable 9) sits directly above the
-    // statusline and only occupies a row while a message is live — so the
-    // statusline never moves and its content is never covered.
-    // While the body-search input is open it occupies the message-row position
-    // (vim-style `/query`), shadowing any transient message.
+    // The dedicated message row (deliverable 9) sits above the statusline and
+    // only occupies a row while a message is live, so the statusline never moves.
+    // The body-search input takes that row when open (vim-style `/query`),
+    // shadowing any transient message.
     let body_search_input: Option<String> = (app.mode == Mode::BodySearch).then(|| {
         let q = app.body_search_editor.text();
         let matches = match app.active_response() {
@@ -5393,10 +5288,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Layout::horizontal([Constraint::Length(30), Constraint::Fill(1)]).areas(main);
         (Some(explorer_area), right_area)
     };
-    // Column B split into three rows: URL bar (3 lines) / Request / Response.
+    // Column B split into three rows: URL bar / Request / Response.
     // Zoom (deliverable 4) collapses the unfocused pane to a bordered stub
-    // (border top + summary line + border bottom) keeping its title and
-    // tab-bar/stats content visible.
+    // (border + summary + border), keeping its title and tab-bar/stats visible.
     const COLLAPSED_HEIGHT: u16 = 3;
     // The tab strip occupies a single row at the very top of column B, ONLY when
     // at least one buffer is open. `Length(0)` renders nothing so the zero-buffer
@@ -5506,8 +5400,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
     }
-    // The tab strip (top of column B), rendered only when a buffer is open —
-    // `strip_h` is 0 and `strip_area` empty otherwise, so nothing draws.
+    // The tab strip (top of column B), rendered only when a buffer is open.
     if strip_h > 0 {
         let tab_items: Vec<tab_strip::TabItem> = app
             .buffers
@@ -5523,18 +5416,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         tab_strip::render(frame, strip_area, &tab_items, app.active, &theme);
     }
 
-    // Bind the active endpoint buffer by *field* access (not the `&mut self`
-    // accessor) so `app.jump`/`app.focus`/`app.theme`/`app.highlight_tx`/… stay
-    // independently borrowable while we hold the buffer mutably (the design's
-    // render borrow-split). The request/editor/tabs/response/cache all live in
-    // the same buffer as disjoint fields, so they co-borrow cleanly. When no
-    // buffer is loaded, we render against fresh defaults — byte-identical to the
-    // pre-refactor flat fields, which were always default with nothing loaded.
+    // Bind the active buffer by *field* access (not the `&mut self` accessor) so
+    // `app.jump`/`focus`/`theme`/`highlight_tx`/… stay independently borrowable
+    // while we hold the buffer mutably (the render borrow-split). The
+    // request/editor/tabs/response/cache are disjoint fields, so they co-borrow
+    // cleanly. With no buffer loaded we render fresh defaults — byte-identical to
+    // the pre-refactor flat fields, always default with nothing loaded.
     let active = app.active;
-    // The no-buffer response fallback. In production `orphan_response` is always
-    // Idle (a response requires a loaded endpoint); the response-pane isolation
-    // snapshots set it to render a response with no endpoint, byte-identical to
-    // pre-refactor. Bound before `buf` (disjoint field) so both borrows coexist.
+    // No-buffer response fallback. In production `orphan_response` is always Idle
+    // (a response requires a loaded endpoint); the response-pane isolation
+    // snapshots set it to render a response with no endpoint. Bound before `buf`
+    // (disjoint field) so both borrows coexist.
     let default_response: &ResponseState = &app.orphan_response;
     let buf = app
         .buffers
@@ -5591,7 +5483,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let mut resp_outcome: Option<response::RenderOutcome> = None;
     match app.zoom {
         Some(ZoomPane::Request) => {
-            // Request is zoomed: render it full-size, show collapsed summary for response.
             request::render(
                 frame,
                 request_area,
@@ -5615,7 +5506,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             );
         }
         Some(ZoomPane::Response) => {
-            // Response is zoomed: render it full-size, show collapsed summary for request.
             let summary = request::collapsed_summary(selected_request, tabs, &theme);
             render_collapsed_stub(
                 frame,
@@ -5642,7 +5532,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ));
         }
         None => {
-            // Normal split: render both.
             request::render(
                 frame,
                 request_area,
@@ -5700,8 +5589,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     // The statusline (deliverable 9) keeps *only* persistent state: focus,
     // endpoint/workspace, profile, dirty, and the in-flight spinner. Transient
-    // messages live in the dedicated row below. The in-flight spinner still
-    // derives from state so it appears/disappears instantly.
+    // messages live in the dedicated row below.
     let in_flight = app
         .active_endpoint_buffer()
         .is_some_and(|b| b.in_flight.is_some());
@@ -5763,11 +5651,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             SeqView::Run => {
                 let tick = app.tick_count;
                 let active = app.active;
-                // These overlays share the active endpoint buffer's highlight
-                // cache/guard (keyed by viewport hash, so no cross-contamination);
-                // with no buffer loaded they fall back to a per-frame empty cache
-                // (first-frame render is identical — only cross-frame caching is
-                // skipped, which is invisible to snapshots/behaviour).
+                // These overlays share the active buffer's highlight cache/guard
+                // (keyed by viewport hash, so no cross-contamination); with no
+                // buffer loaded they fall back to a per-frame empty cache — only
+                // cross-frame caching is skipped, invisible to snapshots.
                 let scratch_cache = HashMap::new();
                 let mut scratch_pending = None;
                 let cache = app
@@ -5964,9 +5851,8 @@ mod leader_popup {
 }
 
 /// Renders a collapsed zoom stub: the pane's unfocused border + title (with its
-/// jump label when jump-mode is active) around the one-line tab-bar/stats
-/// summary — the pane keeps its chrome when collapsed, it doesn't vanish into a
-/// bare text row.
+/// jump label when active) around the one-line tab-bar/stats summary, so the
+/// pane keeps its chrome when collapsed rather than vanishing into a bare row.
 fn render_collapsed_stub(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -6226,7 +6112,6 @@ mod tests {
     async fn stale_generation_response_is_dropped() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         open_bare_endpoint(&mut app);
-        // Pretend a request at generation 5 is in flight on the active buffer.
         app.generation = 5;
         set_active_in_flight(&mut app, 5);
 
@@ -6701,7 +6586,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Sequence);
         assert_eq!(app.sequence_view, SeqView::Edit);
 
-        // Add a step: `a` opens the picker, Enter accepts the first endpoint.
+        // `a` opens the picker, Enter accepts the first endpoint.
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -6767,7 +6652,7 @@ mod tests {
             ch(&mut app, c);
         }
         enter(&mut app);
-        // second rule also "x"
+        // second rule, also named "x"
         ch(&mut app, 'a');
         ch(&mut app, 'x');
         enter(&mut app);
@@ -6775,8 +6660,7 @@ mod tests {
             ch(&mut app, c);
         }
         enter(&mut app);
-        // Save → refused.
-        ch(&mut app, 'w');
+        ch(&mut app, 'w'); // save → refused
 
         assert_eq!(app.mode, Mode::Sequence, "editor stays open on refusal");
         assert_eq!(app.sequence_view, SeqView::Edit);
@@ -7147,9 +7031,8 @@ mod tests {
         assert_eq!(app.mode, Mode::Palette);
         // Choices: (none), dev, prod.
         assert_eq!(app.profile_choices.len(), 3);
-        // Select index 2 (prod).
         if let Some(picker) = app.picker.as_mut() {
-            picker.selected = 2;
+            picker.selected = 2; // prod
         }
         app.accept_overlay().unwrap();
         assert_eq!(app.active_profile.as_deref(), Some("prod"));
@@ -7452,8 +7335,7 @@ mod tests {
 
     #[test]
     fn split_query_trims_whitespace() {
-        // Names and values with leading/trailing whitespace (e.g. " name = value ")
-        // are trimmed before decode so the resulting params are clean.
+        // Names and values are trimmed before decode.
         let (_, pairs) = split_query("https://x/y? a = 1 & b = hello world ");
         assert_eq!(
             pairs,
@@ -7462,7 +7344,7 @@ mod tests {
                 ("b".to_owned(), "hello world".to_owned()),
             ]
         );
-        // A key-only segment with surrounding spaces is also trimmed.
+        // A key-only segment is trimmed too.
         let (_, pairs) = split_query("https://x/y? flag ");
         assert_eq!(pairs, vec![("flag".to_owned(), String::new())]);
     }
@@ -8216,7 +8098,7 @@ mod tests {
     fn copy_as_curl_falls_back_to_hovered_endpoint() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = hover_fallback_ws(dir.path());
-        // Expand the collection and hover the first endpoint; nothing is loaded.
+        // Hover the first endpoint with nothing loaded.
         app.explorer.expand().unwrap();
         app.explorer.move_down(); // onto "alpha"
         app.set_focus(Pane::Explorer);
@@ -8298,7 +8180,6 @@ mod tests {
         let mut app = app_with_endpoint(dir.path());
         app.begin_url_popup();
         assert!(app.test_url_popup().is_some());
-        // Replace the buffer and commit.
         *app.test_url_popup_mut() = Some(EditorState::new(Lines::from("https://api.test/x?q=1")));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
@@ -8473,7 +8354,6 @@ mod tests {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         app.dispatch(Action::Help, None).unwrap();
         assert!(app.help_open);
-        // `j`/`k` scroll; `?` closes.
         press(&mut app, 'j');
         assert_eq!(app.help_scroll, 1);
         press(&mut app, 'k');
@@ -8496,8 +8376,7 @@ mod tests {
         assert_eq!(picker.items[1], "dev");
         assert_eq!(picker.items[2], "prod");
 
-        // Set active profile to dev (directly, no close needed — open picker
-        // on a fresh fixture to keep state clean).
+        // Fresh fixture with dev active, to keep state clean.
         let dir2 = tempfile::tempdir().unwrap();
         let mut app2 = workspace_fixture(dir2.path());
         app2.active_profile = Some("dev".to_owned());
@@ -8611,7 +8490,7 @@ mod tests {
 
         app.switch_workspace(path_b.clone()).unwrap();
 
-        // The workspace + explorer now reflect B.
+        // Workspace + explorer now reflect B.
         assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
         let names: Vec<String> = app.explorer.rows().iter().map(|r| r.name.clone()).collect();
         assert!(names.iter().any(|n| n == "orders"), "shows B: {names:?}");
@@ -8711,7 +8590,7 @@ mod tests {
             .unwrap();
         app.active = beta_idx;
         *app.test_editor() = EditorState::new(Lines::from("beta-body"));
-        app.active = alpha_idx; // active is alpha
+        app.active = alpha_idx;
         *app.test_editor() = EditorState::new(Lines::from("alpha-body"));
         assert!(app.any_buffer_dirty());
 
@@ -8913,7 +8792,6 @@ mod tests {
             app.load_runner.as_ref().unwrap().url,
             "https://api.test/beta"
         );
-        // Two buffers now: dirty alpha still open, beta active.
         assert_eq!(app.buffers.len(), 2, "beta pushed as a new buffer");
         assert_eq!(app.selected().unwrap().display_path, "api/beta");
         let alpha_idx = app.buffer_index_for_path(&alpha_file).unwrap();
@@ -8949,7 +8827,6 @@ mod tests {
         let mut app = load_pick_app(dir.path());
         app.open_load_runner_pick().unwrap();
         assert!(app.load_runner_after_pick);
-        // Esc cancels the picker.
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.mode, Mode::Normal);
@@ -9439,10 +9316,8 @@ mod tests {
         app.open_or_focus_buffer(selected_with("a.toml", Some("A")));
         app.open_or_focus_buffer(selected_with("b.toml", Some("B")));
         assert_eq!(app.buffers.len(), 2);
-        // Edit A (index 0).
         app.active = 0;
         *app.test_editor() = EditorState::new(Lines::from("A edited"));
-        // Switch to B, then back to A.
         app.active = 1;
         assert_eq!(
             String::from(app.active_endpoint_buffer().unwrap().editor.lines.clone()),

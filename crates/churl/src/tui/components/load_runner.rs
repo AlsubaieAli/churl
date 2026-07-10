@@ -51,7 +51,6 @@ pub enum LoadStatus {
 }
 
 impl LoadStatus {
-    /// The single-cell glyph for this status.
     fn glyph(&self) -> &'static str {
         match self {
             LoadStatus::Pending => "·",
@@ -507,7 +506,6 @@ impl LoadRunnerState {
             KeyCode::Char('h') | KeyCode::Left => {
                 self.field = self.field.prev();
             }
-            // k/up = increase, j/down = decrease (matches vertical arrow sense).
             KeyCode::Char('k') | KeyCode::Up => self.step_field(1),
             KeyCode::Char('j') | KeyCode::Down => self.step_field(-1),
             KeyCode::Char('i') | KeyCode::Enter => self.begin_edit(),

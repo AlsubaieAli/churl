@@ -611,11 +611,10 @@ impl Default for KeyMap {
         // `t` so Space stays free everywhere (DECISIONS.md).
         overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
-        // Copy the loaded request as a curl one-liner: `<leader>y` (see the
-        // leader binds below). Leader keys are inert during text edits, so this
-        // never risks shadowing character insertion in the body editor. The
-        // resolved-vars variant and all interchange import/export actions stay
-        // palette-only (rare, and a path prompt is the natural entry point).
+        // Copy-as-curl is `<leader>y` (see the leader binds below): leader keys are
+        // inert during text edits, so it never shadows body-editor input. The
+        // resolved-vars variant and the interchange import/export actions stay
+        // palette-only (rare; a path prompt is the natural entry point).
         // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
         overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
         // Response pane (M7): body/headers, wrap, search, match nav, folding,
@@ -657,13 +656,12 @@ impl Default for KeyMap {
         // `<leader>v` opens the environments & variables editor (`v` is free).
         root_bind(key!(v), LeaderEntry::Act(Action::OpenEnvEditor));
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
-        // Quick-jump pickers: `<leader><leader>` (Space, the leader-as-its-own
-        // continuation) opens the endpoint/request picker — owner drive-test
-        // 2026-07-10 moved it off `f`, freeing `f` at root for jump-mode. A
-        // leader continuation of Space is NOT flagged by `validate` (that only
-        // checks the leader against the GLOBAL map and pane overlays), so the
-        // default config stays warning-clean. `<leader>w` opens the
-        // recent-workspace picker.
+        // `<leader><leader>` (Space as its own continuation) opens the
+        // endpoint/request picker — owner drive-test 2026-07-10 moved it off `f`,
+        // freeing `f` at root for jump-mode. A leader continuation of Space is NOT
+        // flagged by `validate` (that only checks the leader against the GLOBAL map
+        // and pane overlays), so the default config stays warning-clean.
+        // `<leader>w` opens the recent-workspace picker.
         root_bind(key!(space), LeaderEntry::Act(Action::QuickJumpRequests));
         root_bind(key!(w), LeaderEntry::Act(Action::QuickJumpWorkspaces));
         // Copy the loaded request as a curl one-liner (`y` was free). Moved off
@@ -688,10 +686,9 @@ impl Default for KeyMap {
             .insert(key!(a).normalized(), Action::EditSequence);
         // `<leader>s <leader>` (Space) is the single "find/open a sequence"
         // picker, mirroring `<leader><leader>` for endpoints (owner drive-test
-        // 2026-07-10). This also resolves the earlier "two ways to open a
-        // sequence" note: the former `o` and `f` binds are gone — one key for
-        // one job. A leader continuation of Space stays warning-clean in
-        // `validate` (see the root Space bind above).
+        // 2026-07-10) — one key for one job; the former `o`/`f` binds are gone. A
+        // leader continuation of Space stays warning-clean in `validate` (see the
+        // root Space bind above).
         sequences
             .binds
             .insert(key!(space).normalized(), Action::OpenSequencePicker);

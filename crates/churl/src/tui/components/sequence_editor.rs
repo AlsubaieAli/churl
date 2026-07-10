@@ -42,9 +42,7 @@ enum Focus {
 /// What field a [`LineEditor`] is editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditTarget {
-    /// An extraction rule's variable name.
     RuleName,
-    /// An extraction rule's expression.
     RuleExpr,
 }
 
@@ -496,10 +494,9 @@ impl SequenceEditorState {
     }
 }
 
-/// Renders the sequence editor over `area`.
 /// Renders the sequence editor — the Edit face of the unified sequence surface.
-/// The mode shows in a top row inside the pane; the `Ctrl-R` face-flip hint lives
-/// in the footer (see [`render_footer`]), keeping the title to name + dirty marker.
+/// The `Ctrl-R` face-flip hint lives in the footer (see [`render_footer`]),
+/// keeping the title to name + dirty marker.
 pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme: &Theme) {
     let [modal] = Layout::horizontal([Constraint::Percentage(90)])
         .flex(Flex::Center)

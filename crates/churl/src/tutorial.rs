@@ -27,7 +27,7 @@ use churl_core::persistence::{
 pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
     let root = dir.unwrap_or_else(|| PathBuf::from("churl-tutorial"));
 
-    // Guard: refuse to overwrite a non-empty directory.
+    // Refuse to overwrite a non-empty directory.
     if root.exists() {
         let is_empty = root
             .read_dir()
