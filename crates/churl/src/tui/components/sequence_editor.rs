@@ -24,10 +24,17 @@ use crate::tui::theme::Theme;
 /// A step in the editor's working copy: an endpoint path plus ordered extraction
 /// rules (name → expression). Kept as a `Vec` (not a `BTreeMap`) for insertion
 /// order + in-place rename UX; the `BTreeMap` is rebuilt only on save.
+///
+/// `persist` is a parallel `bool` per rule (index-aligned with `rules`): `true`
+/// means the rule's captured value flows into the in-memory Session scope
+/// (surviving the run for standalone requests); `false` (the default) is today's
+/// Run-only ephemeral behaviour. It is seeded from the step's `persist` name list
+/// on load and rebuilt back into it on save (note #6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepEdit {
     endpoint: String,
     rules: Vec<(String, String)>,
+    persist: Vec<bool>,
 }
 
 /// Which column has focus.
@@ -111,13 +118,23 @@ impl SequenceEditorState {
     pub fn new(name: String, path: PathBuf, sequence: &Sequence, endpoints: Vec<String>) -> Self {
         let steps: Vec<StepEdit> = churl_core::sequence::ordered_steps(sequence)
             .into_iter()
-            .map(|step| StepEdit {
-                endpoint: step.endpoint.clone(),
-                rules: step
+            .map(|step| {
+                let rules: Vec<(String, String)> = step
                     .extract
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                    .collect();
+                // Seed each rule's target from the step's `persist` name list: a
+                // rule whose name is listed is a Session target, else Run-only.
+                let persist: Vec<bool> = rules
+                    .iter()
+                    .map(|(name, _)| step.persist.iter().any(|p| p == name))
+                    .collect();
+                StepEdit {
+                    endpoint: step.endpoint.clone(),
+                    rules,
+                    persist,
+                }
             })
             .collect();
         let snapshot = (sequence.on_error, steps.clone());
@@ -193,6 +210,16 @@ impl SequenceEditorState {
                         .filter(|(name, _)| !name.trim().is_empty())
                         .map(|(name, expr)| (name.clone(), expr.clone()))
                         .collect::<BTreeMap<_, _>>(),
+                    // The Session-target rule names (trimmed, non-empty). Only the
+                    // names are persisted — never the captured value, which stays
+                    // in-memory only (note #6 security invariant).
+                    persist: step
+                        .rules
+                        .iter()
+                        .zip(step.persist.iter())
+                        .filter(|((name, _), on)| **on && !name.trim().is_empty())
+                        .map(|((name, _), _)| name.clone())
+                        .collect(),
                 })
                 .collect(),
         })
@@ -203,7 +230,18 @@ impl SequenceEditorState {
     /// matches exactly what was written to disk (no dirty-after-save mismatch).
     pub fn mark_saved(&mut self) {
         for step in &mut self.steps {
-            step.rules.retain(|(name, _)| !name.trim().is_empty());
+            // Purge empty-named rules from both the rules list and its parallel
+            // `persist` flags in lockstep so the two stay index-aligned.
+            let mut i = 0;
+            step.rules.retain(|(name, _)| {
+                let keep = !name.trim().is_empty();
+                if !keep && i < step.persist.len() {
+                    step.persist.remove(i);
+                } else {
+                    i += 1;
+                }
+                keep
+            });
         }
         self.selected_rule = self
             .selected_rule
@@ -332,8 +370,20 @@ impl SequenceEditorState {
             KeyCode::Char('a') => self.add_rule(),
             KeyCode::Char('d') => self.delete_rule(),
             KeyCode::Char('r') => self.begin_edit(EditTarget::RuleName, false),
+            // Toggle the selected rule's target Run-only ⇄ Session (note #6). `p`
+            // for "persist"; free among the Rules-focus keys.
+            KeyCode::Char('p') => self.toggle_persist(),
             KeyCode::Enter | KeyCode::Char('i') => self.begin_edit(EditTarget::RuleExpr, false),
             _ => {}
+        }
+    }
+
+    /// Flips the selected rule's Session/Run-only target.
+    fn toggle_persist(&mut self) {
+        if let Some(step) = self.steps.get_mut(self.selected_step)
+            && let Some(flag) = step.persist.get_mut(self.selected_rule)
+        {
+            *flag = !*flag;
         }
     }
 
@@ -372,6 +422,7 @@ impl SequenceEditorState {
             return;
         };
         step.rules.push((String::new(), String::new()));
+        step.persist.push(false); // new rules default to Run-only
         self.selected_rule = step.rules.len() - 1;
         self.begin_edit(EditTarget::RuleName, true);
     }
@@ -381,6 +432,9 @@ impl SequenceEditorState {
             && self.selected_rule < step.rules.len()
         {
             step.rules.remove(self.selected_rule);
+            if self.selected_rule < step.persist.len() {
+                step.persist.remove(self.selected_rule);
+            }
             self.selected_rule = self.selected_rule.min(step.rules.len().saturating_sub(1));
         }
     }
@@ -436,6 +490,9 @@ impl SequenceEditorState {
                     if fresh && target == EditTarget::RuleName {
                         if rule < step.rules.len() {
                             step.rules.remove(rule);
+                            if rule < step.persist.len() {
+                                step.persist.remove(rule);
+                            }
                             self.selected_rule =
                                 self.selected_rule.min(step.rules.len().saturating_sub(1));
                         }
@@ -500,6 +557,7 @@ impl SequenceEditorState {
                     self.steps.push(StepEdit {
                         endpoint,
                         rules: Vec::new(),
+                        persist: Vec::new(),
                     });
                     self.selected_step = self.steps.len() - 1;
                 }
@@ -662,7 +720,7 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
             _ => (name.clone(), expr.clone()),
         };
         let marker = if selected { "> " } else { "  " };
-        let mut line = Line::from(vec![
+        let mut spans = vec![
             Span::raw(marker),
             Span::styled(
                 if name_s.is_empty() {
@@ -678,7 +736,16 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
             } else {
                 expr_s
             }),
-        ]);
+        ];
+        // A Session-target rule (note #6) shows a dim ` →session` marker; Run-only
+        // rules show nothing (the ephemeral default). Hidden while this row is
+        // being edited so the live edit buffer stays clean.
+        let persisted = step.persist.get(i).copied().unwrap_or(false);
+        let being_edited = matches!(&state.edit, Some(edit) if edit.rule == i);
+        if persisted && !being_edited {
+            spans.push(Span::styled(" →session", theme.statusline));
+        }
+        let mut line = Line::from(spans);
         if selected && focused {
             line = line.style(theme.selection);
         }
@@ -713,7 +780,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceEditorState, the
                 "j/k step · a add · d del · K/J mv · o on-err · w save · ^R run · q close"
             }
             Focus::Rules => {
-                "j/k rule · a add · enter expr · r name · d del · w save · ^R run · q close"
+                "j/k rule · a add · enter expr · r name · p session · d del · w save · ^R run · q close"
             }
         }
     };
@@ -794,11 +861,13 @@ mod tests {
                     seq: 0,
                     endpoint: "a/one.toml".to_owned(),
                     extract: BTreeMap::new(),
+                    persist: Vec::new(),
                 },
                 SequenceStep {
                     seq: 1,
                     endpoint: "b/two.toml".to_owned(),
                     extract: BTreeMap::new(),
+                    persist: Vec::new(),
                 },
             ],
         }
@@ -994,6 +1063,68 @@ mod tests {
         let err = ed.to_sequence_checked().unwrap_err();
         assert!(err.contains("duplicate rule name 'x'"), "{err}");
         assert!(err.contains("step 1"), "{err}");
+    }
+
+    #[test]
+    fn toggle_persist_flips_target_and_populates_persist_on_save() {
+        // Note #6: `p` on a rule flips Run-only ⇄ Session; on save the rule name
+        // lands in `SequenceStep.persist` (only when Session), never the value.
+        let mut ed = editor();
+        ed.handle_key(key(KeyCode::Char('l'))); // focus rules of step 0
+        ed.handle_key(key(KeyCode::Char('a'))); // add rule → editing name
+        typ(&mut ed, "token");
+        ed.handle_key(key(KeyCode::Enter)); // name → chains to expr
+        typ(&mut ed, "$.data.token");
+        ed.handle_key(key(KeyCode::Enter));
+        // Default is Run-only: not in persist.
+        let out = ed.to_sequence_checked().unwrap();
+        assert!(out.steps[0].persist.is_empty(), "default is Run-only");
+        // Flip to Session.
+        ed.handle_key(key(KeyCode::Char('p')));
+        let out = ed.to_sequence_checked().unwrap();
+        assert_eq!(out.steps[0].persist, vec!["token".to_owned()]);
+        // The captured value is NOT in persist — only the rule name.
+        assert!(!out.steps[0].persist.iter().any(|n| n.contains("$.")));
+        // Flip back to Run-only.
+        ed.handle_key(key(KeyCode::Char('p')));
+        assert!(
+            ed.to_sequence_checked().unwrap().steps[0]
+                .persist
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn persist_seeds_from_loaded_step_and_shows_session_marker() {
+        // Loading a step whose `persist` lists a rule shows the ` →session` marker
+        // and round-trips the flag back out on save.
+        let sequence = Sequence {
+            seq: 0,
+            name: "Flow".to_owned(),
+            on_error: OnError::Halt,
+            steps: vec![SequenceStep {
+                seq: 0,
+                endpoint: "auth/login.toml".to_owned(),
+                extract: BTreeMap::from([("token".to_owned(), "$.token".to_owned())]),
+                persist: vec!["token".to_owned()],
+            }],
+        };
+        let mut ed = SequenceEditorState::new(
+            "Flow".to_owned(),
+            PathBuf::from("sequences/flow.toml"),
+            &sequence,
+            vec!["auth/login.toml".to_owned()],
+        );
+        assert_eq!(ed.steps[0].persist, vec![true]);
+        // Focus the rules pane so the row renders, then assert the marker shows.
+        ed.handle_key(key(KeyCode::Char('l')));
+        let out = render_to_text(&ed);
+        assert!(out.contains("→session"), "session marker shown:\n{out}");
+        // Round-trips back out unchanged.
+        assert_eq!(
+            ed.to_sequence_checked().unwrap().steps[0].persist,
+            vec!["token".to_owned()]
+        );
     }
 
     #[test]

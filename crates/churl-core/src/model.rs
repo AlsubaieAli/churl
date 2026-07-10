@@ -334,6 +334,18 @@ pub struct SequenceStep {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extract: BTreeMap<String, String>,
+    /// Names of this step's extraction rules whose captured value is written into
+    /// the in-memory Session scope (surviving the run for standalone requests).
+    /// Rules not listed stay run-only (ephemeral). Persisted as `persist = [...]`.
+    ///
+    /// Backward-compatible: a sequence file without `persist` loads with an empty
+    /// list, so every rule is Run-only — today's behaviour unchanged. A rule's
+    /// target is Session iff its name is in `persist`. The Session store itself is
+    /// process-lifetime, in-memory, and NEVER written to disk (a security feature —
+    /// captured secrets never touch the filesystem); only the rule *name* list is
+    /// persisted here, never the captured value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub persist: Vec<String>,
 }
 
 /// An executed HTTP response. Runtime-only: never persisted to TOML.

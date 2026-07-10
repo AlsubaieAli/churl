@@ -701,6 +701,13 @@ pub struct App {
     /// The load runner's request, resolved ONCE at open time and cloned for every
     /// copy in a run (consistent batch — no per-copy re-resolution).
     load_request: Option<Request>,
+    /// In-memory Session variable store (note #6), keyed by canonical workspace
+    /// root so one workspace's captured secrets never leak into another. Populated
+    /// when a sequence run extracts a value for a rule listed in that step's
+    /// `persist`; read as the highest resolver scope for BOTH sequence-run and
+    /// standalone-send resolution. **Never** written to disk (a security feature —
+    /// captured tokens stay in RAM and evaporate on exit); there is no load/save.
+    session_vars: HashMap<PathBuf, BTreeMap<String, String>>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -835,6 +842,7 @@ impl App {
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
             load_request: None,
+            session_vars: HashMap::new(),
         })
     }
 
@@ -1313,12 +1321,60 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The in-memory Session store key for the current workspace: its canonical
+    /// root path. `None` when no workspace is open (nothing to key on).
+    fn session_key(&self) -> Option<PathBuf> {
+        self.workspace.as_ref().map(|ws| canonical_path(ws.root()))
+    }
+
+    /// The current workspace's in-memory Session captures (note #6), empty when
+    /// none or no workspace. The highest resolver scope for a standalone send and
+    /// (threaded through [`RunScopes`]) for a sequence run.
+    fn session_vars(&self) -> BTreeMap<String, String> {
+        self.session_key()
+            .and_then(|key| self.session_vars.get(&key).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Writes `name → value` into the current workspace's Session store,
+    /// creating the workspace entry on first write and overwriting an existing
+    /// name (a re-login refreshes the token). In-memory only — never persisted.
+    /// No-op when no workspace is open.
+    fn write_session_var(&mut self, name: String, value: String) {
+        let Some(key) = self.session_key() else {
+            return;
+        };
+        self.session_vars
+            .entry(key)
+            .or_default()
+            .insert(name, value);
+    }
+
+    /// Clears the current workspace's Session captures (the env-editor Session
+    /// group's clear action). Returns whether anything was cleared.
+    fn clear_session_vars(&mut self) -> bool {
+        let Some(key) = self.session_key() else {
+            return false;
+        };
+        match self.session_vars.get_mut(&key) {
+            Some(map) if !map.is_empty() => {
+                map.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Builds the template [`Resolver`] for a send of `selected`, in precedence
-    /// order: cli `--var` → active profile → the endpoint's collection
-    /// `folder.toml` vars → workspace `[vars]` → process env (implicit).
+    /// order: in-memory Session captures → cli `--var` → active profile → the
+    /// endpoint's collection `folder.toml` vars → workspace `[vars]` → process env
+    /// (implicit). The Session scope (note #6) sits at the top so a standalone
+    /// request using `{{token}}` resolves a value captured by an earlier sequence
+    /// run; it is empty until a Session-target rule writes into it.
     fn build_resolver(&mut self, selected: &SelectedEndpoint) -> Resolver {
         let collection_vars = self.explorer.collection_vars(selected.collection);
         Resolver::new(vec![
+            Scope::new("session", self.session_vars()),
             Scope::new("cli", self.cli_vars.clone()),
             Scope::new("profile", self.profile_vars()),
             Scope::new("collection", collection_vars),
@@ -2847,12 +2903,17 @@ impl App {
     /// Opens the environments & variables editor over the current workspace.
     /// Requires an open workspace (there is nothing to edit otherwise).
     fn open_env_editor(&mut self) {
+        let session = self.session_vars();
         let Some(ws) = self.workspace.as_ref() else {
             self.notify("open a workspace first");
             return;
         };
-        match EnvEditorState::from_workspace(ws, self.active_profile.clone(), self.cli_vars.clone())
-        {
+        match EnvEditorState::from_workspace(
+            ws,
+            self.active_profile.clone(),
+            self.cli_vars.clone(),
+            &session,
+        ) {
             Ok(state) => {
                 self.env_editor = Some(state);
                 self.mode = Mode::EnvEditor;
@@ -2880,6 +2941,20 @@ impl App {
                 }
             }
             EnvKeyOutcome::Close => self.close_env_editor(),
+            EnvKeyOutcome::ClearSession => {
+                // Empty the current workspace's in-memory Session store, then
+                // rebuild the editor's read-only Session group so it reflects it.
+                let cleared = self.clear_session_vars();
+                let session = self.session_vars();
+                if let Some(editor) = self.env_editor.as_mut() {
+                    editor.set_session_vars(&session);
+                }
+                self.notify(if cleared {
+                    "session captures cleared"
+                } else {
+                    "no session captures to clear"
+                });
+            }
         }
         Ok(())
     }
@@ -3029,6 +3104,7 @@ impl App {
     /// per-step collection scope is loaded inside `prepare_step`.
     fn sequence_run_scopes(&self) -> churl_core::sequence::RunScopes {
         churl_core::sequence::RunScopes {
+            session: self.session_vars(),
             cli: self.cli_vars.clone(),
             profile: self.profile_vars(),
             workspace: self.workspace_vars(),
@@ -3153,14 +3229,28 @@ impl App {
             ),
         };
 
-        // Merge extracted values into the accumulator (empty on any failure).
+        // Merge extracted values into the run-only accumulator (empty on any
+        // failure). Also collect the Session-target captures (note #6): a rule
+        // whose name is in this step's `persist` and that actually extracted a
+        // value. `extracted` is empty on a failed extraction, so a failure never
+        // writes — leaving any prior Session value intact.
+        let mut session_writes: Vec<(String, String)> = Vec::new();
         for (name, value) in &extracted {
             runner.extracted.insert(name.clone(), value.clone());
+            if step.persist.iter().any(|p| p == name) {
+                session_writes.push((name.clone(), value.clone()));
+            }
         }
         if let Some(row) = runner.steps.get_mut(index) {
             row.timing = timing;
             row.extracted = extracted;
             row.response = response;
+        }
+        // Write the Session captures into the current workspace's in-memory store
+        // (create/overwrite — a re-login refreshes the token). Done after the
+        // `runner` borrow is released. Never touches disk.
+        for (name, value) in session_writes {
+            self.write_session_var(name, value);
         }
         self.finish_sequence_step(index, result);
     }
@@ -6944,6 +7034,218 @@ mod tests {
                 "scenario {label}: core vs TUI extracted maps diverged"
             );
         }
+    }
+
+    /// Builds a sequence app whose step 0 extracts `token` from `$.token`, with the
+    /// rule's target chosen by `persist` (true = Session, false = Run-only).
+    fn session_seq_app(root: &Path, persist: bool) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("login.toml"),
+            "seq = 0\nname = \"login\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/login\"\n",
+        )
+        .unwrap();
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        let persist_line = if persist {
+            "persist = [\"token\"]\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            seq_dir.join("flow.toml"),
+            format!(
+                "seq = 0\nname = \"Flow\"\non_error = \"halt\"\n\n[[step]]\nseq = 0\nendpoint = \"api/login.toml\"\n{persist_line}[step.extract]\ntoken = \"$.token\"\n"
+            ),
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let file = seq_dir.join("flow.toml");
+        let sequence = churl_core::persistence::load_sequence(&file).unwrap();
+        app.open_sequence_runner(super::super::components::explorer::SelectedSequence {
+            name: sequence.name.clone(),
+            file,
+            sequence,
+        });
+        app
+    }
+
+    /// A dummy SelectedEndpoint for building a standalone resolver in tests.
+    fn dummy_selected(file: &Path) -> SelectedEndpoint {
+        SelectedEndpoint {
+            display_path: "api/login".into(),
+            file: file.to_owned(),
+            collection: 0,
+            endpoint: churl_core::persistence::load_endpoint(file).unwrap(),
+        }
+    }
+
+    /// Note #6: a Session-target rule writes the extracted value into the workspace
+    /// session store, and a subsequent STANDALONE send resolves `{{token}}` from it.
+    #[test]
+    fn session_rule_persists_and_resolves_standalone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut app = session_seq_app(root, true);
+        // Before the run, nothing is captured.
+        assert!(app.session_vars().is_empty());
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"T-123"}"#)));
+        // Captured into the in-memory Session store.
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("T-123")
+        );
+        // A standalone resolver (as a normal send would build) substitutes it.
+        let file = root.join("api/login.toml");
+        let selected = dummy_selected(&file);
+        let resolver = app.build_resolver(&selected);
+        assert_eq!(resolver.substitute("Bearer {{token}}"), "Bearer T-123");
+    }
+
+    /// A Run-only rule (default, no `persist`) never writes to the session store.
+    #[test]
+    fn run_only_rule_does_not_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = session_seq_app(dir.path(), false);
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"T-123"}"#)));
+        assert!(
+            app.session_vars().is_empty(),
+            "run-only rule must not touch the session store"
+        );
+    }
+
+    /// A failed extraction (missing key) never clobbers an existing Session value.
+    #[test]
+    fn failed_extraction_keeps_prior_session_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut app = session_seq_app(root, true);
+        // First run captures T-1.
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"T-1"}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("T-1")
+        );
+        // Re-run; this time the body lacks `token` → extraction fails.
+        app.start_sequence_run();
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"other":1}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("T-1"),
+            "a failed extraction leaves the prior value intact"
+        );
+    }
+
+    /// A re-run with a Session-target rule overwrites the captured value.
+    #[test]
+    fn session_value_overwritten_on_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut app = session_seq_app(root, true);
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"OLD"}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("OLD")
+        );
+        app.start_sequence_run();
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"NEW"}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("NEW")
+        );
+    }
+
+    /// Cross-workspace isolation: a capture in workspace A does not resolve in B.
+    #[test]
+    fn session_captures_are_workspace_isolated() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        // Capture a token in workspace A.
+        let mut app = session_seq_app(dir_a.path(), true);
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"A-TOK"}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("A-TOK")
+        );
+        // Switch the app's workspace to B (same in-memory store, different key).
+        std::fs::write(dir_b.path().join("churl.toml"), "name = \"b\"\n").unwrap();
+        app.workspace = Some(OpenWorkspace::open(dir_b.path()).unwrap());
+        assert!(
+            app.session_vars().is_empty(),
+            "workspace B sees none of A's captures"
+        );
+    }
+
+    /// Security: after a run that persists a token, the session value never
+    /// touches disk — the sequence/workspace TOMLs are byte-unchanged.
+    #[test]
+    fn session_value_never_written_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut app = session_seq_app(root, true);
+        let seq_path = root.join("sequences/flow.toml");
+        let manifest_path = root.join("churl.toml");
+        let endpoint_path = root.join("api/login.toml");
+        let seq_before = std::fs::read_to_string(&seq_path).unwrap();
+        let manifest_before = std::fs::read_to_string(&manifest_path).unwrap();
+        let endpoint_before = std::fs::read_to_string(&endpoint_path).unwrap();
+
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Ok(ok_resp(200, r#"{"token":"SECRET-TOKEN"}"#)));
+        assert_eq!(
+            app.session_vars().get("token").map(String::as_str),
+            Some("SECRET-TOKEN")
+        );
+
+        // No file carries the captured value; the files are byte-identical.
+        assert_eq!(std::fs::read_to_string(&seq_path).unwrap(), seq_before);
+        assert_eq!(
+            std::fs::read_to_string(&manifest_path).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(&endpoint_path).unwrap(),
+            endpoint_before
+        );
+        // Belt-and-braces: the secret appears in NO file under the workspace.
+        for entry in walkdir(root) {
+            let text = std::fs::read_to_string(&entry).unwrap_or_default();
+            assert!(
+                !text.contains("SECRET-TOKEN"),
+                "session value leaked to disk at {}",
+                entry.display()
+            );
+        }
+    }
+
+    /// Recursively lists every file under `root` (test-only, small trees).
+    fn walkdir(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_owned()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     #[test]

@@ -631,6 +631,7 @@ mod tests {
             seq: 0,
             endpoint: endpoint.to_owned(),
             extract: BTreeMap::new(),
+            persist: Vec::new(),
         }
     }
 

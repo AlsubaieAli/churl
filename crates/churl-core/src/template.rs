@@ -182,6 +182,26 @@ mod tests {
     }
 
     #[test]
+    fn session_scope_beats_profile_and_below() {
+        // Note #6: the standalone chain is `session > cli > profile > … > env`.
+        // A var defined in both a profile and the session resolves to the session.
+        let resolver = Resolver::new(vec![
+            scope("session", &[("token", "session")]),
+            scope("cli", &[("token", "cli")]),
+            scope("profile", &[("token", "profile")]),
+            scope("workspace", &[("token", "workspace")]),
+        ]);
+        assert_eq!(resolver.resolve("token").as_deref(), Some("session"));
+        // With no session value, cli wins (session sits above cli but is empty).
+        let resolver = Resolver::new(vec![
+            scope("session", &[]),
+            scope("cli", &[("token", "cli")]),
+            scope("profile", &[("token", "profile")]),
+        ]);
+        assert_eq!(resolver.resolve("token").as_deref(), Some("cli"));
+    }
+
+    #[test]
     fn env_is_the_last_fallback() {
         // SAFETY: single-threaded test; unique var name.
         unsafe { std::env::set_var("CHURL_TEST_ENV_VAR", "from-env") };
