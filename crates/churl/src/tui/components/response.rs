@@ -208,6 +208,13 @@ pub struct ResponseView {
     folded: HashSet<usize>,
     /// Whether soft-wrap is on.
     wrap: bool,
+    /// Whether the left-hand line-number gutter is shown (drive-test note #8).
+    /// Defaults to `true` (gutter on) and persists across pretty/sort/wrap/fold
+    /// toggles for the life of the view — a new response builds a fresh view, so
+    /// the default-on contract is re-established per response. Render-only: it
+    /// shrinks the effective body width (see [`render_done`]) but never touches
+    /// `raw_text`, copy, or the line index.
+    line_numbers: bool,
     /// Horizontal scroll offset in *char columns* for unwrapped long lines
     /// (M7.7). When wrap is off, each logical line's display row shows the char
     /// window `[h_scroll, h_scroll + viewport_width)` instead of the whole line,
@@ -284,6 +291,7 @@ impl ResponseView {
             folds: None,
             folded: HashSet::new(),
             wrap: false,
+            line_numbers: true,
             h_scroll: 0,
             pretty,
             sort_keys,
@@ -314,6 +322,32 @@ impl ResponseView {
     /// Whether wrap is on.
     pub fn wrap(&self) -> bool {
         self.wrap
+    }
+
+    /// Whether the line-number gutter is shown (drive-test note #8).
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
+    }
+
+    /// Toggles the line-number gutter (`#`). Render-only — it changes only the
+    /// effective body width, so no folds/generation/search reset is needed. The
+    /// highlight cache is keyed on `line_numbers` (via `viewport_hash`), so the
+    /// changed body width re-highlights on the next frame.
+    pub fn toggle_line_numbers(&mut self) {
+        self.line_numbers = !self.line_numbers;
+    }
+
+    /// The width in columns the gutter consumes when on: the digit count of the
+    /// largest 1-based line number that can appear in the current source, plus one
+    /// space of padding. `0` when the gutter is off. Computed from the *total*
+    /// displayed line count (not the visible slice) so the width is stable while
+    /// scrolling and does not jitter as folds open/close.
+    fn gutter_width(&self) -> usize {
+        if !self.line_numbers {
+            return 0;
+        }
+        let last = self.source_line_count();
+        digit_count(last) + 1
     }
 
     /// Whether the body is currently rendered pretty (reformatted).
@@ -1317,9 +1351,16 @@ fn render_done(
     ctx: &RenderCtx,
     outcome: &mut RenderOutcome,
 ) {
-    let width = body_area.width as usize;
+    let area_width = body_area.width as usize;
     let height = body_area.height as usize;
     let visible = view.visible_map();
+    // The gutter consumes columns from the left; everything downstream (wrap
+    // splitting, the h_scroll window, viewport_width, and thus the caller's
+    // cursor→logical mapping) uses the reduced body width so the seam is single
+    // and consistent (drive-test note #8). `saturating_sub` guards a pane
+    // narrower than the gutter — the body simply gets 0 columns rather than wrap.
+    let gutter = view.gutter_width().min(area_width);
+    let width = area_width.saturating_sub(gutter);
     // Clamp the horizontal scroll so it can't pan past the last screenful of the
     // widest visible line (mirror of `clamp_scroll` for the vertical axis). The
     // caller writes the clamped value back so an over-pan self-corrects.
@@ -1328,6 +1369,9 @@ fn render_done(
     let rows = expand_wrap(view, &visible, view.wrap, width, h_scroll);
     let total = rows.len();
     outcome.total_rows = total;
+    // Report the *reduced* body width — the caller feeds it back into
+    // logical_at_display_row / display_row_for_logical / ensure_column_visible,
+    // so every geometry consumer sees the same gutter-adjusted width.
     outcome.viewport_width = width;
 
     // Clamp cursor and scroll into range, keeping the cursor within the viewport.
@@ -1349,6 +1393,22 @@ fn render_done(
     // a fold/wrap/mode change re-highlights; h_scroll is included so a horizontal
     // pan (which changes the char window each row shows) also re-highlights.
     let hash = viewport_hash(view, scroll, height, h_scroll);
+    // The gutter number shows on the FIRST display row of each visible entry; a
+    // wrap-continuation row (same visible_idx as the row above) gets a blank,
+    // aligned gutter. `char_start == 0` is *not* the predicate — an unwrapped row
+    // under h_scroll starts at `char_start == h_scroll > 0` yet is still the sole
+    // (first) row of its logical line and must carry a number.
+    //
+    // Seed `prev_visible_idx` from the row JUST ABOVE the window (`rows[scroll-1]`),
+    // not `None`: we only walk the visible slice `rows[scroll..end]`, so a
+    // `None` seed would treat the top painted row as a first row even when it is a
+    // wrap-continuation whose numbered first row is scrolled off — painting a
+    // number where a blank gutter belongs. The seed makes first-row detection
+    // correct at the viewport top, uniformly for wrapped and unwrapped rows.
+    let mut prev_visible_idx: Option<usize> = scroll
+        .checked_sub(1)
+        .and_then(|i| rows.get(i))
+        .map(|r| r.visible_idx);
     let highlighted: Option<&Vec<Line<'static>>> = if view.wrap {
         // Under wrap we render plain (styled overlays only) — highlighting wrapped
         // spans is deferred (see the module + DECISIONS notes). Skip the cache.
@@ -1386,6 +1446,23 @@ fn render_done(
             }
         };
         let line = apply_cursor(line, is_cursor, ctx.theme);
+        // Prepend the gutter AFTER the cursor style so the number stays dim on the
+        // cursor row (the gutter is a fixed decoration, not part of the content).
+        let line = if gutter > 0 {
+            let is_first_row = prev_visible_idx != Some(row.visible_idx);
+            // 1-based logical line number of this row's visible entry; a fold-header
+            // maps to its opener line, so `logical()` already yields the opener's
+            // number. Continuation rows show a blank, right-aligned gutter.
+            let label = if is_first_row {
+                format!("{:>w$} ", v.logical() + 1, w = gutter - 1)
+            } else {
+                " ".repeat(gutter)
+            };
+            prepend_gutter(line, label)
+        } else {
+            line
+        };
+        prev_visible_idx = Some(row.visible_idx);
         out_lines.push(line);
     }
 
@@ -1532,6 +1609,31 @@ fn apply_cursor<'a>(line: Line<'a>, is_cursor: bool, theme: &Theme) -> Line<'a> 
     } else {
         line
     }
+}
+
+/// The number of decimal digits in `n` (at least 1, so `0` → 1). Drives the
+/// stable gutter width from the total displayed line count.
+fn digit_count(n: usize) -> usize {
+    let mut n = n;
+    let mut digits = 1;
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+/// Prepends the dim line-number `label` to `line` as a leading span (drive-test
+/// note #8). The gutter reuses the same `Modifier::DIM` the viewer already uses
+/// for secondary text (fold suffixes, non-current search matches).
+fn prepend_gutter(line: Line<'_>, label: String) -> Line<'_> {
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::styled(
+        label,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 /// A char-index slice of `s` (`start..end` in chars).
@@ -1741,6 +1843,11 @@ fn viewport_hash(view: &ResponseView, scroll: usize, height: usize, h_scroll: us
     // (belt-and-braces alongside the generation bump their toggles already do).
     view.pretty.hash(&mut hasher);
     view.sort_keys.hash(&mut hasher);
+    // The gutter shrinks the effective body width, so each unwrapped row's char
+    // window (and each wrapped row's split) differs between gutter-on and -off.
+    // Toggling `#` does not bump the generation, so key it here to invalidate the
+    // stale highlight cache built at the other width.
+    view.line_numbers.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -2689,5 +2796,340 @@ mod tests {
             "copy-line returns the full RAW line, unaffected by h_scroll or sanitize"
         );
         assert_eq!(v.copy_all(), body, "copy-all returns the full raw body");
+    }
+
+    // ---- drive-test note #8: line-number gutter ----
+
+    /// Renders a `Done` view into a `TestBackend` of the given size and returns
+    /// the body rows as strings (the whole inner area, borders included). Used to
+    /// assert the gutter is actually painted (not just the geometry math).
+    fn render_rows(view: ResponseView, w: u16, h: u16) -> Vec<String> {
+        render_rows_scrolled(view, w, h, 0)
+    }
+
+    /// Like [`render_rows`] but with a starting display-row `scroll` — needed to
+    /// exercise a wrap-continuation row *at the viewport top* (the gutter
+    /// first-row seed is only wrong when `scroll > 0`).
+    fn render_rows_scrolled(view: ResponseView, w: u16, h: u16, scroll: usize) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let state = ResponseState::Done { view };
+        let cache = HashMap::new();
+        let theme = Theme::default();
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    RenderCtx {
+                        state: &state,
+                        request: None,
+                        focused: false,
+                        scroll,
+                        cursor: scroll,
+                        cache: &cache,
+                        theme: &theme,
+                        jump_label: None,
+                        tick_count: 0,
+                    },
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer[(x, y)].symbol().to_owned()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn gutter_is_on_by_default() {
+        // The observable contract: a freshly built view shows the gutter.
+        let v = view("a\nb\nc");
+        assert!(v.line_numbers(), "the gutter defaults ON");
+    }
+
+    #[test]
+    fn toggle_flips_gutter_visibility() {
+        let mut v = view("a\nb");
+        assert!(v.line_numbers());
+        v.toggle_line_numbers();
+        assert!(!v.line_numbers(), "toggle hides the gutter");
+        v.toggle_line_numbers();
+        assert!(v.line_numbers(), "toggle shows it again");
+    }
+
+    #[test]
+    fn gutter_width_scales_with_line_count_and_is_zero_when_off() {
+        // 1–9 lines → 1 digit + 1 pad = 2; 10+ lines → 2 digits + 1 pad = 3.
+        let mut v = view("a\nb\nc"); // 3 lines
+        assert_eq!(v.gutter_width(), 2);
+        let big: String = (0..12)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut v2 = view(&big); // exactly 12 lines
+        assert_eq!(v2.source_line_count(), 12);
+        assert_eq!(v2.gutter_width(), 3, "two-digit count → width 3");
+        // Off → the gutter consumes nothing.
+        v.toggle_line_numbers();
+        assert_eq!(v.gutter_width(), 0);
+        v2.toggle_line_numbers();
+        assert_eq!(v2.gutter_width(), 0);
+    }
+
+    #[test]
+    fn gutter_renders_right_aligned_1_based_numbers() {
+        // Ten lines so the width is 3 (two digits + pad): line 9 is ` 9 `,
+        // line 10 is `10 ` — right-aligned in the same column.
+        let body: String = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = render_rows(view(&body), 40, 14);
+        // Body starts at inner row 1 (row 0 is the top border). Content rows begin
+        // after the border; find the row carrying "line0".
+        let first = rows
+            .iter()
+            .find(|r| r.contains("line0"))
+            .expect("line0 row");
+        assert!(
+            first.contains(" 1 line0"),
+            "row shows a right-aligned 1-based number, got {first:?}"
+        );
+        let tenth = rows
+            .iter()
+            .find(|r| r.contains("line9"))
+            .expect("line9 row");
+        assert!(
+            tenth.contains("10 line9"),
+            "the 10th logical line is numbered 10, got {tenth:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_continuation_rows_have_a_blank_gutter() {
+        // One long logical line, wrap on: the first display row shows the number;
+        // the continuation rows show a blank (aligned) gutter. Asserted at the
+        // render level — the painted body rows must carry the gutter only once.
+        let mut v = view(&"w".repeat(60));
+        v.toggle_wrap();
+        assert!(v.wrap());
+        // 40-wide pane: inner 38, gutter 2 → 36-col body, so 60 chars → 2 rows.
+        let rows = render_rows(v, 40, 12);
+        // Body rows carry the `www…` run; the title (`… wrap`) has a lone `w`, so
+        // filter on the run to avoid matching the title row.
+        let content: Vec<&String> = rows.iter().filter(|r| r.contains("ww")).collect();
+        assert!(content.len() >= 2, "the long line wrapped to ≥2 rows");
+        // The first content row carries the number `1 ` before the text.
+        assert!(
+            content[0].contains("1 w"),
+            "first row numbered, got {:?}",
+            content[0]
+        );
+        // Continuation rows: the text after the left border (thin `│` unfocused)
+        // is preceded by the blank 2-col gutter (`  w…`), never a digit.
+        for cont in &content[1..] {
+            let after_border = cont.trim_start_matches('│');
+            assert!(
+                after_border.starts_with("  w"),
+                "continuation row has a blank gutter then text, got {cont:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_row_at_viewport_top_has_a_blank_gutter() {
+        // P1 regression guard: line 1 is long (wraps to 9 rows at a 36-col body),
+        // line 2 is short. Scroll so the TOP visible row is a wrap-continuation of
+        // line 1 (its numbered first row scrolled off). With a `None` seed the top
+        // row would wrongly show `1`; the seed-from-`rows[scroll-1]` fix must make
+        // it a blank gutter. Row below (still a continuation) is also blank; the
+        // first row of line 2 further down is correctly numbered `2`.
+        let body = format!("{}\nSECONDLINE", "a".repeat(300));
+        let mut v = view(&body);
+        v.toggle_wrap();
+        assert!(v.wrap());
+        // 40-wide pane → inner 38, gutter 2 → 36-col body. 300 chars → 9 rows for
+        // line 1 (rows 0..9), then line 2 at row 9 (10 rows total). Pane height 10 →
+        // 8 body rows, so `clamp_scroll(2, 10, 8) == 2` holds (a too-tall pane would
+        // clamp scroll back to 0 and hide the bug) while the window [2, 10) still
+        // reaches line 2's row. Top two visible rows are line-1 continuations; line
+        // 2's numbered first row is at the bottom.
+        let rows = render_rows_scrolled(v, 40, 10, 2);
+        // The `a`-run rows are line-1 continuations (blank gutter); the SECONDLINE
+        // row is line 2's first row (numbered `2`).
+        let a_rows: Vec<&String> = rows.iter().filter(|r| r.contains("aa")).collect();
+        assert!(
+            a_rows.len() >= 2,
+            "two line-1 continuation rows visible at the top, got {a_rows:?}"
+        );
+        for cont in &a_rows {
+            let body_cols = cont.trim_start_matches('│');
+            assert!(
+                body_cols.starts_with("  a"),
+                "continuation row at/after the viewport top has a BLANK gutter (not \
+                 a line number), got {cont:?}"
+            );
+            assert!(
+                !body_cols.starts_with("1 "),
+                "a continuation row must never show line 1's number, got {cont:?}"
+            );
+        }
+        // Line 2's first row is numbered `2` (the seed didn't break real first rows).
+        let second = rows
+            .iter()
+            .find(|r| r.contains("SECONDLINE"))
+            .expect("line 2 visible");
+        assert!(
+            second.contains("2 SECONDLINE"),
+            "line 2's first row is numbered 2, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn unwrapped_panned_line_at_scroll_still_shows_its_number() {
+        // Seed-fix guard for the unwrapped path: every unwrapped line is exactly
+        // one row per visible_idx, so even with `scroll > 0` AND `h_scroll > 0`
+        // (the row's char_start == h_scroll > 0) the top row is still a first row
+        // and must carry its number. Ten distinct wide lines; pan right; scroll to
+        // line 3 (index 2 → number 3).
+        let body: String = (0..10)
+            .map(|i| format!("L{i}-{}", "x".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut v = view(&body);
+        v.scroll_h(true, 5); // h_scroll > 0
+        assert_eq!(v.h_scroll(), 5);
+        assert!(!v.wrap());
+        // Scroll to display row 2 (0-based) → logical line index 2 → number 3.
+        // 10 lines → gutter width 3 (2 digits + pad), so line 3 renders as ` 3 `.
+        let rows = render_rows_scrolled(v, 40, 8, 2);
+        // The top content row shows number `3` right-aligned in the 3-col gutter.
+        let numbered = rows
+            .iter()
+            .find(|r| r.trim_start_matches('│').starts_with(" 3 "))
+            .expect("top unwrapped row numbered 3 despite scroll>0 and h_scroll>0");
+        // And it shows the panned window (char_start == 5), so `L3-` is off-screen
+        // left; the visible text is the `x` run.
+        assert!(
+            numbered.contains('x'),
+            "the numbered row shows the panned window, got {numbered:?}"
+        );
+    }
+
+    #[test]
+    fn fold_header_shows_the_opener_line_number() {
+        // A JSON body folded at the top: the fold-header row carries the opener
+        // line's number (line 1), then the `⋯ N lines` suffix.
+        let mut v = json_view("{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}");
+        assert!(v.line_count() > 1);
+        v.toggle_all_folds(); // collapse the top-level object
+        let rows = render_rows(v, 60, 10);
+        let header = rows
+            .iter()
+            .find(|r| r.contains('⋯'))
+            .expect("a fold-header row");
+        assert!(
+            header.contains("1 {"),
+            "fold-header carries the opener's number (1), got {header:?}"
+        );
+    }
+
+    #[test]
+    fn gutter_shrinks_effective_body_width_for_wrap_and_h_scroll() {
+        // The width interaction is the risk area: the gutter must be subtracted
+        // from the body width BEFORE wrap/h_scroll geometry. We assert the wrap
+        // boundary shifts by exactly the gutter width when it is on vs off.
+        let long = "z".repeat(100);
+        // Gutter OFF: with an 18-col body, the first wrap row is 18 chars.
+        let mut off = view(&long);
+        off.toggle_line_numbers();
+        off.toggle_wrap();
+        let visible = off.visible_map();
+        let rows_off = expand_wrap(&off, &visible, true, 18, 0);
+        assert_eq!(
+            rows_off[0].char_end - rows_off[0].char_start,
+            18,
+            "gutter off: full 18-col body wrap"
+        );
+        // Gutter ON: same 20-col area, but render subtracts gutter (2) → 18-col
+        // body. We emulate render's seam: body width = area - gutter_width.
+        let mut on = view(&long);
+        on.toggle_wrap();
+        assert!(on.line_numbers());
+        let area_width = 20usize;
+        let body_width = area_width - on.gutter_width();
+        assert_eq!(body_width, 18, "gutter on: body = area(20) - gutter(2)");
+        let visible = on.visible_map();
+        let rows_on = expand_wrap(&on, &visible, true, body_width, 0);
+        assert_eq!(
+            rows_on[0].char_end - rows_on[0].char_start,
+            18,
+            "wrap splits at the REDUCED body width, not the full area"
+        );
+
+        // And h_scroll: with the gutter on, max_h_scroll must be computed against
+        // the reduced body width. widest visible line = 100.
+        let pan = view(&long); // wrap off, gutter on
+        assert!(!pan.wrap());
+        // If a caller passes the reduced width (as render does), the clamp uses it.
+        assert_eq!(pan.gutter_width(), 2);
+        let reduced = 30 - pan.gutter_width();
+        assert_eq!(pan.max_h_scroll(reduced), 100 - reduced);
+    }
+
+    #[test]
+    fn copy_stays_byte_exact_with_the_gutter_on() {
+        // Regression guard: the gutter is render-only. Copy must be byte-exact even
+        // with the gutter on AND a mangled line (ANSI/tab/NUL) that sanitize would
+        // corrupt if copy ever read the displayed text.
+        let raw = "clean\nmid\u{1B}[31m\tx\u{00}y\ntail";
+        let v = view(raw);
+        assert!(v.line_numbers(), "gutter on");
+        assert_eq!(v.copy_all(), raw, "copy-all is the raw body, gutter or not");
+        assert_eq!(
+            v.copy_line(1),
+            "mid\u{1B}[31m\tx\u{00}y",
+            "copy-line is the raw line bytes, unaffected by the gutter"
+        );
+    }
+
+    #[test]
+    fn viewport_width_reported_by_render_excludes_the_gutter() {
+        // The reported viewport_width (fed back into cursor→logical mapping) must be
+        // the reduced body width. Render a 40-wide pane: inner width = 38, minus the
+        // 2-col gutter = 36.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let state = ResponseState::Done { view: view("a\nb") };
+        let cache = HashMap::new();
+        let theme = Theme::default();
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut captured = 0usize;
+        terminal
+            .draw(|frame| {
+                let outcome = render(
+                    frame,
+                    frame.area(),
+                    RenderCtx {
+                        state: &state,
+                        request: None,
+                        focused: false,
+                        scroll: 0,
+                        cursor: 0,
+                        cache: &cache,
+                        theme: &theme,
+                        jump_label: None,
+                        tick_count: 0,
+                    },
+                );
+                captured = outcome.viewport_width;
+            })
+            .expect("draw");
+        // inner width = 40 - 2 borders = 38; gutter = 2 → body = 36.
+        assert_eq!(captured, 36, "viewport_width excludes the gutter");
     }
 }
