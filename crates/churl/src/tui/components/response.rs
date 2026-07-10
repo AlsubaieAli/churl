@@ -1841,6 +1841,11 @@ fn status_summary(view: &ResponseView, focused: bool) -> String {
     if view.wrap {
         summary.push_str(" · wrap");
     }
+    // Sort is only meaningful (and only togglable) on a pretty JSON body; show the
+    // marker so an active A→Z key sort isn't invisible (owner drive-test 2026-07-10).
+    if view.sort_keys {
+        summary.push_str(" · sorted");
+    }
     if let Some(search) = view.search() {
         if search.count() > 0 {
             match search.current_ordinal() {
@@ -2019,6 +2024,21 @@ mod tests {
         assert!(status_summary(&v, true).contains("· wrap"));
         v.view_mode = ViewMode::Headers;
         assert!(status_summary(&v, true).contains("· headers"));
+    }
+
+    #[test]
+    fn status_summary_shows_sorted_marker() {
+        // A pretty JSON body with the A→Z key sort active surfaces `· sorted`;
+        // off it does not (owner drive-test #1). Uses a JSON body so pretty/sort
+        // are meaningful.
+        let mut v = json_view("{\"b\":1,\"a\":2}");
+        assert!(v.pretty(), "JSON is pretty by default");
+        assert!(!status_summary(&v, true).contains("sorted"));
+        v.toggle_sort_keys();
+        assert!(v.sort_keys());
+        assert!(status_summary(&v, true).contains("· sorted"));
+        v.toggle_sort_keys();
+        assert!(!status_summary(&v, true).contains("sorted"));
     }
 
     #[test]
