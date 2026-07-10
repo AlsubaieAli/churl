@@ -61,20 +61,24 @@ The Explorer pane overlay binds the arrow keys to navigation (`Up`/`Down` → Up
 
 The find/open pickers hang off the leader key as its own continuation (M7.10 follow-up): `<leader><leader>` (Space Space) opens the endpoint/request picker, `<leader>s <leader>` the sequence picker, `<leader>l <leader>` the load-runner endpoint picker. `f` is freed at root for jump-mode. Space as a leader *continuation* is not flagged by `validate` (which only checks the leader key against the global map + pane overlays).
 
-The Response pane (M7) adds a `[keys.response]` overlay (`h` headers · `W` wrap · `/` search · `n`/`N` match nav · `o`/`O` fold · `y`/`Y` copy) and a new keyboard-owning overlay mode `Mode::BodySearch` (routed like the other overlays; the incremental `/query` input renders in the message-row position via the shared `LineEditor`). The response `[h]` headers-hint is focus-gated — it shows only when its response pane (main, sequence-runner, or load-runner) is focused.
+The Response pane (M7) adds a `[keys.response]` overlay (`h` headers · `W` wrap · `p` pretty/raw · `/` search · `n`/`N` match nav · `o`/`O` fold · `y`/`Y` copy) and a new keyboard-owning overlay mode `Mode::BodySearch` (routed like the other overlays; the incremental `/query` input renders in the message-row position via the shared `LineEditor`). The response `[h]` headers-hint is focus-gated — it shows only when its response pane (main, sequence-runner, or load-runner) is focused.
 
 ### Response viewer pipeline (M7)
 
-The response viewer composes three pure transforms over the logical lines, evaluated fresh each render (`components/response.rs`):
+The response viewer composes a reformat pass plus three pure transforms over the logical lines, evaluated fresh each render (`components/response.rs`):
 
 ```
-logical lines (body or headers text, CRLF-stripped)
+raw body bytes → lossy-UTF-8 decode  (kept verbatim as `raw_text` — copy reads this)
+  → reformat pass    (JSON-only, pretty-by-default; malformed → raw fallback) ⇒ displayed `text`
+  → line index       (`line_offsets` over the DISPLAYED text — navigation matches what's shown)
   → fold filter      (JSON-only; folded regions elided to a `⋯ N lines` header)
   → wrap expansion    (optional; each display row = a char sub-range of one logical line)
   → viewport slice    (scroll offset + height)
 ```
 
-Cursor and scroll are **display-row** indices (post-fold, post-wrap); the cursor follows-and-scrolls at render time. Search matches are stored against *logical* lines (byte ranges) and mapped through the pipeline for navigation, auto-unfold, and highlight overlay. Per-view UI state (view mode, folds, wrap, search) lives on `ResponseView` so it resets on each new response; cursor/scroll/geometry live on `App`. Fold regions come from `components::fold::scan_regions` (single O(n) string-aware pass, cached lazily). Highlighting is deferred under wrap (wrapped bodies render plain); unwrapped bodies keep full off-thread syntect highlighting with a duplicate-enqueue guard (`App::pending_highlight`).
+**Reformat pass (M7.7 Stage A).** `reformat_body_if_needed(text, syntax, pretty)` runs before the fold/wrap/viewport stages. When `pretty` is on and `syntax == Json` it parses the body as a `serde_json::Value` and re-emits it with `to_string_pretty` (JSON-only in v1 — zero new deps since `serde_json` is already a workspace dep); on **any** parse error it returns the raw text unchanged (silent fallback — the viewer never errors on a malformed body). json-ish content-types default to pretty on arrival, everything else to raw. `p` (`Action::TogglePretty`) flips raw↔pretty: it rebuilds `text`/`line_offsets` from `raw_text`, bumps `generation` (invalidating the syntect viewport cache), and **resets folds** (openers are position-based; the layouts differ). `pretty` is also hashed into `viewport_hash`. The separate `raw_text` field is what copy (`y`/`Y`) reads, so copy stays byte-exact regardless of the toggle — reformatting drives display only.
+
+Cursor and scroll are **display-row** indices (post-fold, post-wrap); the cursor follows-and-scrolls at render time. Search matches are stored against *logical* lines (byte ranges) and mapped through the pipeline for navigation, auto-unfold, and highlight overlay. Per-view UI state (view mode, folds, wrap, pretty, search) lives on `ResponseView` so it resets on each new response; cursor/scroll/geometry live on `App`. Fold regions come from `components::fold::scan_regions` (single O(n) string-aware pass over the displayed text, cached lazily). Highlighting is deferred under wrap (wrapped bodies render plain); unwrapped bodies keep full off-thread syntect highlighting with a duplicate-enqueue guard (`App::pending_highlight`).
 
 ## On-disk format
 

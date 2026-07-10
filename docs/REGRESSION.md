@@ -60,6 +60,10 @@ binary, so the built commit is recorded below every pass.
 - [ ] Send a request → response renders; cursor / headers toggle / wrap / fold / search / copy all work.
 - [ ] Large body is truncated with the truncation status; folding JSON regions works.
 - [ ] The `[h]` headers hint appears in the response summary **only when the response pane is focused** — unfocused (incl. a collapsed stub or an embedded sequence/load-runner response that isn't the focused sub-pane) omits it.
+- [ ] A minified single-line JSON response (e.g. petstore) arrives **pretty** (multi-line, indented) by default, not on one line. (M7.7)
+- [ ] `p` toggles raw↔pretty; in raw mode the body shows the **exact on-the-wire bytes**, and toggling back and forth is stable. Toggling resets any open folds. (M7.7)
+- [ ] A malformed/non-JSON body with a JSON content-type renders **raw with no error or crash** (silent fallback). (M7.7)
+- [ ] Copy body (`y`) / copy line (`Y`) copy the **raw bytes** even while the body is displayed pretty — pasting round-trips the server's actual JSON. (M7.7)
 
 ## Persistence durability
 - [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)

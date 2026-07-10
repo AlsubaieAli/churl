@@ -135,6 +135,8 @@ pub enum Action {
     ToggleHeadersView,
     /// Toggle soft-wrap in the response viewer.
     ToggleWrap,
+    /// Toggle raw↔pretty (reformatted) rendering of the response body.
+    TogglePretty,
     /// Open incremental literal search over the response body.
     OpenBodySearch,
     /// Jump to the next response-search match.
@@ -279,6 +281,11 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
         "toggle response headers view",
     ),
     (Action::ToggleWrap, "toggle-wrap", "toggle response wrap"),
+    (
+        Action::TogglePretty,
+        "toggle-pretty",
+        "toggle response pretty/raw",
+    ),
     (
         Action::OpenBodySearch,
         "open-body-search",
@@ -609,6 +616,10 @@ impl Default for KeyMap {
         // OpenSearch here (same precedent as Request-pane `1`–`4`; DECISIONS.md).
         overlay(PaneCtx::Response, key!(h), Action::ToggleHeadersView);
         overlay(PaneCtx::Response, key!(shift - w), Action::ToggleWrap);
+        // `p` (pretty) toggles raw↔reformatted body rendering (M7.7). `p` is free
+        // in the Response overlay (the global `<leader>p` switch-profile lives
+        // behind the leader, not in this pane overlay).
+        overlay(PaneCtx::Response, key!(p), Action::TogglePretty);
         overlay(PaneCtx::Response, key!('/'), Action::OpenBodySearch);
         overlay(PaneCtx::Response, key!(n), Action::SearchNext);
         overlay(PaneCtx::Response, key!(shift - n), Action::SearchPrev);

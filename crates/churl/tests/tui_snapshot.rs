@@ -983,12 +983,14 @@ fn every_palette_command_dispatches() {
                 assert_eq!(app.mode, Mode::Palette, "{label:?} must open the picker");
                 assert!(app.picker.is_some());
             }
-            // The two viewer toggles are palette-exposed; with no response they
+            // The viewer toggles are palette-exposed; with no response they
             // no-op gracefully (the pane is Idle), so just assert no crash / mode
-            // stays Normal.
+            // stays Normal. `TogglePretty` additionally warns (pretty is JSON-body
+            // only) rather than silently doing nothing.
             Action::ToggleHeadersView | Action::ToggleWrap => {
                 assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
             }
+            Action::TogglePretty => expect_status(&mut app, "pretty: JSON body only"),
             Action::FocusExplorer => assert_eq!(app.focus, Pane::Explorer),
             Action::FocusUrlBar => assert_eq!(app.focus, Pane::UrlBar),
             Action::FocusRequest => assert_eq!(app.focus, Pane::Request),

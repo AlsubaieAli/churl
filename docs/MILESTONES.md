@@ -775,11 +775,11 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 
 **Scope**: A focused viewer/overlay UX round (owner notes 2026-07-08). Two independent polish items that both live in the response viewer / overlay code, grouped like the earlier M6.x UX rounds.
 
-**Deliverables** (design session first):
-- **Response pretty-printer / reformatter**: re-indent structured bodies for readability — not just soft-wrap. Minified/single-line JSON (e.g. httpbin's) renders on one line today and `W` wrap doesn't help. Raw↔pretty toggle; pretty-by-default for known content-types. Covers **JSON**, **HTML**, and **XML**. Must interact cleanly with the existing display pipeline (syntect highlighting, JSON folding `o`/`O`, wrap, body search) — reformat is a transform *before* the fold/wrap/viewport stages, keeping the single content-type→formatter mapping point (`SyntaxToken::from_content_type`, M7-viewer plugin guardrail) rather than forking per-format paths.
-- **Help-overlay `/` quick-search**: `/` inside the `?` help pane filters/jumps to a binding, reusing the response body-search pattern (`/` `n` `N`, smart-case). Keeps the live-KeyMap-driven help from M6.7.
-- Tests: reformat round-trip + idempotence per content-type, pretty↔raw toggle preserves search/fold state, help-search filter/jump snapshots.
-- Also fold in (from the 07-09 sweep): **control-char / ANSI sanitize** + explicit tab-width in the viewer, and the **horizontal-window slice** for unwrapped long lines (the minified-line perf cliff — reformat addresses the common case, the window slice bounds the rest).
+**Deliverables** (design session first). Landed in two stages (Stage A = reformatter PR, Stage B = help search):
+- **Response pretty-printer / reformatter** — ✅ **done (Stage A)**. Re-indents structured bodies for readability — not just soft-wrap. Minified/single-line JSON (e.g. petstore's) rendered on one line before; it now arrives pretty. Raw↔pretty toggle on `p`; pretty-by-default for json-ish content-types. **v1 scope is JSON-only** (owner decision — see DECISIONS) via `serde_json::to_string_pretty` (zero new deps); HTML/XML reformat deferred. Reformat is a transform *before* the fold/wrap/viewport stages, keyed off the single content-type→syntax mapping point (`SyntaxToken::from_content_type`, M7-viewer plugin guardrail) rather than forking per-format paths. Malformed JSON silently falls back to raw (never errors). Copy (`y`/`Y`) always reads the raw on-the-wire bytes.
+- **Help-overlay `/` quick-search** — *pending (Stage B, separate PR)*: `/` inside the `?` help pane filters/jumps to a binding, reusing the response body-search pattern (`/` `n` `N`, smart-case). Keeps the live-KeyMap-driven help from M6.7.
+- Tests (Stage A): pretty-by-default for minified JSON, pretty↔raw toggle round-trips byte-exact, malformed JSON stays raw, fold + wrap over pretty text, copy stays raw. Stage B: help-search filter/jump snapshots.
+- Also fold in (from the 07-09 sweep, later stages): **control-char / ANSI sanitize** + explicit tab-width in the viewer, and the **horizontal-window slice** for unwrapped long lines (the minified-line perf cliff — reformat addresses the common case, the window slice bounds the rest).
 
 **Next**: R1 (per the 2026-07-09 re-sequence)
 

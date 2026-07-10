@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1580
 expression: render_runner(&mut state)
 ---
                                                                                           
@@ -8,11 +7,11 @@ expression: render_runner(&mut state)
      ┃Mode: RUN   1/3 · 120ms total   on_error: halt                                 ┃    
      ┃Run the chain in order, piping each step's extracted values into the requests t┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Res 200 OK · 120 ms · 27 B · 1 header ┐┃    
-     ┃┃✓ POST auth/login.toml  200  120ms  ┃│{"data":{"token":"abc123"}}            │┃    
-     ┃┃    ↳ token = ••••••                ┃│                                       │┃    
-     ┃┃⠋ GET users/me.toml                 ┃│                                       │┃    
-     ┃┃○ GET users/by_id.toml              ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
+     ┃┃✓ POST auth/login.toml  200  120ms  ┃│{                                      │┃    
+     ┃┃    ↳ token = ••••••                ┃│  "data": {                            │┃    
+     ┃┃⠋ GET users/me.toml                 ┃│    "token": "abc123"                  │┃    
+     ┃┃○ GET users/by_id.toml              ┃│  }                                    │┃    
+     ┃┃                                    ┃│}                                      │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
