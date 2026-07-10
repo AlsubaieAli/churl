@@ -1578,6 +1578,7 @@ fn runner_step(endpoint: &str) -> churl_core::model::SequenceStep {
         seq: 0,
         endpoint: endpoint.to_owned(),
         extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
     }
 }
 
@@ -1761,11 +1762,13 @@ fn sequence_editor_modal() {
                 seq: 0,
                 endpoint: "auth/login.toml".to_owned(),
                 extract: rules,
+                persist: Vec::new(),
             },
             SequenceStep {
                 seq: 1,
                 endpoint: "users/me.toml".to_owned(),
                 extract: std::collections::BTreeMap::new(),
+                persist: Vec::new(),
             },
         ],
     };

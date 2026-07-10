@@ -63,6 +63,7 @@ fn step(endpoint: &str, extract: &[(&str, &str)]) -> SequenceStep {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        persist: Vec::new(),
     }
 }
 
@@ -520,6 +521,113 @@ fn sequence_fresh_save_shape_round_trips() {
 
     let reloaded = load_sequence(&path).unwrap();
     assert_eq!(reloaded, sequence);
+}
+
+/// Note #6: the `persist` name list serializes as `persist = [...]` and
+/// round-trips (load → toggle a persist name → save → reload → identical).
+#[test]
+fn persist_field_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("s.toml");
+    let mut sequence = Sequence {
+        seq: 0,
+        name: "auth".into(),
+        on_error: OnError::Halt,
+        steps: vec![step("auth/login.toml", &[("token", "$.token")])],
+    };
+    sequence.steps[0].persist = vec!["token".to_owned()];
+    save_sequence(&path, &sequence).unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("persist = [\"token\"]"), "{text}");
+
+    // Reload is equal, then toggle the persist name off and back on.
+    let mut reloaded = load_sequence(&path).unwrap();
+    assert_eq!(reloaded, sequence);
+    reloaded.steps[0].persist.clear();
+    save_sequence(&path, &reloaded).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("persist"),
+        "empty persist is omitted:\n{text}"
+    );
+    let empty = load_sequence(&path).unwrap();
+    assert!(empty.steps[0].persist.is_empty());
+    // Re-add it; the name comes back verbatim.
+    let mut readd = empty;
+    readd.steps[0].persist = vec!["token".to_owned()];
+    save_sequence(&path, &readd).unwrap();
+    assert_eq!(load_sequence(&path).unwrap(), readd);
+}
+
+/// Backward-compat: a sequence file with no `persist` key loads with every rule
+/// Run-only (empty `persist`).
+#[test]
+fn missing_persist_loads_as_run_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.toml");
+    let legacy = r#"seq = 0
+name = "legacy"
+on_error = "halt"
+
+[[step]]
+seq = 0
+endpoint = "auth/login.toml"
+[step.extract]
+token = "$.token"
+"#;
+    fs::write(&path, legacy).unwrap();
+    let sequence = load_sequence(&path).unwrap();
+    assert_eq!(sequence.steps.len(), 1);
+    assert!(
+        sequence.steps[0].persist.is_empty(),
+        "old files → all rules Run-only"
+    );
+    assert!(sequence.steps[0].extract.contains_key("token"));
+}
+
+/// Format-preserving: toggling a persist name on one step keeps hand-written
+/// comments on the *sibling* step intact.
+#[test]
+fn toggling_persist_preserves_sibling_comments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("auth-flow.toml");
+    let original = r#"seq = 0
+name = "Auth flow"
+on_error = "halt"
+
+# The login step — grabs a token.
+[[step]]
+seq = 0
+endpoint = "auth/login.toml"
+[step.extract]
+token = "$.data.token"
+
+# Uses {{token}} in its Authorization header.
+[[step]]
+seq = 1
+endpoint = "users/me.toml"
+"#;
+    fs::write(&path, original).unwrap();
+
+    let mut sequence = load_sequence(&path).unwrap();
+    // Mark step 0's `token` rule as a Session target.
+    sequence.steps[0].persist = vec!["token".to_owned()];
+    save_sequence(&path, &sequence).unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    // The new field landed…
+    assert!(text.contains("persist = [\"token\"]"), "{text}");
+    // …and both comments survive, including the sibling step's.
+    assert!(text.contains("# The login step — grabs a token."), "{text}");
+    assert!(
+        text.contains("# Uses {{token}} in its Authorization header."),
+        "sibling comment preserved:\n{text}"
+    );
+    // The sibling step (no persist) is unchanged.
+    let reloaded = load_sequence(&path).unwrap();
+    assert!(reloaded.steps[1].persist.is_empty());
+    assert_eq!(reloaded.steps[1].endpoint, "users/me.toml");
 }
 
 /// An empty-step sequence must not panic and yields no outcomes.

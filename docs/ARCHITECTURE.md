@@ -11,9 +11,9 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
 | `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
 | `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint). Sequences (M7.4): `SEQUENCES_DIRNAME` reserved dir (excluded from `collections()`); `OpenWorkspace::sequences() -> SequenceLoad { sequences, warnings }` (lenient); `load/save/create/rename/delete_sequence` CRUD seams |
-| `sequence` | Request-sequence run engine (M7.4, UI-free): dependency-free extraction subset (`extract_value`: `status` / `header:<Name>` / JSON-path `$.a.b[0].c`) over `serde_json`; run primitives shared by tests and the live TUI — `prepare_step` (resolver with the extracted scope prepended highest), `extract_step`, `classify_step` (the single classify+extract seam), `ordered_steps`; `run_sequence` wiremock-tested convenience. Rejects `..`/absolute step endpoints; never panics |
+| `sequence` | Request-sequence run engine (M7.4, UI-free): dependency-free extraction subset (`extract_value`: `status` / `header:<Name>` / JSON-path `$.a.b[0].c`) over `serde_json`; run primitives shared by tests and the live TUI — `prepare_step` (resolver with the `extracted` scope prepended highest, then `session` — note #6), `extract_step`, `classify_step` (the single classify+extract seam), `ordered_steps`; `run_sequence` wiremock-tested convenience. `RunScopes` carries the in-memory `session` map (note #6). Rejects `..`/absolute step endpoints; never panics |
 | `load` | Concurrent-load / throttle runner (M7.5, UI-free): `run_load` fires N copies of an already-resolved `Request` through the single `execute` chokepoint, bounded by `futures`' `buffer_unordered` (== concurrency in flight) + absolute-target pacing; `classify` (`Ok`/`Failed`≥400/`Error`) is the single seam; pure `stats` (nearest-rank min/median/p95/max/mean over completed timings); `check_config`/`LoadCaps`/`LoadCheck` guardrail classifier. `run_load` is the wiremock-tested twin the TUI launcher mirrors. Uses `tokio::time`/`futures` internally; `execute` stays runtime-agnostic |
-| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06). Sequences prepend an ephemeral highest-precedence `extracted` scope (M7.4) — one extra scope, resolution never forked |
+| `template` | Hand-rolled `{{var}}` substitution via a single chain resolver; precedence: **in-memory Session captures (note #6)** → CLI flag → active profile → collection vars (`folder.toml`) → workspace vars → process env (M6, owner decision 2026-07-06). The Session scope (note #6) is prepended for BOTH standalone sends (`App::build_resolver`) and sequence runs; sequences additionally prepend the ephemeral highest-precedence `extracted` scope (M7.4). Full run chain: `extracted > session > cli > profile > collection > workspace > env` — extra scopes, resolution never forked |
 | `import` | curl command parsing (shlex + hand-rolled flag map, M4): strict flag policy — unknown flags are hard errors, `-F`/`@file` are `Unsupported`, query stays in the URL; returns `ImportResult { endpoint, warnings }` |
 | `export` | curl command generation from `Endpoint` (M4): shlex-quoted single line, enabled headers/params only; round-trip contract with `import` |
 | `http` | Request execution via `reqwest` + `rustls`; coarse timing (`total` only, `connect` stays `None`); `execute(client, request, &ExecuteOptions)` is a plain runtime-agnostic `async fn` — cancellation is task-level in the TUI (`tokio::spawn` + `AbortHandle`), never in core. Body streamed chunk-wise up to `max_body_bytes` (default 10 MB) → `Response.truncated`; `build_client(timeout)` takes the config-resolved timeout. Auth injected via `auth::apply_auth` (M5): header effects skipped when an enabled user header with the same name exists (the user's header wins), query effects appended after enabled params. No `{{var}}` templating (M6); URL/headers/body/auth used verbatim |
@@ -114,6 +114,9 @@ on_error = "halt"               # halt (default) | continue
 [[step]]
 seq = 0
 endpoint = "auth/login.toml"    # workspace-relative endpoint path
+persist = ["token"]             # note #6: these rules' captured values feed the
+                                #   in-memory Session scope (surviving the run);
+                                #   omitted/empty => every rule is Run-only (ephemeral)
 [step.extract]
 token = "$.data.token"          # var name -> extraction expression
 user_id = "$.data.user.id"
@@ -122,6 +125,8 @@ user_id = "$.data.user.id"
 seq = 1
 endpoint = "users/me.toml"      # its request uses {{token}} — resolved from the extracted scope
 ```
+
+**In-memory Session store (note #6).** `persist` lists only the rule *names*; the captured *values* are written into a process-lifetime, in-memory Session store (`App::session_vars`, keyed by canonical workspace root) and are **NEVER written to disk** — a security feature, so captured secrets never touch the filesystem and evaporate on exit. The Session scope is the highest-precedence resolver layer (`session > cli > …`) for both sequence-run and standalone-send resolution, so a token captured by a `login` sequence resolves in a later standalone `{{token}}` send. The `<leader>v` env editor shows the store as a read-only, masked `Session` group with a clear action.
 
 Endpoint file shape (M1):
 

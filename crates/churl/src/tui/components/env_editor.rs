@@ -46,6 +46,10 @@ pub enum EnvScopeKind {
     },
     /// A named profile's `[profiles.vars]`.
     Profile,
+    /// The in-memory Session captures for the current workspace (note #6). A
+    /// **read-only** display group: values are populated by sequence runs, masked,
+    /// never edited here, and never written to disk. A clear action empties it.
+    Session,
 }
 
 /// One editable scope: an ordered list of `(name, value)` var rows plus a label.
@@ -124,6 +128,9 @@ pub enum EnvKeyOutcome {
     SaveAndClose,
     /// Close the editor now (discard, or a clean close).
     Close,
+    /// Clear the current workspace's in-memory Session captures (note #6). The app
+    /// empties its store, then the editor rebuilds the Session group's rows.
+    ClearSession,
 }
 
 /// Full state of the open environments & variables editor.
@@ -165,6 +172,7 @@ impl EnvEditorState {
         ws: &OpenWorkspace,
         active_profile: Option<String>,
         cli_vars: BTreeMap<String, String>,
+        session_vars: &BTreeMap<String, String>,
     ) -> Result<Self, PersistenceError> {
         let manifest = ws.manifest();
         let mut scopes = Vec::new();
@@ -194,6 +202,15 @@ impl EnvEditorState {
             });
         }
 
+        // The read-only Session group (note #6): the current workspace's in-memory
+        // captures. Always present so the user can see (and clear) captured
+        // secrets even when empty. Never editable, never saved.
+        scopes.push(EnvScope {
+            kind: EnvScopeKind::Session,
+            label: "Session".to_owned(),
+            vars: map_to_rows(session_vars),
+        });
+
         Ok(Self {
             snapshot: scopes.clone(),
             scopes,
@@ -210,6 +227,22 @@ impl EnvEditorState {
         })
     }
 
+    /// Replaces the read-only Session group's rows from a fresh capture map (after
+    /// the app clears its in-memory store). Keeps the snapshot in lockstep so this
+    /// never registers as a dirtying edit — the Session group is never saved.
+    pub fn set_session_vars(&mut self, session_vars: &BTreeMap<String, String>) {
+        let rows = map_to_rows(session_vars);
+        for scopes in [&mut self.scopes, &mut self.snapshot] {
+            if let Some(scope) = scopes
+                .iter_mut()
+                .find(|s| matches!(s.kind, EnvScopeKind::Session))
+            {
+                scope.vars = rows.clone();
+            }
+        }
+        self.clamp_row();
+    }
+
     /// Whether the working state differs from the pristine snapshot: any var/scope
     /// edit, or a change to the active profile (`x`).
     pub fn is_dirty(&self) -> bool {
@@ -218,6 +251,11 @@ impl EnvEditorState {
 
     fn scope(&self) -> &EnvScope {
         &self.scopes[self.selected_scope]
+    }
+
+    /// Whether the selected scope is the read-only Session group (note #6).
+    fn selected_is_session(&self) -> bool {
+        matches!(self.scope().kind, EnvScopeKind::Session)
     }
 
     /// Handles one key event, returning what the app should do next.
@@ -278,6 +316,18 @@ impl EnvEditorState {
                 self.clamp_row();
                 EnvKeyOutcome::Consumed
             }
+            // Clear the read-only Session group's captures. Only meaningful while
+            // the Session scope is selected.
+            KeyCode::Char('c') if self.selected_is_session() => EnvKeyOutcome::ClearSession,
+            // The Session group is read-only: swallow new/rename/delete/activate
+            // with a message (navigation, save, and close still fall through).
+            KeyCode::Char('n') | KeyCode::Char('r') | KeyCode::Char('d') | KeyCode::Char('x')
+                if self.selected_is_session() =>
+            {
+                self.message =
+                    Some("Session vars are read-only (run-populated) — c to clear".to_owned());
+                EnvKeyOutcome::Consumed
+            }
             KeyCode::Char('n') => {
                 self.naming = Some(ProfileNameEdit {
                     editor: LineEditor::new(""),
@@ -326,6 +376,22 @@ impl EnvEditorState {
             }
             KeyCode::Tab | KeyCode::Char('h') | KeyCode::Left => {
                 self.focus = EnvFocus::ScopeList;
+                EnvKeyOutcome::Consumed
+            }
+            // The Session group's rows are read-only (run-populated, masked). Block
+            // add/delete/edit with a message; navigation + close still work.
+            KeyCode::Char('a')
+            | KeyCode::Char('n')
+            | KeyCode::Char('d')
+            | KeyCode::Enter
+            | KeyCode::Char('i')
+            | KeyCode::Char('r')
+                if self.selected_is_session() =>
+            {
+                self.message = Some(
+                    "Session vars are read-only (run-populated) — h to scopes, c to clear"
+                        .to_owned(),
+                );
                 EnvKeyOutcome::Consumed
             }
             KeyCode::Char('a') | KeyCode::Char('n') => {
@@ -706,7 +772,9 @@ impl EnvEditorState {
                     name: scope.label.clone(),
                     vars: rows_to_map(&scope.vars),
                 }),
-                EnvScopeKind::Collection { .. } => {}
+                // Collection metas write separately; the Session group is
+                // in-memory only and never reaches disk.
+                EnvScopeKind::Collection { .. } | EnvScopeKind::Session => {}
             }
         }
         Workspace {
@@ -735,7 +803,8 @@ impl EnvEditorState {
     /// Whether any workspace/profile scope differs from the snapshot (the manifest
     /// carries both; a change to either requires rewriting `churl.toml`).
     fn manifest_scopes_changed(&self) -> bool {
-        let is_manifest = |s: &EnvScope| !matches!(s.kind, EnvScopeKind::Collection { .. });
+        let is_manifest =
+            |s: &EnvScope| matches!(s.kind, EnvScopeKind::Workspace | EnvScopeKind::Profile);
         let now: Vec<&EnvScope> = self.scopes.iter().filter(|s| is_manifest(s)).collect();
         let was: Vec<&EnvScope> = self.snapshot.iter().filter(|s| is_manifest(s)).collect();
         now != was
@@ -836,6 +905,12 @@ impl EnvEditorState {
         if name.is_empty() {
             return String::new();
         }
+        // The Session group is the highest scope; a defined Session var always
+        // wins for a standalone send. Tag it plainly rather than running the
+        // (Session-unaware) precedence chain.
+        if self.selected_is_session() {
+            return " ✓".to_owned();
+        }
         if self.selected_is_inactive_profile() {
             return " (inactive)".to_owned();
         }
@@ -871,6 +946,11 @@ impl EnvEditorState {
         let (name, _) = scope.vars.get(self.selected_row)?;
         if name.is_empty() {
             return None;
+        }
+        if self.selected_is_session() {
+            return Some(format!(
+                "{name}: in-memory Session capture — resolves standalone; c clears"
+            ));
         }
         if self.selected_is_inactive_profile() {
             return Some(format!(
@@ -1037,6 +1117,7 @@ fn render_scope_list(frame: &mut Frame, area: Rect, state: &EnvEditorState, them
             EnvScopeKind::Workspace => "WORKSPACE",
             EnvScopeKind::Collection { .. } => "COLLECTIONS",
             EnvScopeKind::Profile => "PROFILES",
+            EnvScopeKind::Session => "SESSION (read-only)",
         };
         if last_group != Some(group) {
             if last_group.is_some() {
@@ -1084,11 +1165,13 @@ fn render_var_rows(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme:
     }
 
     if scope.vars.is_empty() {
+        let empty = if matches!(scope.kind, EnvScopeKind::Session) {
+            "(no session captures yet — run a sequence with a Session-target rule)"
+        } else {
+            "(no variables — press a to add)"
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                "(no variables — press a to add)",
-                theme.auth_mask,
-            )),
+            Paragraph::new(Line::styled(empty, theme.auth_mask)),
             rows_area,
         );
         return;
@@ -1139,10 +1222,15 @@ fn render_var_line<'a>(
         pad(name, name_col)
     };
 
-    // Secret-named literal values are masked unless placeholder or being edited.
+    // Session captures are ALWAYS masked — a captured token is a secret
+    // regardless of its var name (note #6). Elsewhere, secret-named literal values
+    // are masked unless a placeholder or being edited.
     let value_cell = if editing_value {
         field_with_cursor(editing.unwrap())
-    } else if !value.is_empty() && looks_like_secret_name(name) && !is_template_placeholder(value) {
+    } else if !value.is_empty()
+        && (matches!(state.scope().kind, EnvScopeKind::Session)
+            || (looks_like_secret_name(name) && !is_template_placeholder(value)))
+    {
         "••••••".to_owned()
     } else {
         value.to_owned()
@@ -1233,6 +1321,18 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &
         "enter commit · esc cancel".to_owned()
     } else if state.editing.is_some() {
         "enter commit · tab name/value · esc cancel".to_owned()
+    } else if state.selected_is_session() {
+        // Read-only Session group: only view / clear / navigate.
+        match state.focus {
+            EnvFocus::ScopeList => {
+                format!(
+                    "{dirty}j/k move · l/enter view (read-only) · c clear session · w save · q close"
+                )
+            }
+            EnvFocus::VarRows => {
+                format!("{dirty}j/k move · read-only (run-populated, masked) · h scopes · q close")
+            }
+        }
     } else {
         match state.focus {
             EnvFocus::ScopeList => format!(
@@ -1630,6 +1730,96 @@ mod tests {
     }
 
     // --- Fix-round (2026-07-08 review) regression tests. ---
+
+    /// A fixture with a read-only Session group holding one capture.
+    fn fixture_with_session() -> EnvEditorState {
+        let mut s = fixture();
+        s.scopes.push(EnvScope {
+            kind: EnvScopeKind::Session,
+            label: "Session".into(),
+            vars: vec![("token".into(), "T-abc-123".into())],
+        });
+        s.snapshot = s.scopes.clone();
+        s
+    }
+
+    fn render_to_text(state: &EnvEditorState) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state, &theme))
+            .unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn session_group_shows_masked_values() {
+        // Note #6: the Session group renders its captures masked (a token is a
+        // secret regardless of its var name), and the raw value never appears.
+        let mut s = fixture_with_session();
+        // Select the Session scope (last) and enter its rows.
+        s.selected_scope = s.scopes.len() - 1;
+        s.focus = EnvFocus::VarRows;
+        let out = render_to_text(&s);
+        assert!(
+            out.contains("SESSION"),
+            "session group header shown:\n{out}"
+        );
+        assert!(out.contains("token"), "the var name is visible");
+        assert!(out.contains("••••••"), "the value is masked:\n{out}");
+        assert!(
+            !out.contains("T-abc-123"),
+            "the raw session value never renders:\n{out}"
+        );
+    }
+
+    #[test]
+    fn session_group_is_read_only() {
+        let mut s = fixture_with_session();
+        s.selected_scope = s.scopes.len() - 1;
+        // Editing keys in the rows are inert.
+        s.focus = EnvFocus::VarRows;
+        s.handle_key(ch('a'));
+        assert!(s.editing.is_none(), "cannot add a session row");
+        s.handle_key(key(KeyCode::Enter));
+        assert!(s.editing.is_none(), "cannot edit a session value");
+        // Scope-list mutations are inert too.
+        s.focus = EnvFocus::ScopeList;
+        let before = s.scopes.len();
+        s.handle_key(ch('d'));
+        assert_eq!(s.scopes.len(), before, "cannot delete the session group");
+        assert!(!s.is_dirty(), "the read-only group never dirties");
+    }
+
+    #[test]
+    fn session_clear_key_emits_clear_outcome() {
+        let mut s = fixture_with_session();
+        s.selected_scope = s.scopes.len() - 1;
+        s.focus = EnvFocus::ScopeList;
+        assert_eq!(s.handle_key(ch('c')), EnvKeyOutcome::ClearSession);
+        // `c` on a non-session scope is inert (no clear).
+        s.selected_scope = 0;
+        assert_ne!(s.handle_key(ch('c')), EnvKeyOutcome::ClearSession);
+    }
+
+    #[test]
+    fn set_session_vars_replaces_rows_without_dirtying() {
+        let mut s = fixture_with_session();
+        s.set_session_vars(&BTreeMap::new());
+        let session = s
+            .scopes
+            .iter()
+            .find(|sc| matches!(sc.kind, EnvScopeKind::Session))
+            .unwrap();
+        assert!(session.vars.is_empty(), "cleared to empty");
+        assert!(
+            !s.is_dirty(),
+            "clearing the read-only group is not a dirty edit"
+        );
+    }
 
     #[test]
     fn esc_reverts_an_existing_field_edit() {

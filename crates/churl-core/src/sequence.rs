@@ -6,10 +6,12 @@
 //! their semantics can never drift.
 //!
 //! The resolver stays the single `{{var}}` seam (the M9 plugin guardrail): a step
-//! is prepared by *prepending* an ephemeral `"extracted"` [`Scope`] to the
-//! canonical scope chain — resolution is never forked. Extracted values win over
-//! ambient config so a chained value is never shadowed by a same-named workspace
-//! var.
+//! is prepared by *prepending* an ephemeral `"extracted"` [`Scope`] and the
+//! in-memory `"session"` [`Scope`] to the canonical scope chain — resolution is
+//! never forked. Extracted values win over ambient config so a chained value is
+//! never shadowed by a same-named workspace var; the Session scope (note #6) sits
+//! just below `extracted` so a previously-captured token resolves during a run
+//! too, but a same-run extraction still wins.
 //!
 //! # Extraction expression grammar (a documented, dependency-free subset)
 //!
@@ -281,12 +283,18 @@ fn json_type(value: &serde_json::Value) -> &'static str {
 }
 
 /// The ambient variable scopes a sequence run resolves against, below the
-/// ephemeral extracted scope: CLI `--var` flags, the active profile, and the
-/// workspace `[vars]`. (The per-endpoint collection scope is loaded fresh in
-/// [`prepare_step`] from each step's own collection.)
+/// ephemeral extracted scope: the in-memory Session captures, CLI `--var` flags,
+/// the active profile, and the workspace `[vars]`. (The per-endpoint collection
+/// scope is loaded fresh in [`prepare_step`] from each step's own collection.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunScopes {
-    /// Highest ambient precedence: CLI `--var` overrides.
+    /// In-memory Session captures (note #6): values previously extracted by a
+    /// Session-target rule, surviving the run. Sits just below `extracted` and
+    /// above `cli` so a same-named ambient var never shadows a captured token; a
+    /// same-run extraction (`extracted`) still wins. Process-lifetime, in-memory,
+    /// never persisted to disk.
+    pub session: BTreeMap<String, String>,
+    /// CLI `--var` overrides.
     pub cli: BTreeMap<String, String>,
     /// The active profile's vars.
     pub profile: BTreeMap<String, String>,
@@ -400,9 +408,13 @@ fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
 /// loads it and its collection vars, builds the resolver with the **extracted
 /// scope prepended (highest precedence)**, and returns the substituted request.
 ///
-/// The scope chain is `extracted > cli > profile > collection > workspace`
-/// (then process env, via [`Resolver`]). Prepending one scope preserves the
-/// single resolver seam — resolution is never forked.
+/// The scope chain is
+/// `extracted > session > cli > profile > collection > workspace` (then process
+/// env, via [`Resolver`]). Prepending scopes preserves the single resolver seam
+/// — resolution is never forked. `session` sits below `extracted` (a same-run
+/// capture still wins) and above `cli` (a captured token is not shadowed by an
+/// ambient same-named var); it is the same in-memory Session store a standalone
+/// send resolves against (note #6).
 pub fn prepare_step(
     workspace_root: &Path,
     step: &SequenceStep,
@@ -422,6 +434,7 @@ pub fn prepare_step(
 
     let resolver = Resolver::new(vec![
         Scope::new("extracted", extracted.clone()),
+        Scope::new("session", scopes.session.clone()),
         Scope::new("cli", scopes.cli.clone()),
         Scope::new("profile", scopes.profile.clone()),
         Scope::new("collection", meta.vars),
@@ -855,6 +868,7 @@ mod tests {
             seq: 0,
             endpoint: "link/secret.toml".into(),
             extract: BTreeMap::new(),
+            persist: Vec::new(),
         };
         assert!(matches!(
             prepare_step(root, &step, &BTreeMap::new(), &RunScopes::default()),
@@ -868,6 +882,7 @@ mod tests {
             seq: 0,
             endpoint: "e.toml".into(),
             extract: BTreeMap::new(),
+            persist: Vec::new(),
         };
         // Ok
         let (result, _) = classify_step(&Ok(json_response("{}")), &step);
@@ -906,6 +921,64 @@ mod tests {
     }
 
     #[test]
+    fn prepare_step_session_scope_precedence() {
+        // Note #6: the run scope chain is
+        // `extracted > session > cli > profile > collection > workspace`. This
+        // exercises the ordering directly through prepare_step by giving the same
+        // var name a value in adjacent layers and asserting the resolved URL.
+        use crate::model::{Body, BodyKind, Endpoint, Method, Request};
+        use crate::persistence::save_endpoint;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("c")).unwrap();
+        // An endpoint whose URL is just `{{x}}` so the resolved URL == the winner.
+        let ep = Endpoint {
+            seq: 0,
+            name: "e".into(),
+            request: Request {
+                method: Method::Get,
+                url: "{{x}}".into(),
+                headers: vec![],
+                params: vec![],
+                body: Some(Body {
+                    kind: BodyKind::Text,
+                    content: String::new(),
+                }),
+                auth: None,
+            },
+        };
+        save_endpoint(&root.join("c/e.toml"), &ep).unwrap();
+        let step = SequenceStep {
+            seq: 0,
+            endpoint: "c/e.toml".into(),
+            extract: BTreeMap::new(),
+            persist: Vec::new(),
+        };
+        let map = |v: &str| BTreeMap::from([("x".to_owned(), v.to_owned())]);
+        let scopes = RunScopes {
+            session: map("session"),
+            cli: map("cli"),
+            profile: map("profile"),
+            workspace: map("workspace"),
+        };
+        // extracted (same-run) still beats session.
+        let extracted = map("extracted");
+        let prepared = prepare_step(root, &step, &extracted, &scopes).unwrap();
+        assert_eq!(prepared.url, "extracted");
+        // With no same-run extraction, session wins over cli/profile/workspace.
+        let prepared = prepare_step(root, &step, &BTreeMap::new(), &scopes).unwrap();
+        assert_eq!(prepared.url, "session");
+        // With no session value, cli wins (session sits above cli but is empty).
+        let scopes_no_session = RunScopes {
+            session: BTreeMap::new(),
+            ..scopes.clone()
+        };
+        let prepared = prepare_step(root, &step, &BTreeMap::new(), &scopes_no_session).unwrap();
+        assert_eq!(prepared.url, "cli");
+    }
+
+    #[test]
     fn classify_step_extract_error() {
         let mut step_extract = BTreeMap::new();
         step_extract.insert("v".to_owned(), "$.missing".to_owned());
@@ -913,6 +986,7 @@ mod tests {
             seq: 0,
             endpoint: "e.toml".into(),
             extract: step_extract,
+            persist: Vec::new(),
         };
         let (result, extracted) = classify_step(&Ok(json_response("{}")), &step);
         assert!(matches!(result, StepResult::ExtractError(_)));

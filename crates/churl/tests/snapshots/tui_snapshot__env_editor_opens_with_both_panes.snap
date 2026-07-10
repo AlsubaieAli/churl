@@ -14,8 +14,8 @@ expression: snapshot(&mut app)
 │   ┃│PROFILES                  ││                                        │┃   │
 │   ┃│  dev                     ││                                        │┃   │
 │   ┃│                          ││                                        │┃   │
-│   ┃│                          ││                                        │┃───┘
-│   ┃│                          ││                                        │┃───┐
+│   ┃│SESSION (read-only)       ││                                        │┃───┘
+│   ┃│  Session                 ││                                        │┃───┐
 │   ┃│                          ││                                        │┃   │
 │   ┃│                          ││                                        │┃   │
 │   ┃│                          ││                                        │┃   │
