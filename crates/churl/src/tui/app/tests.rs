@@ -5344,3 +5344,124 @@ fn rename_repoints_loaded_buffer_path() {
         "unsaved edit survives the in-place rename"
     );
 }
+
+// ---- B1: in-flight-on-quit history recording ----------------------------------
+
+/// On quit, an in-flight request records an interrupted history row (no
+/// status/duration), mirroring `cancel_request` — so a request the user quit
+/// mid-flight isn't silently lost from history (audit B1). Its task is aborted.
+#[tokio::test]
+async fn quit_records_in_flight_request_in_history() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    app.open_or_focus_buffer(selected_with("a.toml", None));
+    let handle = tokio::spawn(async {
+        std::future::pending::<()>().await;
+    });
+    let aborted = handle.abort_handle();
+    app.active_endpoint_buffer_mut().unwrap().in_flight = Some(InFlightRequest {
+        handle: aborted.clone(),
+        generation: 1,
+        meta: meta(),
+    });
+
+    app.record_inflight_on_quit();
+
+    // An interrupted row (status None) was written for the request.
+    let rows = app.history.as_ref().unwrap().recent(10).unwrap();
+    assert_eq!(rows.len(), 1, "one interrupted history row recorded");
+    assert_eq!(rows[0].url, "https://api.test/x");
+    assert!(rows[0].status.is_none(), "interrupted → no status");
+    // The in-flight slot was drained and its task aborted (runtime-safe on quit).
+    assert!(!active_in_flight_is_some(&app));
+    tokio::task::yield_now().await;
+    assert!(
+        aborted.is_finished(),
+        "the in-flight task was aborted on quit"
+    );
+}
+
+/// Every in-flight buffer is recorded on quit, not just the active one (audit
+/// B1 — the response router is per-buffer, so quit must be too).
+#[tokio::test]
+async fn quit_records_all_in_flight_buffers() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    app.buffers = vec![
+        Buffer::endpoint(selected_with("a.toml", None)),
+        Buffer::endpoint(selected_with("b.toml", None)),
+    ];
+    for (i, generation) in [7u64, 9].into_iter().enumerate() {
+        app.buffers[i].as_endpoint_mut().unwrap().in_flight = Some(InFlightRequest {
+            handle: tokio::spawn(async { std::future::pending::<()>().await }).abort_handle(),
+            generation,
+            meta: meta(),
+        });
+    }
+
+    app.record_inflight_on_quit();
+
+    let rows = app.history.as_ref().unwrap().recent(10).unwrap();
+    assert_eq!(rows.len(), 2, "both in-flight buffers recorded");
+    assert!(
+        app.buffers
+            .iter()
+            .all(|b| b.as_endpoint().is_none_or(|e| e.in_flight.is_none()))
+    );
+}
+
+/// Quit with nothing in flight writes no history row (no spurious markers).
+#[tokio::test]
+async fn quit_without_in_flight_writes_nothing() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    app.open_or_focus_buffer(selected_with("a.toml", None));
+    app.record_inflight_on_quit();
+    assert!(app.history.as_ref().unwrap().recent(10).unwrap().is_empty());
+}
+
+// ---- B3: sticky history-write-failure indicator -------------------------------
+
+/// The sticky "history not recording" flag arms after N consecutive write
+/// failures and clears on the next success (audit B3). Driven through
+/// `note_history_write`, which is exactly what `write_history` /
+/// `write_load_summary` call on each SQLite insert outcome. (A real insert
+/// failure can't be forced deterministically without exposing a test-only DB
+/// seam on `HistoryStore`; the failure→sticky→clear contract lives entirely in
+/// this counter, so it's tested directly here and rendered below.)
+#[test]
+fn history_failures_arm_sticky_flag_then_clear_on_success() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    assert!(!app.history_failing(), "clean session shows no flag");
+
+    for _ in 0..App::HISTORY_FAIL_THRESHOLD {
+        app.note_history_write(false);
+    }
+    assert!(app.history_failing(), "flag arms at the failure threshold");
+
+    // Further failures keep it armed.
+    app.note_history_write(false);
+    assert!(app.history_failing());
+
+    // A single success clears it.
+    app.note_history_write(true);
+    assert!(!app.history_failing(), "a successful write clears the flag");
+}
+
+/// A successful `write_history` (working store) never arms the flag — the
+/// wiring feeds success into the counter (guards against a regression that
+/// forgets to reset on the happy path).
+#[test]
+fn successful_write_history_leaves_flag_clear() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    // Pre-arm the counter, then a real successful insert must clear it.
+    app.note_history_write(false);
+    assert!(app.history_failing());
+    app.write_history(&meta(), Some(200), None);
+    assert!(
+        !app.history_failing(),
+        "a real successful insert resets the flag"
+    );
+    assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 1);
+}
