@@ -1939,6 +1939,7 @@ impl App {
             Action::BufferPrev => self.buffer_cycle(false),
             Action::BufferClose => self.close_buffer(self.active),
             Action::BufferCloseAll => self.close_all_buffers(),
+            Action::FocusBufferIndex(n) => self.focus_buffer_index(n),
             Action::Up
             | Action::Down
             | Action::Select
@@ -2053,6 +2054,20 @@ impl App {
         } else {
             (self.active + len - 1) % len
         };
+    }
+
+    /// Jumps directly to the `n`th open buffer/tab (1-based; `<leader>t <n>`,
+    /// note #5). Reuses the same `self.active` focus mechanism `buffer_cycle`
+    /// drives — no duplicated focus logic. Out of range (`n` > open count, incl.
+    /// `n == 0`) is a graceful no-op with a brief status message; never a panic
+    /// or a wrong-tab jump.
+    fn focus_buffer_index(&mut self, n: usize) {
+        let len = self.buffers.len();
+        if n == 0 || n > len {
+            self.notify(format!("no tab {n}"));
+            return;
+        }
+        self.active = n - 1;
     }
 
     /// The active buffer index that should be selected after the buffer at
@@ -11109,6 +11124,84 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)
             ),
             Some(Action::BufferCloseAll)
+        );
+        // Note #5: `<leader>t 1`..`9` resolve to FocusBufferIndex(n) — in the
+        // tabs SUBMENU layer only (see `numbered_jump_does_not_shadow_request_...`).
+        for n in 1..=9usize {
+            let digit = char::from_digit(n as u32, 10).unwrap();
+            assert_eq!(
+                km.leader_sub_lookup("tabs", lk(digit)),
+                Some(Action::FocusBufferIndex(n)),
+                "<leader>t {n} → FocusBufferIndex({n})"
+            );
+        }
+    }
+
+    /// The tabs-submenu digit binds (`<leader>t <n>`) live ONLY in the `tabs`
+    /// submenu layer and must NOT shadow the Request-pane `1`..`4` tab-jump
+    /// overlay (M6.7). The submenu resolves a digit to `FocusBufferIndex`, while
+    /// the Request `PaneCtx` overlay still resolves the same digit to its
+    /// `Tab1`..`Tab4` action — two independent keymap layers, no clash.
+    #[test]
+    fn numbered_jump_does_not_shadow_request_pane_digits() {
+        let km = KeyMap::default();
+        let lk = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        // Submenu layer: digit → FocusBufferIndex.
+        assert_eq!(
+            km.leader_sub_lookup("tabs", lk('3')),
+            Some(Action::FocusBufferIndex(3))
+        );
+        // Request-pane overlay: the same digit still means Tab3 (Auth) there.
+        assert_eq!(
+            km.lookup_ctx(lk('3'), PaneCtx::Request),
+            Some(Action::Tab3),
+            "Request-pane digit overlay is untouched by the submenu binds"
+        );
+        // And `5`..`9` are NOT bound in the Request pane (only `1`..`4` are), so
+        // the extra submenu digits can never leak a Request-pane action.
+        assert_eq!(km.lookup_ctx(lk('5'), PaneCtx::Request), None);
+    }
+
+    /// `<leader>t 3` dispatches to `FocusBufferIndex(3)`, focusing the 3rd tab.
+    #[test]
+    fn focus_buffer_index_focuses_nth_tab() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.buffers = vec![
+            Buffer::endpoint(selected_with("a.toml", None)),
+            Buffer::endpoint(selected_with("b.toml", None)),
+            Buffer::endpoint(selected_with("c.toml", None)),
+        ];
+        app.active = 0;
+        // Dispatch the action the `<leader>t 3` bind resolves to.
+        app.dispatch(Action::FocusBufferIndex(3), None).unwrap();
+        assert_eq!(app.active, 2, "1-based jump: tab 3 → index 2");
+        assert!(app.message.is_none(), "in-range jump sets no message");
+    }
+
+    /// Out-of-range `<leader>t <n>` (n > open count, and n == 0) is a graceful
+    /// no-op with a "no tab N" message — never a panic or a wrong-tab jump.
+    #[test]
+    fn focus_buffer_index_out_of_range_is_noop_with_message() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.buffers = vec![
+            Buffer::endpoint(selected_with("a.toml", None)),
+            Buffer::endpoint(selected_with("b.toml", None)),
+        ];
+        app.active = 1;
+        // n = 5 > 2 open tabs → no-op + message, active unchanged.
+        app.dispatch(Action::FocusBufferIndex(5), None).unwrap();
+        assert_eq!(app.active, 1, "out-of-range never moves the active tab");
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("no tab 5")
+        );
+        // n = 0 is likewise a guarded no-op (defensive; not reachable via 1..9).
+        app.message = None;
+        app.dispatch(Action::FocusBufferIndex(0), None).unwrap();
+        assert_eq!(app.active, 1);
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("no tab 0")
         );
     }
 

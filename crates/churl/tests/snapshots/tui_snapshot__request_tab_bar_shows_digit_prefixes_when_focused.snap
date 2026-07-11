@@ -2,12 +2,12 @@
 source: crates/churl/tests/tui_snapshot.rs
 expression: rendered
 ---
-┌ Explorer ──────────────────┐▐ List users ▌                                    
+┌ Explorer ──────────────────┐  List users                                      
 │  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
 │  ▾ users                   ││GET  https://api.test/users                     │
 │>   List users              │└────────────────────────────────────────────────┘
 │    Create user             │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│    Get user                │┃▐ [1] Params(0) ▌ ▐ [2] Headers(0) ▌ ›          ┃
+│    Get user                │┃  [1] Params(0)     [2] Headers(0)   ›          ┃
 │                            │┃  (no params — a to add)                        ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃

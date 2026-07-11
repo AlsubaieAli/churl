@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
 use super::jump::JumpState;
 use super::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
-use super::tab_strip::{CHIP_LEFT, CHIP_OVERHEAD, CHIP_RIGHT, chip_window};
+use super::tab_strip::{CHIP_OVERHEAD, chip_window};
 use crate::tui::theme::Theme;
 
 /// Everything [`render`] needs.
@@ -165,16 +165,18 @@ fn tab_bar_line(
         .enumerate()
         .map(|(i, tab)| {
             let tab_label = tab.label();
+            // Note #5: two-space internal padding (softer, roomier chip) now that
+            // the hard `▐`/`▌` edge caps are gone; the gap between chips separates.
             if focused {
                 // Prefix with 1-based digit when focused (tab-jump keys are live)
                 match counts(*tab) {
-                    Some(n) => format!(" [{}] {tab_label}({n}) ", i + 1),
-                    None => format!(" [{}] {tab_label} ", i + 1),
+                    Some(n) => format!("  [{}] {tab_label}({n})  ", i + 1),
+                    None => format!("  [{}] {tab_label}  ", i + 1),
                 }
             } else {
                 match counts(*tab) {
-                    Some(n) => format!(" {tab_label}({n}) "),
-                    None => format!(" {tab_label} "),
+                    Some(n) => format!("  {tab_label}({n})  "),
+                    None => format!("  {tab_label}  "),
                 }
             }
         })
@@ -192,9 +194,11 @@ fn tab_bar_line(
         .collect();
     let (start, left_marker) = chip_window(&widths, active, width);
 
-    // Each tab is a filled "chip" — `▐` left edge, label, `▌` right edge on the
-    // chip bg — with a single raw space gap between chips. Active = bright
-    // `selection`; inactive = the dim `tab_inactive` fill (both carry a real bg).
+    // Each tab is a soft filled "chip" — the padded label on the chip bg — with a
+    // single raw space gap between chips doing the separating (drive-test note #5:
+    // no `▐`/`▌` edge caps, no `▏` bar). Active = bright `selection`; inactive =
+    // the dim `tab_inactive` fill (both carry a real bg, so every chip reads as
+    // filled, with stronger active-vs-inactive contrast).
     let mut spans: Vec<Span> = Vec::new();
     let mut used = 0usize;
     if left_marker {
@@ -210,14 +214,15 @@ fn tab_bar_line(
             clipped_right = true;
             break;
         }
+        // Active chip: the bright `selection` fill made BOLD for a stronger,
+        // clearer active-vs-inactive contrast (note #5) without touching the
+        // shared `selection` slot (also used by explorer/picker rows).
         let style = if *tab == tabs.active {
-            theme.selection
+            theme.selection.add_modifier(Modifier::BOLD)
         } else {
             theme.tab_inactive
         };
-        spans.push(Span::styled(CHIP_LEFT, style));
         spans.push(Span::styled(labels[i].clone(), style));
-        spans.push(Span::styled(CHIP_RIGHT, style));
         spans.push(Span::raw(" "));
         used += widths[i];
     }
@@ -431,9 +436,9 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// The `▐ Body ▌` chip whose tab is active must render at every pane width —
-    /// when it doesn't fit, the bar scrolls (dropping earlier chips behind a `‹`
-    /// marker) so the active chip is never clipped off-screen.
+    /// The active `Body` chip must render at every pane width — when it doesn't
+    /// fit, the bar scrolls (dropping earlier chips behind a `‹` marker) so the
+    /// active chip is never clipped off-screen.
     #[test]
     fn narrow_tab_bar_keeps_active_body_visible_with_marker() {
         let theme = Theme::dark();
@@ -482,15 +487,48 @@ mod tests {
             text.contains("[1]"),
             "focused digit prefix inside chip: {text:?}"
         );
-        // The active (Params) chip spans use the bright selection style; some
-        // inactive chip spans use the dim tab_inactive style.
+        // The active (Params) chip spans use the bright selection style (bolded
+        // for contrast, note #5); some inactive chip spans use the dim
+        // tab_inactive style.
+        let active_style = theme.selection.add_modifier(Modifier::BOLD);
         assert!(
-            line.spans.iter().any(|s| s.style == theme.selection),
-            "active chip uses the bright selection bg"
+            line.spans.iter().any(|s| s.style == active_style),
+            "active chip uses the bright, bold selection bg"
         );
         assert!(
             line.spans.iter().any(|s| s.style == theme.tab_inactive),
             "inactive chips use the dim tab_inactive bg"
+        );
+    }
+
+    /// Drive-test note #5: the refined chips carry NO hard edge caps (`▐`/`▌`) and
+    /// NO `▏` bar separator — a raw space gap separates them. Verified over the
+    /// request tab bar; the top buffer strip shares the same render primitives.
+    #[test]
+    fn refined_chips_drop_caps_and_bar_separators() {
+        let theme = Theme::dark();
+        let tabs = RequestTabs::default();
+        let line = tab_bar_line(None, &tabs, &theme, false, 60);
+        let text = line_text(&line);
+        for glyph in ['▐', '▌', '▏'] {
+            assert!(
+                !text.contains(glyph),
+                "chip must not contain {glyph:?}: {text:?}"
+            );
+        }
+        // A bare-space gap between chips does the separating: an inactive-styled
+        // chip span is followed by an unstyled raw space span.
+        let has_gap = line
+            .spans
+            .windows(2)
+            .any(|w| w[0].style != Style::default() && w[1].content.as_ref() == " ");
+        assert!(has_gap, "a raw-space gap separates chips: {text:?}");
+        // The active chip fill is the bright `selection` style, bolded for a
+        // stronger active-vs-inactive contrast (note #5).
+        let active_style = theme.selection.add_modifier(Modifier::BOLD);
+        assert!(
+            line.spans.iter().any(|s| s.style == active_style),
+            "active chip uses the bright, bold selection fill: {text:?}"
         );
     }
 }

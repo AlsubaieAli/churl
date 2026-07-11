@@ -2,17 +2,20 @@
 //!
 //! Rendered ONLY when at least one buffer is open — the caller allots
 //! `Length(0)` for an empty buffer list, so the zero-buffer render stays
-//! byte-identical to the pre-tabs layout. Each tab is a filled "chip": a `▐`
-//! left edge, the short name (with an accent `●` when dirty), and a `▌` right
-//! edge, all on the chip background — bright ([`Theme::selection`]) for the
-//! active tab, dim for the rest — with a single raw space gap between chips.
-//! When the tabs overflow the strip width, a horizontal window is derived each
-//! frame to keep the active tab visible, with `‹`/`›` edge markers marking
-//! clipped sides. No persistent scroll state — the window is a pure function of
-//! the items, active index, and width.
+//! byte-identical to the pre-tabs layout. Each tab is a soft filled "chip":
+//! a leading pad space, the short name (with an accent `●` when dirty), and a
+//! trailing pad space, all on the chip background — bright ([`Theme::selection`])
+//! for the active tab, dim ([`Theme::tab_inactive`]) for the rest — with a raw
+//! space gap between chips doing the separating (drive-test note #5: no hard
+//! `▐`/`▌` edge caps and no `▏` bar separator; the rounded terminal-cell fill of
+//! the padded bg is the chip). When the tabs overflow the strip width, a
+//! horizontal window is derived each frame to keep the active tab visible, with
+//! `‹`/`›` edge markers marking clipped sides. No persistent scroll state — the
+//! window is a pure function of the items, active index, and width.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -22,14 +25,12 @@ use crate::tui::theme::Theme;
 /// replaces the tail when longer).
 const MAX_NAME: usize = 12;
 
-/// The `▐` (U+2590) left edge glyph of a chip. Shared with the request tab bar.
-pub(super) const CHIP_LEFT: &str = "▐";
-/// The `▌` (U+258C) right edge glyph of a chip. Shared with the request tab bar.
-pub(super) const CHIP_RIGHT: &str = "▌";
-/// Columns the chip framing adds to a tab beyond its label: the two half-block
-/// edges plus the single space gap that trails every chip. Every width
-/// computation counts a chip as `label_width + CHIP_OVERHEAD`.
-pub(super) const CHIP_OVERHEAD: usize = 3;
+/// Columns the chip framing adds to a tab beyond its (already padded) label:
+/// only the single space gap that trails every chip and does the separating
+/// (drive-test note #5 dropped the `▐`/`▌` edge caps). Every width computation
+/// counts a chip as `label_width + CHIP_OVERHEAD`; the softer look comes from
+/// the wider internal padding baked into the label itself ([`tab_label`]).
+pub(super) const CHIP_OVERHEAD: usize = 1;
 
 /// A single tab's render inputs: its short endpoint name and dirty state.
 pub struct TabItem {
@@ -39,15 +40,16 @@ pub struct TabItem {
     pub dirty: bool,
 }
 
-/// The rendered label text of a tab, including surrounding spaces and the dirty
-/// marker: `" name ● "` or `" name "`. Used both for width measurement and
-/// rendering so the two never drift.
+/// The rendered label text of a tab, including its internal padding and the
+/// dirty marker: `"  name ●  "` or `"  name  "`. Used both for width measurement
+/// and rendering so the two never drift. The two-space caps (drive-test note #5)
+/// give the softer, roomier chip look now that the hard `▐`/`▌` edges are gone.
 fn tab_label(item: &TabItem) -> String {
     let name = truncate(&item.short_name, MAX_NAME);
     if item.dirty {
-        format!(" {name} ● ")
+        format!("  {name} ●  ")
     } else {
-        format!(" {name} ")
+        format!("  {name}  ")
     }
 }
 
@@ -66,10 +68,10 @@ fn label_width(item: &TabItem) -> usize {
     tab_label(item).chars().count()
 }
 
-/// The width in display columns a rendered chip occupies: the label plus the
-/// [`CHIP_OVERHEAD`] framing (both half-block edges and the trailing gap). The
-/// single source every width computation measures a tab by, so the window math
-/// and the render loop can never drift from what actually paints.
+/// The width in display columns a rendered chip occupies: the padded label plus
+/// the [`CHIP_OVERHEAD`] framing (just the trailing gap now — note #5 dropped the
+/// edge caps). The single source every width computation measures a tab by, so
+/// the window math and the render loop can never drift from what actually paints.
 fn chip_width(item: &TabItem) -> usize {
     label_width(item) + CHIP_OVERHEAD
 }
@@ -138,26 +140,28 @@ pub fn render(frame: &mut Frame, area: Rect, items: &[TabItem], active: usize, t
             clipped_right = true;
             break;
         }
-        // Active chip = bright `selection` fill; inactive = the dim `tab_inactive`
-        // fill (both carry a real bg, so every chip reads as filled).
+        // Active chip = bright `selection` fill made BOLD for a stronger,
+        // clearer active-vs-inactive contrast (note #5); inactive = the dim
+        // `tab_inactive` fill (both carry a real bg, so every chip reads as
+        // filled). Bolding the local style leaves the shared `selection` slot
+        // (explorer/picker rows) untouched.
         let style = if i == active {
-            theme.selection
+            theme.selection.add_modifier(Modifier::BOLD)
         } else {
             theme.tab_inactive
         };
-        // Chip: `▐` left edge, the label, `▌` right edge — all on the chip bg —
-        // then a raw space gap. The label is split so the dirty `●` can carry the
-        // accent foreground while still sitting on the chip bg.
-        spans.push(Span::styled(CHIP_LEFT, style));
+        // Chip: the padded label on the chip bg, then a raw space gap that does
+        // the separating (note #5: no `▐`/`▌` caps, no `▏` bar). The label is
+        // split so the dirty `●` can carry the accent foreground while still
+        // sitting on the chip bg.
         if item.dirty {
             let name = truncate(&item.short_name, MAX_NAME);
-            spans.push(Span::styled(format!(" {name} "), style));
+            spans.push(Span::styled(format!("  {name} "), style));
             spans.push(Span::styled("●", style.patch(theme.accent)));
-            spans.push(Span::styled(" ", style));
+            spans.push(Span::styled("  ", style));
         } else {
             spans.push(Span::styled(tab_label(item), style));
         }
-        spans.push(Span::styled(CHIP_RIGHT, style));
         spans.push(Span::raw(" "));
         used += w;
     }
@@ -180,25 +184,30 @@ mod tests {
 
     #[test]
     fn tab_label_widths() {
-        assert_eq!(tab_label(&item("ab", false)), " ab ");
-        assert_eq!(tab_label(&item("ab", true)), " ab ● ");
+        // Note #5: two-space internal padding, no `▐`/`▌` caps.
+        assert_eq!(tab_label(&item("ab", false)), "  ab  ");
+        assert_eq!(tab_label(&item("ab", true)), "  ab ●  ");
         // Truncation to MAX_NAME cols with an ellipsis.
         let long = "a".repeat(20);
         let lbl = tab_label(&item(&long, false));
         assert!(lbl.contains('…'), "long name truncated: {lbl:?}");
         assert_eq!(
             lbl.chars().count(),
-            MAX_NAME + 2,
-            "MAX_NAME + surrounding spaces"
+            MAX_NAME + 4,
+            "MAX_NAME + two-space caps each side"
         );
     }
 
     #[test]
-    fn chip_width_counts_edges_and_gap() {
-        // Label " x " is 3 cols; a chip adds `▐` + `▌` + the trailing gap = 3.
-        assert_eq!(label_width(&item("x", false)), 3);
-        assert_eq!(chip_width(&item("x", false)), 3 + CHIP_OVERHEAD);
-        assert_eq!(CHIP_OVERHEAD, 3, "▐ + ▌ + one gap space");
+    fn chip_width_counts_padding_and_gap() {
+        // Note #5: label "  x  " is 5 cols (two-space caps); a chip adds only the
+        // trailing gap space now that the `▐`/`▌` edge caps are gone.
+        assert_eq!(label_width(&item("x", false)), 5);
+        assert_eq!(chip_width(&item("x", false)), 5 + CHIP_OVERHEAD);
+        assert_eq!(
+            CHIP_OVERHEAD, 1,
+            "just the trailing gap space (no edge caps)"
+        );
         // A dirty chip still counts its `●` label plus the same framing.
         assert_eq!(
             chip_width(&item("x", true)),
@@ -210,10 +219,10 @@ mod tests {
     /// `window_start` reserves a right-marker column so the render loop's matching
     /// reserve can never clip the active tab — the window fits `start..=active`
     /// into `width - 1` (right marker), guaranteeing a free column for `›`. The
-    /// widths here are CHIP widths (label 3 + edges/gap 3 = 6 each).
+    /// widths here are CHIP widths (padded label 5 + gap 1 = 6 each).
     #[test]
     fn window_reserves_right_marker_when_more_follow() {
-        // 1-char names → label " x " = 3 cols → chip = 6 cols each.
+        // 1-char names → label "  x  " = 5 cols → chip = 6 cols each.
         let items = vec![item("a", false), item("b", false), item("c", false)];
         // active = 1 (middle), more follow (c). width chosen so start..=active
         // (a,b = 12) fits exactly, but +1 right marker forces the window to drop
@@ -237,8 +246,8 @@ mod tests {
     /// than paint past `width`, and it must keep the active chip visible.
     #[test]
     fn wider_chips_clip_where_bare_labels_fit() {
-        // Four chips of 6 cols each (1-char names). Bare labels (3 each) would fit
-        // 4 tabs in 12 cols; chips (6 each) do not.
+        // Four chips of 6 cols each (1-char names). Bare names (1 each) would fit
+        // 4 tabs in 12 cols; padded chips (6 each) do not.
         let items = vec![
             item("a", false),
             item("b", false),

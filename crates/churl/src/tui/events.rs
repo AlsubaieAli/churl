@@ -193,7 +193,30 @@ pub enum Action {
     BufferClose,
     /// Close all open buffers/tabs (each dirty one prompts in turn).
     BufferCloseAll,
+    /// Jump directly to the Nth open buffer/tab (1-based; `<leader>t <n>`, note
+    /// #5). Out of range is a graceful no-op with a status message — never a
+    /// panic or a wrong-tab jump. Distinct from the request-pane `Tab1`..`Tab4`
+    /// (which switch Params/Headers/Auth/Body); those live in the Request pane
+    /// overlay, this only in the tabs leader submenu, so the digits never clash.
+    FocusBufferIndex(usize),
 }
+
+/// The `(index, config name, palette label)` rows for the parameterized
+/// [`Action::FocusBufferIndex`] variants (1-based, `1..=9`). Kept as a static
+/// table with `'static` strings so [`Action::name`]/[`Action::label`] can return
+/// `&'static str` for a data-carrying variant, and so `from_str`/`all` round-trip
+/// exactly like the flat [`ACTION_TABLE`] entries.
+const FOCUS_BUFFER_TABLE: &[(usize, &str, &str)] = &[
+    (1, "focus-buffer-1", "tab: jump to 1"),
+    (2, "focus-buffer-2", "tab: jump to 2"),
+    (3, "focus-buffer-3", "tab: jump to 3"),
+    (4, "focus-buffer-4", "tab: jump to 4"),
+    (5, "focus-buffer-5", "tab: jump to 5"),
+    (6, "focus-buffer-6", "tab: jump to 6"),
+    (7, "focus-buffer-7", "tab: jump to 7"),
+    (8, "focus-buffer-8", "tab: jump to 8"),
+    (9, "focus-buffer-9", "tab: jump to 9"),
+];
 
 /// `(action, config name, palette label)` for every action, in palette order.
 const ACTION_TABLE: &[(Action, &str, &str)] = &[
@@ -390,13 +413,28 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
 ];
 
 impl Action {
-    /// All actions, in the order they appear in the command palette.
+    /// All actions, in the order they appear in the command palette: the flat
+    /// [`ACTION_TABLE`] followed by the nine parameterized
+    /// [`Action::FocusBufferIndex`] variants (note #5), so the numbered tab jumps
+    /// surface in the palette and the `keymaps` view like any other action.
     pub fn all() -> impl Iterator<Item = Action> {
-        ACTION_TABLE.iter().map(|(action, _, _)| *action)
+        ACTION_TABLE.iter().map(|(action, _, _)| *action).chain(
+            FOCUS_BUFFER_TABLE
+                .iter()
+                .map(|(n, _, _)| Action::FocusBufferIndex(*n)),
+        )
     }
 
-    /// The stable config-facing name of this action (e.g. `"open-palette"`).
+    /// The stable config-facing name of this action (e.g. `"open-palette"`,
+    /// `"focus-buffer-3"`).
     pub fn name(self) -> &'static str {
+        if let Action::FocusBufferIndex(n) = self {
+            return FOCUS_BUFFER_TABLE
+                .iter()
+                .find(|(i, _, _)| *i == n)
+                .map(|(_, name, _)| *name)
+                .expect("FocusBufferIndex out of the 1..=9 range has no name");
+        }
         ACTION_TABLE
             .iter()
             .find(|(action, _, _)| *action == self)
@@ -406,6 +444,13 @@ impl Action {
 
     /// The human-readable palette label of this action (e.g. `"command palette"`).
     pub fn label(self) -> &'static str {
+        if let Action::FocusBufferIndex(n) = self {
+            return FOCUS_BUFFER_TABLE
+                .iter()
+                .find(|(i, _, _)| *i == n)
+                .map(|(_, _, label)| *label)
+                .expect("FocusBufferIndex out of the 1..=9 range has no label");
+        }
         ACTION_TABLE
             .iter()
             .find(|(action, _, _)| *action == self)
@@ -472,6 +517,9 @@ impl FromStr for Action {
     type Err = UnknownAction;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((n, _, _)) = FOCUS_BUFFER_TABLE.iter().find(|(_, name, _)| *name == s) {
+            return Ok(Action::FocusBufferIndex(*n));
+        }
         ACTION_TABLE
             .iter()
             .find(|(_, name, _)| *name == s)
@@ -749,13 +797,32 @@ impl Default for KeyMap {
         submenus.insert("load".to_owned(), load);
 
         // `<leader>t …`: buffer/tab actions. `n` next · `p` prev · `x` close ·
-        // `X` (shift-x) close all. Do NOT touch `Tab`/`Shift-Tab` (cross-pane).
+        // `X` (shift-x) close all · `1`..`9` jump to the Nth open tab (note #5).
+        // Do NOT touch `Tab`/`Shift-Tab` (cross-pane). The digit binds live ONLY
+        // in this submenu layer, so they never shadow the Request-pane `1`..`4`
+        // tab-jump overlay (a separate `PaneCtx::Request` layer, bound below).
         let mut tabs = Submenu::new("tabs");
         tabs.binds.insert(key!(n).normalized(), Action::BufferNext);
         tabs.binds.insert(key!(p).normalized(), Action::BufferPrev);
         tabs.binds.insert(key!(x).normalized(), Action::BufferClose);
         tabs.binds
             .insert(key!(shift - x).normalized(), Action::BufferCloseAll);
+        // `<leader>t 1` … `<leader>t 9` → jump straight to the Nth open tab.
+        let digit_combos = [
+            key!('1'),
+            key!('2'),
+            key!('3'),
+            key!('4'),
+            key!('5'),
+            key!('6'),
+            key!('7'),
+            key!('8'),
+            key!('9'),
+        ];
+        for (combo, (n, _, _)) in digit_combos.into_iter().zip(FOCUS_BUFFER_TABLE) {
+            tabs.binds
+                .insert(combo.normalized(), Action::FocusBufferIndex(*n));
+        }
         submenus.insert("tabs".to_owned(), tabs);
 
         Self {
