@@ -72,6 +72,31 @@ feat!: drop TOML v1 workspace layout
 Scopes are free-form but prefer existing ones (`viewer`, `import`, `auth`,
 `tui`, `core`, `installer`, `release`).
 
+## Working conventions
+
+How we keep pace, focus, and style consistent — for any contributor, human or agent. (Agents: these bind you; `CLAUDE.md` points here.)
+
+### Code structure
+- **File-size discipline.** Source files have a soft ceiling of ~800 lines. Past it, ask *"one responsibility, or several?"* — several clusters with no cross-dependencies → split into sibling modules; one cohesive state-machine → keep it (splitting state from its render adds indirection, not clarity). Splits are pure-move and behaviour-preserving: snapshots stay byte-identical.
+- **Illegal states unrepresentable.** Model state so invalid combinations can't be constructed — per-mode data lives inside its `Mode`/`Picker` enum variant, not in parallel `Option` fields guarded at every use site. If you're writing a defensive `match` for a state the types already rule out, fix the type instead.
+- **`churl-core` purity.** No TUI dependencies (ratatui, crossterm, …) in `churl-core`, ever. Model, persistence, and HTTP live there; rendering never does.
+- **Errors.** `thiserror` typed errors in libraries (`churl-core`); `color-eyre` for context-rich reporting in the binary (`churl`, `main.rs`).
+
+### Comments
+- Comments explain **present-tense behaviour and rationale** — the *why*, invariants, safety/security predicates, protocol/wire-format notes, subtle concurrency reasoning.
+- **No milestone/PR archaeology in code** (`(M7.4)`, `PR #58`, `// ---- M6.7 … ----`), no "previously… now…" narratives, no restating what the code plainly says. Provenance belongs in git history and the decision log, not inline.
+
+### Process — how work moves
+- **Milestone-per-session.** Each unit of work is a milestone with a class: **F** feature · **R** regression-hardening · **D** debug/drive-test · **refactor** (behaviour-preserving).
+- **Adversarial review is a standing gate** on every non-trivial change. A reviewer independent of the author assumes a bug exists, attacks the change's stated #1 risk, and names any test that only appears to test something. It has repeatedly caught real defects under all-green builder tests.
+- **A green build is not proof.** The author's passing tests only prove the code matches the author's belief. Re-run in a fresh context, drive the real binary (PTY) for UI changes, and verify even a reviewer's cited specifics against a primary source.
+- **No silent deferrals.** Every "later" gets an explicit milestone or backlog entry *at the moment of deferral*.
+- **Docs move with the code.** Update `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `CLAUDE.md` in the same commit as the change; keep `CLAUDE.md`'s layout map factually current.
+
+### Commit hygiene
+- Conventional Commits (`feat:`/`fix:`/`refactor:`/`docs:`/`chore:`/…) — CI enforces the PR title (see the table above).
+- **Keep the subject clean:** the subject line is user-facing release-note copy (the changelog is generated from it), so no milestone/PR/note archaeology in it — put context in the commit body if it's worth keeping.
+
 ## How releases work
 
 Nobody pushes tags or runs `cargo publish` by hand:
