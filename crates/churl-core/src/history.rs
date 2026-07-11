@@ -76,6 +76,7 @@ const MIGRATIONS: &[&str] = &[
 
 /// Error opening or querying the history store.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum HistoryError {
     /// The parent directory of the database file could not be created.
     #[error("failed to create state directory {path}: {source}")]

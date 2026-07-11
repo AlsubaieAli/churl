@@ -155,6 +155,7 @@ pub fn classify(result: &Result<Response, HttpError>) -> ReqOutcome {
 /// requests that actually **completed** (have a timing), so an all-errored batch
 /// yields `None` for every percentile without panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct LoadStats {
     /// Number of `Ok` outcomes.
     pub ok: usize,

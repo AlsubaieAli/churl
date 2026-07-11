@@ -74,6 +74,7 @@ pub struct ImportSummary {
 
 /// Error importing or exporting a JSON collection.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum InterchangeError {
     /// The input was not valid JSON.
     #[error("invalid JSON: {0}")]

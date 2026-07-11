@@ -53,6 +53,7 @@ impl std::fmt::Display for Method {
 /// Error returned when a string cannot be parsed as an HTTP [`Method`].
 #[derive(Debug, thiserror::Error)]
 #[error("unknown HTTP method: {0:?}")]
+#[non_exhaustive]
 pub struct ParseMethodError(String);
 
 impl std::str::FromStr for Method {

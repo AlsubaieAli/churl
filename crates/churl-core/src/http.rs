@@ -44,6 +44,7 @@ impl Default for ExecuteOptions {
 
 /// Error executing an HTTP request.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum HttpError {
     /// The request URL could not be parsed.
     #[error("invalid URL {url:?}: {reason}")]

@@ -14,6 +14,7 @@ use crate::model::Workspace;
 
 /// Error loading a churl [`Config`] file.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// The config file exists but could not be read.
     #[error("failed to read config {path}: {source}")]

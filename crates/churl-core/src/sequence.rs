@@ -39,6 +39,7 @@ use crate::template::{Resolver, Scope};
 /// Error extracting a value from a response via [`extract_value`]. Every variant
 /// names the offending expression and the reason.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtractError {
     /// A `header:<Name>` expression named a header the response does not carry.
     #[error("extract {expr:?}: response has no header {name:?}")]
@@ -319,6 +320,7 @@ pub struct PreparedStep {
 /// Error preparing a sequence step (path resolution / endpoint load). The step
 /// fails; the run never panics and never escapes the workspace root.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SequenceError {
     /// The step's `endpoint` used `..` or an absolute path — refused so a step can
     /// never escape the workspace root.
