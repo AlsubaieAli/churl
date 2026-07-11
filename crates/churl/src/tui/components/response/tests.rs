@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
+use super::render::status_summary;
 use super::*;
+use crate::tui::theme::Theme;
 use churl_core::model::{Header, Response};
 
 fn view(body: &str) -> ResponseView {
