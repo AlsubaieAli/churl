@@ -1,5 +1,6 @@
-//! JSON collection interchange: import Postman Collection v2.1 into churl
-//! endpoints, and export churl collections/workspaces to a selectable JSON
+//! JSON collection interchange: import a Postman Collection v2.1 or churl-native
+//! document into churl endpoints (the dialect is auto-detected from the
+//! envelope), and export churl collections/workspaces to a selectable JSON
 //! dialect (Postman v2.1 for round-tripping, or a lossless churl-native shape).
 //!
 //! The Postman mapping is hand-rolled against `serde_json::Value` on purpose:
@@ -148,6 +149,105 @@ pub fn import_postman_v21(json: &str) -> Result<CollectionImport, InterchangeErr
         requests: ctx.requests,
         warnings: ctx.warnings,
     })
+}
+
+/// Imports a churl-native JSON document (as written by [`export_workspace`] /
+/// [`export_collection`] in [`JsonDialect::Native`]) into a [`CollectionImport`].
+///
+/// The envelope is `{ churl_version, name, collections: [ { name, endpoints: [
+/// Endpoint... ] } ] }`. A malformed top-level envelope is a hard error, but —
+/// mirroring the Postman path — a single endpoint that fails to deserialize is
+/// dropped with a warning rather than aborting the whole import.
+///
+/// A file whose `churl_version` exceeds this build's [`CHURL_NATIVE_VERSION`] is
+/// rejected outright (never best-effort-parsed), so a newer producer's added
+/// fields can't be silently dropped.
+pub fn import_churl_native(json: &str) -> Result<CollectionImport, InterchangeError> {
+    let root: Value = serde_json::from_str(json)?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| InterchangeError::UnsupportedSchema("top level is not an object".into()))?;
+
+    let version = match obj.get("churl_version") {
+        None => {
+            return Err(InterchangeError::UnsupportedSchema(
+                "missing churl_version — not a churl-native collection".into(),
+            ));
+        }
+        Some(raw) => raw.as_u64().ok_or_else(|| {
+            InterchangeError::UnsupportedSchema(format!(
+                "churl_version must be a non-negative integer, got {raw}"
+            ))
+        })?,
+    };
+    if version > CHURL_NATIVE_VERSION {
+        return Err(InterchangeError::UnsupportedSchema(format!(
+            "churl-native file version {version} is newer than this build supports \
+             ({CHURL_NATIVE_VERSION}); upgrade churl"
+        )));
+    }
+
+    let name = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Imported")
+        .to_owned();
+
+    let mut requests = Vec::new();
+    let mut warnings = Vec::new();
+    if let Some(collections) = obj.get("collections").and_then(Value::as_array) {
+        for (ci, collection) in collections.iter().enumerate() {
+            let cname = collection
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Imported")
+                .to_owned();
+            let Some(endpoints) = collection.get("endpoints").and_then(Value::as_array) else {
+                continue;
+            };
+            for (ei, raw) in endpoints.iter().enumerate() {
+                match serde_json::from_value::<Endpoint>(raw.clone()) {
+                    Ok(endpoint) => requests.push(ImportedRequest {
+                        folder_path: vec![cname.clone()],
+                        endpoint,
+                    }),
+                    Err(err) => warnings.push(format!(
+                        "skipped endpoint {ei} in collection {cname:?} (index {ci}): {err}"
+                    )),
+                }
+            }
+        }
+    }
+
+    Ok(CollectionImport {
+        name,
+        requests,
+        warnings,
+    })
+}
+
+/// Imports a JSON collection, auto-detecting its dialect from the envelope: a
+/// `churl_version` key routes to [`import_churl_native`], an `info`/`item` key
+/// routes to [`import_postman_v21`], and anything else is an
+/// [`InterchangeError::UnsupportedSchema`]. This is the seam both the CLI
+/// (`--import-collection`) and the in-TUI import use so import "just works"
+/// regardless of which format the file is in.
+pub fn import_json(json: &str) -> Result<CollectionImport, InterchangeError> {
+    let root: Value = serde_json::from_str(json)?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| InterchangeError::UnsupportedSchema("top level is not an object".into()))?;
+    if obj.contains_key("churl_version") {
+        import_churl_native(json)
+    } else if obj.contains_key("info") || obj.contains_key("item") {
+        import_postman_v21(json)
+    } else {
+        Err(InterchangeError::UnsupportedSchema(
+            "unrecognized collection format — expected churl-native or Postman v2.1".into(),
+        ))
+    }
 }
 
 /// Accumulator threaded through the recursive `item[]` walk.
