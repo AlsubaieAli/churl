@@ -12,9 +12,9 @@ use churl_core::model::{
 use churl_core::persistence::endpoint_to_toml;
 use churl_core::persistence::{
     Collection, OpenWorkspace, PersistenceError, create_collection, create_endpoint,
-    delete_collection, delete_endpoint, load_collection_meta, load_endpoint,
-    load_workspace_manifest, rename_collection, rename_endpoint, save_collection_meta,
-    save_endpoint, save_workspace_manifest,
+    create_sequence, delete_collection, delete_endpoint, delete_sequence, load_collection_meta,
+    load_endpoint, load_workspace_manifest, rename_collection, rename_endpoint,
+    save_collection_meta, save_endpoint, save_workspace_manifest,
 };
 
 /// Comment-bearing endpoint fixtures: (name, contents, every comment that must survive).
@@ -879,6 +879,16 @@ fn delete_endpoint_removes_file() {
     let path = create_endpoint(&coll, "Doomed").unwrap();
     assert!(path.exists());
     delete_endpoint(&path).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn delete_sequence_removes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // create_sequence makes the sequences/ dir on demand under the root.
+    let path = create_sequence(dir.path(), "Doomed flow").unwrap();
+    assert!(path.exists());
+    delete_sequence(&path).unwrap();
     assert!(!path.exists());
 }
 

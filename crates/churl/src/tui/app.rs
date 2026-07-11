@@ -215,6 +215,8 @@ impl PromptPurpose {
 pub enum ConfirmPurpose {
     /// Delete the selected endpoint.
     DeleteEndpoint,
+    /// Delete the selected sequence in the Sequences sub-pane (note #6).
+    DeleteSequence,
     /// Discard unsaved changes before switching endpoints. The pending target
     /// lives in `App::pending_load` (it can carry a path, so it is not part of
     /// this `Copy` enum).
@@ -1898,10 +1900,11 @@ impl App {
             // everywhere else it renames the selected tree node.
             Action::Rename if self.left_column_on_sequences() => self.run_selected_sequence(),
             Action::Rename => self.begin_rename(),
-            Action::Delete if self.left_column_on_sequences() => {
-                self.notify("not available in the sequences pane")
-            }
+            // `d` on the sequences sub-pane deletes the hovered sequence (parallels
+            // endpoints `d`); everywhere else it deletes the selected tree node.
+            Action::Delete if self.left_column_on_sequences() => self.begin_delete_sequence(),
             Action::Delete => self.begin_delete(),
+            Action::DeleteSequence => self.begin_delete_sequence(),
             Action::HalfPageDown | Action::HalfPageUp => {
                 if self.focus == Pane::Response {
                     self.response_half_page(matches!(action, Action::HalfPageDown));
@@ -4767,6 +4770,18 @@ impl App {
         }
     }
 
+    /// `d` on the sequences sub-pane: y/n confirm before deleting the hovered
+    /// sequence file (parallels [`begin_delete`]'s endpoint arm — same low-friction
+    /// y/n gate, since a sequence file carries no secret values). Notifies when no
+    /// sequence is selected.
+    fn begin_delete_sequence(&mut self) {
+        if self.explorer.selected_sequence().is_none() {
+            self.notify("select a sequence first");
+            return;
+        }
+        self.mode = Mode::Confirm(ConfirmPurpose::DeleteSequence);
+    }
+
     /// Opens a text prompt seeded with `seed`.
     fn open_prompt(&mut self, purpose: PromptPurpose, seed: &str) {
         self.prompt_editor = LineEditor::new(seed);
@@ -5161,6 +5176,47 @@ impl App {
                                 // whose file vanished.
                                 self.reload_explorer()?;
                                 self.message = Some(Message::new("deleted endpoint"));
+                            }
+                            Err(err) => self.crud_error(err),
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Normal,
+                _ => {}
+            },
+            ConfirmPurpose::DeleteSequence => match key.code {
+                KeyCode::Char('y') => {
+                    self.mode = Mode::Normal;
+                    if let Some(selected) = self.explorer.selected_sequence() {
+                        let path = selected.file;
+                        match persistence::delete_sequence(&path) {
+                            Ok(()) => {
+                                // A sequence editor/runner is a modal overlay
+                                // (`Mode::Sequence`) and so cannot be open while this
+                                // confirm runs in `Mode::Normal`; but if a stale
+                                // editor/runner state still points at the just-deleted
+                                // file, drop it so a later save can't resurrect the
+                                // file and the runner can't act on a vanished target.
+                                if self
+                                    .sequence_editor
+                                    .as_ref()
+                                    .is_some_and(|e| e.path() == path)
+                                {
+                                    self.sequence_editor = None;
+                                }
+                                if self
+                                    .sequence_runner
+                                    .as_ref()
+                                    .is_some_and(|r| r.path == path)
+                                {
+                                    self.sequence_runner = None;
+                                }
+                                // reload_explorer clamps the sub-pane cursor to the
+                                // new sequence count, so selection lands on the
+                                // next/previous sequence (or the empty-state
+                                // affordance when none remain).
+                                self.reload_explorer()?;
+                                self.message = Some(Message::new("deleted sequence"));
                             }
                             Err(err) => self.crud_error(err),
                         }
@@ -6349,6 +6405,7 @@ fn confirm_text(
 ) -> (&'static str, &'static str, &'static str) {
     match purpose {
         ConfirmPurpose::DeleteEndpoint => ("Delete endpoint", "Delete this endpoint?", "[y/n]"),
+        ConfirmPurpose::DeleteSequence => ("Delete sequence", "Delete this sequence?", "[y/n]"),
         ConfirmPurpose::DiscardChanges if closing => (
             "Unsaved changes",
             "Close without saving?",
@@ -8871,9 +8928,16 @@ mod tests {
         app.dispatch(Action::FocusSequencesToggle, None).unwrap();
         assert!(app.left_column_on_sequences());
 
-        // `d` → no tree delete prompt; mode stays Normal.
+        // `d` → the delete-SEQUENCE confirm (never the tree delete prompt).
         app.dispatch(Action::Delete, None).unwrap();
-        assert_eq!(app.mode, Mode::Normal, "d must not open a delete prompt");
+        assert_eq!(
+            app.mode,
+            Mode::Confirm(ConfirmPurpose::DeleteSequence),
+            "d on the sequences sub-pane confirms a sequence delete, not a tree delete"
+        );
+        // Back out so the rest of the assertions run from Normal.
+        app.dispatch(Action::Cancel, None).ok();
+        app.mode = Mode::Normal;
 
         // `N` → no new-collection prompt; mode stays Normal.
         app.dispatch(Action::NewCollection, None).unwrap();
@@ -8889,6 +8953,100 @@ mod tests {
             app.mode,
             Mode::Prompt(PromptPurpose::NewSequence),
             "n on the sequences sub-pane creates a new sequence"
+        );
+    }
+
+    /// Note #6: `d` → confirm → `y` on the sequences sub-pane deletes the hovered
+    /// sequence file, refreshes the pane, and the sub-pane cursor lands on a
+    /// surviving sequence. Mirrors the endpoint-delete confirm flow.
+    #[test]
+    fn d_confirm_y_deletes_hovered_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = seq_pane_app(dir.path());
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert!(app.left_column_on_sequences());
+        assert_eq!(app.explorer.sequences_len(), 2);
+
+        // Cursor 0 → "Login" (seq = 0). Capture its file before deleting.
+        let selected = app.explorer.selected_sequence().unwrap();
+        assert_eq!(selected.name, "Login");
+        let deleted_path = selected.file.clone();
+        assert!(deleted_path.exists());
+
+        // `d` opens the confirm, `y` performs the delete.
+        app.dispatch(Action::Delete, None).unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DeleteSequence));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.mode, Mode::Normal, "confirm closes on y");
+        assert!(!deleted_path.exists(), "sequence file removed from disk");
+        assert_eq!(app.explorer.sequences_len(), 1, "pane refreshed");
+        // Selection lands sensibly on the surviving sequence.
+        assert_eq!(app.explorer.selected_sequence().unwrap().name, "Checkout");
+    }
+
+    /// Note #6, empty-after-delete case: deleting the last remaining sequence
+    /// leaves an empty sub-pane and reconciles the left-column focus back to the
+    /// endpoints tree (never stranded on an empty sub-pane).
+    #[test]
+    fn deleting_last_sequence_empties_pane_and_reconciles_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        // A workspace with exactly one sequence.
+        std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = dir.path().join("api");
+        std::fs::create_dir(&coll).unwrap();
+        std::fs::write(
+            coll.join("one.toml"),
+            "seq = 0\nname = \"one\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/one\"\n",
+        )
+        .unwrap();
+        let seq_dir = dir.path().join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        std::fs::write(
+            seq_dir.join("only.toml"),
+            "seq = 0\nname = \"Only\"\non_error = \"halt\"\n",
+        )
+        .unwrap();
+        let ws = open_workspace(dir.path()).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+
+        app.dispatch(Action::FocusSequencesToggle, None).unwrap();
+        assert_eq!(app.left_active, LeftPane::Sequences);
+        assert_eq!(app.explorer.sequences_len(), 1);
+        let only = app.explorer.selected_sequence().unwrap().file;
+
+        app.dispatch(Action::Delete, None).unwrap();
+        assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DeleteSequence));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!only.exists(), "last sequence file removed");
+        assert_eq!(app.explorer.sequences_len(), 0, "pane now empty");
+        assert!(app.explorer.selected_sequence().is_none());
+        // Focus reconciled off the empty sub-pane.
+        assert_eq!(
+            app.left_active,
+            LeftPane::Endpoints,
+            "focus reconciles to endpoints when the sequence list empties"
+        );
+    }
+
+    /// Note #6: `d` on the sequences sub-pane with no sequence selected notifies
+    /// and never opens a confirm.
+    #[test]
+    fn d_on_empty_sequences_subpane_notifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = empty_seq_pane_app(dir.path());
+        app.left_active = LeftPane::Sequences;
+        app.focus = Pane::Explorer;
+        assert!(app.explorer.selected_sequence().is_none());
+
+        app.dispatch(Action::Delete, None).unwrap();
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "no confirm when nothing is selected"
         );
     }
 
