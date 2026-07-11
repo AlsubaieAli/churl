@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/AlsubaieAli/churl/compare/v0.1.3...v0.2.0) - 2026-07-11
+
+### Added
+
+- *(tui)* ephemeral peek+copy for masked secret values (note #3) ([#56](https://github.com/AlsubaieAli/churl/pull/56))
+- *(tui)* refine tab chips + <leader>t <n> numbered jump (note #5) ([#57](https://github.com/AlsubaieAli/churl/pull/57))
+- *(tui)* delete a sequence from the Sequences pane (note #6) ([#54](https://github.com/AlsubaieAli/churl/pull/54))
+- extraction rule → in-memory Session variable (note #6) ([#50](https://github.com/AlsubaieAli/churl/pull/50))
+- *(tui)* extraction-grammar guidance in the sequence rule editor (note #5) ([#49](https://github.com/AlsubaieAli/churl/pull/49))
+- *(tui)* Ctrl-j/Ctrl-k reorder steps in the sequence editor (note #4) ([#48](https://github.com/AlsubaieAli/churl/pull/48))
+- *(tui)* filled-chip tab style with borders + gaps (note #7) ([#46](https://github.com/AlsubaieAli/churl/pull/46))
+- *(tui)* · sorted marker when A→Z key sort is active (note #1) ([#45](https://github.com/AlsubaieAli/churl/pull/45))
+- *(tui)* line-number gutter in the response viewer (default on) ([#43](https://github.com/AlsubaieAli/churl/pull/43))
+- *(tui)* M7.7 close-out — viewer sanitize, tab-width, horizontal-window slice ([#42](https://github.com/AlsubaieAli/churl/pull/42))
+- *(tui)* / search in the help overlay (M7.7 stage B) ([#40](https://github.com/AlsubaieAli/churl/pull/40))
+- *(tui)* optional A→Z key-sort toggle in pretty JSON view (M7.7) ([#39](https://github.com/AlsubaieAli/churl/pull/39))
+- *(tui)* JSON response reformatter + pretty toggle (M7.7 stage A) ([#38](https://github.com/AlsubaieAli/churl/pull/38))
+- *(tui)* sequence Mode header + runner/load pane legibility (M7.10 stage C) ([#36](https://github.com/AlsubaieAli/churl/pull/36))
+- *(tui)* 4-region Tab, pane-only f-jump, cycle-region, remove <leader>S (M7.10 stage B) ([#35](https://github.com/AlsubaieAli/churl/pull/35))
+- *(keymap)* dynamic leader submenus + load-time conflict warnings (M7.10 stage A) ([#34](https://github.com/AlsubaieAli/churl/pull/34))
+- R0 cheap-P0 durability — atomic saves + load-runner memory bound ([#33](https://github.com/AlsubaieAli/churl/pull/33))
+- *(tui)* D1 demo-stabilize — peek-symmetry, sequence run-chooser, cancel timing, env msg ([#29](https://github.com/AlsubaieAli/churl/pull/29))
+- *(tui)* multi-endpoint tabs/buffers (stage 2) ([#27](https://github.com/AlsubaieAli/churl/pull/27))
+- *(tui)* sequences sub-pane — toggle-able, out of the explorer tree, mutually-exclusive zoom ([#25](https://github.com/AlsubaieAli/churl/pull/25))
+- *(tui)* leader submenus (sequences/load) + unified sequence surface with edit⇄run switcher ([#24](https://github.com/AlsubaieAli/churl/pull/24))
+- *(tui)* picker vim-nav (ctrl-j/k), proportional picker, copy-as-curl on <leader>y ([#23](https://github.com/AlsubaieAli/churl/pull/23))
+- load-runner UX polish (response pane, value steppers, grouped stats, headers hint) ([#20](https://github.com/AlsubaieAli/churl/pull/20))
+- concurrent request load testing with bounded concurrency and live stats ([#18](https://github.com/AlsubaieAli/churl/pull/18))
+- request sequences for end-to-end API testing ([#17](https://github.com/AlsubaieAli/churl/pull/17))
+- environments & variables editor + collection-manifest crash fix ([#16](https://github.com/AlsubaieAli/churl/pull/16))
+- quick-jump request + workspace pickers ([#13](https://github.com/AlsubaieAli/churl/pull/13))
+- collection interchange — Postman JSON import/export, curl paste/copy ([#14](https://github.com/AlsubaieAli/churl/pull/14))
+
+### Fixed
+
+- *(durability)* R1 — reserved-name guards, SQLite WAL+migration lock, comment-preserving array merge, memory/disk bounds ([#59](https://github.com/AlsubaieAli/churl/pull/59))
+- *(tui)* D2 drive-test fixes — env copy regression, runner→edit focus, global {/} tab nav, s discoverability ([#58](https://github.com/AlsubaieAli/churl/pull/58))
+- *(tui)* session-marker contrast + env g/G nav + no silent copy no-ops (notes #1/#2) ([#55](https://github.com/AlsubaieAli/churl/pull/55))
+- *(tui)* honest, yankable failed-response row in the unified viewer ([#53](https://github.com/AlsubaieAli/churl/pull/53))
+- *(core)* fail loudly on unresolved {{var}} instead of shipping a literal ([#52](https://github.com/AlsubaieAli/churl/pull/52))
+- *(tui)* focus + inform the empty sequences pane on f-jump (note #3) ([#47](https://github.com/AlsubaieAli/churl/pull/47))
+- *(tui)* M7.10 drive-test follow-ups — nav, keymap, response hint ([#37](https://github.com/AlsubaieAli/churl/pull/37))
+- *(tui)* Tab skips a collapsed explorer instead of reopening it ([#32](https://github.com/AlsubaieAli/churl/pull/32))
+- clipboard copy reaches the system clipboard (native arboard + OSC 52 passthrough fallback) ([#22](https://github.com/AlsubaieAli/churl/pull/22))
+- gate [h] headers hint on focus + correct load-runner idle copy ([#21](https://github.com/AlsubaieAli/churl/pull/21))
+- unify pane navigation laws across zoom and the load runner ([#19](https://github.com/AlsubaieAli/churl/pull/19))
+
+### Other
+
+- *(tui)* unify runner response viewers with the main pane (note #2) ([#44](https://github.com/AlsubaieAli/churl/pull/44))
+- codebase-wide comment cleanup + M7.11 modularization milestone ([#41](https://github.com/AlsubaieAli/churl/pull/41))
+- *(comments)* condense verbose comments (first pass — response, persistence, env editor) ([#28](https://github.com/AlsubaieAli/churl/pull/28))
+- *(tui)* per-endpoint Buffer model (stage 1 of tabs/buffers) ([#26](https://github.com/AlsubaieAli/churl/pull/26))
+
 ## [0.1.3] - 2026-07-07
 
 - fix(ci): authenticate the force-release git push (#11)
