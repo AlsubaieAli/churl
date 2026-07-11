@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::theme::Theme;
 use crossterm::event::KeyModifiers;
 
 fn key(code: KeyCode) -> KeyEvent {
