@@ -441,6 +441,18 @@ impl EnvEditorState {
                 self.selected_row = 0;
                 EnvKeyOutcome::Consumed
             }
+            // Vim `g`/`G` jump to first/last scope (aliased Home/End), matching the
+            // single-`g` convention the runners use (drive-test note #2).
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.selected_scope = 0;
+                self.selected_row = 0;
+                EnvKeyOutcome::Consumed
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.selected_scope = self.scopes.len().saturating_sub(1);
+                self.selected_row = 0;
+                EnvKeyOutcome::Consumed
+            }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
                 self.focus = EnvFocus::VarRows;
                 self.clamp_row();
@@ -502,6 +514,17 @@ impl EnvEditorState {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected_row = self.selected_row.saturating_sub(1);
+                EnvKeyOutcome::Consumed
+            }
+            // Vim `g`/`G` jump to first/last row (aliased Home/End). Pure
+            // navigation, so it works in the read-only Session group too
+            // (drive-test note #2).
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.selected_row = 0;
+                EnvKeyOutcome::Consumed
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.selected_row = self.scope().vars.len().saturating_sub(1);
                 EnvKeyOutcome::Consumed
             }
             KeyCode::Tab | KeyCode::Char('h') | KeyCode::Left => {
@@ -1614,6 +1637,63 @@ mod tests {
         assert_eq!(s.selected_scope, 1);
         s.handle_key(key(KeyCode::Enter));
         assert_eq!(s.focus, EnvFocus::VarRows);
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_scope_list_top_and_bottom() {
+        // Drive-test note #2: vim `g`/`G` (aliased Home/End) jump the scope list
+        // to first/last, matching the single-`g` convention the runners use.
+        let mut s = fixture();
+        assert_eq!(s.selected_scope, 0);
+        s.handle_key(ch('G'));
+        assert_eq!(s.selected_scope, s.scopes.len() - 1, "G → last scope");
+        assert_eq!(s.selected_row, 0, "jumping scope resets the row");
+        s.handle_key(ch('g'));
+        assert_eq!(s.selected_scope, 0, "g → first scope");
+        // Home/End are aliases.
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(s.selected_scope, s.scopes.len() - 1);
+        s.handle_key(key(KeyCode::Home));
+        assert_eq!(s.selected_scope, 0);
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_var_rows_top_and_bottom() {
+        // A scope with several rows, focused into the var-row list.
+        let mut s = EnvEditorState {
+            scopes: vec![EnvScope {
+                kind: EnvScopeKind::Workspace,
+                label: "Workspace".into(),
+                vars: vec![
+                    ("a".into(), "1".into()),
+                    ("b".into(), "2".into()),
+                    ("c".into(), "3".into()),
+                    ("d".into(), "4".into()),
+                ],
+            }],
+            snapshot: vec![],
+            selected_scope: 0,
+            focus: EnvFocus::VarRows,
+            selected_row: 0,
+            editing: None,
+            naming: None,
+            message: None,
+            pending_close: false,
+            active_profile: None,
+            snapshot_active_profile: None,
+            cli_vars: BTreeMap::new(),
+            reveal: None,
+        }
+        .with_snapshot();
+        s.handle_key(ch('G'));
+        assert_eq!(s.selected_row, 3, "G → last row");
+        s.handle_key(ch('g'));
+        assert_eq!(s.selected_row, 0, "g → first row");
+        // Home/End aliases too.
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(s.selected_row, 3);
+        s.handle_key(key(KeyCode::Home));
+        assert_eq!(s.selected_row, 0);
     }
 
     #[test]
