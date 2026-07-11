@@ -3870,6 +3870,81 @@ fn load_response_search_targets_runner_and_returns() {
     );
 }
 
+/// R1.5 A2 regression lock: a load result that lands WHILE body-search is open
+/// over the runner must reach the PARKED runner state (moved into
+/// `body_search_return` when `/` opened `Mode::BodySearch`), not fall on the
+/// floor because `self.mode` is momentarily `Mode::BodySearch`. Proves
+/// `load_runner_mut()` resolves the parked state, the batch finalizes mid-search
+/// (finished + summary written), and Esc restores `Mode::LoadRunner(state)` with
+/// the recorded result intact. Guards the fold against PRs 2–3 touching this area.
+#[test]
+fn load_result_lands_on_parked_runner_during_body_search() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two-copy batch so landing copy #1 finalizes the run (finished + summary),
+    // exercising every `load_runner()`/`load_runner_mut()` seam on the FINISH path
+    // while the runner is parked behind body-search.
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    app.load_runner_mut().unwrap().cfg.total = 2;
+    app.start_load_run();
+    let g = load_gen(&app);
+    // Copy #0 lands normally (runner still live in `Mode::LoadRunner`); focus its
+    // Response region so `/` targets the runner surface.
+    app.on_load_result(g, 0, Ok(json_resp("{\"needle\":\"needle\"}")));
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    render_once(&mut app);
+
+    // Open body-search over the runner → mode flips to BodySearch, runner parked.
+    app.handle_key(norm('/')).unwrap();
+    assert!(matches!(app.mode, Mode::BodySearch));
+    assert!(
+        matches!(app.body_search_return, Mode::LoadRunner(_)),
+        "the runner state is parked in body_search_return, not dropped"
+    );
+    // The parked runner is still reachable through the accessor mid-search.
+    assert!(
+        app.load_runner().is_some(),
+        "load_runner() resolves the parked runner while Mode::BodySearch"
+    );
+    assert!(
+        !app.load_runner().unwrap().finished,
+        "batch not finished yet — copy #1 still pending"
+    );
+
+    // Copy #1 lands WHILE body-search is active. It must reach the parked runner.
+    app.on_load_result(g, 1, Ok(json_resp("{\"ok\":true}")));
+
+    // The result reached the parked runner: row #1 recorded and the batch
+    // finalized (finished flips true, written on the finish path via load_runner()).
+    assert!(matches!(app.mode, Mode::BodySearch), "still searching");
+    assert_eq!(
+        load_status(&app, 1),
+        LoadStatus::Ok(200),
+        "copy #1 recorded on the PARKED runner mid-search"
+    );
+    assert!(
+        app.load_runner().unwrap().finished,
+        "batch finished on the parked runner (last copy landed)"
+    );
+
+    // Esc out of body-search → the runner mode is restored intact, with BOTH
+    // results still present (row #0 from before the search, row #1 landed during).
+    app.handle_key(keyc(KeyCode::Esc)).unwrap();
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "Esc restores Mode::LoadRunner"
+    );
+    assert_eq!(load_status(&app, 0), LoadStatus::Ok(200), "row #0 intact");
+    assert_eq!(
+        load_status(&app, 1),
+        LoadStatus::Ok(200),
+        "row #1 (landed mid-search) survived the restore"
+    );
+    assert!(
+        app.load_runner().unwrap().finished,
+        "finished state survived the restore"
+    );
+}
+
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
 /// returns the BYTE-EXACT raw wire bytes (M7.7 invariant holds in the runner).
 #[test]
