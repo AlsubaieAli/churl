@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
-use super::text::{DisplayRow, char_range_to_bytes, char_slice, clamp_scroll, expand_wrap};
+use super::text::{DisplayRow, char_range_to_bytes, char_slice, clamp_scroll};
 use super::{ResponseState, ResponseView, ViewMode, Visible, failed_request_line};
 use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
@@ -236,7 +236,13 @@ fn render_done(
 ) {
     let area_width = body_area.width as usize;
     let height = body_area.height as usize;
-    let visible = view.visible_map();
+    // A3: the fold-filtered visible map, the wrap expansion, and the
+    // widest-visible-line scan below are all served from the view's single-slot
+    // geometry memo when the signature (generation/mode/fold-set/wrap/width/
+    // h_scroll) is unchanged — so an idle 250ms tick no longer re-walks the full
+    // body. A signature match yields byte-identical geometry, so the memo is
+    // behaviour-preserving (the snapshots prove it).
+    let visible = view.cached_visible_map();
     // The gutter consumes columns from the left; everything downstream (wrap
     // splitting, the h_scroll window, viewport_width, and thus the caller's
     // cursor→logical mapping) uses the reduced body width so the seam is single
@@ -249,7 +255,7 @@ fn render_done(
     // caller writes the clamped value back so an over-pan self-corrects.
     let h_scroll = view.h_scroll.min(view.max_h_scroll(width));
     outcome.clamped_h_scroll = h_scroll;
-    let rows = expand_wrap(view, &visible, view.wrap, width, h_scroll);
+    let rows = view.cached_expand_wrap(view.wrap, width, h_scroll);
     let total = rows.len();
     outcome.total_rows = total;
     // Report the *reduced* body width — the caller feeds it back into
