@@ -1,4 +1,4 @@
-//! Slug + reserved-name derivation extracted from `persistence.rs` (M7.11): the
+//! Slug + reserved-name derivation extracted from `persistence.rs`: the
 //! `slugify` normaliser, the reserved file-stem / directory-name tables, and the
 //! collision-avoiding path pickers. Child module of `persistence`, so it keeps
 //! full access to the parent's imports/constants (e.g. `SEQUENCES_DIRNAME`)

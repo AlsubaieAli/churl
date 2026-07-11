@@ -347,7 +347,7 @@ mod tests {
         );
     }
 
-    /// D2 note #2: the Explorer `s` binding (endpoints ⇄ sequences switch) must be
+    /// The Explorer `s` binding (endpoints ⇄ sequences switch) must be
     /// discoverable in the help overlay's Explorer section — it renders from the
     /// live keymap, but lock it so a future refactor cannot silently drop it.
     #[test]

@@ -44,16 +44,16 @@ pub struct Theme {
     /// statusline / URL bar / explorer row).
     pub accent: Style,
     /// The subordinate ` →session` marker on a sequence-editor extraction rule
-    /// whose captured value feeds the in-memory Session scope (note #6). Kept
+    /// whose captured value feeds the in-memory Session scope. Kept
     /// visually secondary to the rule text, but legible on the plain row; the
     /// render derives a selection-aware variant (carrying `selection`'s bg + a
     /// DIM modifier) so it stays readable when the row is highlighted, where a
-    /// plain-dim foreground would wash out (drive-test note #1).
+    /// plain-dim foreground would wash out.
     pub session_marker: Style,
 }
 
 impl Theme {
-    /// The built-in dark theme (the default; keeps M5 rendering).
+    /// The built-in dark theme (the default).
     pub fn dark() -> Self {
         Self {
             border_focused: Style::default().fg(Color::Cyan),

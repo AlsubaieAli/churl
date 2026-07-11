@@ -5,9 +5,9 @@
 //! handled at the *task* level by the caller — the TUI spawns the future with
 //! `tokio::spawn` and keeps the resulting `AbortHandle` — so `churl-core` never needs
 //! to know about the runtime. There is no `{{var}}` templating here; URLs, headers,
-//! and body are used verbatim (templating arrives in M6).
+//! and body are used verbatim.
 //!
-//! First-class auth (M5) is injected here: the request's [`crate::model::Auth`]
+//! First-class auth is injected here: the request's [`crate::model::Auth`]
 //! resolves to an [`AuthWire`] effect via [`crate::auth::apply_auth`] (the single
 //! auth dispatch point), and this module only applies the effect — a header
 //! (skipped when an enabled user header with the same name exists; the user's
@@ -84,7 +84,7 @@ pub fn build_client(timeout: Duration) -> Result<reqwest::Client, HttpError> {
 /// carries a body, a `Content-Type` is derived from its [`BodyKind`] *unless* the
 /// caller supplied an enabled `Content-Type` header — the user's header always wins.
 /// Timing measures total wall-clock from just before send to the body being fully
-/// read (or the cap being hit); connect timing is not split out in M3 and stays
+/// read (or the cap being hit); connect timing is not split out and stays
 /// `None`.
 ///
 /// The body is streamed chunk-wise and accumulated up to `options.max_body_bytes`.

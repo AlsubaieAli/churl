@@ -195,8 +195,8 @@ fn tab_bar_line(
     let (start, left_marker) = chip_window(&widths, active, width);
 
     // Each tab is a soft filled "chip" — the padded label on the chip bg — with a
-    // single raw space gap between chips doing the separating (drive-test note #5:
-    // no `▐`/`▌` edge caps, no `▏` bar). Active = bright `selection`; inactive =
+    // single raw space gap between chips doing the separating (no `▐`/`▌` edge
+    // caps, no `▏` bar). Active = bright `selection`; inactive =
     // the dim `tab_inactive` fill (both carry a real bg, so every chip reads as
     // filled, with stronger active-vs-inactive contrast).
     let mut spans: Vec<Span> = Vec::new();
@@ -215,7 +215,7 @@ fn tab_bar_line(
             break;
         }
         // Active chip: the bright `selection` fill made BOLD for a stronger,
-        // clearer active-vs-inactive contrast (note #5) without touching the
+        // clearer active-vs-inactive contrast without touching the
         // shared `selection` slot (also used by explorer/picker rows).
         let style = if *tab == tabs.active {
             theme.selection.add_modifier(Modifier::BOLD)
@@ -488,7 +488,7 @@ mod tests {
             "focused digit prefix inside chip: {text:?}"
         );
         // The active (Params) chip spans use the bright selection style (bolded
-        // for contrast, note #5); some inactive chip spans use the dim
+        // for contrast); some inactive chip spans use the dim
         // tab_inactive style.
         let active_style = theme.selection.add_modifier(Modifier::BOLD);
         assert!(
@@ -501,7 +501,7 @@ mod tests {
         );
     }
 
-    /// Drive-test note #5: the refined chips carry NO hard edge caps (`▐`/`▌`) and
+    /// The refined chips carry NO hard edge caps (`▐`/`▌`) and
     /// NO `▏` bar separator — a raw space gap separates them. Verified over the
     /// request tab bar; the top buffer strip shares the same render primitives.
     #[test]
@@ -524,7 +524,7 @@ mod tests {
             .any(|w| w[0].style != Style::default() && w[1].content.as_ref() == " ");
         assert!(has_gap, "a raw-space gap separates chips: {text:?}");
         // The active chip fill is the bright `selection` style, bolded for a
-        // stronger active-vs-inactive contrast (note #5).
+        // stronger active-vs-inactive contrast.
         let active_style = theme.selection.add_modifier(Modifier::BOLD);
         assert!(
             line.spans.iter().any(|s| s.style == active_style),

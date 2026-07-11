@@ -6,7 +6,7 @@
 //! lines of one viewport; the worker highlights them and returns the coloured
 //! [`Line`]s to the app as [`AppMsg::Highlighted`]. Highlighting starts stateless
 //! at the top of every viewport — a known imperfection for multi-line constructs
-//! (block comments/strings that begin above the viewport), accepted in M3 for the
+//! (block comments/strings that begin above the viewport), accepted for the
 //! render-loop budget it buys.
 
 use std::sync::mpsc::Receiver;
@@ -72,7 +72,7 @@ pub struct HighlightJob {
 /// Returns `None` if the OS refuses the thread (EAGAIN under fd/thread
 /// exhaustion) rather than panicking: highlighting is best-effort (already
 /// absent under `TestBackend`), so the app degrades to plain, un-highlighted
-/// response rendering instead of aborting at startup (audit B4).
+/// response rendering instead of aborting at startup.
 pub fn spawn(app_tx: Sender<AppMsg>, light: bool) -> Option<std::sync::mpsc::Sender<HighlightJob>> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<HighlightJob>();
     match std::thread::Builder::new()
@@ -99,7 +99,7 @@ fn worker(jobs: Receiver<HighlightJob>, app_tx: Sender<AppMsg>, light: bool) {
     for job in jobs {
         let lines = highlight(&syntax_set, &theme, job.syntax, &job.lines);
         // This is a dedicated OS thread (never the render/UI thread and not an
-        // async task), so `blocking_send` on the bounded app channel (R1 D4a) is
+        // async task), so `blocking_send` on the bounded app channel is
         // safe: it parks THIS thread until the queue drains, applying backpressure
         // to highlight results without ever stalling input handling.
         if app_tx
@@ -191,7 +191,7 @@ mod tests {
         // On a healthy runtime the worker thread spawns and `spawn` hands back a
         // live sender. The `Option` return exists so a thread-spawn *failure*
         // (EAGAIN under fd/thread exhaustion) degrades to `None` — plain,
-        // un-highlighted rendering — instead of panicking (audit B4). A real
+        // un-highlighted rendering — instead of panicking. A real
         // EAGAIN can't be forced deterministically in-process without exhausting
         // the host, so this test pins the success arm and the graceful contract;
         // the degrade path is exercised by `App::install_runtime` treating `None`

@@ -1,4 +1,4 @@
-//! The environments & variables editor (M7.3): a split-view modal for editing the
+//! The environments & variables editor: a split-view modal for editing the
 //! three template-var scopes — workspace `[vars]`, per-collection `folder.toml
 //! [vars]`, and named profiles — with profile CRUD, explicit save, a
 //! dirty/discard guard, secret masking + refusal, and a live **precedence
@@ -48,7 +48,7 @@ pub enum EnvScopeKind {
     },
     /// A named profile's `[profiles.vars]`.
     Profile,
-    /// The in-memory Session captures for the current workspace (note #6). A
+    /// The in-memory Session captures for the current workspace. A
     /// **read-only** display group: values are populated by sequence runs, masked,
     /// never edited here, and never written to disk. A clear action empties it.
     Session,
@@ -130,10 +130,10 @@ pub enum EnvKeyOutcome {
     SaveAndClose,
     /// Close the editor now (discard, or a clean close).
     Close,
-    /// Clear the current workspace's in-memory Session captures (note #6). The app
+    /// Clear the current workspace's in-memory Session captures. The app
     /// empties its store, then the editor rebuilds the Session group's rows.
     ClearSession,
-    /// Ephemeral peek (drive-test note #3): the user pressed the reveal key on a
+    /// Ephemeral peek: the user pressed the reveal key on a
     /// masked row. The editor cannot resolve values itself (it is UI-only), so it
     /// asks the app to resolve the selected row's value through the normal
     /// [`Resolver`] and hand it back via [`EnvEditorState::set_reveal`]. Nothing is
@@ -145,7 +145,7 @@ pub enum EnvKeyOutcome {
     /// revealed (the editor only emits this while a reveal is live).
     CopyRevealed,
     /// Copy the selected NON-masked row's value directly (`y` on a plainly-visible
-    /// row — drive-test D2 note #3). No peek is needed for a value that is already
+    /// row). No peek is needed for a value that is already
     /// on screen: masked/secret rows keep the reveal-first gate ([`CopyRevealed`]),
     /// visible rows copy outright. The app reads [`EnvEditorState::selected_row_value`]
     /// and routes it through the same clipboard path.
@@ -157,7 +157,7 @@ pub enum EnvKeyOutcome {
 /// 250 ms tick (mirrors [`super::message::MESSAGE_EXPIRE_SECS`]).
 pub const REVEAL_EXPIRE_SECS: u64 = 6;
 
-/// An active ephemeral peek (drive-test note #3): exactly one masked row's
+/// An active ephemeral peek: exactly one masked row's
 /// **resolved** value revealed in place. This is the ONLY place the plaintext of a
 /// masked value lives in view state, and it is cleared on any row/scope move, mode
 /// change, or timeout — never persisted, never logged. Pinned to a `(scope, row)`
@@ -193,7 +193,7 @@ pub struct EnvEditorState {
     pub naming: Option<ProfileNameEdit>,
     /// Inline status/error message shown in the editor footer.
     pub message: Option<String>,
-    /// The active ephemeral secret peek (drive-test note #3), if any. At most one
+    /// The active ephemeral secret peek, if any. At most one
     /// row is ever revealed. Cleared on row/scope move, mode change, and timeout;
     /// its plaintext lives only here, transiently, and is never written or logged.
     reveal: Option<Reveal>,
@@ -247,7 +247,7 @@ impl EnvEditorState {
             });
         }
 
-        // The read-only Session group (note #6): the current workspace's in-memory
+        // The read-only Session group: the current workspace's in-memory
         // captures. Always present so the user can see (and clear) captured
         // secrets even when empty. Never editable, never saved.
         scopes.push(EnvScope {
@@ -299,7 +299,7 @@ impl EnvEditorState {
         &self.scopes[self.selected_scope]
     }
 
-    /// Whether the selected scope is the read-only Session group (note #6).
+    /// Whether the selected scope is the read-only Session group.
     fn selected_is_session(&self) -> bool {
         matches!(self.scope().kind, EnvScopeKind::Session)
     }
@@ -355,7 +355,7 @@ impl EnvEditorState {
 
     /// The raw value of the selected row, verbatim as it renders on a NON-masked
     /// row. Used by the app for the direct `y` copy of a plainly-visible value
-    /// (drive-test D2 note #3) — it never resolves templates, so what copies is
+    /// — it never resolves templates, so what copies is
     /// exactly what the row shows. `None` when there is no selected row.
     pub fn selected_row_value(&self) -> Option<&str> {
         self.scope()
@@ -426,9 +426,9 @@ impl EnvEditorState {
             }
         }
         if !violations.is_empty() {
-            // D1 (interim): name the offending var(s) and signal they're
+            // Name the offending var(s) and signal they're
             // pre-existing so the refusal doesn't read as a silent dead-end. The
-            // actual grandfather+warn / save-anyway behavior is R3.
+            // actual grandfather+warn / save-anyway behavior is not yet implemented.
             let msg = format!(
                 "pre-existing secret-named var(s) with literal values not saved: {} — move them to env (grandfathering coming soon)",
                 violations.join(", ")

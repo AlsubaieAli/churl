@@ -1,5 +1,5 @@
 //! `.env` editor overlay handlers (open/key/save/close), extracted from
-//! `app.rs` (M7.11). Grandchild module of `app`; `impl App` here keeps full
+//! `app.rs`. Grandchild module of `app`; `impl App` here keeps full
 //! access to `App`'s private fields and methods without any visibility widening.
 
 use super::super::*;
@@ -19,8 +19,8 @@ impl App {
             self.cli_vars.clone(),
             &session,
         ) {
-            // R1.5 A2: one transition — construct the state INTO the mode. No
-            // parallel `env_editor` field to set first, so `(Mode::EnvEditor, None)`
+            // One transition — construct the state INTO the mode. No parallel
+            // `env_editor` field to set first, so `(Mode::EnvEditor, None)`
             // is unrepresentable.
             Ok(state) => self.mode = Mode::EnvEditor(state),
             Err(err) => self.notify(format!("couldn't open editor: {err}")),
@@ -29,10 +29,10 @@ impl App {
 
     /// Routes a key to the open env editor and acts on its outcome (save / close).
     ///
-    /// R1.5 A2: the editor state lives in `self.mode`; a non-`EnvEditor` mode here
-    /// is now unreachable by construction (the router only dispatches this on
-    /// `Mode::EnvEditor(_)`), so the old defensive `is_none()→Normal` guard is
-    /// gone. The key is handled INSIDE the `&mut self.mode` borrow, which is
+    /// The editor state lives in `self.mode`; a non-`EnvEditor` mode here is
+    /// unreachable by construction (the router only dispatches this on
+    /// `Mode::EnvEditor(_)`), so no defensive `is_none()→Normal` guard is
+    /// needed. The key is handled INSIDE the `&mut self.mode` borrow, which is
     /// dropped (via the `outcome` local) before any `&mut self` method runs.
     pub(in crate::tui::app) fn handle_env_editor_key(&mut self, key: KeyEvent) -> Result<()> {
         let Mode::EnvEditor(editor) = &mut self.mode else {
@@ -67,7 +67,7 @@ impl App {
                 });
             }
             EnvKeyOutcome::RevealRow => {
-                // Ephemeral peek (drive-test note #3): resolve the selected masked
+                // Ephemeral peek: resolve the selected masked
                 // row's value through the SAME resolver a standalone send uses, then
                 // hand the plaintext to the editor's transient reveal state. The
                 // resolved value never touches disk, a log, or any persisted field —
@@ -97,8 +97,8 @@ impl App {
                 }
             }
             EnvKeyOutcome::CopyValue => {
-                // Copy a plainly-visible (non-masked) row's value directly — the D2
-                // regression fix (note #3): a visible value needs no peek to copy.
+                // Copy a plainly-visible (non-masked) row's value directly:
+                // a visible value needs no peek to copy.
                 // Same clipboard seam as every other copy; the value is taken raw,
                 // exactly as the row renders it (no template resolution).
                 let value = match &self.mode {
@@ -113,7 +113,7 @@ impl App {
         Ok(())
     }
 
-    /// Closes the editor and returns to normal mode. R1.5 A2: setting `Normal`
+    /// Closes the editor and returns to normal mode. Setting `Normal`
     /// drops the [`EnvEditorState`] automatically (no separate field to clear).
     pub(in crate::tui::app) fn close_env_editor(&mut self) {
         self.mode = Mode::Normal;

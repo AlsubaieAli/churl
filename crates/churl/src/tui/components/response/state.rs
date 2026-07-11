@@ -16,7 +16,7 @@ use super::ResponseView;
 pub struct ResponseMeta {
     /// HTTP method string, e.g. `"GET"`.
     pub method: String,
-    /// Requested URL (verbatim; no templating in M3).
+    /// Requested URL (verbatim; no templating).
     pub url: String,
     /// Workspace-relative path of the originating endpoint file, when known.
     pub endpoint_path: Option<String>,
@@ -65,7 +65,7 @@ pub enum ResponseState {
         view: ResponseView,
     },
     /// A completed response whose body was deliberately not retained by the
-    /// load runner's memory bound (R0). The status/timing/size are kept for an
+    /// load runner's memory bound. The status/timing/size are kept for an
     /// honest placeholder, but the body bytes are gone and NOT reconstructable —
     /// selecting this row shows a "not retained" note instead of the viewer.
     Dropped {
@@ -83,7 +83,7 @@ impl ResponseState {
     /// `'static` reference when nothing is loaded.
     pub const IDLE: ResponseState = ResponseState::Idle;
 
-    /// The copyable text for a [`ResponseState::Failed`] row (drive-test #4a):
+    /// The copyable text for a [`ResponseState::Failed`] row:
     /// the error message plus the request method+URL when known, so a transport
     /// failure is yankable with `y` for debugging. Returns `None` for every
     /// other state — the copy handler falls back to this only when there is no

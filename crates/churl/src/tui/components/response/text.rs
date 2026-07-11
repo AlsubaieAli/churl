@@ -1,18 +1,18 @@
 //! Response-viewer text-processing helpers: body reformatting (pretty JSON),
 //! display sanitization, line indexing, wrap expansion, char-slice / char↔byte
 //! mapping, and the shared smart-case matcher. Split out of the response module
-//! (M7.11) as a child module; the free fns keep their original module-private
+//! as a child module; the free fns keep their original module-private
 //! scope via `pub(in …response)` so the parent and sibling `render` module reach
 //! them by path with no visibility widening.
 
 use super::ResponseView;
 
 /// Reformats a response body for display when the viewer is in pretty mode and
-/// the body is JSON (decision 1: JSON-only in v1). Parses `text` as a
+/// the body is JSON (JSON-only in v1). Parses `text` as a
 /// `serde_json::Value` and re-emits it with `to_string_pretty`. On **any** parse
 /// error — or when `pretty` is off, or the syntax is not JSON — the original
 /// `text` is returned unchanged (silent raw fallback; never errors, never
-/// panics, decision 2). Returns an owned string so the caller can store it as the
+/// panics). Returns an owned string so the caller can store it as the
 /// displayed body.
 ///
 /// When `sort_keys` is set, every JSON object's keys are sorted A→Z recursively
@@ -68,7 +68,7 @@ fn sort_value_keys(value: &mut serde_json::Value) {
 }
 
 /// Tab-stop width used when expanding `\t` for display. A fixed constant, NOT a
-/// config knob (M7.7): tabs advance to the next multiple of this many columns.
+/// config knob: tabs advance to the next multiple of this many columns.
 const TAB_WIDTH: usize = 4;
 
 /// The visible placeholder substituted for control characters that would
@@ -79,7 +79,7 @@ const CONTROL_PLACEHOLDER: char = '·';
 /// move the cursor, recolour the pane, write the clipboard (OSC 52), or smuggle
 /// invisible control bytes into the viewer. Applied to the reformatted text
 /// *before* `index_lines`; the untouched `raw_text` is what copy reads, so this
-/// never affects byte-exact copy (M7.7). A single left-to-right scan:
+/// never affects byte-exact copy. A single left-to-right scan:
 ///
 /// 1. **Strip ANSI escapes** — CSI (`ESC [` … final byte `0x40..=0x7E`), OSC
 ///    (`ESC ]` … terminated by BEL `0x07` or ST `ESC \`), and any other lone
@@ -210,7 +210,7 @@ pub(in crate::tui::components::response) struct DisplayRow {
 
 /// Expands the visible map into display rows for a given wrap width. When wrap is
 /// off (or `width == 0`), each visible line is exactly one display row; a normal
-/// line's row is the horizontal window `[h_scroll, h_scroll + width)` (M7.7),
+/// line's row is the horizontal window `[h_scroll, h_scroll + width)`,
 /// while a fold-header keeps its full width. When wrap is on, long logical lines
 /// split at display-width boundaries (`unicode-width`); fold-headers never wrap.
 ///

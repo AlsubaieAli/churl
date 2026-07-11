@@ -1,7 +1,7 @@
 //! URL bar: a slim focusable strip above the Request pane showing `METHOD  url`
 //! plus right-aligned indicators (auth kind, placeholder count, unsaved dot).
 //!
-//! Focusable since M6.6: it joins the Tab cycle / jump-mode, edits its URL inline
+//! Focusable: it joins the Tab cycle / jump-mode, edits its URL inline
 //! (via a [`LineEditor`]), and switches the method (cycle key / menu).
 //!
 //! [`LineEditor`]: crate::tui::components::line_editor::LineEditor
@@ -141,7 +141,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
 
     // Split the inner area into left (method+url) and right (indicators) first,
     // so the inline editor's horizontal viewport can follow the cursor within the
-    // real available width (deliverable 6 — typing past the edge must not go blind).
+    // real available width (typing past the edge must not go blind).
     let (left_area, right_area) = if indicator_str.is_empty() {
         (inner, None)
     } else {
@@ -208,7 +208,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
     }
 }
 
-/// Renders the centered vim-popup URL editor (deliverable 7): an edtui editor
+/// Renders the centered vim-popup URL editor: an edtui editor
 /// seeded with the URL. edtui's own status line shows the vim mode, so the
 /// footer carries only the commit/cancel hints, bottom-right (review round 3).
 /// Enter commits, Esc (in normal mode) cancels.

@@ -1,5 +1,5 @@
 //! The nucleo-backed [`FuzzyFinder`] over a list of display strings. Split out of
-//! the events module (M7.11) as a child module.
+//! the events module as a child module.
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};

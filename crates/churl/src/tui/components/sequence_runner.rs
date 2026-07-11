@@ -189,7 +189,7 @@ pub struct SequenceRunnerState {
     pub focus: RunnerFocus,
     /// Response viewer cursor/scroll/viewport geometry for the selected step. Same
     /// shape as the main pane's so the shared `response_*` handlers drive it when
-    /// the Response region is focused (note #2).
+    /// the Response region is focused.
     pub geometry: ResponseGeometry,
     /// Monotonic counter minting a unique generation for each step's
     /// [`ResponseView`], so the shared highlight cache never collides two steps'
@@ -305,7 +305,7 @@ impl SequenceRunnerState {
                 match self.focus {
                     RunnerFocus::Steps => self.handle_steps_key(key),
                     // Response-region keys are routed by `App` through the shared
-                    // `response_*` handlers BEFORE this delegate (note #2 — one
+                    // `response_*` handlers BEFORE this delegate (one
                     // code path, full parity with the main pane). Anything that
                     // reaches here in Response focus is not a response action, so
                     // it is a harmless no-op.
@@ -338,14 +338,14 @@ impl SequenceRunnerState {
     }
 
     /// Whether a runner sub-state currently owns the keyboard, so `App` must NOT
-    /// route Response actions into the shared handlers (note #2). The sequence
+    /// route Response actions into the shared handlers. The sequence
     /// runner's only such state is the running-close confirm (no field editor).
     pub fn response_input_captured(&self) -> bool {
         self.confirming_close
     }
 
     /// The selected step's response state, for the shared `response_*` handlers
-    /// (note #2). `None` when there is no step — the caller falls back to an idle
+    /// `None` when there is no step — the caller falls back to an idle
     /// no-op.
     pub fn selected_response(&self) -> Option<&ResponseState> {
         self.steps.get(self.selected).map(|row| &row.response)
@@ -598,8 +598,8 @@ fn render_response(
     // Store clamp geometry for the next key press (mirrors the top-level render).
     state.geometry.apply_render_outcome(&outcome);
     // Write the clamped horizontal scroll back onto the selected view so an
-    // over-pan self-corrects on the next frame — mirrors the main pane (M7.7),
-    // now reachable in the runner via the shared hscroll parity (note #2).
+    // over-pan self-corrects on the next frame — mirrors the main pane,
+    // now reachable in the runner via the shared hscroll parity.
     if let Some(ResponseState::Done { view }) = state.selected_response_mut() {
         view.set_h_scroll(outcome.clamped_h_scroll);
     }

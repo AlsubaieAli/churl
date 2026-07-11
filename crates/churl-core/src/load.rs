@@ -1,4 +1,4 @@
-//! Concurrent load / throttle runner (M7.5).
+//! Concurrent load / throttle runner.
 //!
 //! Fires **N copies** of one *already-resolved* [`Request`] through the single
 //! [`execute`] HTTP chokepoint with **bounded concurrency** and optional launch

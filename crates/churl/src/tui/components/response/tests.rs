@@ -94,7 +94,7 @@ fn status_summary_markers() {
 #[test]
 fn status_summary_shows_sorted_marker() {
     // A pretty JSON body with the A→Z key sort active surfaces `· sorted`;
-    // off it does not (owner drive-test #1). Uses a JSON body so pretty/sort
+    // off it does not. Uses a JSON body so pretty/sort
     // are meaningful.
     let mut v = json_view("{\"b\":1,\"a\":2}");
     assert!(v.pretty(), "JSON is pretty by default");
@@ -142,8 +142,8 @@ fn status_summary_pluralizes_header_count() {
 
 #[test]
 fn status_summary_omits_hint_when_unfocused() {
-    // The `[h]` full-headers affordance is focus-gated (owner drive-test
-    // 2026-07-10): an unfocused Body-view response never shows it, so
+    // The `[h]` full-headers affordance is focus-gated: an unfocused
+    // Body-view response never shows it, so
     // embedded/collapsed viewers stay uncluttered.
     let v = view("body");
     assert_eq!(v.view_mode, ViewMode::Body);
@@ -300,7 +300,7 @@ fn smart_case_insensitive_and_sensitive() {
 #[test]
 fn case_insensitive_match_with_length_shifting_folds() {
     // `İ` (2 bytes) lowercases to 3 bytes; `ẞ` (3 bytes) to 2 — the totals
-    // cancel, which used to defeat the equal-length heuristic. The mapping
+    // cancel, which would defeat an equal-length heuristic. The mapping
     // table must yield exactly one match with the *original* byte range.
     let line = "İneedleẞ";
     let v = view(line);
@@ -398,7 +398,7 @@ fn copy_all_and_line() {
     assert_eq!(v.copy_line(99), "");
 }
 
-// ---- M7.7: JSON response reformatter + pretty toggle ----
+// ---- JSON response reformatter + pretty toggle ----
 
 #[test]
 fn minified_json_renders_pretty_by_default() {
@@ -548,7 +548,7 @@ fn copy_all_is_raw_even_when_pretty() {
     assert_eq!(v.copy_all(), raw, "copy must be the raw bytes");
 }
 
-// ---- M7.7: optional A→Z key-sort toggle ----
+// ---- optional A→Z key-sort toggle ----
 
 #[test]
 fn sort_keys_sorts_object_keys_recursively() {
@@ -667,7 +667,7 @@ fn build_search_spans_splits_around_match() {
     assert_eq!(line.spans[2].content, "ef");
 }
 
-// ---- M7.7: control-char / ANSI sanitize + explicit tab-width ----
+// ---- control-char / ANSI sanitize + explicit tab-width ----
 
 #[test]
 fn sanitize_strips_ansi_csi_osc_and_lone_esc() {
@@ -759,7 +759,7 @@ fn build_sanitizes_displayed_text_but_copy_stays_raw() {
 #[test]
 fn copy_line_is_raw_on_multiline_text_plain_body() {
     // Multi-line text/plain: line 1 carries ANSI + tab + NUL. copy-line must
-    // return the EXACT raw line bytes (the D1 invariant), never the sanitized
+    // return the EXACT raw line bytes (the byte-exact invariant), never the sanitized
     // display. `copy_all` returns the whole raw body.
     let raw = "plain first\nsecond\u{1B}[31m\tx\u{00}y\nthird";
     let v = view(raw);
@@ -803,7 +803,7 @@ fn copy_line_preserves_raw_crlf_bytes() {
     assert_eq!(v.copy_line(2), "c");
 }
 
-// ---- M7.7: horizontal-window slice for unwrapped long lines ----
+// ---- horizontal-window slice for unwrapped long lines ----
 
 /// A response whose single body line is `n` chars wide (unwrapped test fixture).
 fn wide_line_view(width_chars: usize) -> ResponseView {
@@ -919,7 +919,7 @@ fn copy_line_returns_full_raw_line_despite_h_scroll() {
     assert_eq!(v.copy_all(), body, "copy-all returns the full raw body");
 }
 
-// ---- drive-test note #8: line-number gutter ----
+// ---- line-number gutter ----
 
 /// Renders a `Done` view into a `TestBackend` of the given size and returns
 /// the body rows as strings (the whole inner area, borders included). Used to

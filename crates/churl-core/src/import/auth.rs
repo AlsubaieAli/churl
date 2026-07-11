@@ -22,7 +22,7 @@ impl Parser {
     /// An `Authorization: Bearer …` header (name case-insensitive; `Bearer `
     /// prefix matched exactly) is remapped to first-class [`Auth::Bearer`],
     /// with a literal token replaced by a `{{token}}` placeholder. Any other
-    /// `Authorization:` header (including M4-era `Basic <base64>`) stays a
+    /// `Authorization:` header (including `Basic <base64>`) stays a
     /// plain header.
     pub(super) fn add_header(&mut self, value: &str) {
         let (name, val) = match value.split_once(':') {
@@ -59,12 +59,12 @@ impl Parser {
         });
     }
 
-    /// `-u user:pass` → first-class [`Auth::Basic`] (M5). A literal password is
+    /// `-u user:pass` → first-class [`Auth::Basic`]. A literal password is
     /// replaced with a `{{password}}` placeholder — no secrets in workspace
     /// files; a password that is already a `{{...}}` placeholder is kept
     /// verbatim. Without a colon the whole value is the username (curl would
     /// prompt for the password). When another auth source already claimed the
-    /// first-class slot, `-u` falls back to the M4-era plain
+    /// first-class slot, `-u` falls back to the plain
     /// `Authorization: Basic <base64>` header.
     pub(super) fn add_basic_auth(&mut self, value: &str) {
         if let Some(kept) = &self.auth {

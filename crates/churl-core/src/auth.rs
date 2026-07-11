@@ -7,7 +7,7 @@
 //! this match, not into scattered call sites.
 //!
 //! No `{{var}}` resolution happens here; placeholder values are passed through
-//! verbatim like everywhere else until M6's template resolver.
+//! verbatim like everywhere else until the template resolver runs.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;

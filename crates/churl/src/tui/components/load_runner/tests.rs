@@ -189,8 +189,7 @@ fn interval_edits_to_zero_allowed() {
 
 #[test]
 fn ctrl_r_requests_run() {
-    // Run is Ctrl-R (matches the sequence surface); plain `r` no longer runs
-    // (owner decision 2026-07-10).
+    // Run is Ctrl-R (matches the sequence surface); plain `r` does not run.
     let mut r = runner();
     let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
     assert_eq!(r.handle_key(ctrl_r), LoadOutcome::Run);
@@ -488,7 +487,7 @@ fn snapshot_finished_with_failures_stats_line() {
     insta::assert_snapshot!(snapshot(&mut r));
 }
 
-/// R0 memory bound: a high-`total` run holds a bounded number of live
+/// Memory bound: a high-`total` run holds a bounded number of live
 /// `Done` views (`K + 1`: the window plus the selected row), and — regardless
 /// of eviction — the stats computed over *all* outcomes stay correct.
 #[test]

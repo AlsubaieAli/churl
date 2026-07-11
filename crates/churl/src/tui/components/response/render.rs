@@ -1,6 +1,6 @@
 //! The response pane's render/draw pipeline: the `render` entry point and its
 //! private draw helpers (fold → wrap → viewport, search overlays, gutter,
-//! status summaries). Split out of the response module (M7.11) as a child
+//! status summaries). Split out of the response module as a child
 //! module, so it keeps full access to `ResponseView`'s private fields and
 //! methods with no visibility widening.
 
@@ -58,8 +58,8 @@ pub struct RenderOutcome {
     /// Total display rows in the current view (post-fold, post-wrap), for
     /// cursor/scroll motion clamping by the caller.
     pub total_rows: usize,
-    /// The horizontal scroll offset after clamping to the widest visible line
-    /// (M7.7). The caller writes it back onto the view so an over-pan self-corrects
+    /// The horizontal scroll offset after clamping to the widest visible line.
+    /// The caller writes it back onto the view so an over-pan self-corrects
     /// on the next frame; `0` while wrap is on.
     pub clamped_h_scroll: usize,
 }
@@ -163,7 +163,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             let status_area = status_area_opt.unwrap();
             let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("request failed")), status_area);
-            // Honest failure panel (drive-test #4a): the request method+URL (when
+            // Honest failure panel: the request method+URL (when
             // known) and the error. A TRANSPORT failure has no HTTP status, body,
             // or timing — there was no response — so we show none rather than a
             // fabricated 0. `press y to copy` mirrors the yank the copy handler
@@ -246,7 +246,7 @@ fn render_done(
     // The gutter consumes columns from the left; everything downstream (wrap
     // splitting, the h_scroll window, viewport_width, and thus the caller's
     // cursor→logical mapping) uses the reduced body width so the seam is single
-    // and consistent (drive-test note #8). `saturating_sub` guards a pane
+    // and consistent. `saturating_sub` guards a pane
     // narrower than the gutter — the body simply gets 0 columns rather than wrap.
     let gutter = view.gutter_width().min(area_width);
     let width = area_width.saturating_sub(gutter);
@@ -490,8 +490,8 @@ pub(crate) fn build_search_spans(
     Line::from(spans)
 }
 
-/// Prepends the dim line-number `label` to `line` as a leading span (drive-test
-/// note #8). The gutter reuses the same `Modifier::DIM` the viewer already uses
+/// Prepends the dim line-number `label` to `line` as a leading span.
+/// The gutter reuses the same `Modifier::DIM` the viewer already uses
 /// for secondary text (fold suffixes, non-current search matches).
 fn prepend_gutter(line: Line<'_>, label: String) -> Line<'_> {
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
@@ -553,9 +553,9 @@ pub(in crate::tui::components::response) fn status_summary(
         format!("{} headers", view.header_count)
     };
     // In body view, append a `[h]` affordance hinting the full-headers key so the
-    // count earns its spot (owner call) — but ONLY when this response pane is
-    // focused, so the hint doesn't clutter unfocused/embedded viewers (owner
-    // drive-test 2026-07-10). In headers view the `· headers` marker below
+    // count earns its spot — but ONLY when this response pane is
+    // focused, so the hint doesn't clutter unfocused/embedded viewers. In headers
+    // view the `· headers` marker below
     // already shows the state, so omit the hint there.
     let headers = if focused && view.view_mode == ViewMode::Body {
         format!("{count}  [h]")
@@ -574,7 +574,7 @@ pub(in crate::tui::components::response) fn status_summary(
         summary.push_str(" · wrap");
     }
     // Sort is only meaningful (and only togglable) on a pretty JSON body; show the
-    // marker so an active A→Z key sort isn't invisible (owner drive-test 2026-07-10).
+    // marker so an active A→Z key sort isn't invisible.
     if view.sort_keys {
         summary.push_str(" · sorted");
     }

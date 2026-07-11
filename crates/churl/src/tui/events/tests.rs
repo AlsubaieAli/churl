@@ -39,7 +39,7 @@ fn default_map_lookups() {
     );
 }
 
-/// D2 note #4: `}` / `{` are GLOBAL buffer next/prev — they must resolve from
+/// `}` / `{` are GLOBAL buffer next/prev — they must resolve from
 /// any pane (base map, not a pane overlay). Verified from a non-Request pane
 /// context so a Request-overlay binding can never be what makes them work.
 #[test]
@@ -164,7 +164,7 @@ fn combos_for_returns_sorted_bindings() {
 #[test]
 fn overlay_lookup_precedence() {
     let keymap = KeyMap::default();
-    // `1` has no global binding (M6.7 removed pane-focus digits); inside the
+    // `1` has no global binding (there are no pane-focus digits); inside the
     // Request overlay it is Tab1.
     assert_eq!(
         keymap.lookup(press(KeyCode::Char('1'), KeyModifiers::NONE)),
@@ -304,7 +304,7 @@ fn overlay_combos_and_iter_cover_bindings() {
 #[test]
 fn digit_binds_only_act_in_request() {
     let keymap = KeyMap::default();
-    // No global digit binds (1–4) after M6.7.
+    // No global digit binds (1–4).
     for d in ['1', '2', '3', '4'] {
         assert_eq!(
             keymap.lookup(press(KeyCode::Char(d), KeyModifiers::NONE)),
@@ -387,7 +387,7 @@ fn leader_submenu_lookups() {
     let keymap = KeyMap::default();
     assert_eq!(
         keymap.leader_sub_lookup("sequences", press(KeyCode::Char('r'), KeyModifiers::NONE)),
-        // D1: `<leader>s r` routes to the run-flavored chooser.
+        // `<leader>s r` routes to the run-flavored chooser.
         Some(Action::RunSequencePick)
     );
     assert_eq!(
@@ -467,7 +467,7 @@ fn flat_sequence_actions_not_root_bound() {
         }
     }
     // leader_combos_for reports the full chord path for submenu actions.
-    // D1: `<leader>s r` now maps to the run-flavored chooser.
+    // `<leader>s r` maps to the run-flavored chooser.
     assert_eq!(
         keymap.leader_combos_for(Action::RunSequencePick),
         vec!["s r"]
@@ -542,7 +542,7 @@ fn bad_leader_table_action_errors() {
 
 #[test]
 fn leader_descent_to_new_submenu_parses() {
-    // M7.10: any non-empty `"+name"` descent is valid — submenus are dynamic.
+    // Any non-empty `"+name"` descent is valid — submenus are dynamic.
     // A dangling one (no matching table) parses fine and is caught later by
     // the load-time validator, not the parser.
     let overlays = BTreeMap::from([(
@@ -569,7 +569,7 @@ fn empty_leader_descent_token_errors() {
 
 #[test]
 fn leader_submenu_table_creates_new_submenu() {
-    // M7.10: `[keys.leader.git]` creates a brand-new submenu (dynamic).
+    // `[keys.leader.git]` creates a brand-new submenu (dynamic).
     let overlays = BTreeMap::from([
         (
             "leader".to_string(),

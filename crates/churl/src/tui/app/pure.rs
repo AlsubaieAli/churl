@@ -1,7 +1,7 @@
 //! Self-contained, `self`-free helpers for the TUI app: URL query
 //! splitting/decoding/merging, Auth-tab field access, and export-path
 //! resolution. Pure functions with no `App` state — split out of `app.rs`
-//! (M7.11) into this child module so they still see the parent's imports and
+//! into this child module so they still see the parent's imports and
 //! private types via `use super::*`.
 
 use super::*;
@@ -56,8 +56,8 @@ pub(super) fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Merges committed URL query `pairs` into the request `params` per the M6.7
-/// deliverable-3 policy, returning a human-readable report (`"A updated, B added"`)
+/// Merges committed URL query `pairs` into the request `params` per the
+/// query-merge policy, returning a human-readable report (`"A updated, B added"`)
 /// or `None` when nothing changed:
 /// - (a) exact `name=value` row exists → ensure enabled (no duplicate);
 /// - (b) name exists with a different value → the first such row gets the new

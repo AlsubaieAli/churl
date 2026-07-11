@@ -1,4 +1,4 @@
-//! Workspace/explorer plumbing extracted from `app.rs` (M7.11): the tree-reload
+//! Workspace/explorer plumbing extracted from `app.rs`: the tree-reload
 //! and buffer-remap seam plus the guarded endpoint/workspace switch. Grandchild
 //! module of `app`, so `impl App` here keeps full access to `App`'s private
 //! fields and methods without any visibility widening — see DECISIONS.md,

@@ -31,7 +31,7 @@ use action::FOCUS_BUFFER_TABLE;
 /// second key selects an action within it. Submenus are fully data-driven — the
 /// built-in three (sequences/load/tabs) are seeded as default data in
 /// [`KeyMap::default`], and a config `[keys.leader.<name>]` table creates or
-/// extends any submenu by name (M7.10). No closed enum of submenu kinds.
+/// extends any submenu by name. No closed enum of submenu kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submenu {
     /// The which-key label shown next to the submenu prefix (e.g. `"sequences"`).
@@ -53,7 +53,7 @@ impl Submenu {
 /// A root-level leader binding: either a direct action or a descent into a named
 /// submenu. Populated from the built-in root map + the `[keys.leader]` table. The
 /// submenu is carried by name (not an enum variant) so config can wire arbitrary
-/// submenus (M7.10 dynamic leader submenus).
+/// submenus (dynamic leader submenus).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderEntry {
     /// A direct action dispatched from the root which-key popup.
@@ -73,7 +73,7 @@ pub enum PaneCtx {
     UrlBar,
     /// The request pane (tab switching + row editing).
     Request,
-    /// The response pane (M7 viewer keys: headers/wrap/search/fold/copy).
+    /// The response pane (viewer keys: headers/wrap/search/fold/copy).
     Response,
 }
 
@@ -125,7 +125,7 @@ pub struct KeyMap {
     /// direct action or a descent into a named submenu. Populated from the
     /// built-in root map + the `[keys.leader]` sub-table.
     leader_root: HashMap<KeyCombination, LeaderEntry>,
-    /// Named leader submenus (M7.10 dynamic submenus): submenu name → its
+    /// Named leader submenus (dynamic submenus): submenu name → its
     /// `(title, binds)`. The built-in `sequences`/`load`/`tabs` are seeded in
     /// [`Self::default`]; a config `[keys.leader.<name>]` table creates or
     /// extends any submenu.
@@ -147,7 +147,7 @@ impl Default for KeyMap {
             KeyCombination::new(KeyCode::BackTab, KeyModifiers::SHIFT),
             Action::FocusPrev,
         );
-        // Global `1`/`2`/`3` pane-focus binds were removed in M6.7 (DECISIONS.md):
+        // There are no global `1`/`2`/`3` pane-focus binds (DECISIONS.md):
         // navigation is Tab/Shift-Tab + `f` jump-mode only; `1`–`4` are Request-tab
         // jumps only. Pane focus stays fully reachable without digit keys.
         bind(key!(k), Action::Up);
@@ -170,7 +170,7 @@ impl Default for KeyMap {
         // `?` opens the help overlay; `z` zooms the focused pane.
         bind(key!('?'), Action::Help);
         bind(key!(z), Action::Zoom);
-        // Global buffer-tab nav (D2 note #4, owner decision 2026-07-11): `}` next
+        // Global buffer-tab nav: `}` next
         // buffer, `{` prev buffer — fast chip-tab switching from ANY pane, so these
         // live in the base/global map (not a pane overlay). `[`/`]` are deliberately
         // NOT touched (they stay Request-pane sub-tab prev/next in that overlay);
@@ -195,7 +195,7 @@ impl Default for KeyMap {
         overlay(PaneCtx::Explorer, key!(r), Action::Rename);
         overlay(PaneCtx::Explorer, key!(d), Action::Delete);
         // `s` switches focus/zoom between the endpoints tree and the sequences
-        // sub-pane (PR 2b) — a lawful in-pane move, only live when the left
+        // sub-pane — a lawful in-pane move, only live when the left
         // column is focused. `s` is otherwise free in the Explorer overlay.
         overlay(PaneCtx::Explorer, key!(s), Action::FocusSequencesToggle);
         // Arrow keys navigate the explorer, mirroring the global `k`/`j`/`h`/`l`
@@ -223,7 +223,7 @@ impl Default for KeyMap {
         overlay(PaneCtx::Request, key!('4'), Action::Tab4);
         overlay(PaneCtx::Request, key!(a), Action::RowAdd);
         overlay(PaneCtx::Request, key!(d), Action::RowDelete);
-        // Space is the global leader from M6.7; the Request row-toggle rebinds to
+        // Space is the global leader; the Request row-toggle rebinds to
         // `t` so Space stays free everywhere (DECISIONS.md).
         overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
@@ -233,20 +233,20 @@ impl Default for KeyMap {
         // palette-only (rare; a path prompt is the natural entry point).
         // URL bar: the vim-popup editor (`e`), independent of the inline `i`/Enter.
         overlay(PaneCtx::UrlBar, key!(e), Action::EditUrlPopup);
-        // Response pane (M7): body/headers, wrap, search, match nav, folding,
+        // Response pane: body/headers, wrap, search, match nav, folding,
         // copy. `h` shadows the global Collapse and `/` shadows the global
         // OpenSearch here (same precedent as Request-pane `1`–`4`; DECISIONS.md).
         overlay(PaneCtx::Response, key!(h), Action::ToggleHeadersView);
         overlay(PaneCtx::Response, key!(shift - w), Action::ToggleWrap);
-        // `p` (pretty) toggles raw↔reformatted body rendering (M7.7). `p` is free
+        // `p` (pretty) toggles raw↔reformatted body rendering. `p` is free
         // in the Response overlay (the global `<leader>p` switch-profile lives
         // behind the leader, not in this pane overlay).
         overlay(PaneCtx::Response, key!(p), Action::TogglePretty);
-        // `s` (sort) toggles A→Z key sorting on the pretty JSON body (M7.7). Free
+        // `s` (sort) toggles A→Z key sorting on the pretty JSON body. Free
         // in the Response overlay; the leader `s` (sequences submenu) lives behind
         // the leader, not this pane overlay.
         overlay(PaneCtx::Response, key!(s), Action::ToggleSortKeys);
-        // `#` toggles the line-number gutter (default on; drive-test note #8). `#`
+        // `#` toggles the line-number gutter (default on). `#`
         // is free in the Response overlay and everywhere else in the keymap.
         overlay(PaneCtx::Response, key!('#'), Action::ToggleLineNumbers);
         overlay(PaneCtx::Response, key!('/'), Action::OpenBodySearch);
@@ -256,7 +256,7 @@ impl Default for KeyMap {
         overlay(PaneCtx::Response, key!(shift - o), Action::ToggleAllFolds);
         overlay(PaneCtx::Response, key!(y), Action::CopyResponse);
         overlay(PaneCtx::Response, key!(shift - y), Action::CopyLine);
-        // Horizontal window pan for unwrapped long lines (M7.7). `H`/`L`
+        // Horizontal window pan for unwrapped long lines. `H`/`L`
         // (shift-h/shift-l) were free in the Response overlay; Left/Right arrows are
         // aliases (also free here — global Left/Right are unbound, only the Explorer
         // overlay uses them). No-op while wrap is on. Wrap-off-only is enforced in
@@ -275,8 +275,8 @@ impl Default for KeyMap {
         // Direct root actions. `s` (formerly Send) now descends into the
         // sequences submenu — Send stays Ctrl-S ONLY (bound in `map` above).
         root_bind(key!(e), LeaderEntry::Act(Action::ToggleExplorer));
-        // `<leader>S` was removed in M7.10 stage B: the sequences sub-pane is
-        // always peek-visible, so a show/hide toggle had no job. Reaching the
+        // There is no `<leader>S`: the sequences sub-pane is
+        // always peek-visible, so a show/hide toggle has no job. Reaching the
         // sequences sub-pane stays covered by the Explorer `s` overlay, `f`-jump
         // (`s` label) and the `<leader>s f` picker.
         root_bind(key!(c), LeaderEntry::Act(Action::Cancel));
@@ -303,7 +303,7 @@ impl Default for KeyMap {
         // `<leader>t` descends into the tabs/buffers submenu. `t` is free at root.
         root_bind(key!(t), LeaderEntry::Submenu("tabs".to_owned()));
 
-        // The built-in submenus, seeded as default data (M7.10). Behaviour is
+        // The built-in submenus, seeded as default data. Behaviour is
         // byte-identical to the former hardcoded `sub_*` maps.
         let mut submenus: HashMap<String, Submenu> = HashMap::new();
 
@@ -320,7 +320,7 @@ impl Default for KeyMap {
         sequences
             .binds
             .insert(key!(space).normalized(), Action::OpenSequencePicker);
-        // D1: `<leader>s r` routes to a run-flavored chooser (pick which sequence
+        // `<leader>s r` routes to a run-flavored chooser (pick which sequence
         // to run) instead of silently running `sequences[seq_cursor]`. The direct
         // `RunSequence` action stays reachable via the in-pane `r` + palette.
         sequences
@@ -340,7 +340,7 @@ impl Default for KeyMap {
         submenus.insert("load".to_owned(), load);
 
         // `<leader>t …`: buffer/tab actions. `n` next · `p` prev · `x` close ·
-        // `X` (shift-x) close all · `1`..`9` jump to the Nth open tab (note #5).
+        // `X` (shift-x) close all · `1`..`9` jump to the Nth open tab.
         // Do NOT touch `Tab`/`Shift-Tab` (cross-pane). The digit binds live ONLY
         // in this submenu layer, so they never shadow the Request-pane `1`..`4`
         // tab-jump overlay (a separate `PaneCtx::Request` layer, bound below).
@@ -551,8 +551,8 @@ impl KeyMap {
             }
             // `[keys.leader.<name>]`: a submenu table whose values are action
             // names. Handled BEFORE the PaneCtx lookup so it is not rejected as an
-            // unknown table. The submenu is created on first mention (M7.10
-            // dynamic submenus), so `g = "+git"` + `[keys.leader.git]` wires a
+            // unknown table. The submenu is created on first mention (dynamic
+            // submenus), so `g = "+git"` + `[keys.leader.git]` wires a
             // brand-new working submenu; the built-in three are extended in place.
             if let Some(menu_name) = table.strip_prefix("leader.") {
                 let label = format!("[keys.leader.{menu_name}]");
@@ -589,7 +589,7 @@ impl KeyMap {
         Ok(keymap)
     }
 
-    /// Load-time conflict/shadow validator (M7.10). Runs on the final keymap and
+    /// Load-time conflict/shadow validator. Runs on the final keymap and
     /// returns human-readable warnings for **genuine defects only** — documented
     /// intentional single-pane overlay shadows (Response `h`/`/`, Request `1`–`4`,
     /// …) produce ZERO warnings. Surfaced loudly but non-blocking (stderr + a

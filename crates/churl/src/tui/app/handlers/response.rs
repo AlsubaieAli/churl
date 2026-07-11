@@ -1,5 +1,5 @@
 //! Response-viewer handlers — scrolling, view toggles, body search, and copy —
-//! extracted from `app.rs` (M7.11). Grandchild module of `app`; `impl App`
+//! extracted from `app.rs`. Grandchild module of `app`; `impl App`
 //! here keeps full access to `App`'s private fields and methods without any
 //! visibility widening.
 
@@ -8,7 +8,7 @@ use super::super::*;
 impl App {
     /// The coarse maximum cursor row (total display rows minus one, as of the
     /// last render) for the *active response surface* (main pane or a focused
-    /// runner Response — note #2); render clamps further. `0` when nothing is
+    /// runner Response); render clamps further. `0` when nothing is
     /// loaded.
     pub(in crate::tui::app) fn response_max_cursor(&self) -> usize {
         self.active_response_geometry().total_rows.saturating_sub(1)
@@ -60,7 +60,7 @@ impl App {
 
     /// Resets the active response surface's cursor/scroll (+ optionally the shared
     /// highlight guard/cache) after a view-geometry change. Works on the main pane
-    /// or the focused runner Response (note #2). The highlight cache/guard is
+    /// or the focused runner Response. The highlight cache/guard is
     /// shared with the active endpoint buffer even for runner responses (they
     /// render through it), so it is cleared via [`Self::clear_active_highlight`].
     pub(in crate::tui::app) fn reset_response_geometry(&mut self, clear_cache: bool) {
@@ -76,7 +76,7 @@ impl App {
 
     /// The logical line under the response cursor (through the last render's
     /// fold/wrap geometry), or `None` when there is no response — on the active
-    /// response surface (note #2).
+    /// response surface.
     pub(in crate::tui::app) fn response_cursor_logical(&self) -> Option<usize> {
         let g = self.active_response_geometry();
         let (width, cursor) = (g.viewport_width, g.cursor);
@@ -104,7 +104,7 @@ impl App {
     }
 
     /// `H`/`L` (or Left/Right): pan the response horizontal window for unwrapped
-    /// long lines (M7.7). A no-op while wrap is on (the view guards internally) —
+    /// long lines. A no-op while wrap is on (the view guards internally) —
     /// wrapped rows already fit the width, so there is nothing to pan. The pan
     /// amount is a fixed column step; render clamps the offset to the widest
     /// visible line and writes the clamped value back, so an over-pan self-corrects.
@@ -116,7 +116,7 @@ impl App {
         }
     }
 
-    /// `p`: toggle raw↔pretty body rendering (M7.7). Body text/line count change
+    /// `p`: toggle raw↔pretty body rendering. Body text/line count change
     /// (and `toggle_pretty` resets folds), so reset cursor/scroll geometry and
     /// clear the highlight cache. Pretty is JSON-only in v1 — no-op with a notice
     /// outside a JSON body view, which would otherwise silently do nothing.
@@ -138,7 +138,7 @@ impl App {
         }
     }
 
-    /// `s`: toggle A→Z sorting of pretty JSON object keys (M7.7). Only meaningful
+    /// `s`: toggle A→Z sorting of pretty JSON object keys. Only meaningful
     /// on a pretty JSON body — guard and notify otherwise (mirrors the
     /// pretty-outside-JSON notice). Text/line count change (and `toggle_sort_keys`
     /// resets folds), so reset cursor/scroll and clear the highlight cache.
@@ -161,7 +161,7 @@ impl App {
         }
     }
 
-    /// `#`: toggle the line-number gutter (default on; drive-test note #8). The
+    /// `#`: toggle the line-number gutter (default on). The
     /// gutter shrinks the effective body width, so wrap boundaries and the total
     /// display-row count can change — reset cursor/scroll geometry (as `W` does).
     /// The displayed text is untouched, so the highlight cache is kept (it is
@@ -231,11 +231,11 @@ impl App {
             view.set_search(String::new());
         }
         // Remember where to return: Normal for the main pane, or the live runner
-        // mode when search was opened over a runner Response region (note #2).
-        // R1.5 A2: `mem::replace` MOVES the current mode (incl. a
-        // `LoadRunner(state)` payload) into `body_search_return` instead of copying
-        // it — `Mode` is no longer `Copy`, and the runner state must survive the
-        // body-search overlay (it is read back via `load_runner()`, which consults
+        // mode when search was opened over a runner Response region.
+        // `mem::replace` MOVES the current mode (incl. a `LoadRunner(state)`
+        // payload) into `body_search_return` rather than copying it — `Mode` is
+        // not `Copy`, and the runner state must survive the body-search overlay
+        // (it is read back via `load_runner()`, which consults
         // `body_search_return` while `Mode::BodySearch` is active).
         self.body_search_return = std::mem::replace(&mut self.mode, Mode::BodySearch);
     }
@@ -297,7 +297,7 @@ impl App {
     /// Moves the response cursor onto the current search match's logical line,
     /// so scroll follows it into view at the next render. Also pans the horizontal
     /// window so an unwrapped match that lies past the right edge is brought into
-    /// view (M7.7 horizontal search-into-view); inert while wrap is on.
+    /// view (horizontal search-into-view); inert while wrap is on.
     pub(in crate::tui::app) fn response_center_on_match(&mut self) {
         // Read the surface's width first (immutable), then take the view mutably —
         // the cursor lives in the geometry, the view in the response, both on the
@@ -320,12 +320,12 @@ impl App {
 
     /// `y`: copy the current response's full text via OSC 52 (capped).
     ///
-    /// On a `Done` row this copies the byte-exact body (unchanged). On a `Failed`
-    /// row (drive-test #4a) it copies an honest error blurb — the error message
-    /// plus the request method+URL when known — via the same clipboard path, so
-    /// `y` is never a silent no-op on a transport failure. This branch lives in
-    /// the single shared copy handler used by the main pane, load runner, and
-    /// sequence runner (note #2), so all three unified viewers get it at once.
+    /// On a `Done` row this copies the byte-exact body. On a `Failed` row it
+    /// copies an honest error blurb — the error message plus the request
+    /// method+URL when known — via the same clipboard path, so `y` is never a
+    /// silent no-op on a transport failure. This branch lives in the single
+    /// shared copy handler used by the main pane, load runner, and sequence
+    /// runner, so all three unified viewers get it at once.
     pub(in crate::tui::app) fn response_copy_view(&mut self) {
         if let Some(view) = self.response_view_mut() {
             let full = view.copy_all().to_owned();
@@ -335,7 +335,7 @@ impl App {
             self.enqueue_clipboard(&text, "copied error");
         } else {
             // No view and no failure blurb (Dropped / Idle / …). Never a silent
-            // no-op (the exact class of bug #4a addressed) — say why (note #1).
+            // no-op — say why.
             self.message = Some(Message::new(nothing_to_copy_message(
                 self.active_response(),
             )));

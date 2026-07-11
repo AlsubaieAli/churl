@@ -1,4 +1,4 @@
-//! Concurrent-load runner overlay (`Mode::LoadRunner`, M7.5): a large modal that
+//! Concurrent-load runner overlay (`Mode::LoadRunner`): a large modal that
 //! fires N copies of the selected endpoint concurrently and shows a live results
 //! list, a latency stats line, and any individual response in the real response
 //! viewer, atop an editable config header (total / concurrency / min gap).
@@ -27,7 +27,7 @@ use crate::tui::highlight::HighlightJob;
 use crate::tui::theme::Theme;
 
 /// How many completed rows keep a full [`ResponseState::Done`] view in memory
-/// (R0 memory bound). Retention is O(concurrency + K): the last `K` OK completions
+/// (memory bound). Retention is O(concurrency + K): the last `K` OK completions
 /// plus the currently-selected row are kept live; older OK rows are downgraded to
 /// [`ResponseState::Dropped`] (status/timing/size only, no body). A high-`total`
 /// load run therefore holds bounded memory instead of `total × body`.
@@ -207,7 +207,7 @@ pub struct LoadRunnerState {
     /// Row indices currently holding a live [`ResponseState::Done`] view, in
     /// completion order (front = oldest). Bounds retained bodies to `K`: when a
     /// new view lands and the window overflows, the oldest non-selected row here
-    /// is downgraded to [`ResponseState::Dropped`]. Drives the R0 memory bound.
+    /// is downgraded to [`ResponseState::Dropped`]. Drives the memory bound.
     live_views: VecDeque<usize>,
     /// The selected results row (drives the response viewer).
     pub selected: usize,
@@ -231,7 +231,7 @@ pub struct LoadRunnerState {
     pub stats: LoadStats,
     /// Response viewer cursor/scroll/viewport geometry for the selected row. Same
     /// shape as the main pane's so the shared `response_*` handlers drive it when
-    /// the Response region is focused (note #2).
+    /// the Response region is focused.
     pub geometry: ResponseGeometry,
     /// First visible results-list row from the last render (scroll offset).
     list_offset: usize,
@@ -359,7 +359,7 @@ impl LoadRunnerState {
             self.geometry.cursor = 0;
             self.geometry.scroll = 0;
         }
-        // R0 memory bound: track the newly-retained view and evict the oldest
+        // Memory bound: track the newly-retained view and evict the oldest
         // ones beyond the window. Done *after* the follow-selection update so the
         // just-selected row is never a candidate for eviction.
         if holds_view {
@@ -461,8 +461,8 @@ impl LoadRunnerState {
                 }
             }
             // Run/re-run the batch. Ctrl-R (not plain `r`) to match the sequence
-            // surface's Ctrl-R (owner decision 2026-07-10); plain `r` no longer
-            // runs. Guarded like Ctrl-C above — the editing/confirm sub-states
+            // surface's Ctrl-R; plain `r` does not run. Guarded like Ctrl-C above
+            // — the editing/confirm sub-states
             // return before this match, so Ctrl-R only fires from a live pane.
             KeyCode::Char('r') if ctrl => LoadOutcome::Run,
             // Tab / Shift-Tab are the ONLY cross-pane traversal: Tab cycles
@@ -481,7 +481,7 @@ impl LoadRunnerState {
                     RunnerFocus::ConfigHeader => self.handle_config_key(key),
                     RunnerFocus::Results => self.handle_results_key(key),
                     // Response-region keys are routed by `App` through the shared
-                    // `response_*` handlers BEFORE this delegate (note #2 — one
+                    // `response_*` handlers BEFORE this delegate (one
                     // code path, full parity with the main pane). Anything that
                     // reaches here in Response focus is not a response action, so
                     // it is a harmless no-op.
@@ -614,7 +614,7 @@ impl LoadRunnerState {
     }
 
     /// Whether a runner sub-state currently owns the keyboard, so `App` must NOT
-    /// route Response actions into the shared handlers (note #2): the guardrail
+    /// route Response actions into the shared handlers: the guardrail
     /// confirm, the running-close confirm, or an in-progress config-field edit. In
     /// any of these the runner's own `handle_key` interception takes the key.
     pub fn response_input_captured(&self) -> bool {
@@ -622,7 +622,7 @@ impl LoadRunnerState {
     }
 
     /// The selected results row's response state, for the shared `response_*`
-    /// handlers (note #2). `None` when there is no selectable row (pre-run) — the
+    /// handlers. `None` when there is no selectable row (pre-run) — the
     /// caller falls back to an idle no-op.
     pub fn selected_response(&self) -> Option<&ResponseState> {
         self.results.get(self.selected).map(|row| &row.response)
@@ -936,7 +936,7 @@ fn render_response(
     // opens. When there is no selectable row yet (pre-run), delegate to
     // `response::render` with an `Idle` state so the pane draws the same
     // bordered block + dim placeholder it uses for an idle/no-response row —
-    // never a blank right half (M7.5.2 L1). A selected row with a real response
+    // never a blank right half. A selected row with a real response
     // delegates to the same renderer with its own state, unchanged.
     let render_state = match state.results.get(state.selected) {
         Some(row) => &row.response,
@@ -959,8 +959,8 @@ fn render_response(
     );
     state.geometry.apply_render_outcome(&outcome);
     // Write the clamped horizontal scroll back onto the selected view so an
-    // over-pan self-corrects on the next frame — mirrors the main pane (M7.7),
-    // now reachable in the runner via the shared hscroll parity (note #2).
+    // over-pan self-corrects on the next frame — mirrors the main pane,
+    // now reachable in the runner via the shared hscroll parity.
     if let Some(ResponseState::Done { view }) = state.selected_response_mut() {
         view.set_h_scroll(outcome.clamped_h_scroll);
     }

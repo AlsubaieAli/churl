@@ -90,7 +90,7 @@ fn focus_moves_between_panes() {
 
 #[test]
 fn g_and_shift_g_jump_scope_list_top_and_bottom() {
-    // Drive-test note #2: vim `g`/`G` (aliased Home/End) jump the scope list
+    // Vim `g`/`G` (aliased Home/End) jump the scope list
     // to first/last, matching the single-`g` convention the runners use.
     let mut s = fixture();
     assert_eq!(s.selected_scope, 0);
@@ -281,8 +281,8 @@ fn save_refuses_literal_secret() {
     let EnvSaveResult::Refused(msg) = &result else {
         panic!("expected Refused, got {result:?}");
     };
-    // D1: the interim message names the offending var and signals it's
-    // pre-existing (the full grandfather+warn behavior is R3).
+    // The message names the offending var and signals it's
+    // pre-existing (the full grandfather+warn behavior is not yet implemented).
     assert!(
         msg.contains("api_token"),
         "refusal names the offending var: {msg}"
@@ -618,7 +618,7 @@ fn activating_profile_is_dirty_discard_reverts_save_commits() {
     assert!(!s.is_dirty(), "save commits the active-profile change");
 }
 
-// --- Ephemeral peek + copy (drive-test note #3). ---
+// --- Ephemeral peek + copy. ---
 
 /// Select the Session scope's first row (a masked capture) with VarRows focus.
 fn on_session_row(s: &mut EnvEditorState) {
@@ -753,7 +753,7 @@ fn y_on_masked_row_without_reveal_is_a_no_op_hint() {
 
 #[test]
 fn y_on_visible_row_copies_value_directly() {
-    // D2 regression fix (note #3): a plainly-visible (non-masked) value copies
+    // A plainly-visible (non-masked) value copies
     // outright with `y` — no peek needed. The app reads it back verbatim.
     let mut s = fixture(); // workspace base_url is not a secret
     s.focus = EnvFocus::VarRows;
@@ -767,7 +767,7 @@ fn y_on_visible_row_copies_value_directly() {
 #[test]
 fn y_on_empty_visible_row_is_a_no_op_hint() {
     // Nothing to copy when the visible value is empty — a hint, not a silent
-    // no-op (drive-test: `y` must never quietly do nothing).
+    // no-op (`y` must never quietly do nothing).
     let mut s = fixture();
     s.scopes[0].vars.push(("blank".into(), String::new()));
     s.focus = EnvFocus::VarRows;

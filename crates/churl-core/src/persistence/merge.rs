@@ -1,4 +1,4 @@
-//! Format-preserving TOML merge cluster extracted from `persistence.rs` (M7.11):
+//! Format-preserving TOML merge cluster extracted from `persistence.rs`:
 //! the recursive `merge_*` walkers that fold a freshly serialized document into an
 //! existing one, touching only changed values so all decor survives. Child module
 //! of `persistence`, so it keeps full access to the parent's imports without any
@@ -57,7 +57,7 @@ fn merge_items(old: &mut Item, new: &Item) {
 
 /// Merges two arrays-of-tables element-wise, preserving the decor
 /// (comments/whitespace/order) of every surviving table — even when the length
-/// changes (R1 D3). Overlapping indices recurse through [`merge_tables`] (so a
+/// changes. Overlapping indices recurse through [`merge_tables`] (so a
 /// survivor keeps its `# comments`); genuinely new trailing tables are appended
 /// from `new`; trailing tables that disappeared are truncated.
 ///

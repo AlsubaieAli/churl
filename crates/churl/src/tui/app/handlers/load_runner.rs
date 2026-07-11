@@ -1,15 +1,15 @@
 //! Load-runner handlers (open/start/progress/cancel/summary/key), extracted
-//! from `app.rs` (M7.11). Grandchild module of `app`; `impl App` here keeps
+//! from `app.rs`. Grandchild module of `app`; `impl App` here keeps
 //! full access to `App`'s private fields and methods without visibility widening.
 
 use super::super::*;
 
 impl App {
-    /// The open load runner's state, if the runner is active (R1.5 A2). The state
-    /// now lives in the [`Mode::LoadRunner`] variant, not a parallel field. While
-    /// body-search is open OVER the runner (`Mode::BodySearch`), the runner mode is
-    /// parked in `body_search_return`, so it is also consulted — the runner's
-    /// response surface must stay reachable through a `/` search (note #2).
+    /// The open load runner's state, if the runner is active. The state lives in
+    /// the [`Mode::LoadRunner`] variant, not a parallel field. While body-search
+    /// is open OVER the runner (`Mode::BodySearch`), the runner mode is parked in
+    /// `body_search_return`, so it is also consulted — the runner's response
+    /// surface must stay reachable through a `/` search.
     pub(in crate::tui::app) fn load_runner(&self) -> Option<&LoadRunnerState> {
         match &self.mode {
             Mode::LoadRunner(runner) => Some(runner),
@@ -21,7 +21,7 @@ impl App {
         }
     }
 
-    /// Mutable accessor for the open load runner's state (R1.5 A2). Consults the
+    /// Mutable accessor for the open load runner's state. Consults the
     /// same two locations as [`App::load_runner`] (the mode, or the parked mode
     /// while body-search is open over the runner).
     pub(in crate::tui::app) fn load_runner_mut(&mut self) -> Option<&mut LoadRunnerState> {
@@ -52,7 +52,7 @@ impl App {
     /// batch hits the same URL/vars/auth as a normal send, and prefills the config
     /// from the load defaults. Never auto-runs — the user reviews/edits first.
     pub(in crate::tui::app) fn open_load_runner(&mut self) {
-        // Fall back to the hovered endpoint when nothing is loaded (M7.10 stage B);
+        // Fall back to the hovered endpoint when nothing is loaded;
         // its on-disk request is used (no active buffer → `body_text` resolves empty).
         let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.notify("no endpoint selected — select one to load-test");
@@ -80,7 +80,7 @@ impl App {
         let url = request.url.clone();
         let endpoint_path = self.endpoint_rel_path(&selected);
         self.load_request = Some(request);
-        // R1.5 A2: one transition — construct the runner INTO the mode. No parallel
+        // One transition — construct the runner INTO the mode. No parallel
         // `load_runner` field, so `(Mode::LoadRunner, None)` is unrepresentable.
         self.mode = Mode::LoadRunner(LoadRunnerState::new(
             selected.endpoint.name.clone(),
@@ -258,7 +258,7 @@ impl App {
             };
             for row in &mut runner.results {
                 if matches!(row.status, LoadStatus::Pending | LoadStatus::Running) {
-                    // D1: a launched-then-cancelled row carries a real time-to-cancel.
+                    // A launched-then-cancelled row carries a real time-to-cancel.
                     // The launch `Instant` already lives in `InFlight { started }`
                     // (set by `on_load_started`); read it out before overwriting the
                     // response. Never-launched `Pending` rows have no `InFlight` and
@@ -323,9 +323,9 @@ impl App {
 
     /// Routes a key to the open load runner and acts on its outcome.
     ///
-    /// R1.5 A2: the runner state lives in `self.mode`; the router only dispatches
-    /// this on `Mode::LoadRunner(_)`, so the old `is_none()→Normal` guard and the
-    /// `.expect("checked above")` it protected are gone (unreachable by
+    /// The runner state lives in `self.mode`; the router only dispatches this on
+    /// `Mode::LoadRunner(_)`, so no `is_none()→Normal` guard or the
+    /// `.expect("checked above")` it would protect is needed (unreachable by
     /// construction). The key is handled inside the `&mut self.mode` borrow, which
     /// is dropped (via the owned `outcome`) before any `&mut self` method runs.
     pub(in crate::tui::app) fn handle_load_runner_key(&mut self, key: KeyEvent) -> Result<()> {

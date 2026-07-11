@@ -1,8 +1,8 @@
-//! In-app sequence editor (`Mode::SequenceEditor`, M7.4 §4): a modal to edit a
+//! In-app sequence editor (`Mode::SequenceEditor`): a modal to edit a
 //! sequence's steps, per-step extraction rules, and `on_error` policy, saved
 //! through the format-preserving `save_sequence` seam.
 //!
-//! Reuses the M7.3 env-editor patterns: an ordered working copy, derived dirty
+//! Reuses the env-editor patterns: an ordered working copy, derived dirty
 //! state, a discard-on-close guard, and a shared [`LineEditor`] for field edits.
 //! Adding a step picks from the workspace's endpoints via a small self-contained
 //! substring picker (no cross-modal dependency on the app's fuzzy overlay).
@@ -30,7 +30,7 @@ use crate::tui::theme::Theme;
 /// means the rule's captured value flows into the in-memory Session scope
 /// (surviving the run for standalone requests); `false` (the default) is today's
 /// Run-only ephemeral behaviour. It is seeded from the step's `persist` name list
-/// on load and rebuilt back into it on save (note #6).
+/// on load and rebuilt back into it on save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepEdit {
     endpoint: String,
@@ -175,7 +175,7 @@ impl SequenceEditorState {
     /// by position. Refuses (naming the step + var) when a step has two extraction
     /// rules with the same trimmed non-empty name — collecting into a `BTreeMap`
     /// would silently collapse them last-wins and lose a visible row (mirrors the
-    /// M7.3 duplicate-var-name gate). Empty-named rules are dropped from the saved
+    /// duplicate-var-name gate). Empty-named rules are dropped from the saved
     /// output (they bind no variable); [`mark_saved`] purges them from the working
     /// copy so dirty reconciles.
     pub fn to_sequence_checked(&self) -> Result<Sequence, String> {
@@ -213,7 +213,7 @@ impl SequenceEditorState {
                         .collect::<BTreeMap<_, _>>(),
                     // The Session-target rule names (trimmed, non-empty). Only the
                     // names are persisted — never the captured value, which stays
-                    // in-memory only (note #6 security invariant).
+                    // in-memory only (security invariant).
                     persist: step
                         .rules
                         .iter()
@@ -303,8 +303,8 @@ impl SequenceEditorState {
 
     fn handle_steps_key(&mut self, key: KeyEvent) {
         // Ctrl-j / Ctrl-k reorder the selected step (down / up), an alias for the
-        // Shift-J/Shift-K + [ / ] bindings (owner drive-test #4 — Ctrl-j/k is the
-        // reorder convention they reached for). Intercepted before the plain match
+        // Shift-J/Shift-K + [ / ] bindings (Ctrl-j/k is a natural
+        // reorder convention). Intercepted before the plain match
         // so it isn't swallowed by the bare `j`/`k` selection-nav arms. Note:
         // Ctrl-j (ASCII LF) is only distinct from Enter under the enhanced keyboard
         // protocol; on legacy terminals it arrives as Enter, so the portable
@@ -371,7 +371,7 @@ impl SequenceEditorState {
             KeyCode::Char('a') => self.add_rule(),
             KeyCode::Char('d') => self.delete_rule(),
             KeyCode::Char('r') => self.begin_edit(EditTarget::RuleName, false),
-            // Toggle the selected rule's target Run-only ⇄ Session (note #6). `p`
+            // Toggle the selected rule's target Run-only ⇄ Session. `p`
             // for "persist"; free among the Rules-focus keys.
             KeyCode::Char('p') => self.toggle_persist(),
             KeyCode::Enter | KeyCode::Char('i') => self.begin_edit(EditTarget::RuleExpr, false),
@@ -738,11 +738,11 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
                 expr_s
             }),
         ];
-        // A Session-target rule (note #6) shows a subordinate ` →session` marker;
+        // A Session-target rule shows a subordinate ` →session` marker;
         // Run-only rules show nothing (the ephemeral default). Hidden while this
         // row is being edited so the live edit buffer stays clean. On the
         // highlighted row the marker adapts (selection bg + DIM) so it stays
-        // legible where a plain-dim fg would wash out (drive-test note #1).
+        // legible where a plain-dim fg would wash out.
         let persisted = step.persist.get(i).copied().unwrap_or(false);
         let being_edited = matches!(&state.edit, Some(edit) if edit.rule == i);
         let highlighted = selected && focused;
@@ -758,9 +758,9 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
         }
         lines.push(line);
     }
-    // Guidance on the extraction grammar (owner drive-test #5 — adding a rule gave
+    // Guidance on the extraction grammar (adding a rule otherwise gives
     // no hint how to extract a value). Shown while the Rules pane is focused/edited
-    // so the syntax is in view as you type. Mirrors the M7.4 grammar subset:
+    // so the syntax is in view as you type. Mirrors the grammar subset:
     // `status`, `header:<name>`, and `$.json.path` (with `[i]` array indexing).
     if focused {
         lines.push(Line::from(""));
@@ -845,7 +845,7 @@ fn render_picker(
 /// (cyan-on-cyan / blue-on-blue) and would wash out to fg==bg, so instead we
 /// carry the selection's *own* foreground — guaranteed to contrast its own
 /// background — and add `DIM` so the marker stays subordinate but legible
-/// (drive-test note #1; the earlier "keep marker fg" derivation was invisible).
+/// (a plain "keep marker fg" derivation would be invisible here).
 fn session_marker_style(theme: &Theme, highlighted: bool) -> Style {
     if highlighted {
         theme.selection.add_modifier(Modifier::DIM)

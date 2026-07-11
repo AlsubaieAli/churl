@@ -63,8 +63,7 @@ pub struct Config {
     ///
     /// The table is `[theme_colors]` rather than `[theme.colors]`: `theme` is a
     /// scalar key (`theme = "dark"`), so a `[theme.colors]` sub-table would
-    /// collide with it in TOML. (Deviation from the M6 design, recorded in
-    /// DECISIONS.md.)
+    /// collide with it in TOML.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub theme_colors: BTreeMap<String, String>,
     /// Keybinding overrides under a flat `[keys]` table: key-combination string →
@@ -107,7 +106,7 @@ pub struct Config {
     /// [`Config::url_edit`] and fails loudly on an unknown value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_edit: Option<String>,
-    /// Concurrent-load guardrail caps under a `[load]` table (M7.5); absent →
+    /// Concurrent-load guardrail caps under a `[load]` table; absent →
     /// [`crate::load::LoadCaps::default`]. A malformed value (e.g. a non-integer
     /// `warn_total`) fails the whole config parse loudly, like every other knob.
     /// Resolved via [`Config::load_caps`].
@@ -138,7 +137,7 @@ pub struct LoadSection {
 /// centered vim popup. `e` on the bar always opens the popup regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UrlEditMode {
-    /// Edit the URL inline in the bar (the M6.6 behaviour).
+    /// Edit the URL inline in the bar.
     #[default]
     Inline,
     /// Open the centered edtui vim popup.
@@ -330,7 +329,7 @@ pub fn looks_like_secret_name(name: &str) -> bool {
 
 /// Returns `true` when `value` is a `{{...}}` template placeholder rather than a
 /// literal. The placeholder shape also covers future env references such as
-/// `{{env:FOO}}` (M6 resolves them; until then placeholders are sent verbatim).
+/// `{{env:FOO}}` (the resolver handles them; until then placeholders are sent verbatim).
 pub fn is_template_placeholder(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with("{{") && trimmed.ends_with("}}")
@@ -508,9 +507,8 @@ mod tests {
     #[test]
     fn config_parses_leader_submenu_tables() {
         // Real TOML: `[keys.leader]` mixes a flat root bind with two submenu
-        // sub-tables. Previously the whole config hard-failed ("did not match any
-        // variant of untagged enum KeyEntry"); now it parses and the submenu binds
-        // flatten into dotted `key_overlays` keys.
+        // sub-tables. It parses cleanly and the submenu binds flatten into dotted
+        // `key_overlays` keys.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(

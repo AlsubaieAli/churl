@@ -262,7 +262,7 @@ pub struct Workspace {
 }
 
 /// Optional per-collection metadata: the parsed form of a collection's
-/// `folder.toml` (`persistence::FOLDER_FILENAME`, reserved since M1 and never
+/// `folder.toml` (`persistence::FOLDER_FILENAME`, a reserved name and never
 /// listed as an endpoint). Currently just collection-level template variables —
 /// environment-independent defaults, no per-collection profiles.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
