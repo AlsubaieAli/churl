@@ -347,6 +347,27 @@ mod tests {
         );
     }
 
+    /// D2 note #2: the Explorer `s` binding (endpoints ⇄ sequences switch) must be
+    /// discoverable in the help overlay's Explorer section — it renders from the
+    /// live keymap, but lock it so a future refactor cannot silently drop it.
+    #[test]
+    fn explorer_section_lists_the_s_switch() {
+        let keymap = KeyMap::default();
+        let sections = sections(&keymap);
+        let explorer = sections
+            .iter()
+            .find(|s| s.header == "Explorer")
+            .expect("Explorer section present");
+        assert!(
+            explorer
+                .entries
+                .iter()
+                .any(|(k, l)| k == "s" && l == "switch endpoints / sequences"),
+            "Explorer section must list `s` → switch endpoints / sequences, got {:?}",
+            explorer.entries
+        );
+    }
+
     /// A query matching a known label produces matches on the right line(s) with
     /// byte ranges that slice back to the query in the plain line text.
     #[test]
