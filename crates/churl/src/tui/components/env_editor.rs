@@ -1441,10 +1441,10 @@ fn render_var_line<'a>(
         field_with_cursor(editing.unwrap())
     } else if let Some(plain) = revealed {
         plain.to_owned()
-    } else if !value.is_empty()
-        && (matches!(state.scope().kind, EnvScopeKind::Session)
-            || (looks_like_secret_name(name) && !is_template_placeholder(value)))
-    {
+    } else if state.row_is_masked(row) {
+        // Single source of truth: the display mask and the #3 copy-gate both read
+        // `row_is_masked`, so they can never desync (this row renders rows of the
+        // selected scope, so `row` is the same coordinate the helper indexes).
         "••••••".to_owned()
     } else {
         value.to_owned()
