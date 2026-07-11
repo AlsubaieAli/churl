@@ -117,7 +117,9 @@ crates/
                            #     M7.7 sanitize_for_display (strip ANSI/controls, tab-width 4) + h_scroll horizontal window),
                            #   fold (JSON fold-region scanner), env_editor (M7.3 environments & vars editor:
                            #     EnvEditorState split-view over workspace/collection/profile scopes — profile CRUD,
-                           #     dirty/discard guard, secret mask+refuse, live precedence display; core stays UI-free),
+                           #     dirty/discard guard, secret mask+refuse, live precedence display; core stays UI-free;
+                           #     `p` ephemeral peek reveals a masked row's resolved value in place (note #3) + `y` copies it —
+                           #     re-masks on any move/mode-change/6s-timeout, one row at a time, view-state-only never-persisted),
                            #   picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump, statusline,
                            #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors),
