@@ -100,6 +100,82 @@ impl Resolver {
     }
 }
 
+/// Names of every well-formed `{{name}}` placeholder still present in a
+/// substituted [`Request`], deduplicated and sorted — empty when the request is
+/// fully resolved.
+///
+/// This is the "fail loud" seam: run it on a request *after*
+/// [`Resolver::substitute_request`]. Any name it returns is a variable no scope
+/// (nor the process env) resolved, so the literal `{{name}}` would otherwise ship
+/// on the wire (a `{` / `}` in a URL yields a cryptic transport error, and a leaked
+/// `{{token}}` header is silently wrong). Call sites should refuse the send and
+/// surface the names.
+///
+/// It reuses the SAME delimiter scan as substitution ([`parse_placeholder`]), so
+/// what it flags is exactly what substitution would have replaced: a malformed
+/// brace run (`{{ }}`, `{{a b}}`, an unclosed `{{`) is left verbatim by
+/// substitution and is therefore treated as literal text here — never flagged.
+/// churl has no other escape for literal double-braces, so a genuinely literal
+/// `{{...}}` that is *not* a valid placeholder name passes through untouched at
+/// both stages. Fields scanned mirror [`Resolver::substitute_request`] exactly:
+/// `url`, every header *value*, every param *value*, the body content, and all
+/// auth string fields (basic username + password, bearer token, apikey name +
+/// value). Header and param *names* are not substituted, so they are not scanned.
+pub fn unresolved_placeholders(req: &Request) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut push_from = |s: &str| collect_placeholder_names(s, &mut names);
+
+    push_from(&req.url);
+    for header in &req.headers {
+        push_from(&header.value);
+    }
+    for param in &req.params {
+        push_from(&param.value);
+    }
+    if let Some(body) = req.body.as_ref() {
+        push_from(&body.content);
+    }
+    if let Some(auth) = req.auth.as_ref() {
+        match auth {
+            Auth::Basic { username, password } => {
+                push_from(username);
+                push_from(password);
+            }
+            Auth::Bearer { token } => push_from(token),
+            Auth::ApiKey { name, value, .. } => {
+                push_from(name);
+                push_from(value);
+            }
+        }
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Appends the *trimmed* name of every well-formed `{{name}}` placeholder in
+/// `input` to `names`, using the same scan as [`substitute_with`] so the two can
+/// never disagree about what is a placeholder. Duplicates are left for the caller
+/// to dedup.
+fn collect_placeholder_names(input: &str, names: &mut Vec<String>) {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < input.len() {
+        if bytes[i] == b'{'
+            && i + 1 < input.len()
+            && bytes[i + 1] == b'{'
+            && let Some((name, end)) = parse_placeholder(input, i)
+        {
+            names.push(name.trim().to_string());
+            i = end;
+            continue;
+        }
+        let ch = input[i..].chars().next().expect("index on char boundary");
+        i += ch.len_utf8();
+    }
+}
+
 /// Returns `true` for the characters allowed in a placeholder name
 /// (`[A-Za-z0-9_.-]`).
 fn is_name_char(c: char) -> bool {
@@ -309,6 +385,131 @@ mod tests {
             }
             _ => panic!("wrong auth kind"),
         }
+    }
+
+    /// A helper: a plain request whose only templatable content is `url`.
+    fn req_with_url(url: &str) -> Request {
+        Request {
+            method: Method::Get,
+            url: url.into(),
+            headers: vec![],
+            params: vec![],
+            body: None,
+            auth: None,
+        }
+    }
+
+    #[test]
+    fn unresolved_none_when_fully_resolved() {
+        // A request with no placeholders left is clean.
+        let req = req_with_url("https://api.test/users/42");
+        assert!(unresolved_placeholders(&req).is_empty());
+    }
+
+    #[test]
+    fn unresolved_reports_names_across_every_field() {
+        // A leftover placeholder in each templatable field is reported once, sorted,
+        // deduped; header/param NAMES are not scanned (they are never substituted).
+        let req = Request {
+            method: Method::Post,
+            url: "https://{{host}}/x".into(),
+            headers: vec![Header {
+                name: "{{hname_ignored}}".into(),
+                value: "{{hval}}".into(),
+                enabled: true,
+            }],
+            params: vec![Param {
+                name: "{{pname_ignored}}".into(),
+                value: "{{pval}}".into(),
+                enabled: true,
+            }],
+            body: Some(Body {
+                kind: BodyKind::Json,
+                // `host` again — proves dedup across fields.
+                content: "{\"a\": \"{{bodyvar}}\", \"b\": \"{{host}}\"}".into(),
+            }),
+            auth: Some(Auth::Basic {
+                username: "{{user}}".into(),
+                password: "{{pass}}".into(),
+            }),
+        };
+        assert_eq!(
+            unresolved_placeholders(&req),
+            vec![
+                "bodyvar".to_string(),
+                "host".to_string(),
+                "hval".to_string(),
+                "pass".to_string(),
+                "pval".to_string(),
+                "user".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolved_reports_bearer_and_apikey_fields() {
+        let bearer = Request {
+            auth: Some(Auth::Bearer {
+                token: "{{token}}".into(),
+            }),
+            ..req_with_url("https://api.test")
+        };
+        assert_eq!(unresolved_placeholders(&bearer), vec!["token".to_string()]);
+
+        let apikey = Request {
+            auth: Some(Auth::ApiKey {
+                name: "{{keyname}}".into(),
+                value: "{{keyval}}".into(),
+                placement: ApiKeyPlacement::Header,
+            }),
+            ..req_with_url("https://api.test")
+        };
+        assert_eq!(
+            unresolved_placeholders(&apikey),
+            vec!["keyname".to_string(), "keyval".to_string()]
+        );
+    }
+
+    #[test]
+    fn unresolved_ignores_escaped_literal_double_braces() {
+        // No escape convention exists in churl: a malformed brace run is literal
+        // text at BOTH substitution and detection. None of these are well-formed
+        // placeholder names, so `substitute` leaves them verbatim AND
+        // `unresolved_placeholders` must NOT flag them.
+        let cases = [
+            "{{}}",    // empty name
+            "{{a b}}", // illegal char (space) in name
+            "{{x",     // unclosed
+            "{ {x} }", // lone braces, not doubled
+            "literal {{ not a name! }} text",
+            "{{good.name-1_2}}", // <- this ONE is well-formed, flagged below
+        ];
+        for case in &cases[..cases.len() - 1] {
+            let req = req_with_url(case);
+            assert!(
+                unresolved_placeholders(&req).is_empty(),
+                "malformed/literal run should not be flagged: {case:?}"
+            );
+        }
+        // Sanity: a genuinely well-formed unresolved name IS flagged (the escaping
+        // negatives above are meaningful, not vacuous).
+        let req = req_with_url("{{good.name-1_2}}");
+        assert_eq!(
+            unresolved_placeholders(&req),
+            vec!["good.name-1_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn unresolved_matches_what_substitution_would_replace() {
+        // The detector and the substituter agree: after substituting with a resolver
+        // that knows `host`, only the still-unknown `missing` remains — and that is
+        // exactly what the detector reports.
+        let resolver = Resolver::new(vec![scope("workspace", &[("host", "api.test")])]);
+        let mut req = req_with_url("https://{{host}}/{{missing}}");
+        resolver.substitute_request(&mut req);
+        assert_eq!(req.url, "https://api.test/{{missing}}");
+        assert_eq!(unresolved_placeholders(&req), vec!["missing".to_string()]);
     }
 
     #[test]

@@ -401,6 +401,53 @@ fn prepare_step_rejects_traversal() {
 }
 
 #[test]
+fn prepare_step_fails_loud_on_unresolved_variable() {
+    // A step whose request has a `{{var}}` no scope resolves must fail at prepare
+    // time (fail loud) rather than shipping a literal `{{echoed}}` on the wire. The
+    // error names the variable so the message is actionable.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[]);
+    write_endpoint(
+        root,
+        "c/echo.toml",
+        &get_endpoint("echo", "https://httpbin.test/get?e={{echoed}}"),
+    );
+    let s = step("c/echo.toml", &[]);
+    let err = prepare_step(root, &s, &BTreeMap::new(), &RunScopes::default())
+        .expect_err("unresolved variable must fail the prepare step");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unresolved variable(s): echoed"),
+        "error must name the unresolved variable, got: {msg}"
+    );
+}
+
+#[test]
+fn prepare_step_resolves_variable_from_scope_and_succeeds() {
+    // The success path is unchanged: when a scope resolves the variable, prepare
+    // returns the substituted request with no leftover placeholder.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[("echoed", "hello")]);
+    write_endpoint(
+        root,
+        "c/echo.toml",
+        &get_endpoint("echo", "https://httpbin.test/get?e={{echoed}}"),
+    );
+    let s = step("c/echo.toml", &[]);
+    let scopes = RunScopes {
+        workspace: [("echoed".to_string(), "hello".to_string())]
+            .into_iter()
+            .collect(),
+        ..RunScopes::default()
+    };
+    let prepared = prepare_step(root, &s, &BTreeMap::new(), &scopes)
+        .expect("a resolved variable must prepare cleanly");
+    assert_eq!(prepared.url, "https://httpbin.test/get?e=hello");
+}
+
+#[test]
 fn prepare_step_missing_endpoint_errors_without_panic() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
