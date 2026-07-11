@@ -17,12 +17,12 @@ expression: snapshot(&mut app)
 │                            │└────────────────────────────────────────────────┘
 │                            │┏ Response ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 │                            │┃request failed                                  ┃
+│                            │┃GET https://api.test/users/1                    ┃
+│                            │┃                                                ┃
 │                            │┃error:                                          ┃
 │                            │┃request failed: error sending request           ┃
-│                            │┃                                                ┃
-│                            │┃                                                ┃
 └────────────────────────────┘┃                                                ┃
-┌ Sequences ─────────────────┐┃                                                ┃
-│<leader>s a to add          │┃                                                ┃
+┌ Sequences ─────────────────┐┃no response — status, body, and timing are      ┃
+│<leader>s a to add          │┃unavailable                                     ┃
 └────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  RESPONSE · demo · ? help · space leader · / search · : palette

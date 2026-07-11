@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1614
 expression: render_runner(&mut state)
 ---
                                                                                           
@@ -9,14 +8,14 @@ expression: render_runner(&mut state)
      ┃Run the chain in order, piping each step's extracted values into the requests t┃    
      ┃┏ Steps ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ─────────────────────────────┐┃    
      ┃┃✓ POST auth/login.toml  200  90ms   ┃│request failed                         │┃    
-     ┃┃✗ GET users/me.toml  500  45ms      ┃│error:                                 │┃    
-     ┃┃– GET users/by_id.toml  skipped     ┃│HTTP 500                               │┃    
+     ┃┃✗ GET users/me.toml  500  45ms      ┃│users/me.toml                          │┃    
+     ┃┃– GET users/by_id.toml  skipped     ┃│                                       │┃    
+     ┃┃                                    ┃│error:                                 │┃    
+     ┃┃                                    ┃│HTTP 500                               │┃    
      ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
-     ┃┃                                    ┃│                                       │┃    
+     ┃┃                                    ┃│no response — status, body, and timing │┃    
+     ┃┃                                    ┃│are unavailable                        │┃    
+     ┃┃                                    ┃│press y to copy the error              │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    

@@ -109,6 +109,43 @@ impl ResponseState {
     /// The idle default as a `const`, so `&self` accessors can return a
     /// `'static` reference when nothing is loaded.
     pub const IDLE: ResponseState = ResponseState::Idle;
+
+    /// The copyable text for a [`ResponseState::Failed`] row (drive-test #4a):
+    /// the error message plus the request method+URL when known, so a transport
+    /// failure is yankable with `y` for debugging. Returns `None` for every
+    /// other state — the copy handler falls back to this only when there is no
+    /// [`ResponseView`] to copy (i.e. the row is not `Done`), keeping the three
+    /// unified viewers' `Done` copy path untouched. Never fabricates a
+    /// status/body/timing a transport failure genuinely lacks; it copies only
+    /// what is honestly known. `meta.method`/`url` may be empty (the runner
+    /// metas set only the URL) — an empty part is omitted rather than padded.
+    pub fn failure_copy_text(&self) -> Option<String> {
+        let ResponseState::Failed { error, meta } = self else {
+            return None;
+        };
+        let mut out = String::new();
+        let request_line = failed_request_line(meta);
+        if let Some(line) = request_line {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out.push_str("error: ");
+        out.push_str(error);
+        Some(out)
+    }
+}
+
+/// The `METHOD URL` line for a failed request, from its [`ResponseMeta`], or
+/// just the URL when the method is empty (runner metas), or `None` when neither
+/// is known. Shared by the failure render panel and the failure copy text so
+/// the two can never drift.
+fn failed_request_line(meta: &ResponseMeta) -> Option<String> {
+    match (meta.method.trim(), meta.url.trim()) {
+        ("", "") => None,
+        ("", url) => Some(url.to_owned()),
+        (method, "") => Some(method.to_owned()),
+        (method, url) => Some(format!("{method} {url}")),
+    }
 }
 
 /// A literal-substring search over the current view's logical lines. Matches are
@@ -1325,15 +1362,28 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
             frame.render_widget(Paragraph::new(Line::from("cancelled")), status_area);
             frame.render_widget(Paragraph::new(Line::from("request cancelled")), body_area);
         }
-        ResponseState::Failed { error, .. } => {
+        ResponseState::Failed { error, meta } => {
             let status_area = status_area_opt.unwrap();
             let body_area = body_area_opt.unwrap();
             frame.render_widget(Paragraph::new(Line::from("request failed")), status_area);
-            frame.render_widget(
-                Paragraph::new(vec![Line::from("error:"), Line::from(error.clone())])
-                    .wrap(Wrap { trim: false }),
-                body_area,
-            );
+            // Honest failure panel (drive-test #4a): the request method+URL (when
+            // known) and the error. A TRANSPORT failure has no HTTP status, body,
+            // or timing — there was no response — so we show none rather than a
+            // fabricated 0. `press y to copy` mirrors the yank the copy handler
+            // now supports on this state.
+            let mut lines = Vec::new();
+            if let Some(req) = failed_request_line(meta) {
+                lines.push(Line::from(req));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from("error:"));
+            lines.push(Line::from(error.clone()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "no response — status, body, and timing are unavailable",
+            ));
+            lines.push(Line::from("press y to copy the error"));
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
         }
         ResponseState::Dropped {
             status,
