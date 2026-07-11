@@ -3570,7 +3570,41 @@ impl App {
     /// itself is never auto-started here — the user presses `r` in the Run face.
     fn toggle_sequence_view(&mut self) {
         match self.sequence_view {
-            SeqView::Run => self.sequence_view = SeqView::Edit,
+            SeqView::Run => {
+                // Run→Edit is always safe, but the editor may not exist yet: a
+                // `<leader>s r` run opens the runner face WITHOUT building an editor
+                // (D2 note #1). Flipping to Edit without one left the surface in a
+                // dead state — Edit face, no editor — so the pane was "exited" with
+                // nothing focused until the next keypress fell through to
+                // close_sequence_surface. Build the editor synchronously here (from
+                // the runner's saved file, the single source of truth) so focus
+                // transfers into the Edit face on the flip itself.
+                if self.sequence_editor.is_none() {
+                    let Some(path) = self.sequence_runner.as_ref().map(|r| r.path.clone()) else {
+                        // No runner either — nothing to edit; leave the surface as-is
+                        // rather than stranding it in a face with no component.
+                        return;
+                    };
+                    match persistence::load_sequence(&path) {
+                        Ok(sequence) => {
+                            let endpoints = self.endpoint_rel_paths();
+                            self.sequence_editor = Some(SequenceEditorState::new(
+                                sequence.name.clone(),
+                                path,
+                                &sequence,
+                                endpoints,
+                            ));
+                        }
+                        Err(err) => {
+                            // Couldn't load the file to edit — stay in Run face with
+                            // the error surfaced, never a focus-less dead surface.
+                            self.notify(format!("cannot edit sequence: {err}"));
+                            return;
+                        }
+                    }
+                }
+                self.sequence_view = SeqView::Edit;
+            }
             SeqView::Edit => {
                 let Some(editor) = self.sequence_editor.as_ref() else {
                     return;
@@ -7639,6 +7673,40 @@ mod tests {
         assert_eq!(app.mode, Mode::Sequence);
         assert_eq!(app.sequence_view, SeqView::Run);
         assert!(app.sequence_runner.is_some());
+    }
+
+    /// D2 note #1 regression: a `<leader>s r` run opens the runner face with NO
+    /// editor built. `Ctrl-R` must build the editor SYNCHRONOUSLY and land in the
+    /// Edit face on the flip itself — not leave the surface in a focus-less dead
+    /// state that only resolves (by exiting to Normal) on the next keypress.
+    #[test]
+    fn ctrl_r_from_runner_only_builds_editor_synchronously() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "halt", "");
+        // Opened straight into the Run face via the runner path — no editor yet.
+        assert_eq!(app.sequence_view, SeqView::Run);
+        assert!(
+            app.sequence_editor.is_none(),
+            "runner-only open builds no editor"
+        );
+        ctrl_r(&mut app);
+        // The flip transferred focus INTO the Edit face immediately.
+        assert_eq!(app.sequence_view, SeqView::Edit, "flipped to Edit face");
+        assert!(
+            app.sequence_editor.is_some(),
+            "editor built synchronously on the flip"
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Sequence,
+            "surface stays open — not exited to Normal"
+        );
+        // The editor is loaded from the same saved sequence (single source of truth).
+        assert_eq!(app.sequence_editor.as_ref().unwrap().name(), "Flow");
+        // And a further keypress is handled by the editor, not a dead-surface exit.
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.mode, Mode::Sequence, "still in the editor after a key");
     }
 
     /// `Ctrl-R` on a CLEAN editor flips to the Run face, building the runner from
