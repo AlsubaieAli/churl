@@ -9,14 +9,14 @@
 //! (block comments/strings that begin above the viewport), accepted in M3 for the
 //! render-loop budget it buys.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Theme;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use two_face::theme::EmbeddedThemeName;
 
 use super::app::AppMsg;
@@ -68,7 +68,7 @@ pub struct HighlightJob {
 /// selects the embedded syntect theme (Nord for dark, InspiredGithub for light)
 /// so response bodies match the pane palette. Runs until the sender drops or the
 /// app channel closes.
-pub fn spawn(app_tx: UnboundedSender<AppMsg>, light: bool) -> Sender<HighlightJob> {
+pub fn spawn(app_tx: Sender<AppMsg>, light: bool) -> std::sync::mpsc::Sender<HighlightJob> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<HighlightJob>();
     std::thread::Builder::new()
         .name("churl-highlight".to_owned())
@@ -78,7 +78,7 @@ pub fn spawn(app_tx: UnboundedSender<AppMsg>, light: bool) -> Sender<HighlightJo
 }
 
 /// The worker loop: lazily loads the syntax/theme sets, then highlights each job.
-fn worker(jobs: Receiver<HighlightJob>, app_tx: UnboundedSender<AppMsg>, light: bool) {
+fn worker(jobs: Receiver<HighlightJob>, app_tx: Sender<AppMsg>, light: bool) {
     // Lazy load inside the thread so cold start never pays for it.
     let syntax_set = two_face::syntax::extra_newlines();
     let theme_name = if light {
@@ -89,8 +89,12 @@ fn worker(jobs: Receiver<HighlightJob>, app_tx: UnboundedSender<AppMsg>, light: 
     let theme = two_face::theme::extra().get(theme_name).clone();
     for job in jobs {
         let lines = highlight(&syntax_set, &theme, job.syntax, &job.lines);
+        // This is a dedicated OS thread (never the render/UI thread and not an
+        // async task), so `blocking_send` on the bounded app channel (R1 D4a) is
+        // safe: it parks THIS thread until the queue drains, applying backpressure
+        // to highlight results without ever stalling input handling.
         if app_tx
-            .send(AppMsg::Highlighted {
+            .blocking_send(AppMsg::Highlighted {
                 hash: job.hash,
                 lines,
             })

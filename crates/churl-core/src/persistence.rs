@@ -27,6 +27,50 @@ pub const FOLDER_FILENAME: &str = "folder.toml";
 /// It is *not* a collection — [`OpenWorkspace::collections`] excludes it.
 pub const SEQUENCES_DIRNAME: &str = "sequences";
 
+/// File stems churl reserves inside a collection directory. An endpoint (or
+/// sequence) file written verbatim as one of these would overshadow a reserved
+/// `*.toml` — silently and invisibly: a `churl.toml` endpoint parses as the
+/// workspace manifest (the note vanishes), a `folder.toml` endpoint parses as
+/// collection metadata. These are the manifest/folder filenames *without* their
+/// `.toml` extension.
+///
+/// `slugify` lowercases, so these match case-insensitively for free — `"Churl"`
+/// and `"CHURL.TOML"` slug to `churl` / `churl-toml` respectively; only the bare
+/// word is reserved (`churl-toml` is safe). The sequences *directory* is NOT
+/// here: a file named `sequences.toml` inside a collection is harmless (the
+/// reserved `sequences/` is a top-level directory — see [`RESERVED_DIR_NAMES`]).
+const RESERVED_FILE_STEMS: &[&str] = &[
+    // Kept in sync with the filename constants via `reserved_stems_match_constants`.
+    "churl", "folder",
+];
+
+/// Directory names churl reserves at the workspace root. A collection directory
+/// written verbatim as one of these would shadow churl's own directory — the
+/// `sequences/` dir is excluded from [`OpenWorkspace::collections`], so a
+/// collection literally named `sequences` would silently vanish from the tree.
+/// (The manifest/folder stems are *files*, not directories, so a collection
+/// named `churl`/`folder` is not a hazard — only `sequences` is.)
+const RESERVED_DIR_NAMES: &[&str] = &[SEQUENCES_DIRNAME];
+
+/// Whether `slug` collides with a reserved endpoint/sequence *file* stem.
+/// `slugify` already lowercases, so a plain equality check is case-insensitive.
+fn is_reserved_file_slug(slug: &str) -> bool {
+    RESERVED_FILE_STEMS.contains(&slug)
+}
+
+/// Whether `slug` collides with a reserved collection *directory* name.
+fn is_reserved_dir_slug(slug: &str) -> bool {
+    RESERVED_DIR_NAMES.contains(&slug)
+}
+
+/// The filesystem slug churl would derive from a display `name` (kebab-case,
+/// lowercase, ASCII). Public so UI layers can detect when a create/rename was
+/// disambiguated — compare this to the final on-disk stem and surface the
+/// difference (fail-loud on the reserved-name collision, never a silent bump).
+pub fn slug_of(name: &str) -> String {
+    slugify(name)
+}
+
 /// Error reading or writing workspace TOML files.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -173,9 +217,15 @@ fn slugify(name: &str) -> String {
 
 /// Picks an unused `<slug>.toml` path inside `dir`, appending `-2`, `-3`, … on
 /// collision (matching the corpus convention of plain suffixes).
+///
+/// A slug equal to a reserved file stem (see [`RESERVED_FILE_STEMS`]) is treated
+/// as already occupied so it disambiguates exactly like a filename clash (`churl`
+/// → `churl-2.toml`) instead of clobbering the manifest/folder file — the display
+/// `name` inside the file is untouched. Callers surface the final stem when it
+/// was bumped (fail-loud, no silent no-op).
 fn unique_endpoint_path(dir: &Path, slug: &str) -> PathBuf {
     let first = dir.join(format!("{slug}.toml"));
-    if !first.exists() {
+    if !first.exists() && !is_reserved_file_slug(slug) {
         return first;
     }
     let mut n = 2;
@@ -259,9 +309,11 @@ pub fn rename_endpoint(path: &Path, new_name: &str) -> Result<PathBuf, Persisten
 
     let dir = path.parent().unwrap_or(Path::new("."));
     let slug = slugify(new_name);
-    // An unchanged slug keeps the file where it is — its own path must not
-    // count as a collision.
-    if dir.join(format!("{slug}.toml")) == path {
+    // An unchanged, non-reserved slug keeps the file where it is — its own path
+    // must not count as a collision. A reserved slug always falls through to
+    // `unique_endpoint_path` so it disambiguates even if the file already sat on
+    // a reserved stem.
+    if !is_reserved_file_slug(&slug) && dir.join(format!("{slug}.toml")) == path {
         return Ok(path.to_owned());
     }
     let new_path = unique_endpoint_path(dir, &slug);
@@ -280,18 +332,44 @@ pub fn delete_endpoint(path: &Path) -> Result<(), PersistenceError> {
     })
 }
 
+/// Resolves the on-disk directory name for a collection `slug` under `parent`,
+/// bumping a **reserved** directory slug (see [`RESERVED_DIR_NAMES`] — i.e. a
+/// collection literally named `sequences`) to the first free `<slug>-N` so it can
+/// never overshadow the sequences directory. A non-reserved slug is returned
+/// verbatim — the caller still decides what to do if that directory already
+/// exists ([`create_collection`] errors `AlreadyExists`; import reuses it), so
+/// this helper does **not** disambiguate on plain existence.
+fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
+    if !is_reserved_dir_slug(slug) {
+        return parent.join(slug);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = parent.join(format!("{slug}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Creates a new collection directory named `name` (slugified) under `root`. No
 /// `folder.toml` is written — that stays lazy until the collection gains vars
 /// (matching [`load_collection_meta`]'s missing-is-empty behaviour). Returns the
 /// created directory path.
 ///
-/// An empty name is [`PersistenceError::EmptyName`]; an existing directory is
-/// [`PersistenceError::AlreadyExists`].
+/// A slug equal to a reserved directory name (see [`RESERVED_DIR_NAMES`], i.e.
+/// `sequences`) is disambiguated with a `-2`/`-3` suffix so it never overshadows
+/// churl's own directories — the display name (the on-disk dir name) is what
+/// callers surface.
+///
+/// An empty name is [`PersistenceError::EmptyName`]; an already-existing target
+/// directory is [`PersistenceError::AlreadyExists`] (import reuse relies on this).
 pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
     if name.trim().is_empty() {
         return Err(PersistenceError::EmptyName);
     }
-    let dir = root.join(slugify(name));
+    let dir = collection_dir_name(root, &slugify(name));
     if dir.exists() {
         return Err(PersistenceError::AlreadyExists { path: dir });
     }
@@ -312,7 +390,7 @@ pub fn rename_collection(dir: &Path, new_name: &str) -> Result<PathBuf, Persiste
         return Err(PersistenceError::EmptyName);
     }
     let parent = dir.parent().unwrap_or(Path::new("."));
-    let new_dir = parent.join(slugify(new_name));
+    let new_dir = collection_dir_name(parent, &slugify(new_name));
     if new_dir == dir {
         return Ok(new_dir);
     }
@@ -862,8 +940,9 @@ fn normalize_item(item: &mut Item) {
 /// - unchanged values are left untouched (their comments/formatting survive);
 /// - changed scalar values are replaced, copying the old value's decor so inline
 ///   comments survive;
-/// - nested tables recurse; arrays-of-tables of equal length merge element-wise,
-///   otherwise the whole array is replaced.
+/// - nested tables recurse; arrays-of-tables merge element-wise (see
+///   [`merge_arrays_of_tables`]) — survivors keep their decor even when the array
+///   grows or shrinks; only added/removed tables change.
 fn merge_tables(old: &mut Table, new: &Table) {
     let stale: Vec<String> = old
         .iter()
@@ -887,12 +966,8 @@ fn merge_tables(old: &mut Table, new: &Table) {
 fn merge_items(old: &mut Item, new: &Item) {
     match (old, new) {
         (Item::Table(old_table), Item::Table(new_table)) => merge_tables(old_table, new_table),
-        (Item::ArrayOfTables(old_tables), Item::ArrayOfTables(new_tables))
-            if old_tables.len() == new_tables.len() =>
-        {
-            for (old_table, new_table) in old_tables.iter_mut().zip(new_tables.iter()) {
-                merge_tables(old_table, new_table);
-            }
+        (Item::ArrayOfTables(old_tables), Item::ArrayOfTables(new_tables)) => {
+            merge_arrays_of_tables(old_tables, new_tables);
         }
         (Item::Value(old_value), Item::Value(new_value)) => {
             if !values_equal(old_value, new_value) {
@@ -902,6 +977,35 @@ fn merge_items(old: &mut Item, new: &Item) {
             }
         }
         (old, new) => *old = new.clone(),
+    }
+}
+
+/// Merges two arrays-of-tables element-wise, preserving the decor
+/// (comments/whitespace/order) of every surviving table — even when the length
+/// changes (R1 D3). Overlapping indices recurse through [`merge_tables`] (so a
+/// survivor keeps its `# comments`); genuinely new trailing tables are appended
+/// from `new`; trailing tables that disappeared are truncated.
+///
+/// This replaces the old wholesale `*old = new.clone()` on any length change,
+/// which discarded all decor on surviving siblings — breaking the module's
+/// format-preserving promise for `[[array-of-tables]]` (e.g. `[[request.headers]]`).
+fn merge_arrays_of_tables(old: &mut ArrayOfTables, new: &ArrayOfTables) {
+    // 1. Recurse into the overlapping prefix — survivors keep their decor.
+    let overlap = old.len().min(new.len());
+    for i in 0..overlap {
+        if let (Some(old_table), Some(new_table)) = (old.get_mut(i), new.get(i)) {
+            merge_tables(old_table, new_table);
+        }
+    }
+    // 2. Append tables that are new (grew).
+    for i in old.len()..new.len() {
+        if let Some(new_table) = new.get(i) {
+            old.push(new_table.clone());
+        }
+    }
+    // 3. Truncate tables that disappeared (shrank) — remove from the tail.
+    while old.len() > new.len() {
+        old.remove(old.len() - 1);
     }
 }
 
@@ -933,6 +1037,44 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reserved sets must stay in sync with the filename/dir constants, or an
+    /// endpoint could still be written over a renamed manifest/folder file, or a
+    /// collection could shadow the sequences dir. Guards against silent drift.
+    #[test]
+    fn reserved_stems_match_constants() {
+        let manifest_stem = MANIFEST_FILENAME.trim_end_matches(".toml");
+        let folder_stem = FOLDER_FILENAME.trim_end_matches(".toml");
+        // File stems: the manifest + folder metadata filenames without `.toml`.
+        assert!(
+            RESERVED_FILE_STEMS.contains(&manifest_stem),
+            "manifest stem missing"
+        );
+        assert!(
+            RESERVED_FILE_STEMS.contains(&folder_stem),
+            "folder stem missing"
+        );
+        // Dir names: the sequences directory.
+        assert!(
+            RESERVED_DIR_NAMES.contains(&SEQUENCES_DIRNAME),
+            "sequences dir missing"
+        );
+        // Each reserved stem is genuinely reserved case-insensitively (slugify
+        // lowercases): the bare word never lands on disk verbatim.
+        for stem in RESERVED_FILE_STEMS {
+            assert!(is_reserved_file_slug(&slugify(stem)));
+            assert!(is_reserved_file_slug(&slugify(&stem.to_uppercase())));
+        }
+        for name in RESERVED_DIR_NAMES {
+            assert!(is_reserved_dir_slug(&slugify(name)));
+        }
+        // A collection named `folder`/`churl` is NOT a dir hazard (those are files).
+        assert!(!is_reserved_dir_slug(&slugify("folder")));
+        assert!(!is_reserved_dir_slug(&slugify("churl")));
+        // A name whose slug merely *contains* a reserved stem is NOT reserved.
+        assert!(!is_reserved_file_slug(&slugify("churl.toml"))); // → "churl-toml"
+        assert!(!is_reserved_file_slug(&slugify("my churl"))); // → "my-churl"
+    }
 
     #[test]
     fn atomic_write_replaces_content_and_leaves_no_temp() {

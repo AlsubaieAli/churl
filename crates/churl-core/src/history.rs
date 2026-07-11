@@ -6,7 +6,21 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
+
+/// How long a writer waits for a busy database before erroring `SQLITE_BUSY`
+/// (R1 D2). A concurrent churl process holding the write lock (e.g. migrating)
+/// releases it in milliseconds, so 5 s is generous headroom without hanging the
+/// UI indefinitely on a genuinely stuck lock.
+const BUSY_TIMEOUT_MS: u32 = 5_000;
+
+/// Retained-row cap per history table (R1 D4b). Every insert prunes the table
+/// back to the newest `HISTORY_ROW_CAP` rows so an arbitrarily long session
+/// cannot grow `state.sqlite` without bound. Reads (`recent`) are unaffected —
+/// they already `LIMIT` far below this. Applied independently to `history` and
+/// `load_batches` (the `workspaces` table is naturally bounded: one row per
+/// distinct workspace path).
+const HISTORY_ROW_CAP: i64 = 10_000;
 
 /// Ordered schema migrations. Migration `N` (1-based) runs when `user_version < N`,
 /// inside a transaction that bumps `user_version` to `N` on success.
@@ -74,6 +88,16 @@ pub enum HistoryError {
     /// An underlying SQLite operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// `PRAGMA journal_mode=WAL` did not take — the filesystem silently fell back
+    /// to another journal mode (some network/virtual filesystems reject WAL). We
+    /// fail loud rather than run in a mode we didn't ask for (Constitution).
+    #[error(
+        "journal_mode=WAL was rejected (fell back to {actual}); refusing to run in an unexpected mode"
+    )]
+    WalUnavailable {
+        /// The journal mode SQLite actually reported after the PRAGMA.
+        actual: String,
+    },
 }
 
 /// Returns the default state database path (`<data_dir>/churl/state.sqlite`),
@@ -181,37 +205,63 @@ impl HistoryStore {
                 source,
             })?;
         }
-        Self::from_connection(Connection::open(path)?)
+        // File-backed DBs must land in WAL mode (durable + concurrent readers);
+        // an in-memory DB has no journal file, so WAL is not asserted there.
+        Self::from_connection(Connection::open(path)?, true)
     }
 
-    /// Opens an in-memory history store; intended for tests.
+    /// Opens an in-memory history store; intended for tests. WAL is not asserted
+    /// (in-memory databases have no WAL journal), but `busy_timeout` and the
+    /// migration lock are still applied so tests exercise the same path.
     pub fn in_memory() -> Result<Self, HistoryError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, false)
     }
 
-    /// Wraps a connection and brings its schema up to date.
-    fn from_connection(conn: Connection) -> Result<Self, HistoryError> {
+    /// Wraps a connection, applies the durability/concurrency PRAGMAs, and brings
+    /// its schema up to date. `expect_wal` asserts `journal_mode=WAL` actually
+    /// took (file-backed DBs only — an in-memory DB legitimately reports `memory`).
+    fn from_connection(conn: Connection, expect_wal: bool) -> Result<Self, HistoryError> {
+        // 1. busy_timeout FIRST, so the very next statement (incl. the migration
+        //    lock) waits on a busy DB instead of erroring SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_millis(u64::from(BUSY_TIMEOUT_MS)))?;
+        // 2. WAL: durable and concurrent-reader friendly. `journal_mode` returns
+        //    the mode that actually took — fail loud if the FS silently refused.
+        let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if expect_wal && !mode.eq_ignore_ascii_case("wal") {
+            return Err(HistoryError::WalUnavailable { actual: mode });
+        }
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)
     }
 
-    /// Applies every pending migration, each in its own transaction that also bumps
-    /// `PRAGMA user_version`. Idempotent across reopens.
+    /// Brings the schema up to date under a single write lock, so concurrent
+    /// openers can never race the migration (R1 D2).
+    ///
+    /// The whole run happens inside one `BEGIN IMMEDIATE` transaction (a write
+    /// lock taken up front): `user_version` is re-read *inside* the lock, only
+    /// still-pending migrations are applied, `user_version` is bumped, then the
+    /// transaction commits — all-or-nothing. A second process blocks on the lock
+    /// (up to `busy_timeout`), then re-reads the now-current version and no-ops.
     fn migrate(&mut self) -> Result<(), HistoryError> {
-        let current: i64 = self
+        // IMMEDIATE grabs the RESERVED write lock at BEGIN, before we read
+        // `user_version` — so two concurrent migrators serialize on the lock
+        // rather than both reading a stale version and double-applying.
+        let tx = self
             .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         for (index, sql) in MIGRATIONS.iter().enumerate() {
             let version = index as i64 + 1;
             if version <= current {
                 continue;
             }
-            let tx = self.conn.transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", version)?;
-            tx.commit()?;
         }
+        // One commit for the whole run; on any error above the tx drops and rolls
+        // back automatically (all-or-nothing).
+        tx.commit()?;
         Ok(())
     }
 
@@ -239,7 +289,38 @@ impl HistoryStore {
                 entry.endpoint_path,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        self.prune("history")?;
+        Ok(id)
+    }
+
+    /// Prunes `table` back to its newest [`HISTORY_ROW_CAP`] rows by rowid (rowid
+    /// is monotonic with insertion order for these INTEGER-PRIMARY-KEY tables, so
+    /// "newest" = highest rowid).
+    ///
+    /// Cheap and index-friendly: it deletes the closed range `id <= max_id - CAP`
+    /// in one shot (a range scan on the PK), touching nothing when the table is
+    /// under the cap — no per-insert full-table subquery. Because ids only ever
+    /// grow, `max_id - CAP` is exactly the retain boundary regardless of past
+    /// deletions.
+    fn prune(&self, table: &str) -> Result<(), HistoryError> {
+        // `table` is a compile-time-constant literal at every call site, never
+        // user input — safe to interpolate (rusqlite can't bind an identifier).
+        let max_id: Option<i64> =
+            self.conn
+                .query_row(&format!("SELECT MAX(id) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+        let Some(max_id) = max_id else {
+            return Ok(());
+        };
+        let cutoff = max_id - HISTORY_ROW_CAP;
+        if cutoff < 1 {
+            return Ok(()); // still under the cap
+        }
+        self.conn
+            .execute(&format!("DELETE FROM {table} WHERE id <= ?1"), [cutoff])?;
+        Ok(())
     }
 
     /// Returns up to `limit` history entries, newest first (by execution time,
@@ -309,7 +390,9 @@ impl HistoryStore {
                 ms_i64(summary.mean_ms),
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        self.prune("load_batches")?;
+        Ok(id)
     }
 
     /// Returns up to `limit` load-batch summaries, newest first.
@@ -679,6 +762,133 @@ mod tests {
             store.recent_load_batches(1).unwrap()[0].summary.mean_ms,
             Some(60)
         );
+    }
+
+    // ---- R1 D4b: history pruning ------------------------------------------
+
+    /// Counts rows in a table on the store's connection.
+    fn row_count(store: &HistoryStore, table: &str) -> i64 {
+        store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Inserting past the cap prunes back to exactly the cap, keeping the newest
+    /// rows (prune-on-insert). Overshoots the cap by a handful to keep the test
+    /// cheap while still crossing the boundary.
+    #[test]
+    fn history_insert_prunes_to_cap_keeping_newest() {
+        let store = HistoryStore::in_memory().unwrap();
+        let overshoot = 5i64;
+        let total = HISTORY_ROW_CAP + overshoot;
+        for i in 0..total {
+            // executed_at_ms increases with i so "newest" is unambiguous.
+            store.insert(&entry(i, &format!("https://ex/{i}"))).unwrap();
+        }
+        assert_eq!(
+            row_count(&store, "history"),
+            HISTORY_ROW_CAP,
+            "history capped at HISTORY_ROW_CAP"
+        );
+        // The newest row survived; the oldest `overshoot` rows were pruned.
+        let recent = store.recent(1).unwrap();
+        assert_eq!(recent[0].url, format!("https://ex/{}", total - 1));
+        // recent() is unaffected by pruning (still returns the newest window).
+        assert_eq!(store.recent(10).unwrap().len(), 10);
+    }
+
+    /// The same cap applies independently to `load_batches`.
+    #[test]
+    fn load_batches_insert_prunes_to_cap() {
+        let store = HistoryStore::in_memory().unwrap();
+        for i in 0..(HISTORY_ROW_CAP + 3) {
+            store
+                .insert_load_batch(&batch(i, &format!("https://b/{i}"), false))
+                .unwrap();
+        }
+        assert_eq!(row_count(&store, "load_batches"), HISTORY_ROW_CAP);
+        // history untouched by load-batch pruning.
+        assert_eq!(row_count(&store, "history"), 0);
+    }
+
+    // ---- R1 D2: WAL + busy_timeout + migration race guard -----------------
+
+    /// A file-backed store lands in WAL mode with a non-zero busy_timeout after
+    /// open (both PRAGMAs read back as applied).
+    #[test]
+    fn open_sets_wal_and_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let store = HistoryStore::open(&path).unwrap();
+
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode = {mode}");
+
+        let timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, i64::from(BUSY_TIMEOUT_MS), "busy_timeout applied");
+        assert!(timeout > 0);
+
+        // A WAL DB leaves a `-wal` sidecar next to the file.
+        assert!(
+            path.with_extension("sqlite-wal").exists()
+                || std::fs::read_dir(dir.path())
+                    .unwrap()
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with("-wal")),
+            "WAL sidecar present"
+        );
+    }
+
+    /// The migration race guard: opening the SAME file twice (serialised, which
+    /// is the invariant we can assert deterministically in-test) must leave the
+    /// schema at exactly the latest version with no partial/duplicate migration —
+    /// the second open re-reads the current version under the lock and no-ops.
+    #[test]
+    fn second_open_no_ops_migrations_and_reaches_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+
+        let first = HistoryStore::open(&path).unwrap();
+        assert_eq!(first.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        first.insert(&entry(1, "https://a.example")).unwrap();
+        drop(first);
+
+        // Reopen: migrate() re-reads user_version INSIDE the IMMEDIATE tx and
+        // applies nothing. Schema intact, data survived, exactly one mean_ms.
+        let second = HistoryStore::open(&path).unwrap();
+        assert_eq!(second.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(mean_ms_column_count(&second), 1, "no duplicate migration");
+        assert_eq!(second.recent(10).unwrap().len(), 1, "data intact");
+    }
+
+    /// Two live connections to the same file: the first holds a store; a second
+    /// `open` succeeds (WAL + busy_timeout let it through) and both see the latest
+    /// schema. Exercises the concurrent-writer path without flaky threading.
+    #[test]
+    fn concurrent_connections_share_latest_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+
+        let a = HistoryStore::open(&path).unwrap();
+        let b = HistoryStore::open(&path).unwrap();
+        assert_eq!(a.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(b.schema_version().unwrap(), MIGRATIONS.len() as i64);
+
+        // Both can write; a busy retry under WAL never errors SQLITE_BUSY here.
+        a.insert(&entry(1, "https://a.example")).unwrap();
+        b.insert(&entry(2, "https://b.example")).unwrap();
+        // Each connection sees both rows (WAL readers see committed writes).
+        assert_eq!(a.recent(10).unwrap().len(), 2);
+        assert_eq!(b.recent(10).unwrap().len(), 2);
     }
 
     #[test]

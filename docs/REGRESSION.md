@@ -79,6 +79,16 @@ binary, so the built commit is recorded below every pass.
 ## Persistence durability
 - [ ] Edit + save an endpoint, then re-open it — the change persisted and comments/ordering survived (atomic saves must not regress the format-preserving round-trip). (R0)
 - [ ] Save leaves no `.<name>.<pid>.<n>.tmp` sibling files behind in the collection/workspace directory. (R0)
+- [ ] Create an endpoint named `churl` (or `Churl`/`folder`) — it lands on `churl-2.toml`/`folder-2.toml` (NOT `churl.toml`), the workspace manifest survives intact, the note is findable, and the confirmation says `created churl (as churl-2 — name was reserved)`. Display name stays `churl`. (R1 D1)
+- [ ] Create a collection named `sequences` — it lands on `sequences-2/` and appears in the tree (the reserved `sequences/` dir is not shadowed). A collection named `churl`/`folder` is fine (those are files). (R1 D1)
+- [ ] Rename an endpoint *to* `churl` — same disambiguation as create; old file gone, new file on a `-2` stem. (R1 D1)
+- [ ] Hand-add a `# comment` to the middle entry of a `[[request.headers]]` array, then add/remove a header in the TUI and save — the surviving entries' comments/whitespace/order are byte-preserved (array merge is element-wise, not wholesale). (R1 D3)
+
+## State durability / concurrency (SQLite)
+- [ ] After first launch, `<data_dir>/churl/state.sqlite-wal` exists — the history DB is in WAL mode. (R1 D2)
+- [ ] Open two churl processes on the same machine (shared `state.sqlite`); both start and record history without a `database is locked`/`SQLITE_BUSY` error (busy_timeout + WAL + the `BEGIN IMMEDIATE` migration lock). (R1 D2)
+- [ ] A very long / high-`total` load run stays responsive and does not grow `state.sqlite` without bound (prune-on-insert caps `history`/`load_batches` at 10 000 rows each; the bounded app channel applies backpressure). (R1 D2/D4a/D4b)
+- [ ] Open several endpoint buffers, scroll each response, then cycle through the tabs — memory stays flat (inactive buffers' highlight caches are evicted on switch). (R1 D4c)
 
 ## Import / export
 - [ ] `churl import "curl ..."` produces the expected endpoint.
