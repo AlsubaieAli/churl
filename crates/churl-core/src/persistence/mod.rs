@@ -24,7 +24,7 @@ mod naming;
 mod sequences;
 mod workspace;
 
-// The merge + naming clusters live in child modules (M7.11). Their items are
+// The merge + naming clusters live in child modules. Their items are
 // pulled into this module's namespace so in-crate call sites — and `super::*` in
 // the inline `tests` module — resolve them unqualified, exactly as before the
 // split. `slug_of` is the public API (`persistence::slug_of`), re-exported `pub`

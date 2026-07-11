@@ -1,4 +1,4 @@
-//! Buffer/tab management handlers extracted from `app.rs` (M7.11).
+//! Buffer/tab management handlers extracted from `app.rs`.
 //! Grandchild module of `app`, so `impl App` here keeps full access to `App`'s
 //! private fields and methods without any visibility widening — see
 //! DECISIONS.md, "Module boundaries".
@@ -7,7 +7,7 @@ use super::super::*;
 
 impl App {
     /// Focuses buffer `idx`, evicting the *previously* active buffer's highlight
-    /// cache when leaving it (R1 D4c). Only the active buffer enqueues highlight
+    /// cache when leaving it. Only the active buffer enqueues highlight
     /// jobs, so an inactive buffer's cache is dead weight that would otherwise
     /// accumulate across every open buffer — bounding total highlight-cache
     /// memory to (active buffers × 64) rather than (all buffers × 64). The
@@ -54,8 +54,8 @@ impl App {
         self.set_active_buffer(next);
     }
 
-    /// Jumps directly to the `n`th open buffer/tab (1-based; `<leader>t <n>`,
-    /// note #5). Reuses the same `self.active` focus mechanism `buffer_cycle`
+    /// Jumps directly to the `n`th open buffer/tab (1-based; `<leader>t <n>`).
+    /// Reuses the same `self.active` focus mechanism `buffer_cycle`
     /// drives — no duplicated focus logic. Out of range (`n` > open count, incl.
     /// `n == 0`) is a graceful no-op with a brief status message; never a panic
     /// or a wrong-tab jump.

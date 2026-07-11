@@ -1,4 +1,4 @@
-//! Pure data-type definitions for the TUI app (M7.11): the panes/modes/message
+//! Pure data-type definitions for the TUI app: the panes/modes/message
 //! enums, the per-endpoint [`Buffer`]/[`EndpointBuffer`] state, and the small
 //! body-folding free functions. Split out of `app.rs` into this child module of
 //! `app` so every definition keeps its **exact original scope** — items reachable
@@ -58,7 +58,7 @@ impl Pane {
     }
 }
 
-/// Which sub-pane inside the left (explorer) column has focus/zoom (PR 2b).
+/// Which sub-pane inside the left (explorer) column has focus/zoom.
 /// Modelled on a separate axis from [`Pane`]: `Pane::Explorer` means "left column
 /// focused", `LeftPane` decides which sub-pane. Keeps `Pane` at four variants (no
 /// Tab-cycle/zoom-pairing churn) and lets the sequences sub-pane toggle off.
@@ -73,15 +73,14 @@ pub enum LeftPane {
 /// Top-level input mode. Overlays own the keyboard; edtui manages its own vim
 /// modes internally and is not represented here.
 ///
-/// R1.5 A2: the modal overlays whose state used to live in parallel
-/// `Option<…>` fields on [`App`] now carry that state **in their variant**
-/// ([`Mode::EnvEditor`]/[`Mode::LoadRunner`]/[`Mode::Sequence`]) — an active
-/// editor with no data is no longer constructible, and the defensive
-/// `is_none()→Normal` guards + `.expect("checked above")` panics they protected
-/// are gone. Because those payloads are non-`Copy` (and don't derive
-/// `PartialEq`), `Mode` is now **non-`Copy`** and **non-`PartialEq`**: compare
-/// variants with `matches!` and move/replace values with [`std::mem::replace`]
-/// rather than copying.
+/// The modal overlays carry their state **in their variant**
+/// ([`Mode::EnvEditor`]/[`Mode::LoadRunner`]/[`Mode::Sequence`]) rather than in
+/// parallel `Option<…>` fields on [`App`] — an active editor with no data is not
+/// constructible, so no defensive `is_none()→Normal` guards or
+/// `.expect("checked above")` panics are needed. Because those payloads are
+/// non-`Copy` (and don't derive `PartialEq`), `Mode` is **non-`Copy`** and
+/// **non-`PartialEq`**: compare variants with `matches!` and move/replace values
+/// with [`std::mem::replace`] rather than copying.
 #[derive(Debug)]
 pub enum Mode {
     /// Pane navigation and editing.
@@ -90,7 +89,7 @@ pub enum Mode {
     Search,
     /// The command palette overlay is open.
     Palette,
-    /// The quick-jump workspace picker overlay is open (M7.2).
+    /// The quick-jump workspace picker overlay is open.
     WorkspacePicker,
     /// The "open sequence" picker overlay is open (`<leader>s o`): a fuzzy list
     /// of sequence names; accepting one opens the unified sequence surface.
@@ -105,16 +104,15 @@ pub enum Mode {
     Prompt(PromptPurpose),
     /// A y/n confirmation overlay is open.
     Confirm(ConfirmPurpose),
-    /// The environments & variables editor (M7.3): a modal split-view that grabs
+    /// The environments & variables editor: a modal split-view that grabs
     /// every key (same routing tier as Search/Palette/Picker). Owns its
-    /// [`EnvEditorState`] (R1.5 A2) — the editor cannot exist without its data.
+    /// [`EnvEditorState`] — the editor cannot exist without its data.
     EnvEditor(EnvEditorState),
-    /// The unified sequence surface (M7.4): ONE modal with an edit⇄run switcher
+    /// The unified sequence surface: ONE modal with an edit⇄run switcher
     /// (`Ctrl-R`). `view` selects the active face; the Edit face drives the
     /// `editor` (step/extraction editor), the Run face drives + shows the live
-    /// `runner`. R1.5 A2: the three used to be parallel `App` fields —
-    /// (`sequence_editor`/`sequence_runner`/`sequence_view`) — now folded into the
-    /// variant so they cannot exist without `Mode::Sequence`. `editor`/`runner`
+    /// `runner`. The `view`/`editor`/`runner` are fields of this variant, so they
+    /// cannot exist without `Mode::Sequence`. `editor`/`runner`
     /// stay `Option` INSIDE the variant: both faces are legitimately optional (a
     /// `<leader>s r` run opens the Run face with no editor built yet; an edit
     /// session never allocates a runner until the first run).
@@ -123,9 +121,9 @@ pub enum Mode {
         editor: Option<SequenceEditorState>,
         runner: Option<SequenceRunnerState>,
     },
-    /// The concurrent-load runner (M7.5): a large modal firing N copies of the
+    /// The concurrent-load runner: a large modal firing N copies of the
     /// selected endpoint with live results + latency stats. Owns its
-    /// [`LoadRunnerState`] (R1.5 A2) — the runner cannot exist without its data.
+    /// [`LoadRunnerState`] — the runner cannot exist without its data.
     LoadRunner(LoadRunnerState),
 }
 
@@ -133,17 +131,13 @@ pub enum Mode {
 /// four picker modes ([`Mode::Search`]/[`Mode::Palette`]/[`Mode::WorkspacePicker`]
 /// /[`Mode::SequencePicker`]). `None` when no picker is open.
 ///
-/// R1.5 A2 (audit H3): the picker used to be a bare `Option<PickerState>`
-/// multiplexed against three parallel item `Vec`s (`profile_choices`
-/// /`workspace_choices`/`sequence_choices`) + `search_targets`/`palette_actions`,
-/// plus three one-shot `bool`s (`load_runner_after_pick`/`sequence_pick_runs`
-/// /`auth_picker`). The picker *kind* was inferred from [`Mode`] + which `Vec`
-/// was non-empty + which flag was set, and the selected index addressed whichever
-/// `Vec` matched **by convention** — a stale index or wrong-`Vec` pairing was an
-/// out-of-bounds hazard. Now the items travel WITH the finder inside the variant,
-/// so the [`PickerState::current`] index can only address its own list, and the
-/// one-shot flags are variant fields consumed on accept — `(kind, wrong-items)`
-/// and `(kind, stale-flag)` are unrepresentable.
+/// The picker is an enum whose variants each carry their own items inside the
+/// variant, rather than a bare `Option<PickerState>` multiplexed against parallel
+/// item `Vec`s plus one-shot `bool` flags. Because the items travel WITH the
+/// finder inside the variant, the [`PickerState::current`] index can only address
+/// its own list, and the one-shot flags are variant fields consumed on accept —
+/// `(kind, wrong-items)` and `(kind, stale-flag)` are unrepresentable, so a stale
+/// index or wrong-`Vec` pairing cannot become an out-of-bounds hazard.
 ///
 /// The shared [`PickerState`] (query/filter/selection over display strings) is the
 /// `state` field of every variant; reach it uniformly via
@@ -243,7 +237,7 @@ pub enum PromptPurpose {
     ExportWorkspace(JsonDialect),
     /// A curl command to import as a new endpoint in the selected collection.
     PasteCurl,
-    /// Name for a new request sequence (M7.4); opens the editor on the created file.
+    /// Name for a new request sequence; opens the editor on the created file.
     NewSequence,
 }
 
@@ -277,7 +271,7 @@ impl PromptPurpose {
 pub enum ConfirmPurpose {
     /// Delete the selected endpoint.
     DeleteEndpoint,
-    /// Delete the selected sequence in the Sequences sub-pane (note #6).
+    /// Delete the selected sequence in the Sequences sub-pane.
     DeleteSequence,
     /// Discard unsaved changes before switching endpoints. The pending target
     /// lives in `App::pending_load` (it can carry a path, so it is not part of
@@ -311,7 +305,7 @@ pub(in crate::tui::app) enum PendingClose {
     All(std::collections::VecDeque<std::path::PathBuf>),
 }
 
-/// Capacity of the bounded app channel (R1 D4a). Generous headroom for the
+/// Capacity of the bounded app channel. Generous headroom for the
 /// bursty senders (a load run fires `total` `LoadResult`s, the highlight worker a
 /// steady trickle of `Highlighted`s) while still bounding memory: an
 /// arbitrarily long / high-`total` session can no longer flood the queue with
@@ -321,8 +315,8 @@ pub(in crate::tui::app) enum PendingClose {
 /// full queue slows a producer without ever stalling input.
 pub(in crate::tui::app) const APP_CHANNEL_CAPACITY: usize = 1024;
 
-/// Messages delivered to the event loop over the app channel. No longer `Copy`
-/// since M3: results and highlighted lines carry owned data.
+/// Messages delivered to the event loop over the app channel. Not `Copy`:
+/// results and highlighted lines carry owned data.
 #[derive(Debug)]
 pub enum AppMsg {
     /// Request a redraw on the next loop iteration.
@@ -343,18 +337,18 @@ pub enum AppMsg {
         hash: u64,
         lines: Vec<Line<'static>>,
     },
-    /// A sequence step completed (M7.4). `run_generation` is matched against the
+    /// A sequence step completed. `run_generation` is matched against the
     /// runner's generation so results from a cancelled/superseded run are dropped.
     SequenceStep {
         run_generation: u64,
         index: usize,
         outcome: Result<Response, String>,
     },
-    /// One copy of a concurrent-load batch actually started executing (M7.5) —
+    /// One copy of a concurrent-load batch actually started executing —
     /// sent by the launcher when the copy enters the concurrency window, so its
     /// row shows the in-flight glyph honestly. `run_generation`-guarded.
     LoadStarted { run_generation: u64, index: usize },
-    /// One copy of a concurrent-load batch completed (M7.5). `run_generation`
+    /// One copy of a concurrent-load batch completed. `run_generation`
     /// guards against results from a cancelled/superseded batch.
     LoadResult {
         run_generation: u64,
@@ -383,7 +377,7 @@ pub enum SeqView {
     Run,
 }
 
-/// Which pane is zoomed (the other collapses to a stub). See deliverable 4.
+/// Which pane is zoomed (the other collapses to a stub).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoomPane {
     /// Request pane zoomed; Response collapses to its stats line.
@@ -392,7 +386,7 @@ pub enum ZoomPane {
     Response,
 }
 
-/// Which surface the shared `response_*` handlers operate on (note #2). The main
+/// Which surface the shared `response_*` handlers operate on. The main
 /// endpoint buffer by default; a runner's selected row/step when that runner's
 /// Response region is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,8 +407,8 @@ pub(in crate::tui::app) struct InFlightRequest {
     pub(in crate::tui::app) meta: ResponseMeta,
 }
 
-/// The per-endpoint edit/response/dirty/tab/editor state that used to live as
-/// flat `App` fields. Everything here is scoped to a single loaded endpoint; the
+/// The per-endpoint edit/response/dirty/tab/editor state, scoped to a single
+/// loaded endpoint rather than held as flat `App` fields. The
 /// forward-compat split (a later `Sequence` buffer kind) keeps this the payload
 /// of [`BufferKind::Endpoint`] while the dedup key (file path), tab label, and
 /// dirty stay reachable at the [`Buffer`] level.
@@ -442,8 +436,7 @@ pub(in crate::tui::app) struct EndpointBuffer {
     pub(in crate::tui::app) url_popup_vim: VimExt,
     pub(in crate::tui::app) response: ResponseState,
     /// Cursor/scroll/viewport geometry for this buffer's response viewer. Shared
-    /// shape with the runner states so the `response_*` handlers are mode-aware
-    /// (note #2).
+    /// shape with the runner states so the `response_*` handlers are mode-aware.
     pub(in crate::tui::app) geometry: ResponseGeometry,
     /// The highlight hash last enqueued but not yet returned.
     pub(in crate::tui::app) pending_highlight: Option<u64>,

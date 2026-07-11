@@ -6,7 +6,7 @@
 //! a leading pad space, the short name (with an accent `●` when dirty), and a
 //! trailing pad space, all on the chip background — bright ([`Theme::selection`])
 //! for the active tab, dim ([`Theme::tab_inactive`]) for the rest — with a raw
-//! space gap between chips doing the separating (drive-test note #5: no hard
+//! space gap between chips doing the separating (no hard
 //! `▐`/`▌` edge caps and no `▏` bar separator; the rounded terminal-cell fill of
 //! the padded bg is the chip). When the tabs overflow the strip width, a
 //! horizontal window is derived each frame to keep the active tab visible, with
@@ -27,7 +27,7 @@ const MAX_NAME: usize = 12;
 
 /// Columns the chip framing adds to a tab beyond its (already padded) label:
 /// only the single space gap that trails every chip and does the separating
-/// (drive-test note #5 dropped the `▐`/`▌` edge caps). Every width computation
+/// (there are no `▐`/`▌` edge caps). Every width computation
 /// counts a chip as `label_width + CHIP_OVERHEAD`; the softer look comes from
 /// the wider internal padding baked into the label itself ([`tab_label`]).
 pub(super) const CHIP_OVERHEAD: usize = 1;
@@ -42,7 +42,7 @@ pub struct TabItem {
 
 /// The rendered label text of a tab, including its internal padding and the
 /// dirty marker: `"  name ●  "` or `"  name  "`. Used both for width measurement
-/// and rendering so the two never drift. The two-space caps (drive-test note #5)
+/// and rendering so the two never drift. The two-space caps
 /// give the softer, roomier chip look now that the hard `▐`/`▌` edges are gone.
 fn tab_label(item: &TabItem) -> String {
     let name = truncate(&item.short_name, MAX_NAME);
@@ -69,7 +69,7 @@ fn label_width(item: &TabItem) -> usize {
 }
 
 /// The width in display columns a rendered chip occupies: the padded label plus
-/// the [`CHIP_OVERHEAD`] framing (just the trailing gap now — note #5 dropped the
+/// the [`CHIP_OVERHEAD`] framing (just the trailing gap now — there are no
 /// edge caps). The single source every width computation measures a tab by, so
 /// the window math and the render loop can never drift from what actually paints.
 fn chip_width(item: &TabItem) -> usize {
@@ -141,7 +141,7 @@ pub fn render(frame: &mut Frame, area: Rect, items: &[TabItem], active: usize, t
             break;
         }
         // Active chip = bright `selection` fill made BOLD for a stronger,
-        // clearer active-vs-inactive contrast (note #5); inactive = the dim
+        // clearer active-vs-inactive contrast; inactive = the dim
         // `tab_inactive` fill (both carry a real bg, so every chip reads as
         // filled). Bolding the local style leaves the shared `selection` slot
         // (explorer/picker rows) untouched.
@@ -151,7 +151,7 @@ pub fn render(frame: &mut Frame, area: Rect, items: &[TabItem], active: usize, t
             theme.tab_inactive
         };
         // Chip: the padded label on the chip bg, then a raw space gap that does
-        // the separating (note #5: no `▐`/`▌` caps, no `▏` bar). The label is
+        // the separating (no `▐`/`▌` caps, no `▏` bar). The label is
         // split so the dirty `●` can carry the accent foreground while still
         // sitting on the chip bg.
         if item.dirty {

@@ -1,4 +1,4 @@
-//! Key handling + edit-mode state transitions for the env editor (M7.11): the
+//! Key handling + edit-mode state transitions for the env editor: the
 //! `handle_*_key` routers plus the var-row / profile-CRUD mutations they drive.
 //! Split out of `env_editor/mod.rs` into this child module so its `impl
 //! EnvEditorState` block keeps full access to the state's private fields and the
@@ -15,7 +15,7 @@ impl EnvEditorState {
         // A live message is cleared on the next interaction so it does not linger.
         self.message = None;
 
-        // Ephemeral peek re-masking (drive-test note #3): ANY key other than the
+        // Ephemeral peek re-masking: ANY key other than the
         // reveal key (`p`) or the copy-while-revealed key (`y`) re-masks. This is
         // the single seam that satisfies "re-mask on cursor move to another row or
         // any mode change" — j/k, h/l, Tab, Enter, i, Esc, q, etc. all clear the
@@ -76,7 +76,7 @@ impl EnvEditorState {
                 EnvKeyOutcome::Consumed
             }
             // Vim `g`/`G` jump to first/last scope (aliased Home/End), matching the
-            // single-`g` convention the runners use (drive-test note #2).
+            // single-`g` convention the runners use.
             KeyCode::Char('g') | KeyCode::Home => {
                 self.selected_scope = 0;
                 self.selected_row = 0;
@@ -151,8 +151,7 @@ impl EnvEditorState {
                 EnvKeyOutcome::Consumed
             }
             // Vim `g`/`G` jump to first/last row (aliased Home/End). Pure
-            // navigation, so it works in the read-only Session group too
-            // (drive-test note #2).
+            // navigation, so it works in the read-only Session group too.
             KeyCode::Char('g') | KeyCode::Home => {
                 self.selected_row = 0;
                 EnvKeyOutcome::Consumed
@@ -197,7 +196,7 @@ impl EnvEditorState {
                 self.begin_edit(EnvField::Name, false);
                 EnvKeyOutcome::Consumed
             }
-            // Ephemeral peek (drive-test note #3): reveal the selected MASKED row's
+            // Ephemeral peek: reveal the selected MASKED row's
             // resolved value in place. Read-only for every scope including Session —
             // it never enters edit mode, never mutates the row. Only masked rows are
             // peekable; on a visible row it's a no-op with a hint. The app resolves
@@ -211,11 +210,11 @@ impl EnvEditorState {
                     EnvKeyOutcome::Consumed
                 }
             }
-            // Copy the selected value (drive-test D2 note #3). A masked/secret row
+            // Copy the selected value. A masked/secret row
             // keeps the never-expose-secrets stance: it must be peeked first, so `y`
             // only copies while a reveal is live (else a "press p" hint). A plainly
             // VISIBLE row has nothing to hide — `y` copies its value outright, no
-            // peek needed (the D2 regression: a non-masked value was uncopyable).
+            // peek needed (a non-masked value must not be uncopyable).
             KeyCode::Char('y') => {
                 if self.row_is_masked(self.selected_row) {
                     if self.selected_row_is_revealed() {

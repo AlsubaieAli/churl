@@ -1,6 +1,6 @@
 //! The semantic [`Action`] enum, its config-name/label lookup tables, and the
 //! `FromStr`/`Display` conversions between an action and its stable config name.
-//! Split out of the events module (M7.11) as a child module; the private lookup
+//! Split out of the events module as a child module; the private lookup
 //! tables keep their module scope via `pub(in crate::tui::events)` so the keymap
 //! core in the parent reaches them unchanged.
 
@@ -59,10 +59,10 @@ pub enum Action {
     EditSequence,
     /// Open a picker over all sequence names and open the chosen one (Edit face).
     OpenSequencePicker,
-    /// Open a picker over all sequence names and RUN the chosen one (D1 —
-    /// `<leader>s r`, so the user can choose which sequence to run).
+    /// Open a picker over all sequence names and RUN the chosen one
+    /// (`<leader>s r`, so the user can choose which sequence to run).
     RunSequencePick,
-    /// Open the concurrent-load runner for the selected endpoint (M7.5).
+    /// Open the concurrent-load runner for the selected endpoint.
     OpenLoadRunner,
     /// Pick an endpoint, then open the concurrent-load runner over it.
     OpenLoadRunnerPick,
@@ -105,17 +105,17 @@ pub enum Action {
     /// Delete the selected endpoint or collection (with a confirm).
     Delete,
     /// Delete the selected sequence in the Sequences sub-pane (with a y/n
-    /// confirm). Parallels [`Action::Delete`] for the endpoints tree (note #6).
+    /// confirm). Parallels [`Action::Delete`] for the endpoints tree.
     DeleteSequence,
     /// Toggle the explorer sidebar (hide / reopen).
     ToggleExplorer,
     /// Switch focus/zoom between the endpoints tree and the sequences sub-pane
-    /// inside the (focused) explorer column (PR 2b).
+    /// inside the (focused) explorer column.
     FocusSequencesToggle,
-    /// Cycle forward within the focused region (M7.10 stage B, shipped UNBOUND):
+    /// Cycle forward within the focused region (shipped UNBOUND):
     /// left column ⇒ Endpoints⇄Sequences; right column ⇒ next buffer/tab.
     CycleRegionFwd,
-    /// Cycle backward within the focused region (M7.10 stage B, shipped UNBOUND):
+    /// Cycle backward within the focused region (shipped UNBOUND):
     /// left column ⇒ Endpoints⇄Sequences; right column ⇒ previous buffer/tab.
     CycleRegionBack,
     /// Zoom the focused pane (Request/Response), collapsing the other.
@@ -132,7 +132,7 @@ pub enum Action {
     ToggleWrap,
     /// Toggle raw↔pretty (reformatted) rendering of the response body.
     TogglePretty,
-    /// Toggle A→Z alphabetical sorting of pretty JSON object keys (M7.7).
+    /// Toggle A→Z alphabetical sorting of pretty JSON object keys.
     ToggleSortKeys,
     /// Toggle the response viewer's left-hand line-number gutter (default on).
     ToggleLineNumbers,
@@ -150,9 +150,9 @@ pub enum Action {
     CopyResponse,
     /// Copy the response cursor's logical line to the clipboard.
     CopyLine,
-    /// Pan the response horizontal window left (unwrapped long lines, M7.7).
+    /// Pan the response horizontal window left (unwrapped long lines).
     ScrollBodyLeft,
-    /// Pan the response horizontal window right (unwrapped long lines, M7.7).
+    /// Pan the response horizontal window right (unwrapped long lines).
     ScrollBodyRight,
     /// Open the quick-jump request picker (fuzzy over all endpoints). Reuses the
     /// endpoint-search overlay; bound to `<leader>f`.
@@ -407,7 +407,7 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
 impl Action {
     /// All actions, in the order they appear in the command palette: the flat
     /// [`ACTION_TABLE`] followed by the nine parameterized
-    /// [`Action::FocusBufferIndex`] variants (note #5), so the numbered tab jumps
+    /// [`Action::FocusBufferIndex`] variants, so the numbered tab jumps
     /// surface in the palette and the `keymaps` view like any other action.
     pub fn all() -> impl Iterator<Item = Action> {
         ACTION_TABLE.iter().map(|(action, _, _)| *action).chain(

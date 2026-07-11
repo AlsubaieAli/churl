@@ -1,5 +1,5 @@
-//! Help-overlay key handling + in-help search, extracted from `app.rs`
-//! (M7.11). Grandchild module of `app`; `impl App` here keeps full access to
+//! Help-overlay key handling + in-help search, extracted from `app.rs`.
+//! Grandchild module of `app`; `impl App` here keeps full access to
 //! `App`'s private fields and methods without any visibility widening.
 
 use super::super::*;

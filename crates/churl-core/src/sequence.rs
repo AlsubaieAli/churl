@@ -1,15 +1,15 @@
-//! Request-sequence run engine and value extraction (M7.4).
+//! Request-sequence run engine and value extraction.
 //!
 //! This module is the single source of truth for *how a sequence runs*: the same
 //! primitives ([`prepare_step`], [`classify_step`], [`extract_step`]) drive both
 //! the wiremock-tested [`run_sequence`] convenience and the live TUI runner, so
 //! their semantics can never drift.
 //!
-//! The resolver stays the single `{{var}}` seam (the M9 plugin guardrail): a step
+//! The resolver stays the single `{{var}}` seam (the plugin guardrail): a step
 //! is prepared by *prepending* an ephemeral `"extracted"` [`Scope`] and the
 //! in-memory `"session"` [`Scope`] to the canonical scope chain — resolution is
 //! never forked. Extracted values win over ambient config so a chained value is
-//! never shadowed by a same-named workspace var; the Session scope (note #6) sits
+//! never shadowed by a same-named workspace var; the Session scope sits
 //! just below `extracted` so a previously-captured token resolves during a run
 //! too, but a same-run extraction still wins.
 //!
@@ -289,7 +289,7 @@ fn json_type(value: &serde_json::Value) -> &'static str {
 /// scope is loaded fresh in [`prepare_step`] from each step's own collection.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunScopes {
-    /// In-memory Session captures (note #6): values previously extracted by a
+    /// In-memory Session captures: values previously extracted by a
     /// Session-target rule, surviving the run. Sits just below `extracted` and
     /// above `cli` so a same-named ambient var never shadows a captured token; a
     /// same-run extraction (`extracted`) still wins. Process-lifetime, in-memory,
@@ -356,17 +356,12 @@ pub enum SequenceError {
 }
 
 /// Resolves a step's `endpoint` against the workspace root, rejecting any path
-/// that would escape it. Two layers:
-///
-/// 1. A fast **lexical** pre-check rejecting `..` components, absolute paths, and
-///    drive prefixes.
-/// 2. A **canonical containment** check that also catches an in-workspace symlink
-///    pointing outside the root: the deepest existing ancestor of the resolved
-///    path is canonicalized (following symlinks) and must stay under the
-///    canonical root. A missing endpoint file is *not* a traversal — its deepest
-///    existing ancestor (a real in-workspace directory) still resolves inside the
-///    root, so the load simply fails with a not-found error, keeping the two
-///    failure kinds distinct.
+/// that would escape it. Two layers: a lexical pre-check (rejects `..`, absolute
+/// paths, drive prefixes) plus a canonical containment check that also catches an
+/// in-workspace symlink pointing outside the root. A missing endpoint file is
+/// *not* a traversal — its deepest existing ancestor still resolves inside the
+/// root, so the load fails with a not-found error, keeping the two failure kinds
+/// distinct.
 fn resolve_step_path(root: &Path, endpoint: &str) -> Result<PathBuf, SequenceError> {
     let rel = Path::new(endpoint);
     for component in rel.components() {
@@ -427,7 +422,7 @@ fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
 /// — resolution is never forked. `session` sits below `extracted` (a same-run
 /// capture still wins) and above `cli` (a captured token is not shadowed by an
 /// ambient same-named var); it is the same in-memory Session store a standalone
-/// send resolves against (note #6).
+/// send resolves against.
 pub fn prepare_step(
     workspace_root: &Path,
     step: &SequenceStep,

@@ -69,8 +69,8 @@ fn response() -> Response {
 }
 
 /// A minimal loaded endpoint buffer (no workspace) so white-box tests can set
-/// per-buffer state (`in_flight`, `response`, editor) that used to live as
-/// flat `App` fields.
+/// per-buffer state (`in_flight`, `response`, editor) that lives per-buffer,
+/// not as flat `App` fields.
 fn open_bare_endpoint(app: &mut App) {
     let endpoint = Endpoint {
         seq: 0,
@@ -242,7 +242,7 @@ fn workspace_fixture(root: &Path) -> App {
     App::new(ws, KeyMap::default()).unwrap()
 }
 
-// ---- M7.4 sequence runner state machine (injected outcomes, no server) ----
+// ---- sequence runner state machine (injected outcomes, no server) ----
 
 /// Builds a workspace with three GET endpoints and a `sequences/flow.toml`
 /// running them in order, then opens the runner (client `None`, so steps stay
@@ -405,7 +405,7 @@ fn sequence_cancel_marks_pending_skipped() {
     );
 }
 
-// ---- note #2: unified sequence-runner response viewer ----
+// ---- unified sequence-runner response viewer ----
 
 /// Opens the sequence runner, lands a JSON `Done` response on step 0, selects
 /// it, and focuses the Response region — the shared setup for parity tests.
@@ -466,7 +466,7 @@ fn sequence_response_search_and_copy() {
     let dir = tempfile::tempdir().unwrap();
     // Body carries "needle" twice (searchable) plus a tab + NUL that sanitize
     // rewrites on display — so copy proving byte-exactness must return the RAW
-    // wire bytes, not the sanitized text (the M7.7 invariant, in the runner).
+    // wire bytes, not the sanitized text (the byte-exactness invariant, in the runner).
     let raw = "needle\tval\u{0}needle";
     let mut app = seq_app_with_response(dir.path(), raw);
     render_once(&mut app);
@@ -1102,7 +1102,7 @@ fn run_sequence_opens_in_run_face() {
     assert!(app.sequence_runner().is_some());
 }
 
-/// D2 note #1 regression: a `<leader>s r` run opens the runner face with NO
+/// Regression: a `<leader>s r` run opens the runner face with NO
 /// editor built. `Ctrl-R` must build the editor SYNCHRONOUSLY and land in the
 /// Edit face on the flip itself — not leave the surface in a focus-less dead
 /// state that only resolves (by exiting to Normal) on the next keypress.
@@ -1191,7 +1191,7 @@ fn dirty_edit_to_run_blocks_with_notify() {
 }
 
 /// `close_sequence_surface` drops both component states + the abort handle and
-/// returns to Normal. R1.5 A2: the editor/runner/face now live IN the
+/// returns to Normal. The editor/runner/face live IN the
 /// `Mode::Sequence` payload, so returning to `Mode::Normal` drops all three at
 /// once — the accessors go `None` and there is no residual `sequence_view` field
 /// to inspect (the fold's whole point).
@@ -1229,7 +1229,7 @@ async fn edit_to_run_aborts_orphaned_inflight_step() {
     let handle = task.abort_handle();
     app.sequence_abort = Some(handle.clone());
     // Force the surface into the Edit face (clean editor) so a Ctrl-R flip
-    // takes the Edit→Run rebuild branch. R1.5 A2: the face lives in the mode.
+    // takes the Edit→Run rebuild branch. The face lives in the mode.
     if let Mode::Sequence { view, .. } = &mut app.mode {
         *view = SeqView::Edit;
     }
@@ -1262,7 +1262,7 @@ fn jump_label_focuses_pane() {
         .unwrap();
     assert!(matches!(app.mode, Mode::Jump));
     assert!(app.jump.is_some());
-    // `p` is the Response mnemonic (M7.10 stage B — `s` moved to Sequences,
+    // `p` is the Response mnemonic (`s` moved to Sequences,
     // Response took `p` for res`p`onse).
     app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
         .unwrap();
@@ -1271,8 +1271,8 @@ fn jump_label_focuses_pane() {
     assert_eq!(app.focus, Pane::Response);
 }
 
-/// M7.10 stage B: `f`-jump labels NO endpoint rows — a row-alphabet key that
-/// used to select a row is now inert (jump-mode stays open, ignoring it).
+/// `f`-jump labels NO endpoint rows — a row-alphabet key that
+/// does not select a row is inert (jump-mode stays open, ignoring it).
 #[test]
 fn jump_labels_no_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -1296,7 +1296,7 @@ fn jump_labels_no_rows() {
     );
 }
 
-/// M7.10 stage B: `f` no longer labels a row, so pressing the Jump key again
+/// `f` no longer labels a row, so pressing the Jump key again
 /// falls through to the "Jump key again cancels" rule.
 #[test]
 fn jump_f_again_cancels() {
@@ -1528,7 +1528,7 @@ fn sequence_step_unresolved_continue_advances() {
     assert_eq!(step_status(&app, 1), StepStatus::Running);
 }
 
-/// Regression (M6.6 review #1): on the Body tab in edtui Normal mode, the
+/// Regression: on the Body tab in edtui Normal mode, the
 /// row-editing keys (`i` insert, `a` append) must reach edtui instead of
 /// being eaten by the Request overlay's RowEdit/RowAdd — there are no rows
 /// on the Body tab.
@@ -1554,7 +1554,7 @@ fn body_tab_row_keys_reach_edtui() {
     }
 }
 
-/// Regression (M6.6 review #4): after an explorer reload shifts the
+/// Regression: after an explorer reload shifts the
 /// name-sorted collection indices (a new collection sorting first), the
 /// loaded endpoint's collection index is remapped from its file path, so
 /// the send-time resolver still reads the *right* collection's
@@ -1612,11 +1612,11 @@ fn switch_profile_picker_sets_active() {
     }
     app.accept_overlay().unwrap();
     assert_eq!(app.active_profile.as_deref(), Some("prod"));
-    // R1.5 A2: accept drops the whole picker (profiles included) — no residual choices.
+    // accept drops the whole picker (profiles included) — no residual choices.
     assert!(app.picker_profiles().is_empty());
 }
 
-/// R1.5 A2 (audit H3, PR 3): the auth-kind picker is its own `Picker::Auth`
+/// The auth-kind picker is its own `Picker::Auth`
 /// variant, and accepting a selection swaps the loaded endpoint's `request.auth`
 /// to the matching kind. Locks the accept path for the one picker kind that had
 /// no coverage before the fold — the index→`Auth` mapping (`set_auth_kind`) is
@@ -1708,7 +1708,7 @@ fn newer_message_replaces_current() {
     );
 }
 
-// ---- M6.7: leader state machine ----
+// ---- leader state machine ----
 
 fn press(app: &mut App, c: char) {
     app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
@@ -1885,7 +1885,7 @@ fn leader_inert_in_edtui_insert() {
 }
 
 /// The `?` help / `churl keymaps` traversal: the `<leader>s r` chooser
-/// (`RunSequencePick`, D1) is reachable only through the sequences submenu, so
+/// (`RunSequencePick`) is reachable only through the sequences submenu, so
 /// its combo must render as `s r`. Guards the `leader_combos_for`/`iter_leader`
 /// submenu traversal (the help-guard test alone can't catch a missing one).
 #[test]
@@ -1903,7 +1903,7 @@ fn run_sequence_shows_submenu_chord() {
     );
 }
 
-// ---- M6.7: digit binds only act in Request ----
+// ---- digit binds only act in Request ----
 
 /// Global digits do nothing (no pane focus); inside Request they jump tabs.
 #[test]
@@ -1919,7 +1919,7 @@ fn digit_focus_removed_at_app_level() {
     assert_eq!(app.test_tabs().active, RequestTab::Headers);
 }
 
-// ---- M6.7: URL→Params merge policy ----
+// ---- URL→Params merge policy ----
 
 fn params(pairs: &[(&str, &str, bool)]) -> Vec<Param> {
     pairs
@@ -2047,7 +2047,7 @@ fn commit_url_merges_and_marks_dirty() {
     assert!(app.is_dirty(), "commit marks the request dirty");
 }
 
-// ---- M6.7: zoom state machine ----
+// ---- zoom state machine ----
 
 #[test]
 fn zoom_toggles_and_restores() {
@@ -2127,7 +2127,7 @@ fn jump_into_collapsed_pane_transfers_zoom() {
     );
 }
 
-// ---- M6.7: explorer toggle + auto-reopen ----
+// ---- explorer toggle + auto-reopen ----
 
 #[test]
 fn explorer_toggle_and_auto_reopen() {
@@ -2168,7 +2168,7 @@ fn tab_skips_hidden_explorer() {
     );
 }
 
-// ---- PR 2b: sequences sub-pane ----
+// ---- sequences sub-pane ----
 
 /// A workspace with one collection (one endpoint) and two sequences, for the
 /// sub-pane state-machine tests.
@@ -2195,7 +2195,7 @@ fn seq_pane_app(root: &Path) -> App {
 }
 
 /// A workspace with one collection (one endpoint) and NO sequences dir, for
-/// the note #3 focused-empty-pane tests. Mirrors [`seq_pane_app`] minus the
+/// the focused-empty-pane tests. Mirrors [`seq_pane_app`] minus the
 /// `sequences/` dir.
 fn empty_seq_pane_app(root: &Path) -> App {
     std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
@@ -2210,7 +2210,7 @@ fn empty_seq_pane_app(root: &Path) -> App {
     App::new(ws, KeyMap::default()).unwrap()
 }
 
-/// M7.10 stage B: the Explorer `s` overlay (`focus-sequences-toggle`) flips
+/// The Explorer `s` overlay (`focus-sequences-toggle`) flips
 /// `left_active` Endpoints⇄Sequences and focuses the left column. The
 /// sub-pane is always present (peek-symmetric), so nothing ever hides.
 #[test]
@@ -2254,12 +2254,11 @@ fn jump_e_lands_on_endpoints_from_sequences() {
     );
 }
 
-/// Note #3: an EXPLICIT focus on the empty sequences sub-pane now STICKS —
-/// `set_focus` no longer force-reverts to Endpoints on a zero-length list.
-/// (Previously this asserted the blanket force-Endpoints behavior; that crutch
-/// is gone — the empty pane is focusable and renders an informative empty
+/// An EXPLICIT focus on the empty sequences sub-pane STICKS —
+/// `set_focus` does not force-revert to Endpoints on a zero-length list.
+/// The empty pane is focusable and renders an informative empty
 /// state. The reload/switch reconcile path keeps its own guard, exercised by
-/// `reload_emptying_sequences_forces_endpoints`.)
+/// `reload_emptying_sequences_forces_endpoints`.
 #[test]
 fn explicit_focus_sticks_on_empty_sequences_pane() {
     // A workspace with an endpoint but zero sequences.
@@ -2403,7 +2402,7 @@ fn explorer_nav_routes_to_seq_cursor_when_sequences_active() {
     assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
 }
 
-/// D1: `<leader>s r` (`RunSequencePick`) opens a run-flavored chooser and the
+/// `<leader>s r` (`RunSequencePick`) opens a run-flavored chooser and the
 /// accepted index RUNS the chosen sequence — not sequence #0. Mirrors the
 /// `open_load_runner_pick` tests.
 #[test]
@@ -2434,7 +2433,7 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
     );
 }
 
-/// D1: `<leader>s o` (`OpenSequencePicker`) still opens the chosen sequence
+/// `<leader>s o` (`OpenSequencePicker`) still opens the chosen sequence
 /// for EDITING — the run intent stays false so the accept path edits.
 #[test]
 fn open_sequence_pick_edits_not_runs() {
@@ -2493,7 +2492,7 @@ fn leader_s_space_opens_the_sequence_picker() {
     assert_eq!(app.leader, None, "submenu dispatch dismisses the popup");
 }
 
-/// M7.10 dynamic submenus, end-to-end at the app layer: a config
+/// Dynamic submenus, end-to-end at the app layer: a config
 /// `g = "+git"` + `[keys.leader.git]` wires a brand-new submenu that shows in
 /// which-key and whose keys dispatch through the leader state machine.
 #[test]
@@ -2599,7 +2598,7 @@ fn leader_e_hide_restores_prior_focus() {
     app.set_focus(Pane::Response);
     app.set_focus(Pane::Explorer);
     assert_eq!(app.focus, Pane::Explorer);
-    // Hide: focus restores to Response (owner #2B — not the URL-bar fallback).
+    // Hide: focus restores to Response (not the URL-bar fallback).
     app.dispatch(Action::ToggleExplorer, None).unwrap();
     assert!(app.explorer_hidden);
     assert_eq!(app.focus, Pane::Response, "true prior-pane restore");
@@ -2792,7 +2791,7 @@ fn tree_mutating_keys_work_normally_on_endpoints() {
     );
 }
 
-/// M1 regression: switching from a sequenced workspace (sub-pane on, sequences
+/// Regression: switching from a sequenced workspace (sub-pane on, sequences
 /// focused) into a sequence-less one resets to endpoints — focus is never
 /// stranded on an empty sub-pane and B1 is disarmed. Fails pre-fix
 /// (`left_active` stays `Sequences` with an empty list).
@@ -2827,7 +2826,7 @@ fn workspace_switch_into_sequenceless_resets_to_endpoints() {
     assert!(!app.left_column_on_sequences(), "B1 disarmed");
 }
 
-/// M1 regression (reload path): the invariant forces Endpoints when a reload
+/// Regression (reload path): the invariant forces Endpoints when a reload
 /// empties the sequence list even without a full workspace switch.
 #[test]
 fn reload_emptying_sequences_forces_endpoints() {
@@ -2846,7 +2845,7 @@ fn reload_emptying_sequences_forces_endpoints() {
     );
 }
 
-// ---- M7.10 stage B: 4-region Tab, cycle-region, f-jump, hover-fallback ----
+// ---- 4-region Tab, cycle-region, f-jump, hover-fallback ----
 
 /// B1: Tab cycles the 4 regions Explorer→UrlBar→Request→Response→Explorer, and
 /// landing back on the left column RESTORES its last sub-pane (Sequences),
@@ -3051,7 +3050,7 @@ fn picking_a_sequence_sets_seq_cursor() {
     assert_eq!(app.explorer.selected_sequence().unwrap().name, "Checkout");
 }
 
-// ---- M6.7: URL popup editor ----
+// ---- URL popup editor ----
 
 fn app_with_endpoint(dir: &Path) -> App {
     let mut app = workspace_fixture(dir);
@@ -3104,7 +3103,7 @@ fn url_popup_single_line_constraint() {
 
 /// `/`-search in the popup executes on Enter (jump to match → Normal), and
 /// the popup stays open; a second Enter commits. Regression: `handle_url_popup_key`
-/// used to commit on any Enter, so Search could never run.
+/// must not commit on any Enter, or Search could never run.
 #[test]
 fn url_popup_search_executes_then_commits() {
     let dir = tempfile::tempdir().unwrap();
@@ -3235,7 +3234,7 @@ fn url_edit_mode_selects_inline_vs_popup() {
     assert!(app.test_url_editor().is_none());
 }
 
-// ---- M6.7: help overlay ----
+// ---- help overlay ----
 
 #[test]
 fn help_opens_and_closes() {
@@ -3275,7 +3274,7 @@ fn profile_picker_marks_active() {
     assert_eq!(picker2.items[2], "prod");
 }
 
-// ---- M7.2 quick-jump pickers ----
+// ---- quick-jump pickers ----
 
 /// A second workspace fixture with a distinctly-named collection, so a
 /// workspace switch is observable in the explorer tree.
@@ -3463,7 +3462,7 @@ fn two_endpoint_app(root: &Path) -> App {
     app
 }
 
-/// M1: a workspace switch with MULTIPLE dirty buffers. `s` must save EVERY
+/// A workspace switch with MULTIPLE dirty buffers. `s` must save EVERY
 /// dirty buffer (not just the active one) before the switch destroys them all
 /// — a non-active dirty buffer must never be lost silently.
 #[test]
@@ -3508,7 +3507,7 @@ fn workspace_switch_s_saves_all_dirty_buffers() {
     );
 }
 
-/// M1: the workspace-switch guard fires even when ONLY a NON-active buffer is
+/// The workspace-switch guard fires even when ONLY a NON-active buffer is
 /// dirty (the guard uses `any_buffer_dirty`, not active-only).
 #[test]
 fn workspace_switch_guards_on_nonactive_dirty() {
@@ -3539,7 +3538,7 @@ fn workspace_switch_guards_on_nonactive_dirty() {
     );
 }
 
-/// M1: a REFUSED save during a multi-dirty workspace switch aborts the switch
+/// A REFUSED save during a multi-dirty workspace switch aborts the switch
 /// and keeps every buffer (mirrors the single-buffer save-failure behaviour).
 #[test]
 fn workspace_switch_s_refused_save_aborts_switch() {
@@ -3583,7 +3582,7 @@ fn workspace_switch_s_refused_save_aborts_switch() {
     assert!(app.any_buffer_dirty(), "the refused buffer stays dirty");
 }
 
-// ---- M7.5 concurrent-load runner ----
+// ---- concurrent-load runner ----
 
 /// Builds an app with one selected endpoint (targeting `url`) and opens the
 /// load runner over it. Client is `None`, so a run resets rows to Pending and
@@ -3794,7 +3793,7 @@ fn load_run_injected_results_update_stats_and_finish() {
     assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 0);
 }
 
-// ---- note #2: unified runner response viewer (parity + preserved nav) ----
+// ---- unified runner response viewer (parity + preserved nav) ----
 
 /// A JSON response carrying a `content-type` header so the viewer defaults to
 /// pretty and JSON folding/sort are available (mirrors a real server response).
@@ -3964,7 +3963,7 @@ fn load_response_search_targets_runner_and_returns() {
     );
 }
 
-/// R1.5 A2 regression lock: a load result that lands WHILE body-search is open
+/// Regression lock: a load result that lands WHILE body-search is open
 /// over the runner must reach the PARKED runner state (moved into
 /// `body_search_return` when `/` opened `Mode::BodySearch`), not fall on the
 /// floor because `self.mode` is momentarily `Mode::BodySearch`. Proves
@@ -4040,7 +4039,7 @@ fn load_result_lands_on_parked_runner_during_body_search() {
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
-/// returns the BYTE-EXACT raw wire bytes (M7.7 invariant holds in the runner).
+/// returns the BYTE-EXACT raw wire bytes (byte-exactness invariant holds in the runner).
 #[test]
 fn load_response_hscroll_and_byte_exact_copy() {
     let dir = tempfile::tempdir().unwrap();
@@ -4439,7 +4438,7 @@ fn load_cancel_marks_pending_and_writes_partial_summary() {
     assert_eq!(batches[0].summary.ok_count, 1);
 }
 
-/// D1: a launched-then-cancelled row carries a real time-to-cancel (read out
+/// A launched-then-cancelled row carries a real time-to-cancel (read out
 /// of `InFlight { started }`), while a never-launched pending row keeps
 /// `timing = None` — no fabricated zero.
 #[test]
@@ -4658,7 +4657,7 @@ async fn load_cancel_aborts_the_batch_live() {
     );
 }
 
-// ---- PR 3a: Buffer refactor (Stage 1) unit tests ----
+// ---- Buffer refactor (Stage 1) unit tests ----
 
 /// Builds a `SelectedEndpoint` with the given file + body for buffer tests.
 fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
@@ -4812,7 +4811,7 @@ fn distinct_buffers_keep_independent_editor_state() {
     );
 }
 
-/// R1 D4c: switching away from a buffer evicts its highlight cache, so total
+/// Switching away from a buffer evicts its highlight cache, so total
 /// cached-line memory is bounded by (active buffers × 64), not all buffers.
 /// The buffer you land ON is untouched; a same-index focus never evicts.
 #[test]
@@ -5088,7 +5087,7 @@ fn leader_tabs_submenu_binds() {
 
 /// The tabs-submenu digit binds (`<leader>t <n>`) live ONLY in the `tabs`
 /// submenu layer and must NOT shadow the Request-pane `1`..`4` tab-jump
-/// overlay (M6.7). The submenu resolves a digit to `FocusBufferIndex`, while
+/// overlay. The submenu resolves a digit to `FocusBufferIndex`, while
 /// the Request `PaneCtx` overlay still resolves the same digit to its
 /// `Tab1`..`Tab4` action — two independent keymap layers, no clash.
 #[test]
@@ -5349,7 +5348,7 @@ fn rename_repoints_loaded_buffer_path() {
 
 /// On quit, an in-flight request records an interrupted history row (no
 /// status/duration), mirroring `cancel_request` — so a request the user quit
-/// mid-flight isn't silently lost from history (audit B1). Its task is aborted.
+/// mid-flight isn't silently lost from history. Its task is aborted.
 #[tokio::test]
 async fn quit_records_in_flight_request_in_history() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
@@ -5381,8 +5380,8 @@ async fn quit_records_in_flight_request_in_history() {
     );
 }
 
-/// Every in-flight buffer is recorded on quit, not just the active one (audit
-/// B1 — the response router is per-buffer, so quit must be too).
+/// Every in-flight buffer is recorded on quit, not just the active one
+/// (the response router is per-buffer, so quit must be too).
 #[tokio::test]
 async fn quit_records_all_in_flight_buffers() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
@@ -5423,7 +5422,7 @@ async fn quit_without_in_flight_writes_nothing() {
 // ---- B3: sticky history-write-failure indicator -------------------------------
 
 /// The sticky "history not recording" flag arms after N consecutive write
-/// failures and clears on the next success (audit B3). Driven through
+/// failures and clears on the next success. Driven through
 /// `note_history_write`, which is exactly what `write_history` /
 /// `write_load_summary` call on each SQLite insert outcome. (A real insert
 /// failure can't be forced deterministically without exposing a test-only DB

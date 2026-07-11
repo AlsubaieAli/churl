@@ -1,6 +1,6 @@
 //! One-line status bar: persistent state only — focused pane, workspace/endpoint,
 //! active profile, dirty marker, and the in-flight spinner. Transient action
-//! messages live in the dedicated message row above (M6.7 deliverable 9), never
+//! messages live in the dedicated message row above, never
 //! here, so the two components stay decoupled.
 
 use ratatui::Frame;
@@ -25,7 +25,7 @@ pub struct StatusCtx<'a> {
     pub dirty: bool,
     /// Whether a request is in flight (drives the spinner).
     pub in_flight: bool,
-    /// Whether history writes are currently failing (audit B3): draws a sticky,
+    /// Whether history writes are currently failing: draws a sticky,
     /// error-styled "⚠ history not recording" flag that persists until a write
     /// succeeds — unlike the auto-expiring message row, so a persistent SQLite
     /// failure can't scroll past unnoticed ("fail loud").
@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
     if ctx.dirty {
         spans.push(Span::styled(" · ● unsaved · w save", ctx.theme.accent));
     }
-    // Sticky history-failure flag (audit B3): error-styled, stays until a write
+    // Sticky history-failure flag: error-styled, stays until a write
     // succeeds. Placed before the idle/spinner tail so it reads as steady state,
     // not a transient hint.
     if ctx.history_failing {

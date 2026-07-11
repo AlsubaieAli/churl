@@ -8,7 +8,7 @@
 //! an import. The query string stays in the URL — import does not explode it
 //! into [`crate::model::Param`]s (lossless and simple).
 //!
-//! Auth remap (M5): `-u user:pass` becomes first-class [`Auth::Basic`] and an
+//! Auth remap: `-u user:pass` becomes first-class [`Auth::Basic`] and an
 //! `Authorization: Bearer …` header becomes [`Auth::Bearer`]; literal secret
 //! values are replaced with `{{password}}`/`{{token}}` placeholders (no secrets
 //! in workspace files — stdout and `--out` both end up on disk). With multiple
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn other_authorization_headers_stay_plain() {
-        // M4-era Basic base64 export and a lowercase "bearer" scheme (the
+        // Basic base64 export and a lowercase "bearer" scheme (the
         // `Bearer ` prefix is matched exactly) both stay plain headers.
         for command in [
             "curl -H 'Authorization: Basic YWxpY2U6czNjcjN0' https://e.com/x",
@@ -561,7 +561,7 @@ mod tests {
         );
 
         // Bearer header first: bearer wins; -u falls back to the plain
-        // M4-era Authorization: Basic header.
+        // Authorization: Basic header.
         let result =
             import("curl -H 'Authorization: Bearer {{t}}' -u alice:s3cr3t https://e.com/x");
         assert_eq!(

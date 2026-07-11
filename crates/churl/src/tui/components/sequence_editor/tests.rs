@@ -93,7 +93,7 @@ fn render_to_text(state: &SequenceEditorState) -> String {
 
 #[test]
 fn rules_pane_shows_extraction_grammar_hint_when_focused() {
-    // Owner drive-test #5: adding a rule gave no guidance on the extract
+    // Adding a rule otherwise gives no guidance on the extract
     // syntax. The hint shows while the Rules pane is focused, and stays hidden
     // while on the Steps list.
     let mut ed = editor();
@@ -111,8 +111,8 @@ fn rules_pane_shows_extraction_grammar_hint_when_focused() {
 
 #[test]
 fn ctrl_j_k_also_reorder_steps() {
-    // Ctrl-j / Ctrl-k are aliases for Shift-J / Shift-K reordering (owner
-    // drive-test #4). Ctrl must NOT fall through to the bare j/k selection nav.
+    // Ctrl-j / Ctrl-k are aliases for Shift-J / Shift-K reordering.
+    // Ctrl must NOT fall through to the bare j/k selection nav.
     let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
     let mut ed = editor();
     // Select the second step, then Ctrl-k moves it up.
@@ -278,8 +278,8 @@ fn persist_seeds_from_loaded_step_and_shows_session_marker() {
 
 #[test]
 fn session_marker_style_stays_legible_on_selected_row() {
-    // Drive-test note #1: on the highlighted row the marker sits on the
-    // `selection` fill. The real bug (caught in review) was fg==bg — the
+    // On the highlighted row the marker sits on the
+    // `selection` fill. The real bug was fg==bg — the
     // marker's own hue tracks the selection background and vanished. Assert
     // the property that actually means "legible": foreground != background,
     // for BOTH shipped themes — plus that it adapts vs the plain row and

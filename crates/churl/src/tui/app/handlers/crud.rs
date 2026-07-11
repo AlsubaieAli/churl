@@ -1,6 +1,6 @@
 //! CRUD / prompt / confirm handlers — endpoint & collection create/rename/
 //! delete, import/export, paste-curl, copy-as-curl, and the prompt/confirm
-//! key routing — extracted from `app.rs` (M7.11, PR 4). Grandchild module of
+//! key routing — extracted from `app.rs`. Grandchild module of
 //! `app`; `impl App` here keeps full access to `App`'s private fields and
 //! methods without any visibility widening.
 
@@ -124,8 +124,8 @@ impl App {
     /// `C` / palette: copy the loaded request as a curl one-liner. `resolved`
     /// substitutes `{{var}}`s first (secrets caution — the explicit opt-in).
     pub(in crate::tui::app) fn copy_as_curl(&mut self, resolved: bool) {
-        // One-shot read: fall back to the hovered endpoint when nothing is loaded
-        // (M7.10 stage B), so copy acts on what the cursor points at.
+        // One-shot read: fall back to the hovered endpoint when nothing is loaded,
+        // so copy acts on what the cursor points at.
         let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.notify("no endpoint selected");
             return;
@@ -474,13 +474,13 @@ impl App {
                         let path = selected.file;
                         match persistence::delete_sequence(&path) {
                             Ok(()) => {
-                                // R1.5 A2: the sequence editor/runner state now lives
-                                // INSIDE the `Mode::Sequence` variant. This confirm
-                                // runs in `Mode::Confirm(DeleteSequence)`, so that
-                                // state is definitionally absent (dropped when the
-                                // surface closed) — the old defensive "if a stale
-                                // editor/runner points at this file, drop it" block is
-                                // now unreachable by construction and is gone.
+                                // The sequence editor/runner state lives INSIDE the
+                                // `Mode::Sequence` variant. This confirm runs in
+                                // `Mode::Confirm(DeleteSequence)`, so that state is
+                                // definitionally absent (dropped when the surface
+                                // closed) — a stale editor/runner pointing at this
+                                // file is unreachable by construction, so no
+                                // defensive drop is needed here.
                                 // reload_explorer clamps the sub-pane cursor to the
                                 // new sequence count, so selection lands on the
                                 // next/previous sequence (or the empty-state

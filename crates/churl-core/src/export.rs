@@ -7,7 +7,7 @@
 //! only enabled headers are emitted. Every argument is shell-quoted via
 //! [`shlex::try_quote`]; single spaces, no line continuations.
 //!
-//! Auth round-trip addendum (M5): [`Auth::Basic`] exports as `-u 'user:pass'`
+//! Auth round-trip addendum: [`Auth::Basic`] exports as `-u 'user:pass'`
 //! and [`Auth::Bearer`] as `-H 'Authorization: Bearer <token>'` — both
 //! round-trip *structurally* (re-import reproduces `request.auth`) as long as
 //! secret values are `{{...}}` placeholders, which workspace files guarantee.

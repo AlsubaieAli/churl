@@ -36,7 +36,7 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
     if let Some(leader) = config.leader_key.as_deref() {
         keymap.set_leader(leader)?;
     }
-    // Load-time conflict/shadow validation (M7.10). Non-blocking: warnings go to
+    // Load-time conflict/shadow validation. Non-blocking: warnings go to
     // stderr *before* raw mode (visible in the launching shell), then to a
     // first-frame statusline toast, and the full list lives in `churl keymaps`.
     let keymap_warnings = keymap.validate(&config.keys, &config.key_overlays);

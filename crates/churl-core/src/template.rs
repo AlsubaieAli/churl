@@ -1,17 +1,17 @@
 //! `{{var}}` template resolution: the single seam every substitution flows
-//! through (the M9 plugin-guardrail — plugin template *functions* will extend the
+//! through (the plugin-guardrail — plugin template *functions* will extend the
 //! lookup here, not scattered call sites).
 //!
 //! A [`Resolver`] holds an ordered list of [`Scope`]s (highest precedence first)
 //! and falls through to the process environment last. [`Resolver::substitute`]
 //! replaces every `{{name}}` occurrence in a string; an unresolved placeholder is
-//! left **verbatim** (consistent with M5's send-verbatim behaviour — no error).
+//! left **verbatim** (consistent with the send-verbatim behaviour — no error).
 //! [`Resolver::substitute_request`] applies the same substitution across a
 //! [`Request`]'s templatable fields.
 //!
 //! Placeholder syntax matches [`crate::config::is_template_placeholder`]: `{{`,
 //! the name, `}}`, with inner whitespace trimmed; name characters are
-//! `[A-Za-z0-9_.-]`. No nesting, no functions (functions arrive in M9).
+//! `[A-Za-z0-9_.-]`. No nesting, no functions (functions are not yet supported).
 
 use std::collections::BTreeMap;
 
@@ -104,20 +104,14 @@ impl Resolver {
 /// substituted [`Request`], deduplicated and sorted — empty when the request is
 /// fully resolved.
 ///
-/// This is the "fail loud" seam: run it on a request *after*
-/// [`Resolver::substitute_request`]. Any name it returns is a variable no scope
-/// (nor the process env) resolved, so the literal `{{name}}` would otherwise ship
-/// on the wire (a `{` / `}` in a URL yields a cryptic transport error, and a leaked
-/// `{{token}}` header is silently wrong). Call sites should refuse the send and
-/// surface the names.
-///
-/// It reuses the SAME delimiter scan as substitution ([`parse_placeholder`]), so
-/// what it flags is exactly what substitution would have replaced: a malformed
-/// brace run (`{{ }}`, `{{a b}}`, an unclosed `{{`) is left verbatim by
-/// substitution and is therefore treated as literal text here — never flagged.
-/// churl has no other escape for literal double-braces, so a genuinely literal
-/// `{{...}}` that is *not* a valid placeholder name passes through untouched at
-/// both stages. Fields scanned mirror [`Resolver::substitute_request`] exactly:
+/// This is the "fail loud" seam: run it *after* [`Resolver::substitute_request`].
+/// Any name it returns is a variable no scope (nor the process env) resolved, so
+/// the literal `{{name}}` would otherwise ship on the wire (a leaked `{{token}}`
+/// header is silently wrong). Call sites should refuse the send and surface the
+/// names. It reuses the SAME delimiter scan as substitution ([`parse_placeholder`]),
+/// so what it flags is exactly what substitution would have replaced — a malformed
+/// brace run (`{{ }}`, `{{a b}}`, an unclosed `{{`) is literal text at both stages,
+/// never flagged. Fields scanned mirror [`Resolver::substitute_request`] exactly:
 /// `url`, every header *value*, every param *value*, the body content, and all
 /// auth string fields (basic username + password, bearer token, apikey name +
 /// value). Header and param *names* are not substituted, so they are not scanned.

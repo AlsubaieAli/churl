@@ -27,7 +27,7 @@ pub enum RowKind {
 
 /// One visible row of the flattened explorer tree.
 ///
-/// Sequences no longer live in the tree (PR 2b): they render in a dedicated
+/// Sequences no longer live in the tree: they render in a dedicated
 /// toggle-able sub-pane at the bottom of the explorer column, keyed off
 /// [`ExplorerState::seq_cursor`] rather than tree rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +119,7 @@ impl CollectionNode {
 #[derive(Debug)]
 pub struct ExplorerState {
     collections: Vec<CollectionNode>,
-    /// Request sequences (M7.4), loaded eagerly at open/reload (a small set).
+    /// Request sequences, loaded eagerly at open/reload (a small set).
     sequences: Vec<(PathBuf, Sequence)>,
     /// Warnings from the last lenient sequence load, drained by [`take_warnings`].
     ///
@@ -134,7 +134,7 @@ pub struct ExplorerState {
     /// [`scroll_to_fit`]: ExplorerState::scroll_to_fit
     scroll: usize,
     /// Cursor into [`ExplorerState::sequences`] for the sequences sub-pane
-    /// (PR 2b). Independent of the tree `cursor`.
+    /// Independent of the tree `cursor`.
     seq_cursor: usize,
     /// First visible sequence row, keeping the sequence cursor in view when the
     /// sub-pane is shorter than the sequence list.
@@ -207,7 +207,7 @@ impl ExplorerState {
     }
 
     /// Flattens the tree into the currently visible rows (collections and, when
-    /// expanded, their endpoints). Sequences are NOT tree rows since PR 2b —
+    /// expanded, their endpoints). Sequences are NOT tree rows —
     /// they live in the dedicated sub-pane.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
@@ -283,7 +283,7 @@ impl ExplorerState {
     }
 
     /// The endpoint under the tree cursor, if the cursor is on an endpoint row
-    /// (M7.10 stage B). Read-only — unlike [`select`], it neither toggles a
+    /// Read-only — unlike [`select`], it neither toggles a
     /// collection nor loads a buffer; it just peeks at what is hovered. Powers
     /// the hover-vs-selection fallback for one-shot read actions.
     pub fn hovered_endpoint(&self) -> Option<SelectedEndpoint> {
@@ -293,7 +293,7 @@ impl ExplorerState {
             .flatten()
     }
 
-    /// The sequence under the sub-pane cursor (PR 2b), if any. Read by the run
+    /// The sequence under the sub-pane cursor, if any. Read by the run
     /// and edit paths; no tree-cursor gate — the sub-pane owns the selection.
     pub fn selected_sequence(&self) -> Option<SelectedSequence> {
         let (file, sequence) = self.sequences.get(self.seq_cursor)?;
@@ -436,7 +436,7 @@ impl ExplorerState {
     }
 
     /// Loads every collection's endpoints and returns their file paths (for the
-    /// sequence editor's add-step picker, M7.4).
+    /// sequence editor's add-step picker).
     pub fn all_endpoint_files(&mut self) -> Result<Vec<PathBuf>, PersistenceError> {
         let mut out = Vec::new();
         for node in &mut self.collections {
@@ -482,7 +482,7 @@ impl ExplorerState {
         Ok(out)
     }
 
-    // ---- M6.6 CRUD support ----
+    // ---- CRUD support ----
 
     /// Rebuilds the collection list from `workspace` while preserving the current
     /// cursor (clamped) and re-expanding collections that were expanded before.
@@ -725,7 +725,7 @@ pub fn render(
                     .row_endpoint_file(row)
                     .is_some_and(|f| dirty_files.iter().any(|d| d.as_path() == f)))
             .then(|| Span::styled(" ●", theme.accent));
-            // `f`-jump is pane-only now (M7.10 stage B) — rows carry no jump
+            // `f`-jump is pane-only now — rows carry no jump
             // labels, only the usual cursor marker.
             let cursor = if i == state.cursor { "> " } else { "  " };
             let text = format!("{cursor}{indent}{marker}{}", row.name);
@@ -742,7 +742,7 @@ pub fn render(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Renders the sequences sub-pane (PR 2b): a flat list of sequence names keyed
+/// Renders the sequences sub-pane: a flat list of sequence names keyed
 /// off [`ExplorerState::seq_cursor`], with a `Sequences` title, a thick border
 /// when focused, and empty-state text when the workspace has none. Pure and
 /// deterministic (snapshot-safe). Takes `&mut` to update the scroll offset.
@@ -772,7 +772,7 @@ pub fn render_sequences_pane(
     frame.render_widget(block, area);
 
     if state.sequences.is_empty() {
-        // Informative empty state for the EXPANDED/focused pane (note #3): when
+        // Informative empty state for the EXPANDED/focused pane: when
         // `f s` (or the `s` overlay) zooms in on a sequence-less workspace, tell
         // the user how to add one rather than showing a blank body. Dim-hint
         // styling (`theme.statusline`) matches the collapsed peek stub.
@@ -814,7 +814,7 @@ pub fn render_sequences_pane(
 /// sequences, or an empty-state note).
 pub fn sequences_stub_summary(state: &ExplorerState, theme: &Theme) -> Line<'static> {
     let text = match state.sequences.len() {
-        // D1: a zero-sequence peek shows an add affordance, not a dead "no
+        // A zero-sequence peek shows an add affordance, not a dead "no
         // sequences" — matches the `<leader>` glyph convention used elsewhere.
         0 => "<leader>s a to add".to_owned(),
         1 => "1 sequence".to_owned(),

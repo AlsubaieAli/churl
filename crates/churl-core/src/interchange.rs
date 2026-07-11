@@ -7,7 +7,7 @@
 //! files. Import is *liberal* — unknown/missing fields degrade to warnings and
 //! sensible defaults rather than hard errors.
 //!
-//! Secret hygiene (M5) carries over: literal secret auth values are replaced
+//! Secret hygiene carries over: literal secret auth values are replaced
 //! with `{{password}}`/`{{token}}`/`{{api_key}}` placeholders on import (so
 //! [`crate::persistence::save_endpoint`] never refuses them), and export refuses
 //! any endpoint still carrying a literal secret auth value — exactly like
@@ -345,7 +345,7 @@ fn map_body(body: Option<&Value>, ctx: &mut ImportCtx) -> Option<Body> {
     }
 }
 
-/// Maps a Postman `auth` object into a churl [`Auth`], applying the M5 secret
+/// Maps a Postman `auth` object into a churl [`Auth`], applying the secret
 /// placeholder policy to literal secret values.
 fn map_auth(auth: Option<&Value>, ctx: &mut ImportCtx) -> Option<Auth> {
     let obj = auth?.as_object()?;
@@ -436,7 +436,7 @@ fn value_as_string(value: &Value) -> Option<String> {
     }
 }
 
-/// Applies the M5 secret placeholder policy: an already-`{{...}}` value is kept
+/// Applies the secret placeholder policy: an already-`{{...}}` value is kept
 /// verbatim; a literal is replaced with `placeholder` and a warning is raised.
 /// An empty value is left empty (nothing to leak).
 fn placeholderize(raw: &str, placeholder: &str, label: &str, ctx: &mut ImportCtx) -> String {

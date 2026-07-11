@@ -69,7 +69,7 @@ pub(super) struct GeomCache {
 /// [`ResponseView`] (which owns view-mode/folds/wrap/pretty/search state). One of
 /// these is carried by the main-pane endpoint buffer AND by each runner state, so
 /// the shared `response_*` action handlers can operate on whichever surface is the
-/// active response (note #2: unified viewer). The `h_scroll` lives on the view
+/// active response (unified viewer). The `h_scroll` lives on the view
 /// itself; the highlight cache + pending-highlight guard stay on the endpoint
 /// buffer (the runners share it in render).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

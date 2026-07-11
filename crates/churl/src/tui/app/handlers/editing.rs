@@ -1,5 +1,5 @@
-//! Row/field/auth/method/url editing handlers — extracted from `app.rs`
-//! (M7.11, PR 4). Grandchild module of `app`; `impl App` here keeps full
+//! Row/field/auth/method/url editing handlers — extracted from `app.rs`.
+//! Grandchild module of `app`; `impl App` here keeps full
 //! access to `App`'s private fields and methods without any visibility
 //! widening.
 
@@ -72,7 +72,7 @@ impl App {
     }
 
     /// Begins URL editing via `i`/`Enter`: opens the inline editor or the popup
-    /// per `url_edit_mode` (deliverable 7). A no-op when no endpoint is loaded.
+    /// per `url_edit_mode`. A no-op when no endpoint is loaded.
     pub(in crate::tui::app) fn begin_url_edit(&mut self) {
         match self.url_edit_mode {
             UrlEditMode::Inline => self.begin_url_edit_inline(),
@@ -107,7 +107,7 @@ impl App {
     }
 
     /// Commits a new URL (from the inline editor or the popup): strips the query
-    /// string, merges it into the Params tab (deliverable 3), and sets the base
+    /// string, merges it into the Params tab, and sets the base
     /// URL. Reports the merge and marks dirty. A no-op when nothing is loaded.
     pub(in crate::tui::app) fn commit_url(&mut self, url: String) {
         let (base, pairs) = split_query(&url);
@@ -504,9 +504,9 @@ impl App {
             "Bearer".to_owned(),
             "ApiKey".to_owned(),
         ];
-        // R1.5 A2: the auth-kind picker is its own `Picker::Auth` variant (folding
-        // the old `auth_picker` bool) — the accept path matches the variant, not a
-        // side flag, so it can't be confused with the profile/command palette.
+        // The auth-kind picker is its own `Picker::Auth` variant — the accept
+        // path matches the variant, not a side flag, so it can't be confused
+        // with the profile/command palette.
         self.picker = Some(Picker::Auth {
             state: picker::PickerState::new(" Auth kind ", labels),
         });

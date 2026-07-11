@@ -1,6 +1,6 @@
 //! The TUI render layer: the top-level `render` entry point plus its draw-only
 //! helpers (`leader_popup`, `render_collapsed_stub`, `prompt_hint`,
-//! `confirm_text`, `leader_popup_entries`). Split out of `app.rs` (M7.11) into
+//! `confirm_text`, `leader_popup_entries`). Split out of `app.rs` into
 //! this child module of `app` so it keeps full access to `App`'s private fields
 //! and methods without any visibility widening. Rendering is pure (no I/O) and
 //! deterministic, so the `tui_snapshot` snapshots stay byte-identical.
@@ -15,7 +15,7 @@ use super::*;
 ///
 /// Pure (no I/O) and deterministic — `TestBackend` snapshots stay stable.
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // The dedicated message row (deliverable 9) sits above the statusline and
+    // The dedicated message row sits above the statusline and
     // only occupies a row while a message is live, so the statusline never moves.
     // The body-search input takes that row when open (vim-style `/query`),
     // shadowing any transient message.
@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Two-column layout: Explorer left, column B right. The explorer is a
     // *narrow* column (owner prompt): fixed 30 cols — Min(24)+Fill would grow
     // the explorer to half the screen (ratatui distributes excess into Min).
-    // When hidden (deliverable 5) the right column takes the full width.
+    // When hidden the right column takes the full width.
     let (explorer_area, right_area) = if app.explorer_hidden {
         (None, main)
     } else {
@@ -61,7 +61,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         (Some(explorer_area), right_area)
     };
     // Column B split into three rows: URL bar / Request / Response.
-    // Zoom (deliverable 4) collapses the unfocused pane to a bordered stub
+    // Zoom collapses the unfocused pane to a bordered stub
     // (border + summary + border), keeping its title and tab-bar/stats visible.
     const COLLAPSED_HEIGHT: u16 = 3;
     // The tab strip occupies a single row at the very top of column B, ONLY when
@@ -100,8 +100,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .map(|b| b.file().to_path_buf())
         .collect();
     if let Some(explorer_area) = explorer_area {
-        // The left column always splits into endpoints + sequences (M7.10 stage
-        // B — the sequences sub-pane is peek-symmetric, always present). The
+        // The left column always splits into endpoints + sequences (the
+        // sequences sub-pane is peek-symmetric, always present). The
         // focused sub-pane (`left_active`) gets Fill(1); the other collapses to
         // a 3-row stub. Endpoints on top, sequences on the bottom.
         let seq_focused = explorer_focused && app.left_active == LeftPane::Sequences;
@@ -344,7 +344,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     {
         b.geometry.apply_render_outcome(&outcome);
         // Write the clamped horizontal scroll back onto the view so an over-pan
-        // (past the widest visible line) self-corrects on the next frame (M7.7).
+        // (past the widest visible line) self-corrects on the next frame.
         if let ResponseState::Done { view } = &mut b.response {
             view.set_h_scroll(outcome.clamped_h_scroll);
         }
@@ -360,7 +360,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
     }
-    // The statusline (deliverable 9) keeps *only* persistent state: focus,
+    // The statusline keeps *only* persistent state: focus,
     // endpoint/workspace, profile, dirty, and the in-flight spinner. Transient
     // messages live in the dedicated row below.
     let in_flight = app
@@ -385,22 +385,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         message::render(frame, area, text, &theme);
     }
 
-    // R1.5 A2: the shared finder/selection lives inside the `Picker` variant; the
+    // The shared finder/selection lives inside the `Picker` variant; the
     // render is kind-agnostic, so draw from the shared `state()` slice.
     if let Some(picker_state) = app.picker_state() {
         picker::render(frame, main, picker_state, &theme);
     }
 
     // CRUD / method overlays render over the whole main area.
-    // While the body-search input is open OVER a runner Response region (note #2),
+    // While the body-search input is open OVER a runner Response region,
     // keep drawing that runner (with the `/query` row overlaid) instead of falling
     // through to the main two-column layout — the search targets the runner's
     // response. The overlay render decision uses this effective mode; every other
     // overlay still keys on the live `app.mode`.
-    // R1.5 A2: `Mode` is non-`Copy`, so decide the effective overlay by a small
+    // `Mode` is non-`Copy`, so decide the effective overlay by a small
     // owned tag first (dropping any `&app.mode` borrow), then dispatch. While
     // body-search is open OVER a runner, the runner mode is parked in
-    // `body_search_return` (which now owns the `LoadRunner(state)` payload), so we
+    // `body_search_return` (which owns the `LoadRunner(state)` payload), so we
     // key on that; every other overlay keys on the live mode. The payload-carrying
     // arms re-borrow the state out of the mode inside their block so the runner
     // arms can still take `&mut app` for the buffer/highlight bookkeeping.
@@ -425,7 +425,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Prompt(purpose) => Overlay::Prompt(*purpose),
         Mode::Confirm(purpose) => Overlay::Confirm(*purpose),
         Mode::EnvEditor(_) => Overlay::EnvEditor,
-        // R1.5 A2: the active face lives in the (effective) `Mode::Sequence`
+        // The active face lives in the (effective) `Mode::Sequence`
         // payload. While body-search is open over the Run-face Response region the
         // sequence mode is parked in `body_search_return` (= `effective_mode`), so
         // this keys on the face carried there.
@@ -491,7 +491,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .and_then(Buffer::as_endpoint)
                 .map(|b| &b.highlight_cache)
                 .unwrap_or(&scratch_cache);
-            // R1.5 A2: the runner lives in the mode (or the parked mode during a
+            // The runner lives in the mode (or the parked mode during a
             // body-search over its Response region), disjoint from
             // `buffers`/`highlight_tx`.
             let job = match App::sequence_runner_in_mut(&mut app.mode, &mut app.body_search_return)
@@ -534,7 +534,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .and_then(Buffer::as_endpoint)
                 .map(|b| &b.highlight_cache)
                 .unwrap_or(&scratch_cache);
-            // R1.5 A2: the runner lives in the mode (or the parked mode during a
+            // The runner lives in the mode (or the parked mode during a
             // body-search over it), disjoint from `buffers`/`highlight_tx`.
             let job = match App::load_runner_in_mut(&mut app.mode, &mut app.body_search_return) {
                 Some(runner) => load_runner::render(frame, main, runner, tick, cache, &theme),
@@ -567,20 +567,20 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Overlay::None => {}
     }
 
-    // The URL vim-popup editor (deliverable 7) renders over the main area.
+    // The URL vim-popup editor renders over the main area.
     if let Some(b) = app.active_endpoint_buffer_mut()
         && let Some(editor) = b.url_popup.as_mut()
     {
         urlbar::render_popup(frame, main, editor, &theme);
     }
 
-    // The two-level which-key leader popup (deliverable 1).
+    // The two-level which-key leader popup.
     if let Some(state) = app.leader.clone() {
         let (title, entries) = leader_popup_entries(app, &state);
         leader_popup::render(frame, main, &title, &entries, &theme);
     }
 
-    // The `?` help overlay (deliverable 8), rendered from the live keymap.
+    // The `?` help overlay, rendered from the live keymap.
     if app.help_open {
         let outcome = help::render(
             frame,

@@ -1,6 +1,6 @@
 //! The environments & variables editor's render/draw fns: the `render` modal
 //! entry point and its private draw helpers (scope list, var rows, footer).
-//! Split out of the env_editor module (M7.11) as a child module, so it keeps
+//! Split out of the env_editor module as a child module, so it keeps
 //! full access to `EnvEditorState`'s private fields and private methods with no
 //! visibility widening.
 
@@ -101,7 +101,7 @@ fn render_scope_list(frame: &mut Frame, area: Rect, state: &EnvEditorState, them
             lines.push(Line::styled(group.to_owned(), theme.auth_mask));
             last_group = Some(group);
         }
-        // The active profile carries the `●` marker (M6.5 convention).
+        // The active profile carries the `●` marker.
         let marker = if matches!(scope.kind, EnvScopeKind::Profile)
             && state.active_profile.as_deref() == Some(scope.label.as_str())
         {
@@ -197,7 +197,7 @@ fn render_var_line<'a>(
         pad(name, name_col)
     };
 
-    // An ephemeral peek (drive-test note #3) reveals THIS row's resolved value in
+    // An ephemeral peek reveals THIS row's resolved value in
     // place — but only when the reveal is pinned to exactly this scope+row (guarded
     // in `revealed_value`), so a stale reveal can never paint another row's secret.
     let revealed = (row == state.selected_row)
@@ -205,7 +205,7 @@ fn render_var_line<'a>(
         .flatten();
 
     // Session captures are ALWAYS masked — a captured token is a secret
-    // regardless of its var name (note #6). Elsewhere, secret-named literal values
+    // regardless of its var name. Elsewhere, secret-named literal values
     // are masked unless a placeholder or being edited. A live peek overrides the
     // mask for its one row only.
     let value_cell = if editing_value {

@@ -1,6 +1,6 @@
 //! Send/response/history handlers — request dispatch, cancellation, the
 //! channel message pump, response landing, highlight caching, and history
-//! writes — extracted from `app.rs` (M7.11, PR 4). Grandchild module of `app`;
+//! writes — extracted from `app.rs`. Grandchild module of `app`;
 //! `impl App` here keeps full access to `App`'s private fields and methods
 //! without any visibility widening.
 
@@ -71,7 +71,7 @@ impl App {
             let outcome = churl_core::http::execute(&client, &request, &options)
                 .await
                 .map_err(|err| err.to_string());
-            // Bounded channel (R1 D4a): this is a spawned async task, so awaiting
+            // Bounded channel: this is a spawned async task, so awaiting
             // on a full queue applies backpressure without stalling the UI thread.
             let _ = tx
                 .send(AppMsg::Response {
@@ -205,7 +205,7 @@ impl App {
         if b.highlight_cache.len() >= 64 {
             b.highlight_cache.clear();
         }
-        // Clear the in-flight guard when its result lands (M7 dedup micro-nit).
+        // Clear the in-flight guard when its result lands.
         if b.pending_highlight == Some(hash) {
             b.pending_highlight = None;
         }

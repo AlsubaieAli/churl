@@ -12,7 +12,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
         endpoint_path TEXT
     );
     CREATE INDEX idx_history_executed_at ON history(executed_at_ms DESC);",
-    // 2: recently-opened workspaces, for the quick-jump workspace picker (M7.2).
+    // 2: recently-opened workspaces, for the quick-jump workspace picker.
     // Recency lives here (SQLite state), never in the workspace files themselves.
     "CREATE TABLE workspaces (
         id INTEGER PRIMARY KEY,
@@ -20,7 +20,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
         last_opened_ms INTEGER NOT NULL
     );
     CREATE INDEX idx_workspaces_last_opened ON workspaces(last_opened_ms DESC);",
-    // 3: load-run batch summaries (M7.5). A load run fires N copies of one
+    // 3: load-run batch summaries. A load run fires N copies of one
     // endpoint; recording one row per copy would flood the per-endpoint history
     // view, so a completed run writes exactly ONE summary row to this SEPARATE
     // table (never to `history`). Structural non-flooding: the per-endpoint
@@ -42,7 +42,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
         max_ms INTEGER
     );
     CREATE INDEX idx_load_batches_executed_at ON load_batches(executed_at_ms DESC);",
-    // 4: add the mean-latency column to load_batches (M7.5 fix round). Appended
+    // 4: add the mean-latency column to load_batches. Appended
     // as an ALTER rather than editing migration 3's CREATE (migrations are
     // append-only): a DB already at v3 — e.g. from an earlier dev build of this
     // branch — skips migration 3 forever, so the column must arrive via its own

@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, TransactionBehavior};
 
 /// How long a writer waits for a busy database before erroring `SQLITE_BUSY`
-/// (R1 D2). A concurrent churl process holding the write lock (e.g. migrating)
+/// A concurrent churl process holding the write lock (e.g. migrating)
 /// releases it in milliseconds, so 5 s is generous headroom without hanging the
 /// UI indefinitely on a genuinely stuck lock.
 const BUSY_TIMEOUT_MS: u32 = 5_000;
 
-/// Retained-row cap per history table (R1 D4b). Every insert prunes the table
+/// Retained-row cap per history table. Every insert prunes the table
 /// back to the newest `HISTORY_ROW_CAP` rows so an arbitrarily long session
 /// cannot grow `state.sqlite` without bound. Reads (`recent`) are unaffected —
 /// they already `LIMIT` far below this. Applied independently to `history` and
@@ -97,7 +97,7 @@ pub struct HistoryEntry {
     pub endpoint_path: Option<String>,
 }
 
-/// A completed load-run summary about to be inserted into `load_batches` (M7.5).
+/// A completed load-run summary about to be inserted into `load_batches`.
 /// Exactly one of these is written per completed (or cancelled) load run — never
 /// per-request rows, so the per-endpoint history view is never flooded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,7 +191,7 @@ impl HistoryStore {
     }
 
     /// Brings the schema up to date under a single write lock, so concurrent
-    /// openers can never race the migration (R1 D2).
+    /// openers can never race the migration.
     ///
     /// The whole run happens inside one `BEGIN IMMEDIATE` transaction (a write
     /// lock taken up front): `user_version` is re-read *inside* the lock, only
@@ -549,7 +549,7 @@ mod tests {
         );
     }
 
-    // ---- R1 D4b: history pruning ------------------------------------------
+    // ---- history pruning ------------------------------------------
 
     /// Counts rows in a table on the store's connection.
     fn row_count(store: &HistoryStore, table: &str) -> i64 {
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(row_count(&store, "history"), 0);
     }
 
-    // ---- R1 D2: WAL + busy_timeout + migration race guard -----------------
+    // ---- WAL + busy_timeout + migration race guard -----------------
 
     /// A file-backed store lands in WAL mode with a non-zero busy_timeout after
     /// open (both PRAGMAs read back as applied).

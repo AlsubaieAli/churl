@@ -1,18 +1,18 @@
 //! Sequence run + editor handlers — run orchestration, the unified sequence
 //! surface key routing, pickers, and the editor save/create path — extracted
-//! from `app.rs` (M7.11, PR 4). Grandchild module of `app`; `impl App` here
+//! from `app.rs`. Grandchild module of `app`; `impl App` here
 //! keeps full access to `App`'s private fields and methods without any
 //! visibility widening.
 
 use super::super::*;
 
 impl App {
-    /// The open sequence surface's run-face state, if a runner is built (R1.5 A2).
-    /// The state now lives in the [`Mode::Sequence`] variant, not a parallel field.
+    /// The open sequence surface's run-face state, if a runner is built. The
+    /// state lives in the [`Mode::Sequence`] variant, not a parallel field.
     /// While body-search is open OVER the runner (`Mode::BodySearch`), the sequence
     /// mode is parked in `body_search_return`, so it is also consulted — the
-    /// runner's response surface must stay reachable through a `/` search (note #2,
-    /// mirrors [`App::load_runner`]).
+    /// runner's response surface must stay reachable through a `/` search
+    /// (mirrors [`App::load_runner`]).
     pub(in crate::tui::app) fn sequence_runner(&self) -> Option<&SequenceRunnerState> {
         match &self.mode {
             Mode::Sequence { runner, .. } => runner.as_ref(),
@@ -24,7 +24,7 @@ impl App {
         }
     }
 
-    /// Mutable accessor for the open sequence runner (R1.5 A2). Consults the same
+    /// Mutable accessor for the open sequence runner. Consults the same
     /// two locations as [`App::sequence_runner`] (the mode, or the parked mode while
     /// body-search is open over the runner).
     pub(in crate::tui::app) fn sequence_runner_mut(&mut self) -> Option<&mut SequenceRunnerState> {
@@ -50,7 +50,7 @@ impl App {
         }
     }
 
-    /// The open sequence surface's edit-face state, if an editor is built (R1.5 A2).
+    /// The open sequence surface's edit-face state, if an editor is built.
     /// The editor never hosts body-search (only the Run-face Response region does),
     /// so — unlike the runner — this consults only the live mode.
     pub(in crate::tui::app) fn sequence_editor(&self) -> Option<&SequenceEditorState> {
@@ -68,7 +68,7 @@ impl App {
         }
     }
 
-    /// The active face of the open sequence surface (R1.5 A2). `SeqView` is `Copy`,
+    /// The active face of the open sequence surface. `SeqView` is `Copy`,
     /// so this hands back an owned value, dropping the `self.mode` borrow — callers
     /// can then act via `&mut self`. `None` when not in a sequence surface.
     pub(in crate::tui::app) fn sequence_view(&self) -> Option<SeqView> {
@@ -90,7 +90,7 @@ impl App {
 
     /// Opens a fuzzy picker over every sequence name. `run == false` (`<leader>s o`
     /// / palette) opens the chosen sequence in the Edit face; `run == true`
-    /// (`<leader>s r`) loads + runs it instead (D1 — mirrors the
+    /// (`<leader>s r`) loads + runs it instead (mirrors the
     /// `load_runner_after_pick` one-shot-intent pattern).
     pub(in crate::tui::app) fn open_sequence_picker(&mut self, run: bool) {
         if self.workspace.is_none() {
@@ -113,9 +113,9 @@ impl App {
         } else {
             " Open sequence "
         };
-        // R1.5 A2: the sequence files + the run-vs-edit `runs` intent (folding the
-        // old `sequence_pick_runs` bool) travel WITH the finder in the variant, so
-        // the accepted index addresses only these `paths` and the intent can't leak.
+        // The sequence files + the run-vs-edit `runs` intent travel WITH the
+        // finder in the variant, so the accepted index addresses only these
+        // `paths` and the intent can't leak.
         self.picker = Some(Picker::Sequence {
             state: picker::PickerState::new(title, items),
             paths: choices,
@@ -124,7 +124,7 @@ impl App {
         self.mode = Mode::SequencePicker;
     }
 
-    /// Loads the sequence at `path` and opens the RUNNER over it (D1 `<leader>s r`
+    /// Loads the sequence at `path` and opens the RUNNER over it (`<leader>s r`
     /// chooser accept path). Mirrors `open_picked_sequence` but hands to the
     /// runner instead of the editor.
     pub(in crate::tui::app) fn run_sequence_at(&mut self, path: PathBuf) {
@@ -164,7 +164,7 @@ impl App {
             .into_iter()
             .cloned()
             .collect();
-        // R1.5 A2: construct the surface INTO the mode — Run face, no editor yet
+        // Construct the surface INTO the mode — Run face, no editor yet
         // (built lazily on the first Run→Edit flip), runner live. No parallel
         // `sequence_*` fields, so `(Mode::Sequence, None runner in Run face)` after
         // a fresh run is unrepresentable.
@@ -279,8 +279,8 @@ impl App {
         index: usize,
         outcome: Result<Response, String>,
     ) {
-        // R1.5 A2: the runner lives in `self.mode`, so a live runner borrow now
-        // aliases `self` — and `self.sequence_abort = None` below is a `self` field
+        // The runner lives in `self.mode`, so a live runner borrow aliases `self`
+        // — and `self.sequence_abort = None` below is a `self` field
         // write. Do the stale-generation gate through the immutable accessor (borrow
         // dropped at the `if`), clear the abort handle, THEN take the mut borrow.
         let stale = self
@@ -321,7 +321,7 @@ impl App {
         };
 
         // Merge extracted values into the run-only accumulator (empty on any
-        // failure). Also collect the Session-target captures (note #6): a rule
+        // failure). Also collect the Session-target captures: a rule
         // whose name is in this step's `persist` and that actually extracted a
         // value. `extracted` is empty on a failed extraction, so a failure never
         // writes — leaving any prior Session value intact.
@@ -414,7 +414,7 @@ impl App {
     }
 
     /// Routes a runner Response-region key through the SAME dispatch + `response_*`
-    /// handlers the main pane uses (note #2 — one code path, so the runner viewer
+    /// handlers the main pane uses (one code path, so the runner viewer
     /// can never drift). Returns `true` when the key resolved to a response action
     /// and was consumed; `false` when the caller must delegate to the runner for
     /// its own keys.
@@ -438,7 +438,7 @@ impl App {
         };
         match action {
             // Viewer cursor nav — the SAME movement path the main Response pane
-            // uses, operating on the mode-aware geometry (note #2).
+            // uses, operating on the mode-aware geometry.
             Action::Up | Action::Down | Action::Top | Action::Bottom => {
                 self.response_scroll(action)
             }
@@ -475,10 +475,10 @@ impl App {
             self.toggle_sequence_view();
             return Ok(());
         }
-        // R1.5 A2: `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
+        // `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
         // `SeqView` is `Copy`, so read the active face out of the arm without
         // holding the borrow. The dispatcher only routes here on `Mode::Sequence`,
-        // so a non-Sequence mode is unreachable (the old fall-through went nowhere).
+        // so a non-Sequence mode is unreachable.
         let Some(view) = self.sequence_view() else {
             return Ok(());
         };
@@ -508,13 +508,13 @@ impl App {
                 }
             }
             SeqView::Run => {
-                // Response-region keys route through the shared response path FIRST
-                // (note #2); anything not a response action delegates to the runner.
+                // Response-region keys route through the shared response path FIRST;
+                // anything not a response action delegates to the runner.
                 if self.try_route_runner_response_key(key) {
                     return Ok(());
                 }
-                // R1.5 A2: the runner lives in the mode; the old `is_none()→close`
-                // guard + `.expect("checked above")` collapse into one accessor —
+                // The runner lives in the mode; the `is_none()→close` guard +
+                // `.expect("checked above")` collapse into one accessor —
                 // no runner (a Run face with none built) still closes the surface.
                 let Some(runner) = self.sequence_runner_mut() else {
                     self.close_sequence_surface();
@@ -538,7 +538,7 @@ impl App {
     /// (re)builds the runner from the saved steps before switching. The run
     /// itself is never auto-started here — the user presses `r` in the Run face.
     pub(in crate::tui::app) fn toggle_sequence_view(&mut self) {
-        // R1.5 A2: `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
+        // `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
         // Read the face out (Copy), act, then mutate the payload fields back through
         // the arm. Not in a sequence surface ⇒ nothing to flip.
         let Some(view) = self.sequence_view() else {
@@ -547,13 +547,13 @@ impl App {
         match view {
             SeqView::Run => {
                 // Run→Edit is always safe, but the editor may not exist yet: a
-                // `<leader>s r` run opens the runner face WITHOUT building an editor
-                // (D2 note #1). Flipping to Edit without one left the surface in a
-                // dead state — Edit face, no editor — so the pane was "exited" with
-                // nothing focused until the next keypress fell through to
-                // close_sequence_surface. Build the editor synchronously here (from
-                // the runner's saved file, the single source of truth) so focus
-                // transfers into the Edit face on the flip itself.
+                // `<leader>s r` run opens the runner face WITHOUT building an
+                // editor. Flipping to Edit without one would leave the surface in
+                // a dead state — Edit face, no editor — so the pane would be
+                // "exited" with nothing focused until the next keypress fell
+                // through to close_sequence_surface. Build the editor synchronously
+                // here (from the runner's saved file, the single source of truth)
+                // so focus transfers into the Edit face on the flip itself.
                 if self.sequence_editor().is_none() {
                     let Some(path) = self.sequence_runner().map(|r| r.path.clone()) else {
                         // No runner either — nothing to edit; leave the surface as-is
@@ -639,7 +639,7 @@ impl App {
         if let Some(runner) = self.sequence_runner_mut() {
             runner.run_generation += 1;
         }
-        // R1.5 A2: setting `Normal` drops the whole `Mode::Sequence` payload
+        // Setting `Normal` drops the whole `Mode::Sequence` payload
         // (editor + runner) — no separate `sequence_*` fields to clear. The
         // generation bump above ran while the runner was still live, so a landed
         // straggler is already dropped by the guard.
@@ -701,7 +701,7 @@ impl App {
         sequence: &churl_core::model::Sequence,
     ) {
         let endpoints = self.endpoint_rel_paths();
-        // R1.5 A2: construct the surface INTO the mode — Edit face, editor built,
+        // Construct the surface INTO the mode — Edit face, editor built,
         // no runner yet (the run face is entered lazily on the first Ctrl-R flip).
         self.mode = Mode::Sequence {
             view: SeqView::Edit,
@@ -736,7 +736,7 @@ impl App {
         };
         let path = editor.path().to_owned();
         // Validate first (duplicate rule names refuse the whole save — nothing is
-        // written and the editor stays open + dirty, mirroring the M7.3 gate).
+        // written and the editor stays open + dirty, mirroring the save gate).
         let sequence = match editor.to_sequence_checked() {
             Ok(sequence) => sequence,
             Err(msg) => {

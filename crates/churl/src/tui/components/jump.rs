@@ -5,13 +5,13 @@
 //! focuses that region. It is an overlay-level mode: it consumes every key
 //! (routing precedence slot 1, alongside Search/Palette).
 //!
-//! `f`-jump is **pane-only** (M7.10 stage B, owner decision): it labels no
+//! `f`-jump is **pane-only**: it labels no
 //! endpoint rows. Row-precision navigation is the leader pickers' job —
 //! `<leader>f` (endpoints) and `<leader>s f` (sequences).
 
 use super::super::app::Pane;
 
-/// What a jump label points at. Five regions, no rows (M7.10 stage B).
+/// What a jump label points at. Five regions, no rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpTarget {
     /// Focus one of the four top-level [`Pane`]s.
@@ -25,7 +25,7 @@ pub enum JumpTarget {
 /// Fixed mnemonic labels for the five regions, in assignment order:
 /// `e`ndpoints/explorer, `s`equences, `u`rl bar, `r`equest, res`p`onse.
 ///
-/// `s` moved off Response (M7.10 stage B — it now mnemonically labels the new
+/// `s` moved off Response — it now mnemonically labels the new
 /// **s**equences region), and Response took `p` (res**p**onse) so all five
 /// labels stay distinct single keys.
 pub const PANE_LABELS: &[(char, JumpTarget)] = &[

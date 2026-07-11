@@ -82,14 +82,10 @@ pub struct App {
     /// The ONE open fuzzy-picker overlay, when `mode` is a picker mode
     /// (Search/Palette/WorkspacePicker/SequencePicker); `None` otherwise.
     ///
-    /// R1.5 A2 (audit H3): this used to be a bare `Option<picker::PickerState>`
-    /// multiplexed against three parallel item `Vec`s (`profile_choices`
-    /// /`workspace_choices`/`sequence_choices`) + `search_targets`/`palette_actions`
-    /// and three one-shot `bool`s (`load_runner_after_pick`/`sequence_pick_runs`
-    /// /`auth_picker`). The [`Picker`] enum now carries each kind's items + one-shot
-    /// intent IN its variant, so the selected index can only address its own list
-    /// and a stale flag can't leak across kinds. Reach the shared finder/selection
-    /// via [`App::picker_state`]/[`App::picker_state_mut`].
+    /// The [`Picker`] enum carries each kind's items + one-shot intent IN its
+    /// variant, so the selected index can only address its own list and a stale
+    /// flag can't leak across kinds. Reach the shared finder/selection via
+    /// [`App::picker_state`]/[`App::picker_state_mut`].
     pub picker: Option<Picker>,
     /// Active jump-mode state, when `mode` is [`Mode::Jump`].
     pub jump: Option<JumpState>,
@@ -103,7 +99,7 @@ pub struct App {
     finder: FuzzyFinder,
     /// Set to exit the event loop.
     pub should_quit: bool,
-    /// Sender half of the app channel (cloned into background tasks from M3 on).
+    /// Sender half of the app channel (cloned into background tasks).
     pub tx: mpsc::Sender<AppMsg>,
     rx: mpsc::Receiver<AppMsg>,
     /// The shared reqwest client; `None` in snapshot-test construction (runtime-free).
@@ -134,9 +130,9 @@ pub struct App {
     /// The mode to restore when the body-search input closes, PARKED here while
     /// `Mode::BodySearch` is active. `Mode::Normal` for the main pane;
     /// `Mode::LoadRunner(state)`/`Mode::Sequence` when search was opened over a
-    /// runner Response region (note #2), so closing search returns to the runner
-    /// rather than dropping the user into Normal mode. R1.5 A2: since the runner
-    /// state now lives IN the mode, this field owns that parked `LoadRunner(state)`
+    /// runner Response region, so closing search returns to the runner
+    /// rather than dropping the user into Normal mode. Since the runner
+    /// state lives IN the mode, this field owns that parked `LoadRunner(state)`
     /// payload for the duration of the overlay (moved in/out via `mem::replace`),
     /// and `load_runner()`/`active_response_surface` consult it while searching.
     body_search_return: Mode,
@@ -151,10 +147,10 @@ pub struct App {
     /// Consecutive history/load-summary write failures. A single write failure
     /// only flashes a 250 ms toast that can scroll past unnoticed on a busy
     /// session, so once this crosses [`Self::HISTORY_FAIL_THRESHOLD`] the status
-    /// bar shows a sticky "⚠ history not recording" flag (audit B3). Reset to 0
+    /// bar shows a sticky "⚠ history not recording" flag. Reset to 0
     /// on any successful write, which also clears the flag.
     history_write_failures: u32,
-    /// Load-time keymap conflict/shadow warnings (M7.10), surfaced as a
+    /// Load-time keymap conflict/shadow warnings, surfaced as a
     /// first-frame statusline toast. Empty for a clean config. Populated from
     /// [`KeyMap::validate`] by the TUI entry point; a `false` `keymap_warned`
     /// flag ensures the toast fires exactly once.
@@ -175,17 +171,17 @@ pub struct App {
     /// path, resolved by `s`/`d`, aborted by `Esc`. Mutually exclusive with
     /// `pending_load` — only one is `Some` while the confirm is up.
     pending_close: Option<PendingClose>,
-    /// Which pane is zoomed (M6.7 deliverable 4), or `None` for the normal split.
+    /// Which pane is zoomed, or `None` for the normal split.
     zoom: Option<ZoomPane>,
-    /// Whether the explorer sidebar is hidden (M6.7 deliverable 5). Session-only.
+    /// Whether the explorer sidebar is hidden. Session-only.
     explorer_hidden: bool,
-    /// Which sub-pane inside the left column has focus/zoom (PR 2b). The
-    /// sequences sub-pane is always present (peek-symmetric, M7.10 stage B), so
+    /// Which sub-pane inside the left column has focus/zoom. The
+    /// sequences sub-pane is always present (peek-symmetric), so
     /// this is only forced back to `Endpoints` when the workspace has no
     /// sequences at all.
     left_active: LeftPane,
     /// The pane focus held before focus last moved INTO the left column from a
-    /// non-left pane (PR 2b / owner #2B). `<leader>e` hiding a focused explorer
+    /// non-left pane. `<leader>e` hiding a focused explorer
     /// restores this, instead of falling back to the URL bar.
     focus_before_explorer: Option<Pane>,
     /// The active leader chord, or `None` when no chord is in progress. `Some`
@@ -210,12 +206,11 @@ pub struct App {
     url_edit_mode: UrlEditMode,
     /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
     ///
-    /// R1.5 A2: the unified sequence surface's run-face state, edit-face state, and
-    /// active face used to live in three parallel fields here
-    /// (`sequence_runner`/`sequence_editor`/`sequence_view`). They now live IN the
-    /// [`Mode::Sequence`] variant (`{ view, editor, runner }`) so they cannot exist
-    /// without the mode; this abort handle stays here because it outlives no mode —
-    /// it must survive a Run→Edit face flip and is aborted on cancel/re-run/close.
+    /// The unified sequence surface's run-face state, edit-face state, and
+    /// active face live IN the [`Mode::Sequence`] variant (`{ view, editor,
+    /// runner }`) so they cannot exist without the mode; this abort handle stays
+    /// here because it outlives no mode — it must survive a Run→Edit face flip
+    /// and is aborted on cancel/re-run/close.
     sequence_abort: Option<AbortHandle>,
     /// Abort handle for the single load-batch launcher task; aborting it drops
     /// the launcher's `buffer_unordered`, cancelling ALL in-flight requests.
@@ -225,7 +220,7 @@ pub struct App {
     /// The load runner's request, resolved ONCE at open time and cloned for every
     /// copy in a run (consistent batch — no per-copy re-resolution).
     load_request: Option<Request>,
-    /// In-memory Session variable store (note #6), keyed by canonical workspace
+    /// In-memory Session variable store, keyed by canonical workspace
     /// root so one workspace's captured secrets never leak into another. Populated
     /// when a sequence run extracts a value for a rule listed in that step's
     /// `persist`; read as the highest resolver scope for BOTH sequence-run and
@@ -282,7 +277,7 @@ fn nothing_to_copy_message(state: &ResponseState) -> &'static str {
 
 /// The on-disk stem a create/rename landed on, or `None` when it matched the
 /// naive slug of the typed name (no disambiguation happened). Used to fail loud
-/// when a reserved-name collision (R1 D1) bumped the filename — the user must see
+/// when a reserved-name collision bumped the filename — the user must see
 /// the real stem, never a silent rename.
 fn disambiguated_stem(typed: &str, path: &Path) -> Option<String> {
     let stem = path.file_stem().and_then(|s| s.to_str())?;
@@ -303,7 +298,7 @@ fn created_message(typed: &str, path: &Path) -> String {
 }
 
 /// The confirmation message for a rename, noting the actual on-disk name when it
-/// was disambiguated (reserved-name collision, R1 D1).
+/// was disambiguated (reserved-name collision).
 fn renamed_message(typed: &str, path: &Path) -> String {
     match disambiguated_stem(typed, path) {
         Some(stem) => format!("renamed to {typed} (as {stem} — name was reserved)"),
@@ -353,7 +348,7 @@ pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
 
 impl App {
     /// How many consecutive history/load-summary write failures trigger the
-    /// sticky "history not recording" status-bar flag (audit B3). Set to 1 so the
+    /// sticky "history not recording" status-bar flag. Set to 1 so the
     /// very first persistent failure surfaces stickily — a healthy session (zero
     /// failures) never shows it, so existing snapshots are unaffected.
     pub(in crate::tui::app) const HISTORY_FAIL_THRESHOLD: u32 = 1;
@@ -366,7 +361,7 @@ impl App {
 
     /// Records the outcome of a history/load-summary write: a failure bumps the
     /// consecutive-failure counter (arming the sticky flag past the threshold); any
-    /// success resets it to 0, clearing the flag (audit B3).
+    /// success resets it to 0, clearing the flag.
     pub(in crate::tui::app) fn note_history_write(&mut self, ok: bool) {
         if ok {
             self.history_write_failures = 0;
@@ -481,7 +476,7 @@ impl App {
         self.message = Some(Message::new(text));
     }
 
-    /// Records the load-time keymap conflict/shadow warnings (M7.10) so the run
+    /// Records the load-time keymap conflict/shadow warnings so the run
     /// loop can flash a first-frame toast. Called by the TUI entry point after
     /// [`KeyMap::validate`].
     pub fn set_keymap_warnings(&mut self, warnings: Vec<String>) {
@@ -494,7 +489,7 @@ impl App {
         &self.keymap_warnings
     }
 
-    /// Fires the first-frame keymap-warning toast exactly once (M7.10). No-op
+    /// Fires the first-frame keymap-warning toast exactly once. No-op
     /// when the config is clean or the toast has already fired.
     fn arm_keymap_warning_toast(&mut self) {
         if self.keymap_warned || self.keymap_warnings.is_empty() {
@@ -549,7 +544,7 @@ impl App {
 
     /// The endpoint under the explorer cursor (the *hovered* endpoint), when the
     /// left column is on the endpoints tree and the cursor sits on an endpoint
-    /// row (M7.10 stage B). A read-only peek — it does not load a buffer or move
+    /// row. A read-only peek — it does not load a buffer or move
     /// the cursor. Used as a fallback for one-shot read actions (copy-as-curl,
     /// the load runner) when no endpoint is loaded, so they act on what the user
     /// is pointing at rather than refusing.
@@ -561,7 +556,7 @@ impl App {
     }
 
     /// Which surface owns the "active response" the shared `response_*` handlers
-    /// act on (note #2). Resolves by mode + runner focus: a runner whose Response
+    /// act on. Resolves by mode + runner focus: a runner whose Response
     /// region is focused routes the response actions onto its selected row/step;
     /// otherwise the main endpoint buffer (today's behaviour) is active. When the
     /// body-search input is open it resolves against the mode search was opened
@@ -569,7 +564,7 @@ impl App {
     /// runner response the `/` was launched from.
     fn active_response_surface(&self) -> ResponseSurface {
         // When body-search is open, resolve against the mode it was opened over —
-        // parked in `body_search_return` (R1.5 A2: it holds the whole mode, incl.
+        // parked in `body_search_return` (it holds the whole mode, incl.
         // the `LoadRunner(state)` / `Sequence{..}` payloads, so the runner surface
         // stays reachable).
         let effective = if matches!(self.mode, Mode::BodySearch) {
@@ -587,7 +582,7 @@ impl App {
                     ResponseSurface::Main
                 }
             }
-            // R1.5 A2: the Run-face runner now lives in the `Mode::Sequence` payload
+            // The Run-face runner lives in the `Mode::Sequence` payload
             // (of the effective mode), not a parallel field.
             Mode::Sequence {
                 view: SeqView::Run,
@@ -604,7 +599,7 @@ impl App {
 
     /// The active response state for internal readers (render + `response_*`
     /// handlers). Resolves the runner's selected row/step when a runner Response
-    /// region is focused (note #2), else the active endpoint buffer, else the
+    /// region is focused, else the active endpoint buffer, else the
     /// test-only orphan slot (isolation snapshots) when nothing is loaded.
     fn active_response(&self) -> &ResponseState {
         match self.active_response_surface() {
@@ -624,7 +619,7 @@ impl App {
     }
 
     /// Mutable active response, resolving the runner's selected row/step when a
-    /// runner Response region is focused (note #2), else the active buffer, else
+    /// runner Response region is focused, else the active buffer, else
     /// the orphan slot when nothing is loaded (isolation snapshots).
     fn active_response_mut(&mut self) -> &mut ResponseState {
         match self.active_response_surface() {
@@ -655,7 +650,7 @@ impl App {
     /// The active response geometry (cursor/scroll/viewport), mode + focus-aware:
     /// the same [`ResponseSurface`] resolution as [`Self::active_response`], so a
     /// runner Response region's motion/search/copy operate on the runner's own
-    /// geometry (note #2).
+    /// geometry.
     fn active_response_geometry(&self) -> &ResponseGeometry {
         match self.active_response_surface() {
             ResponseSurface::LoadRunner => self
@@ -906,7 +901,7 @@ impl App {
             max_body_bytes: config.max_body_bytes(),
         };
         self.load_caps = config.load_caps();
-        // A spawn failure degrades to plain rendering (audit B4): `spawn` returns
+        // A spawn failure degrades to plain rendering: `spawn` returns
         // `None`, `highlight_tx` stays `None`, and every render site already guards
         // on `if let Some(tx) = &app.highlight_tx`, so the viewer renders fine.
         self.highlight_tx = highlight::spawn(self.tx.clone(), self.theme.is_light());
@@ -937,7 +932,7 @@ impl App {
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(250));
-        // First-frame keymap-warning toast (M7.10): if the loaded config has
+        // First-frame keymap-warning toast: if the loaded config has
         // conflict/shadow issues, flash a non-blocking statusline notice once
         // (stderr already carried the detail before raw mode; `churl keymaps`
         // has the full list).
@@ -975,8 +970,8 @@ impl App {
                     if self.message.as_ref().is_some_and(|s| s.is_expired()) {
                         self.message = None;
                     }
-                    // Re-mask an ephemeral secret peek on timeout (drive-test
-                    // note #3), on the same 250 ms cadence that expires messages.
+                    // Re-mask an ephemeral secret peek on timeout, on the same
+                    // 250 ms cadence that expires messages.
                     if let Mode::EnvEditor(editor) = &mut self.mode {
                         editor.expire_reveal();
                     }
@@ -988,7 +983,7 @@ impl App {
                 }
             }
         }
-        // Quit path (audit B1): the loop has exited but the tokio runtime is still
+        // Quit path: the loop has exited but the tokio runtime is still
         // alive, so record an interrupted history row for every buffer with an
         // in-flight request BEFORE the runtime drops and aborts those tasks. Their
         // `AppMsg::Response` would otherwise never land and the request — possibly
@@ -999,7 +994,7 @@ impl App {
 
     /// On quit, mirror [`Self::cancel_request`] for every in-flight buffer: abort
     /// the task and write an interrupted history row (`write_history(meta, None,
-    /// None)`), so a request the user quit mid-flight is still recorded (audit B1).
+    /// None)`), so a request the user quit mid-flight is still recorded.
     /// Synchronous — never blocks quit on network completion.
     fn record_inflight_on_quit(&mut self) {
         // Drain each buffer's in-flight handle first (a short-lived immutable
@@ -1018,7 +1013,7 @@ impl App {
 
     /// Routes one key event (see the module docs for the precedence rules).
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Modal, keyboard-owning overlays introduced in M6.7 take precedence over
+        // Modal, keyboard-owning overlays take precedence over
         // everything (help / URL popup / pending-leader).
         if self.help_open {
             return self.handle_help_key(key);
@@ -1029,7 +1024,7 @@ impl App {
         if self.leader.is_some() {
             return self.handle_leader_key(key);
         }
-        // R1.5 A2: `Mode` is non-`Copy`, so match by reference and dispatch. The
+        // `Mode` is non-`Copy`, so match by reference and dispatch. The
         // payload-carrying overlay arms (`EnvEditor`/`LoadRunner`) delegate to a
         // handler that re-borrows the state out of `self.mode` itself; the small
         // `Copy` purposes are dereferenced out before the `&mut self` call so no
@@ -1081,7 +1076,7 @@ impl App {
             }
             return self.handle_field_edit_key(key);
         }
-        // 3. edtui insert/visual mode on the Body tab (M4 interception exception).
+        // 3. edtui insert/visual mode on the Body tab (interception exception).
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
             && self.body_editor_non_normal()
@@ -1094,7 +1089,7 @@ impl App {
         }
         // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T) win
         //     before leader/keymap. `f` becomes find-char, shadowing the global
-        //     Jump key there (DECISIONS.md — M6.6 shadowing precedent). Precedes
+        //     Jump key there (DECISIONS.md shadowing precedent). Precedes
         //     leader/keymap so a pending find's next char reaches vim_ext even
         //     when it's Space or a mapped key.
         if self.focus == Pane::Request
@@ -1389,14 +1384,14 @@ impl App {
     }
 
     /// True when the left column is focused AND the sequences sub-pane holds the
-    /// in-pane focus/zoom (PR 2b). Guards the sequence-specific `h/j/k/l/Enter/r`
+    /// in-pane focus/zoom. Guards the sequence-specific `h/j/k/l/Enter/r`
     /// routing so it never fires while the endpoints tree is active.
     fn left_column_on_sequences(&self) -> bool {
         self.focus == Pane::Explorer && self.left_active == LeftPane::Sequences
     }
 
     fn explorer_action(&mut self, action: Action) -> Result<()> {
-        // PR 2b: when the sequences sub-pane is the active occupant of the left
+        // When the sequences sub-pane is the active occupant of the left
         // column, in-pane nav drives the sequence cursor (a flat list — h/l
         // no-op) and Enter opens the unified surface (Edit face) on the hovered
         // sequence.
@@ -1462,7 +1457,7 @@ impl App {
             .map(|path| path.to_string_lossy().into_owned())
     }
 
-    // ---- Response viewer M7 actions ----
+    // ---- Response viewer actions ----
 
     /// Queues `text` (capped at [`clipboard::MAX_COPY_BYTES`], on a char
     /// boundary) for a layered clipboard write on the next loop iteration.
@@ -1479,7 +1474,7 @@ impl App {
     }
 
     /// The shared query/filter/selection state of the open picker overlay, if any.
-    /// R1.5 A2: the finder+items+index live inside the [`Picker`] variant now, so
+    /// The finder+items+index live inside the [`Picker`] variant, so
     /// render/overlay-key/tests reach it uniformly through this seam.
     pub fn picker_state(&self) -> Option<&picker::PickerState> {
         self.picker.as_ref().map(Picker::state)
@@ -1542,7 +1537,7 @@ impl App {
 
     fn open_search(&mut self) -> Result<()> {
         let items = super::components::search::open(&mut self.explorer)?;
-        // R1.5 A2: the targets travel WITH the finder in the variant, so the
+        // The targets travel WITH the finder in the variant, so the
         // accepted index can only address its own list. `after_pick` starts false;
         // `open_load_runner_pick` flips it right after (a `<leader>l f` pick).
         self.picker = Some(Picker::Search {
@@ -1566,8 +1561,8 @@ impl App {
         self.mode = Mode::Palette;
     }
 
-    /// Enters jump-mode, labelling the five pane regions (M7.10 stage B —
-    /// pane-only, no row labels; row precision is the leader pickers' job).
+    /// Enters jump-mode, labelling the five pane regions (pane-only, no row
+    /// labels; row precision is the leader pickers' job).
     fn open_jump(&mut self) {
         self.jump = Some(JumpState::new());
         self.mode = Mode::Jump;
@@ -1612,7 +1607,7 @@ impl App {
                 JumpTarget::Pane(pane) => self.set_focus(pane),
                 // Sequences sub-pane lives in the left column: focus it and make
                 // it active. An EXPLICIT `f s` sticks even on an empty list — the
-                // pane zooms in and shows an informative empty state (note #3);
+                // pane zooms in and shows an informative empty state;
                 // `set_focus` no longer force-reverts to Endpoints.
                 JumpTarget::Sequences => {
                     self.left_active = LeftPane::Sequences;
@@ -1661,14 +1656,14 @@ impl App {
 
     /// Enter (or a jump label) on the current explorer row: loads the endpoint
     /// through the guarded seam. One seam so both the explorer `Enter` and
-    /// jump-mode agree. (Sequences are no longer tree rows — they activate via
-    /// the sub-pane, PR 2b.)
+    /// jump-mode agree. (Sequences are not tree rows — they activate via
+    /// the sub-pane.)
     fn activate_explorer_row(&mut self, row: usize) -> Result<()> {
         self.explorer.cursor = row;
         self.guarded_load(PendingLoad::Row(row))
     }
 
-    // ---- M7.5 concurrent-load runner ----
+    // ---- concurrent-load runner ----
 
     /// `<leader>l f` / palette: pick an endpoint via the fuzzy search overlay,
     /// then open the load runner over it. Reuses the endpoint-search overlay + its
@@ -1676,9 +1671,9 @@ impl App {
     /// `open_load_runner` once the endpoint has loaded.
     fn open_load_runner_pick(&mut self) -> Result<()> {
         self.open_search()?;
-        // R1.5 A2: the old `load_runner_after_pick` one-shot bool is now the
-        // `after_pick` field of the freshly-opened `Picker::Search` variant, so the
-        // intent can't outlive its picker or leak onto a non-search picker.
+        // The one-shot intent is the `after_pick` field of the freshly-opened
+        // `Picker::Search` variant, so the intent can't outlive its picker or leak
+        // onto a non-search picker.
         if let Some(Picker::Search { after_pick, .. }) = &mut self.picker {
             *after_pick = true;
         }
@@ -1739,17 +1734,16 @@ impl App {
     fn close_load_runner(&mut self) {
         self.interrupt_running_batch();
         self.load_request = None;
-        // R1.5 A2: setting `Normal` drops the `LoadRunnerState` (no separate field
+        // Setting `Normal` drops the `LoadRunnerState` (no separate field
         // to clear). `interrupt_running_batch` above already ran while the runner
         // was still live, so the partial summary / abort are recorded first.
         self.mode = Mode::Normal;
     }
 
     fn close_overlay(&mut self) {
-        // R1.5 A2: dropping the `Picker` drops ALL of its variant data — the item
-        // `Vec`s AND the one-shot intents (`after_pick`/`runs`) that used to be
-        // separate `App` fields cleared here. So an Esc-cancelled pick can no longer
-        // leak an intent into the next `/` search or sequence pick.
+        // Dropping the `Picker` drops ALL of its variant data — the item
+        // `Vec`s AND the one-shot intents (`after_pick`/`runs`). So an Esc-cancelled
+        // pick can't leak an intent into the next `/` search or sequence pick.
         self.picker = None;
         self.mode = Mode::Normal;
     }
@@ -1809,12 +1803,11 @@ impl App {
     }
 
     fn accept_overlay(&mut self) -> Result<()> {
-        // R1.5 A2: take the whole `Picker` out (its items + one-shot intents travel
+        // Take the whole `Picker` out (its items + one-shot intents travel
         // WITH the finder in the variant), then reset the mode. `close_overlay()`
         // would drop the picker before we can read it, so `take` it first, then
         // clear the mode ourselves. An empty-result Enter (no `current` index) still
-        // resets the mode + drops the picker — dropping the intents exactly as the
-        // old field-clears did.
+        // resets the mode + drops the picker, dropping the intents.
         let Some(picker) = self.picker.take() else {
             self.mode = Mode::Normal;
             return Ok(());
@@ -1885,12 +1878,12 @@ impl App {
 
     /// Sets (or clears with `None`) the active profile. No status message —
     /// the persistent `profile: <name>` indicator in the statusline is the
-    /// single source of truth (M6.5 dedup fix).
+    /// single source of truth.
     fn set_profile(&mut self, profile: Option<String>) {
         self.active_profile = profile;
     }
 
-    /// M6.7: a hidden explorer drops out of the Tab ring — cycling skips it and
+    /// A hidden explorer drops out of the Tab ring — cycling skips it and
     /// lands on the next visible region. Only Explorer is ever hidden, so a single
     /// skip suffices. Explicit focus (jump-mode, `FocusExplorer`) still auto-reopens
     /// via `set_focus`.
@@ -1911,7 +1904,7 @@ impl App {
             self.explorer_hidden = false;
         }
         // Remember the pane we left when focus moves INTO the left column, so
-        // `<leader>e` can restore true prior focus on hide (owner #2B).
+        // `<leader>e` can restore true prior focus on hide.
         if pane == Pane::Explorer && self.focus != Pane::Explorer {
             self.focus_before_explorer = Some(self.focus);
         }
@@ -1932,8 +1925,8 @@ impl App {
     /// never strands on a list that vanished under it. This is NOT called from the
     /// generic focus path (`set_focus`) — an EXPLICIT focus on an empty Sequences
     /// pane (`f s`, the `s` overlay) is honored and shows an informative empty
-    /// state (note #3); only passive emptying reconciles here. (Sub-pane always
-    /// present — M7.10 stage B; empty pane focusable — note #3.)
+    /// state; only passive emptying reconciles here. (Sub-pane always present;
+    /// empty pane focusable.)
     fn enforce_left_active_invariant(&mut self) {
         if self.explorer.sequences_len() == 0 {
             self.left_active = LeftPane::Endpoints;
@@ -1941,8 +1934,8 @@ impl App {
     }
 
     /// `<leader>e`: toggles the explorer sidebar. Hiding it while it is focused
-    /// restores focus to the pane held before we entered the left column (owner
-    /// #2B — true prior-pane restore, URL bar only as a last resort). Showing it
+    /// restores focus to the pane held before we entered the left column (true
+    /// prior-pane restore, URL bar only as a last resort). Showing it
     /// re-focuses the left column, landing on the active sub-pane.
     fn toggle_explorer(&mut self) {
         if self.explorer_hidden {
@@ -1968,7 +1961,7 @@ impl App {
         self.set_focus(Pane::Explorer);
     }
 
-    /// `cycle-region-fwd`/`cycle-region-back` (M7.10 stage B — shipped UNBOUND).
+    /// `cycle-region-fwd`/`cycle-region-back` (shipped UNBOUND).
     /// Region-aware cycling: left column focused → cycle its sub-panes
     /// (Endpoints⇄Sequences); otherwise cycle open buffers/tabs. `forward` only
     /// matters for the buffer ring — the two-way toggle ignores it. Ctrl-Tab is
@@ -1999,19 +1992,18 @@ impl App {
 
 // Child modules of `app`. Placing them as children (not siblings) keeps their
 // items' access to `App`'s private fields and methods without any `pub(crate)`
-// widening — see DECISIONS.md, "Module boundaries" (M7.11).
+// widening — see DECISIONS.md, "Module boundaries".
 mod handlers;
 mod pure;
 mod render;
 mod state;
 
-// The state data-types live in `state` (M7.11). They are pulled into this
+// The state data-types live in `state`. They are pulled into this
 // module's namespace so in-crate call sites — and `super::*` in the sibling
-// handler modules / `tests` — resolve them unqualified, exactly as before the
-// split. The types that were `pub` in `app.rs` are re-exported `pub` so the
-// public surface (`tui::app::Pane`, `Mode`, `ConfirmPurpose`, …, used by the
-// snapshot integration test) is unchanged; the module-private types keep their
-// original crate-internal visibility via a plain `use`.
+// handler modules / `tests` — resolve them unqualified. The public types are
+// re-exported `pub` so the public surface (`tui::app::Pane`, `Mode`,
+// `ConfirmPurpose`, …, used by the snapshot integration test) is preserved; the
+// module-private types keep their crate-internal visibility via a plain `use`.
 use state::{
     APP_CHANNEL_CAPACITY, Buffer, EndpointBuffer, InFlightRequest, PendingClose, PendingCopy,
     PendingLoad, Picker, ResponseSurface, fold_body_text, overwrite_body_text,

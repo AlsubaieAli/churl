@@ -1,4 +1,4 @@
-//! Variable-scope + template-resolver plumbing extracted from `app.rs` (M7.11).
+//! Variable-scope + template-resolver plumbing extracted from `app.rs`.
 //! Grandchild module of `app`, so `impl App` here keeps full access to `App`'s
 //! private fields and methods without any visibility widening — see DECISIONS.md,
 //! "Module boundaries". Every method carries `pub(in crate::tui::app)` because it
@@ -36,7 +36,7 @@ impl App {
         self.workspace.as_ref().map(|ws| canonical_path(ws.root()))
     }
 
-    /// The current workspace's in-memory Session captures (note #6), empty when
+    /// The current workspace's in-memory Session captures, empty when
     /// none or no workspace. The highest resolver scope for a standalone send and
     /// (threaded through [`RunScopes`]) for a sequence run.
     pub(in crate::tui::app) fn session_vars(&self) -> BTreeMap<String, String> {
@@ -77,7 +77,7 @@ impl App {
     /// Builds the template [`Resolver`] for a send of `selected`, in precedence
     /// order: in-memory Session captures → cli `--var` → active profile → the
     /// endpoint's collection `folder.toml` vars → workspace `[vars]` → process env
-    /// (implicit). The Session scope (note #6) sits at the top so a standalone
+    /// (implicit). The Session scope sits at the top so a standalone
     /// request using `{{token}}` resolves a value captured by an earlier sequence
     /// run; it is empty until a Session-target rule writes into it.
     pub(in crate::tui::app) fn build_resolver(&mut self, selected: &SelectedEndpoint) -> Resolver {
@@ -91,8 +91,8 @@ impl App {
         ])
     }
 
-    /// Builds the resolver used by the env-editor's ephemeral peek (drive-test
-    /// note #3). It mirrors [`build_resolver`] but omits the per-endpoint
+    /// Builds the resolver used by the env-editor's ephemeral peek.
+    /// It mirrors [`build_resolver`] but omits the per-endpoint
     /// `collection` scope — the env editor is not tied to a loaded endpoint, so
     /// there is no single collection to consult (a collection var resolves
     /// per-request, not globally). Session captures still sit highest, so a peeked

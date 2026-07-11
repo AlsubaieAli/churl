@@ -7,7 +7,7 @@
 //! ([`crate::tui::highlight`]): a cache hit draws coloured lines, a miss draws
 //! plain text and enqueues a highlight job.
 //!
-//! ## Display pipeline (M7)
+//! ## Display pipeline
 //!
 //! Three pure transforms over the logical lines (snapshot-testable without a
 //! runtime):
@@ -80,7 +80,7 @@ pub struct ResponseView {
     text: String,
     /// The raw, on-the-wire body — a lossy-UTF-8 decode of the exact response
     /// bytes, never reformatted. Copy (`y`/`Y`) reads from here so it stays
-    /// byte-exact regardless of the pretty toggle (decision 3).
+    /// byte-exact regardless of the pretty toggle.
     raw_text: String,
     /// Byte offset of each line start (into `text`). Empty for an empty body.
     line_offsets: Vec<usize>,
@@ -117,22 +117,22 @@ pub struct ResponseView {
     folded: HashSet<usize>,
     /// Whether soft-wrap is on.
     wrap: bool,
-    /// Whether the left-hand line-number gutter is shown (drive-test note #8).
+    /// Whether the left-hand line-number gutter is shown.
     /// Defaults to `true` (gutter on) and persists across pretty/sort/wrap/fold
     /// toggles for the life of the view — a new response builds a fresh view, so
     /// the default-on contract is re-established per response. Render-only: it
     /// shrinks the effective body width (see [`render_done`]) but never touches
     /// `raw_text`, copy, or the line index.
     line_numbers: bool,
-    /// Horizontal scroll offset in *char columns* for unwrapped long lines
-    /// (M7.7). When wrap is off, each logical line's display row shows the char
+    /// Horizontal scroll offset in *char columns* for unwrapped long lines.
+    /// When wrap is off, each logical line's display row shows the char
     /// window `[h_scroll, h_scroll + viewport_width)` instead of the whole line,
     /// bounding render cost and letting the user pan a minified/non-JSON line past
     /// the first screenful. Reset to 0 on build, on any generation bump, and on
     /// `ToggleWrap`. Inert while wrap is on (wrapped rows already fit the width).
     h_scroll: usize,
     /// Whether the body is rendered pretty (reformatted) rather than raw.
-    /// Defaults to `true` on arrival for json-ish content-types (decision 2),
+    /// Defaults to `true` on arrival for json-ish content-types,
     /// `false` otherwise. Toggled by `p` in the Response overlay. When on but the
     /// body is not parseable JSON, the reformat silently falls back to raw and
     /// `text == raw_text`.
@@ -140,7 +140,7 @@ pub struct ResponseView {
     /// Whether pretty JSON object keys are sorted A→Z (recursively). Defaults to
     /// `false` (server wire order) and resets per response. Only affects display
     /// when `pretty` is on and the body is JSON; a no-op otherwise. Toggled by
-    /// `s` in the Response overlay (M7.7).
+    /// `s` in the Response overlay.
     sort_keys: bool,
     /// The active body search, when a search is live.
     search: Option<SearchState>,
@@ -162,7 +162,7 @@ impl ResponseView {
             .find(|header| header.name.eq_ignore_ascii_case("content-type"))
             .map(|header| header.value.as_str());
         let syntax = SyntaxToken::from_content_type(content_type);
-        // Pretty-by-default for json-ish content-types (decision 2); raw for
+        // Pretty-by-default for json-ish content-types; raw for
         // everything else. The reformat is a transform *before* the fold/wrap/
         // viewport stages — `text`/`line_offsets` describe what is displayed.
         let pretty = syntax == SyntaxToken::Json;
@@ -170,7 +170,7 @@ impl ResponseView {
         let sort_keys = false;
         // Sanitize the reformatted (displayed) text: strip ANSI, expand tabs, and
         // replace remaining control chars. `raw_text` stays the untouched decode so
-        // copy remains byte-exact (M7.7).
+        // copy remains byte-exact.
         let text = sanitize_for_display(&reformat_body_if_needed(
             &raw_text, syntax, pretty, sort_keys,
         ));
@@ -240,7 +240,7 @@ impl ResponseView {
         self.wrap
     }
 
-    /// Whether the line-number gutter is shown (drive-test note #8).
+    /// Whether the line-number gutter is shown.
     pub fn line_numbers(&self) -> bool {
         self.line_numbers
     }
@@ -785,7 +785,7 @@ impl ResponseView {
     }
 
     /// Adjusts `h_scroll` so the char column range `[start, end)` is inside the
-    /// horizontal window `[h_scroll, h_scroll + width)` (M7.7 search-into-view). A
+    /// horizontal window `[h_scroll, h_scroll + width)` (search-into-view). A
     /// no-op while wrap is on or the range already fits. Mirrors the vertical
     /// scroll-into-view for the match *row*: pans left when the match is off the
     /// left edge, right when it is off the right edge, preferring to reveal the
@@ -808,7 +808,7 @@ impl ResponseView {
 
     /// The full text of the current view for the copy-view action (`y`). In the
     /// body view this is the **raw on-the-wire** body, NOT the reformatted text —
-    /// copy stays byte-exact regardless of the pretty toggle (decision 3). In the
+    /// copy stays byte-exact regardless of the pretty toggle. In the
     /// headers view it is the headers text.
     pub fn copy_all(&self) -> &str {
         match self.view_mode {
@@ -819,7 +819,7 @@ impl ResponseView {
 
     /// The text of the logical line at `logical` for the copy-line action (`Y`).
     ///
-    /// Copy must stay byte-exact (the D1 invariant): the displayed `text` is
+    /// Copy must stay byte-exact (the invariant): the displayed `text` is
     /// sanitized (ANSI stripped, tabs expanded, controls → `·`, `\r\n` → `\n`), so
     /// returning the *displayed* line would leak sanitized bytes. Instead:
     ///
