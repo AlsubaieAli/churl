@@ -295,22 +295,20 @@ fn ok_resp(status: u16, body: &str) -> Response {
 }
 
 fn runner_gen(app: &App) -> u64 {
-    app.sequence_runner.as_ref().unwrap().run_generation
+    app.sequence_runner().unwrap().run_generation
 }
 
 fn step_status(app: &App, i: usize) -> StepStatus {
-    app.sequence_runner.as_ref().unwrap().steps[i]
-        .status
-        .clone()
+    app.sequence_runner().unwrap().steps[i].status.clone()
 }
 
 #[test]
 fn sequence_runner_opens_with_first_step_running() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_app(dir.path(), "halt", "");
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Run);
-    let runner = app.sequence_runner.as_ref().unwrap();
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Run);
+    let runner = app.sequence_runner().unwrap();
     assert_eq!(runner.steps.len(), 3);
     assert_eq!(runner.current, Some(0));
     assert_eq!(step_status(&app, 0), StepStatus::Running);
@@ -329,7 +327,7 @@ fn sequence_run_halts_on_failure() {
     app.on_sequence_step(run_gen, 1, Ok(ok_resp(500, "err")));
     assert_eq!(step_status(&app, 1), StepStatus::Failed(500));
     assert_eq!(step_status(&app, 2), StepStatus::Skipped);
-    assert!(app.sequence_runner.as_ref().unwrap().finished);
+    assert!(app.sequence_runner().unwrap().finished);
 }
 
 #[test]
@@ -344,7 +342,7 @@ fn sequence_run_continue_runs_all() {
     app.on_sequence_step(run_gen, 1, Ok(ok_resp(200, "{}")));
     assert_eq!(step_status(&app, 2), StepStatus::Running);
     app.on_sequence_step(run_gen, 2, Ok(ok_resp(200, "{}")));
-    assert!(app.sequence_runner.as_ref().unwrap().finished);
+    assert!(app.sequence_runner().unwrap().finished);
 }
 
 #[test]
@@ -365,7 +363,7 @@ fn sequence_run_accumulates_and_chains_extracted() {
     let mut app = sequence_app(dir.path(), "halt", "[step.extract]\ntoken = \"$.token\"");
     let run_gen = runner_gen(&app);
     app.on_sequence_step(run_gen, 0, Ok(ok_resp(200, r#"{"token":"XYZ"}"#)));
-    let runner = app.sequence_runner.as_ref().unwrap();
+    let runner = app.sequence_runner().unwrap();
     assert_eq!(
         runner.extracted.get("token").map(String::as_str),
         Some("XYZ")
@@ -399,7 +397,7 @@ fn sequence_cancel_marks_pending_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = sequence_app(dir.path(), "halt", "");
     app.cancel_sequence_run();
-    let runner = app.sequence_runner.as_ref().unwrap();
+    let runner = app.sequence_runner().unwrap();
     assert!(runner.finished);
     assert!(
         runner.steps.iter().all(|s| s.status == StepStatus::Skipped),
@@ -416,7 +414,7 @@ fn seq_app_with_response(root: &Path, body: &str) -> App {
     let mut app = sequence_app(root, "continue", "");
     let g = runner_gen(&app);
     app.on_sequence_step(g, 0, Ok(json_resp(body)));
-    let runner = app.sequence_runner.as_mut().unwrap();
+    let runner = app.sequence_runner_mut().unwrap();
     runner.selected = 0;
     runner.focus = sequence_runner::RunnerFocus::Response;
     app
@@ -424,13 +422,7 @@ fn seq_app_with_response(root: &Path, body: &str) -> App {
 
 /// The selected step's live `ResponseView`.
 fn seq_view(app: &App) -> &ResponseView {
-    match app
-        .sequence_runner
-        .as_ref()
-        .unwrap()
-        .selected_response()
-        .unwrap()
-    {
+    match app.sequence_runner().unwrap().selected_response().unwrap() {
         ResponseState::Done { view } => view,
         other => panic!("selected step is not Done: {other:?}"),
     }
@@ -480,14 +472,14 @@ fn sequence_response_search_and_copy() {
     render_once(&mut app);
     app.handle_key(norm('/')).unwrap();
     assert!(matches!(app.mode, Mode::BodySearch));
-    assert!(matches!(app.body_search_return, Mode::Sequence));
+    assert!(matches!(app.body_search_return, Mode::Sequence { .. }));
     for c in "needle".chars() {
         app.handle_key(norm(c)).unwrap();
     }
     assert!(seq_view(&app).search().is_some_and(|s| s.count() >= 2));
     app.handle_key(keyc(KeyCode::Esc)).unwrap();
     assert!(
-        matches!(app.mode, Mode::Sequence),
+        matches!(app.mode, Mode::Sequence { .. }),
         "Esc returns to the sequence runner"
     );
 
@@ -512,11 +504,11 @@ fn sequence_response_cursor_nav_shared_path() {
         .join(",");
     let mut app = seq_app_with_response(dir.path(), &format!("{{{body}}}"));
     render_once(&mut app);
-    assert_eq!(app.sequence_runner.as_ref().unwrap().geometry.cursor, 0);
+    assert_eq!(app.sequence_runner().unwrap().geometry.cursor, 0);
     app.handle_key(norm('j')).unwrap();
-    assert_eq!(app.sequence_runner.as_ref().unwrap().geometry.cursor, 1);
+    assert_eq!(app.sequence_runner().unwrap().geometry.cursor, 1);
     app.handle_key(shift('G')).unwrap();
-    assert!(app.sequence_runner.as_ref().unwrap().geometry.cursor > 1);
+    assert!(app.sequence_runner().unwrap().geometry.cursor > 1);
 }
 
 /// PRESERVED NAV: from Response focus, Tab still toggles Steps↔Response and `r`
@@ -527,26 +519,26 @@ fn sequence_runner_nav_not_shadowed() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = seq_app_with_response(dir.path(), "{\"a\":1}");
     assert_eq!(
-        app.sequence_runner.as_ref().unwrap().focus,
+        app.sequence_runner().unwrap().focus,
         sequence_runner::RunnerFocus::Response
     );
     // Tab toggles Response → Steps (runner-owned; not a response action).
     app.handle_key(keyc(KeyCode::Tab)).unwrap();
     assert_eq!(
-        app.sequence_runner.as_ref().unwrap().focus,
+        app.sequence_runner().unwrap().focus,
         sequence_runner::RunnerFocus::Steps,
         "Tab still toggles regions"
     );
     // Steps-focused `j`/`k` select steps (not response scroll).
-    app.sequence_runner.as_mut().unwrap().selected = 0;
+    app.sequence_runner_mut().unwrap().selected = 0;
     app.handle_key(norm('j')).unwrap();
     assert_eq!(
-        app.sequence_runner.as_ref().unwrap().selected,
+        app.sequence_runner().unwrap().selected,
         1,
         "j selects the next step when Steps-focused"
     );
     // Back to Response; `r` still re-runs (bumps generation).
-    app.sequence_runner.as_mut().unwrap().focus = sequence_runner::RunnerFocus::Response;
+    app.sequence_runner_mut().unwrap().focus = sequence_runner::RunnerFocus::Response;
     let g0 = runner_gen(&app);
     app.handle_key(norm('r')).unwrap();
     assert!(
@@ -560,7 +552,7 @@ fn sequence_runner_nav_not_shadowed() {
 fn sequence_response_action_inert_when_steps_focused() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = seq_app_with_response(dir.path(), "{\"a\":1}");
-    app.sequence_runner.as_mut().unwrap().focus = sequence_runner::RunnerFocus::Steps;
+    app.sequence_runner_mut().unwrap().focus = sequence_runner::RunnerFocus::Steps;
     assert_eq!(app.active_response_surface(), ResponseSurface::Main);
     let before = seq_view(&app).pretty();
     app.handle_key(norm('p')).unwrap();
@@ -687,11 +679,11 @@ async fn sequence_transition_matches_core() {
             sequence: seq2,
         });
         // Feed each step that actually runs the same response the mock returned.
-        while let Some(i) = app.sequence_runner.as_ref().unwrap().current {
-            let g = app.sequence_runner.as_ref().unwrap().run_generation;
+        while let Some(i) = app.sequence_runner().unwrap().current {
+            let g = app.sequence_runner().unwrap().run_generation;
             app.on_sequence_step(g, i, Ok(ok_resp(statuses[i], bodies[i])));
         }
-        let runner = app.sequence_runner.as_ref().unwrap();
+        let runner = app.sequence_runner().unwrap();
         let tui_results: Vec<_> = runner.steps.iter().map(|s| norm_tui(&s.status)).collect();
         let tui_extracted = runner.steps[0].extracted.clone();
 
@@ -924,9 +916,9 @@ fn sequence_rerun_resets_state() {
     let mut app = sequence_app(dir.path(), "halt", "");
     let run_gen = runner_gen(&app);
     app.on_sequence_step(run_gen, 0, Ok(ok_resp(500, "err")));
-    assert!(app.sequence_runner.as_ref().unwrap().finished);
+    assert!(app.sequence_runner().unwrap().finished);
     app.start_sequence_run();
-    let runner = app.sequence_runner.as_ref().unwrap();
+    let runner = app.sequence_runner().unwrap();
     assert!(!runner.finished);
     assert_eq!(runner.run_generation, run_gen + 1);
     assert_eq!(runner.steps[0].status, StepStatus::Running);
@@ -960,8 +952,8 @@ fn sequence_editor_create_add_step_save() {
     app.prompt_editor = LineEditor::new("Auth flow");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Edit);
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
 
     // `a` opens the picker, Enter accepts the first endpoint.
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
@@ -1040,10 +1032,10 @@ fn sequence_editor_duplicate_rule_names_refuse_save() {
     ch(&mut app, 'w'); // save → refused
 
     assert!(
-        matches!(app.mode, Mode::Sequence),
+        matches!(app.mode, Mode::Sequence { .. }),
         "editor stays open on refusal"
     );
-    assert_eq!(app.sequence_view, SeqView::Edit);
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
     assert!(
         app.message
             .as_ref()
@@ -1087,16 +1079,16 @@ fn ctrl_r(app: &mut App) {
         .unwrap();
 }
 
-/// Opening a sequence for edit lands on Mode::Sequence + the Edit face, with
+/// Opening a sequence for edit lands on Mode::Sequence { .. } + the Edit face, with
 /// no runner built yet (Run is entered lazily).
 #[test]
 fn sequence_surface_opens_in_edit_face() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_surface_app(dir.path());
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Edit);
-    assert!(app.sequence_editor.is_some());
-    assert!(app.sequence_runner.is_none(), "run built lazily");
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
+    assert!(app.sequence_editor().is_some());
+    assert!(app.sequence_runner().is_none(), "run built lazily");
 }
 
 /// `<leader>s r` (RunSequence) opens the surface in the Run face and starts
@@ -1105,9 +1097,9 @@ fn sequence_surface_opens_in_edit_face() {
 fn run_sequence_opens_in_run_face() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_app(dir.path(), "halt", "");
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Run);
-    assert!(app.sequence_runner.is_some());
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Run);
+    assert!(app.sequence_runner().is_some());
 }
 
 /// D2 note #1 regression: a `<leader>s r` run opens the runner face with NO
@@ -1119,29 +1111,33 @@ fn ctrl_r_from_runner_only_builds_editor_synchronously() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = sequence_app(dir.path(), "halt", "");
     // Opened straight into the Run face via the runner path — no editor yet.
-    assert_eq!(app.sequence_view, SeqView::Run);
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Run);
     assert!(
-        app.sequence_editor.is_none(),
+        app.sequence_editor().is_none(),
         "runner-only open builds no editor"
     );
     ctrl_r(&mut app);
     // The flip transferred focus INTO the Edit face immediately.
-    assert_eq!(app.sequence_view, SeqView::Edit, "flipped to Edit face");
+    assert_eq!(
+        app.sequence_view().unwrap(),
+        SeqView::Edit,
+        "flipped to Edit face"
+    );
     assert!(
-        app.sequence_editor.is_some(),
+        app.sequence_editor().is_some(),
         "editor built synchronously on the flip"
     );
     assert!(
-        matches!(app.mode, Mode::Sequence),
+        matches!(app.mode, Mode::Sequence { .. }),
         "surface stays open — not exited to Normal"
     );
     // The editor is loaded from the same saved sequence (single source of truth).
-    assert_eq!(app.sequence_editor.as_ref().unwrap().name(), "Flow");
+    assert_eq!(app.sequence_editor().unwrap().name(), "Flow");
     // And a further keypress is handled by the editor, not a dead-surface exit.
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
     assert!(
-        matches!(app.mode, Mode::Sequence),
+        matches!(app.mode, Mode::Sequence { .. }),
         "still in the editor after a key"
     );
 }
@@ -1152,14 +1148,18 @@ fn ctrl_r_from_runner_only_builds_editor_synchronously() {
 fn ctrl_r_toggles_faces_when_clean() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = sequence_surface_app(dir.path());
-    assert!(!app.sequence_editor.as_ref().unwrap().is_dirty());
+    assert!(!app.sequence_editor().unwrap().is_dirty());
     ctrl_r(&mut app);
-    assert_eq!(app.sequence_view, SeqView::Run, "clean edit→run flips");
-    let runner = app.sequence_runner.as_ref().expect("runner built");
+    assert_eq!(
+        app.sequence_view().unwrap(),
+        SeqView::Run,
+        "clean edit→run flips"
+    );
+    let runner = app.sequence_runner().expect("runner built");
     assert_eq!(runner.steps.len(), 1, "runner built from the saved steps");
     // Run→Edit is always safe.
     ctrl_r(&mut app);
-    assert_eq!(app.sequence_view, SeqView::Edit);
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
 }
 
 /// A DIRTY editor blocks Edit→Run with a notify (no auto-save, no stale run).
@@ -1170,14 +1170,17 @@ fn dirty_edit_to_run_blocks_with_notify() {
     // Toggle on_error to make the editor dirty (`o` in the editor).
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
         .unwrap();
-    assert!(app.sequence_editor.as_ref().unwrap().is_dirty());
+    assert!(app.sequence_editor().unwrap().is_dirty());
     ctrl_r(&mut app);
     assert_eq!(
-        app.sequence_view,
+        app.sequence_view().unwrap(),
         SeqView::Edit,
         "stays in edit while dirty"
     );
-    assert!(app.sequence_runner.is_none(), "no runner built while dirty");
+    assert!(
+        app.sequence_runner().is_none(),
+        "no runner built while dirty"
+    );
     assert!(
         app.message
             .as_ref()
@@ -1187,22 +1190,26 @@ fn dirty_edit_to_run_blocks_with_notify() {
     );
 }
 
-/// `close_sequence_surface` clears both component states + the abort handle
-/// and returns to Normal.
+/// `close_sequence_surface` drops both component states + the abort handle and
+/// returns to Normal. R1.5 A2: the editor/runner/face now live IN the
+/// `Mode::Sequence` payload, so returning to `Mode::Normal` drops all three at
+/// once — the accessors go `None` and there is no residual `sequence_view` field
+/// to inspect (the fold's whole point).
 #[test]
 fn close_sequence_surface_clears_everything() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = sequence_surface_app(dir.path());
     // Build the runner too (clean flip), so both states are populated.
     ctrl_r(&mut app);
-    assert!(app.sequence_runner.is_some());
-    assert!(app.sequence_editor.is_some());
+    assert!(app.sequence_runner().is_some());
+    assert!(app.sequence_editor().is_some());
     app.close_sequence_surface();
     assert!(matches!(app.mode, Mode::Normal));
-    assert!(app.sequence_runner.is_none());
-    assert!(app.sequence_editor.is_none());
+    // The whole `Mode::Sequence` payload is gone: no runner, no editor, no face.
+    assert!(app.sequence_runner().is_none());
+    assert!(app.sequence_editor().is_none());
+    assert!(app.sequence_view().is_none());
     assert!(app.sequence_abort.is_none());
-    assert_eq!(app.sequence_view, SeqView::Edit);
 }
 
 /// MAJOR: `Ctrl-R` Edit→Run rebuilds the runner but must first ABORT any
@@ -1222,13 +1229,19 @@ async fn edit_to_run_aborts_orphaned_inflight_step() {
     let handle = task.abort_handle();
     app.sequence_abort = Some(handle.clone());
     // Force the surface into the Edit face (clean editor) so a Ctrl-R flip
-    // takes the Edit→Run rebuild branch.
-    app.sequence_view = SeqView::Edit;
+    // takes the Edit→Run rebuild branch. R1.5 A2: the face lives in the mode.
+    if let Mode::Sequence { view, .. } = &mut app.mode {
+        *view = SeqView::Edit;
+    }
     assert!(!handle.is_finished(), "task live before the flip");
 
     ctrl_r(&mut app);
 
-    assert_eq!(app.sequence_view, SeqView::Run, "clean edit→run flips");
+    assert_eq!(
+        app.sequence_view().unwrap(),
+        SeqView::Run,
+        "clean edit→run flips"
+    );
     assert!(
         app.sequence_abort.is_none(),
         "the prior abort handle was taken during rebuild"
@@ -1501,7 +1514,7 @@ fn sequence_step_fails_on_unresolved_variable_and_halts() {
         StepStatus::Skipped,
         "halt must skip the remaining step"
     );
-    assert!(app.sequence_runner.as_ref().unwrap().finished);
+    assert!(app.sequence_runner().unwrap().finished);
 }
 
 /// Fail loud, path 3 with `on_error = continue`: the unresolved step still fails
@@ -2307,8 +2320,8 @@ fn explorer_nav_routes_to_seq_cursor_when_sequences_active() {
     assert_eq!(app.explorer.cursor, tree_cursor, "tree cursor untouched");
     // Enter opens the unified surface (Edit face) on the hovered sequence.
     app.dispatch(Action::Select, None).unwrap();
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Edit);
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
 }
 
 /// D1: `<leader>s r` (`RunSequencePick`) opens a run-flavored chooser and the
@@ -2332,9 +2345,9 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
     app.accept_overlay().unwrap();
 
     // The runner opened over the CHOSEN sequence (index 1), not sequences[0].
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Run);
-    let runner = app.sequence_runner.as_ref().expect("runner opened");
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Run);
+    let runner = app.sequence_runner().expect("runner opened");
     assert_eq!(runner.name, chosen, "ran the chosen sequence, not #0");
     assert!(
         !app.sequence_pick_runs,
@@ -2352,9 +2365,9 @@ fn open_sequence_pick_edits_not_runs() {
     assert!(matches!(app.mode, Mode::SequencePicker));
     assert!(!app.sequence_pick_runs, "edit path: run intent not armed");
     app.accept_overlay().unwrap();
-    assert!(matches!(app.mode, Mode::Sequence));
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
     assert_eq!(
-        app.sequence_view,
+        app.sequence_view().unwrap(),
         SeqView::Edit,
         "picker opens the Edit face"
     );
@@ -2367,9 +2380,9 @@ fn r_on_sequences_subpane_runs_hovered_sequence() {
     app.dispatch(Action::FocusSequencesToggle, None).unwrap();
     // `r` maps to Rename, but on the sequences sub-pane it runs the sequence.
     app.dispatch(Action::Rename, None).unwrap();
-    assert!(matches!(app.mode, Mode::Sequence));
-    assert_eq!(app.sequence_view, SeqView::Run);
-    assert!(app.sequence_runner.is_some());
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Run);
+    assert!(app.sequence_runner().is_some());
 }
 
 /// `<leader>s <leader>` (Space) is the canonical sequence finder — it opens
@@ -2461,7 +2474,7 @@ fn pickers_open_a_mode_never_run_last() {
         matches!(app.mode, Mode::SequencePicker),
         "s o/s f open a picker"
     );
-    assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
+    assert!(app.sequence_runner().is_none(), "no sequence ran on entry");
 
     let d2 = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(d2.path());
@@ -2470,7 +2483,7 @@ fn pickers_open_a_mode_never_run_last() {
         matches!(app.mode, Mode::SequencePicker),
         "s r opens a picker"
     );
-    assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
+    assert!(app.sequence_runner().is_none(), "no sequence ran on entry");
 
     // Endpoint request picker (`<leader>f`) opens the search overlay.
     let d3 = tempfile::tempdir().unwrap();
@@ -4111,7 +4124,7 @@ fn sequence_failed_step_y_copies_error_not_noop() {
     let mut app = sequence_app(dir.path(), "continue", "");
     let g = runner_gen(&app);
     app.on_sequence_step(g, 0, Err("dns error".to_owned()));
-    let runner = app.sequence_runner.as_mut().unwrap();
+    let runner = app.sequence_runner_mut().unwrap();
     runner.selected = 0;
     runner.focus = sequence_runner::RunnerFocus::Response;
     assert!(matches!(

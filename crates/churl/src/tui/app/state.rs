@@ -73,14 +73,15 @@ pub enum LeftPane {
 /// Top-level input mode. Overlays own the keyboard; edtui manages its own vim
 /// modes internally and is not represented here.
 ///
-/// R1.5 A2: the two modal overlays whose state used to live in parallel
+/// R1.5 A2: the modal overlays whose state used to live in parallel
 /// `Option<…>` fields on [`App`] now carry that state **in their variant**
-/// ([`Mode::EnvEditor`]/[`Mode::LoadRunner`]) — an active editor with no data is
-/// no longer constructible, and the defensive `is_none()→Normal` guards +
-/// `.expect("checked above")` panics they protected are gone. Because those
-/// payloads are non-`Copy` (and don't derive `PartialEq`), `Mode` is now
-/// **non-`Copy`** and **non-`PartialEq`**: compare variants with `matches!` and
-/// move/replace values with [`std::mem::replace`] rather than copying.
+/// ([`Mode::EnvEditor`]/[`Mode::LoadRunner`]/[`Mode::Sequence`]) — an active
+/// editor with no data is no longer constructible, and the defensive
+/// `is_none()→Normal` guards + `.expect("checked above")` panics they protected
+/// are gone. Because those payloads are non-`Copy` (and don't derive
+/// `PartialEq`), `Mode` is now **non-`Copy`** and **non-`PartialEq`**: compare
+/// variants with `matches!` and move/replace values with [`std::mem::replace`]
+/// rather than copying.
 #[derive(Debug)]
 pub enum Mode {
     /// Pane navigation and editing.
@@ -109,9 +110,19 @@ pub enum Mode {
     /// [`EnvEditorState`] (R1.5 A2) — the editor cannot exist without its data.
     EnvEditor(EnvEditorState),
     /// The unified sequence surface (M7.4): ONE modal with an edit⇄run switcher
-    /// (`Ctrl-R`). The active face is [`App::sequence_view`]; the Edit face drives
-    /// the step/extraction editor, the Run face drives + shows the live run.
-    Sequence,
+    /// (`Ctrl-R`). `view` selects the active face; the Edit face drives the
+    /// `editor` (step/extraction editor), the Run face drives + shows the live
+    /// `runner`. R1.5 A2: the three used to be parallel `App` fields —
+    /// (`sequence_editor`/`sequence_runner`/`sequence_view`) — now folded into the
+    /// variant so they cannot exist without `Mode::Sequence`. `editor`/`runner`
+    /// stay `Option` INSIDE the variant: both faces are legitimately optional (a
+    /// `<leader>s r` run opens the Run face with no editor built yet; an edit
+    /// session never allocates a runner until the first run).
+    Sequence {
+        view: SeqView,
+        editor: Option<SequenceEditorState>,
+        runner: Option<SequenceRunnerState>,
+    },
     /// The concurrent-load runner (M7.5): a large modal firing N copies of the
     /// selected endpoint with live results + latency stats. Owns its
     /// [`LoadRunnerState`] (R1.5 A2) — the runner cannot exist without its data.
