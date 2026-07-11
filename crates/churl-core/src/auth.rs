@@ -1,7 +1,7 @@
 //! Auth-kind dispatch: resolve an [`Auth`] config into its wire effect.
 //!
-//! THE single dispatch point for auth kinds (plugin-readiness guardrail,
-//! MILESTONES.md §M9): every auth kind resolves to an [`AuthWire`] effect in
+//! THE single dispatch point for auth kinds (plugin-readiness guardrail):
+//! every auth kind resolves to an [`AuthWire`] effect in
 //! [`apply_auth`]'s one `match`. [`crate::http::execute`] applies effects and
 //! never matches on [`Auth`] — a future plugin-provided auth kind slots into
 //! this match, not into scattered call sites.

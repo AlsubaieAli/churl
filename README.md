@@ -176,7 +176,7 @@ churl keymaps
 
 ## What's next
 
-Roughly in order — see [docs/MILESTONES.md](docs/MILESTONES.md) for detail:
+Roughly in order — see [docs/ROADMAP.md](docs/ROADMAP.md) for the authoritative roadmap:
 
 - **Collection interchange** — JSON collection import/export, plus curl paste/copy directly inside the TUI
 - **Environments & variables editor** — manage profiles, collection, and workspace vars without leaving the app
