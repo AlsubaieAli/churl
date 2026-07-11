@@ -14,6 +14,7 @@ use churl_core::model::{OnError, Sequence, SequenceStep};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
@@ -737,16 +738,22 @@ fn render_rules(frame: &mut Frame, area: Rect, state: &SequenceEditorState, them
                 expr_s
             }),
         ];
-        // A Session-target rule (note #6) shows a dim ` →session` marker; Run-only
-        // rules show nothing (the ephemeral default). Hidden while this row is
-        // being edited so the live edit buffer stays clean.
+        // A Session-target rule (note #6) shows a subordinate ` →session` marker;
+        // Run-only rules show nothing (the ephemeral default). Hidden while this
+        // row is being edited so the live edit buffer stays clean. On the
+        // highlighted row the marker adapts (selection bg + DIM) so it stays
+        // legible where a plain-dim fg would wash out (drive-test note #1).
         let persisted = step.persist.get(i).copied().unwrap_or(false);
         let being_edited = matches!(&state.edit, Some(edit) if edit.rule == i);
+        let highlighted = selected && focused;
         if persisted && !being_edited {
-            spans.push(Span::styled(" →session", theme.statusline));
+            spans.push(Span::styled(
+                " →session",
+                session_marker_style(theme, highlighted),
+            ));
         }
         let mut line = Line::from(spans);
-        if selected && focused {
+        if highlighted {
             line = line.style(theme.selection);
         }
         lines.push(line);
@@ -829,6 +836,22 @@ fn render_picker(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The style for the ` →session` marker, adapting to whether its row is the
+/// highlighted (selected + focused) one. On a plain row it is the subordinate
+/// `session_marker` slot. On the highlighted row the marker sits on the
+/// `selection` fill; the `session_marker` slot's own hue tracks that same fill
+/// (cyan-on-cyan / blue-on-blue) and would wash out to fg==bg, so instead we
+/// carry the selection's *own* foreground — guaranteed to contrast its own
+/// background — and add `DIM` so the marker stays subordinate but legible
+/// (drive-test note #1; the earlier "keep marker fg" derivation was invisible).
+fn session_marker_style(theme: &Theme, highlighted: bool) -> Style {
+    if highlighted {
+        theme.selection.add_modifier(Modifier::DIM)
+    } else {
+        theme.session_marker
+    }
 }
 
 fn bordered(theme: &Theme, focused: bool, title: &'static str) -> Block<'static> {
@@ -1125,6 +1148,40 @@ mod tests {
             ed.to_sequence_checked().unwrap().steps[0].persist,
             vec!["token".to_owned()]
         );
+    }
+
+    #[test]
+    fn session_marker_style_stays_legible_on_selected_row() {
+        // Drive-test note #1: on the highlighted row the marker sits on the
+        // `selection` fill. The real bug (caught in review) was fg==bg — the
+        // marker's own hue tracks the selection background and vanished. Assert
+        // the property that actually means "legible": foreground != background,
+        // for BOTH shipped themes — plus that it adapts vs the plain row and
+        // stays subordinate (DIM).
+        for theme in [Theme::dark(), Theme::light()] {
+            let plain = session_marker_style(&theme, false);
+            let highlighted = session_marker_style(&theme, true);
+            assert_ne!(
+                plain, highlighted,
+                "the marker must adapt when its row is selected"
+            );
+            // The one thing "legible" actually means: the glyph is not the same
+            // colour as the fill it sits on.
+            assert_ne!(
+                highlighted.fg, highlighted.bg,
+                "the highlighted marker must not be fg==bg (invisible) on the selection fill"
+            );
+            assert_eq!(
+                highlighted.bg, theme.selection.bg,
+                "the highlighted marker carries the selection background"
+            );
+            assert!(
+                highlighted
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::DIM),
+                "the highlighted marker stays visually subordinate (DIM)"
+            );
+        }
     }
 
     #[test]

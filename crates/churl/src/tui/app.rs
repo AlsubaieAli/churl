@@ -746,6 +746,18 @@ fn unresolved_vars_message(names: &[String]) -> String {
     )
 }
 
+/// The status message for a `y`/`Y` copy attempt on a row with no copyable
+/// content (drive-test #4a fold-in). A `Dropped` (memory-evicted) load row is
+/// called out specifically — its body was intentionally not retained — while
+/// every other bodyless state (`Idle`/`InFlight`/`Cancelled`) gets a plain
+/// "nothing to copy". Never a silent no-op; never fabricates content.
+fn nothing_to_copy_message(state: &ResponseState) -> &'static str {
+    match state {
+        ResponseState::Dropped { .. } => "nothing to copy — response body not retained",
+        _ => "nothing to copy",
+    }
+}
+
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2687,11 +2699,25 @@ impl App {
             self.copy_to_clipboard_view(&full, truncated);
         } else if let Some(text) = self.active_response().failure_copy_text() {
             self.enqueue_clipboard(&text, "copied error");
+        } else {
+            // No view and no failure blurb (Dropped / Idle / …). Never a silent
+            // no-op (the exact class of bug #4a addressed) — say why (note #1).
+            self.message = Some(Message::new(nothing_to_copy_message(
+                self.active_response(),
+            )));
         }
     }
 
     /// `Y`: copy the response cursor's logical line via the layered clipboard.
     fn response_copy_line(&mut self) {
+        // A missing view (Failed / Dropped / Idle) has no line to copy. Give
+        // feedback rather than silently doing nothing (drive-test #4a fold-in).
+        if self.response_view_mut().is_none() {
+            self.message = Some(Message::new(nothing_to_copy_message(
+                self.active_response(),
+            )));
+            return;
+        }
         let Some(logical) = self.response_cursor_logical() else {
             return;
         };
@@ -10375,6 +10401,100 @@ mod tests {
             copied.contains("https://api.test/ping"),
             "copied text carries the request URL: {copied:?}"
         );
+    }
+
+    /// Drive-test #4a fold-in: `y` on a `Dropped` (memory-evicted) load row has
+    /// no body to copy, but must NOT be a silent no-op — it sets a status message
+    /// explaining the body was not retained, and enqueues nothing.
+    #[test]
+    fn load_dropped_row_y_sets_message_not_silent_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 1;
+        app.start_load_run();
+        // Force the selected row into the memory-evicted Dropped state.
+        {
+            let runner = app.load_runner.as_mut().unwrap();
+            runner.results[0].response = ResponseState::Dropped {
+                status: 200,
+                timing: None,
+                size: 1234,
+            };
+            runner.focus = load_runner::RunnerFocus::Response;
+        }
+        assert!(matches!(
+            app.active_response(),
+            ResponseState::Dropped { .. }
+        ));
+
+        app.handle_key(norm('y')).unwrap();
+        assert!(
+            app.pending_clipboard.is_none(),
+            "a Dropped row has nothing to copy — nothing is enqueued"
+        );
+        let msg = app
+            .message
+            .as_ref()
+            .map(|m| m.text.as_str())
+            .expect("y on a Dropped row must set a status message (not a no-op)");
+        assert!(
+            msg.contains("not retained"),
+            "message explains the body was evicted: {msg:?}"
+        );
+        assert!(!msg.is_empty());
+    }
+
+    /// `Y` (copy-line) on a `Dropped`/`Failed`/`Idle` row — no view, no line —
+    /// also gives feedback instead of a silent no-op.
+    #[test]
+    fn load_dropped_row_shift_y_sets_message_not_silent_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 1;
+        app.start_load_run();
+        {
+            let runner = app.load_runner.as_mut().unwrap();
+            runner.results[0].response = ResponseState::Dropped {
+                status: 200,
+                timing: None,
+                size: 1234,
+            };
+            runner.focus = load_runner::RunnerFocus::Response;
+        }
+        app.response_copy_line();
+        assert!(
+            app.pending_clipboard.is_none(),
+            "no line to copy — nothing enqueued"
+        );
+        let msg = app.message.as_ref().map(|m| m.text.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("not retained"),
+            "Y on a Dropped row reports why: {msg:?}"
+        );
+    }
+
+    /// `Y` on a `Failed` row (no view) gives the generic feedback — still not a
+    /// silent no-op (drive-test #4a fold-in: `Y` on Failed was silent post-4a).
+    #[test]
+    fn load_failed_row_shift_y_sets_message_not_silent_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 1;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Err("connection refused".to_owned()));
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+        assert!(matches!(
+            app.active_response(),
+            ResponseState::Failed { .. }
+        ));
+        app.response_copy_line();
+        assert!(
+            app.pending_clipboard.is_none(),
+            "Y copies a line, not the failure blurb — nothing enqueued"
+        );
+        let msg = app.message.as_ref().map(|m| m.text.as_str()).unwrap_or("");
+        assert_eq!(msg, "nothing to copy", "generic feedback, not silence");
     }
 
     /// `y` on a sequence-runner `Failed` step copies the error via the SAME

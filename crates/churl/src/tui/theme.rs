@@ -43,6 +43,13 @@ pub struct Theme {
     /// Emphasis accent for steady state markers (the unsaved `●` in the
     /// statusline / URL bar / explorer row).
     pub accent: Style,
+    /// The subordinate ` →session` marker on a sequence-editor extraction rule
+    /// whose captured value feeds the in-memory Session scope (note #6). Kept
+    /// visually secondary to the rule text, but legible on the plain row; the
+    /// render derives a selection-aware variant (carrying `selection`'s bg + a
+    /// DIM modifier) so it stays readable when the row is highlighted, where a
+    /// plain-dim foreground would wash out (drive-test note #1).
+    pub session_marker: Style,
 }
 
 impl Theme {
@@ -67,6 +74,10 @@ impl Theme {
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
             accent: Style::default().fg(Color::Yellow),
+            // Subordinate marker: a light cyan tint — dimmer than the rule text,
+            // but far enough off the dark pane bg to stay legible. On a selected
+            // row the render swaps in the selection bg (+DIM), keeping contrast.
+            session_marker: Style::default().fg(Color::Cyan),
         }
     }
 
@@ -91,6 +102,10 @@ impl Theme {
                 .bg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
             accent: Style::default().fg(Color::Magenta),
+            // Subordinate marker on the light pane: a mid blue — softer than the
+            // rule text yet clearly readable on white; the selected-row variant
+            // (selection bg + DIM) keeps it legible when highlighted.
+            session_marker: Style::default().fg(Color::Blue),
         }
     }
 
@@ -136,6 +151,7 @@ impl Theme {
             "response_status" => &mut self.response_status,
             "jump_label" => &mut self.jump_label,
             "accent" => &mut self.accent,
+            "session_marker" => &mut self.session_marker,
             _ => return None,
         })
     }
