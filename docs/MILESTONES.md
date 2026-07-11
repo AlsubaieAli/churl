@@ -26,12 +26,12 @@
 | **M7.10** | Navigation & keymap unification (design-first) | **done** |
 | **M7.7** | Response formatting + help search (+ control-char sanitize) | **done** |
 | **R1** | Durability & concurrency (reserved-names · merge-comments · SQLite WAL · pruning · buffer/channel bounds) | planned |
+| **M7.11** | Modularization refactor (split oversized files; behaviour-preserving) | planned |
 | M7.6 | Interchange parity (churl-native JSON import) | planned |
 | **R2** | Cross-platform proof (CI macOS+Windows · MSRV · cargo-deny · install.ps1 · Wayland) | planned |
 | M7.8 | Lifecycle & distribution (version pin, self-update, uninstall) | planned |
 | **R3** | Secret & request safety (placeholder-gate · redirect policy · env grandfather+warn) | planned |
 | M7.9 | Unified creation flow (`<leader>n`: collection/endpoint/sequence; endpoint from curl) | planned |
-| **M7.11** | Modularization refactor (split oversized files; behaviour-preserving) | planned |
 | M8 | Cookies + proxy | planned |
 | M9 | Plugin system | planned |
 
@@ -60,7 +60,7 @@ Until now hardening was reactive (M7.5.1/.2/.3 patch-batches squeezed between fe
 4. **Living regression checklist** — the demo drive-script becomes a committed, growing checklist so "full regression" is repeatable, not re-discovered each round.
 5. **Demo is rebuilt from master in every D** — the 07-09 sweep found the owner drove a *stale* demo binary (picker Up/Down "broken" was actually fixed on master, pre-#23). Rebuild + re-sign is a checklist step, not a ritual to remember.
 
-**Linear sequence:** `D1 → R0 → M7.10 → M7.7 →(D)→ R1 → M7.6 →(D)→ R2 → M7.8 →(D)→ R3 → M7.9 →(D)→ M8 →(D)→ M9`.
+**Linear sequence:** `D1 → R0 → M7.10 → M7.7 →(D)→ R1 → M7.11 → M7.6 →(D)→ R2 → M7.8 →(D)→ R3 → M7.9 →(D)→ M8 →(D)→ M9`. (M7.11 pulled up from its former pre-M8 slot to right after R1, owner-approved 2026-07-11: a behaviour-preserving split done at peak test coverage + a clean barrier means the whole M7.6→M9 feature tail is built on modular code instead of the ~10.8k-line `app.rs` god-file — see the cost rationale in the M7.11 section.)
 
 ### Provenance — the 07-09 regression sweep
 
@@ -851,9 +851,9 @@ Findings from driving the two edtui editors (URL vim-popup + Body tab), all on e
 - ARCHITECTURE.md module map refreshed; a short DECISIONS ADR recording the module-boundary conventions so future files don't re-bloat.
 - No new tests required (behaviour unchanged) beyond keeping the existing suite green; add a note to the regression checklist that file-size is now watched.
 
-**Sequencing / open question**: placed before M9 deliberately — cleaner module boundaries make the M9 plugin-API seams easier to define and freeze. But it is behaviour-neutral, so the owner can reprioritise it earlier (e.g. right after the M7.x feature run) or slice it (do `app.rs` now, the rest later). **Owner to confirm placement + whether to tackle `app.rs` opportunistically before then.**
+**Sequencing (owner-confirmed 2026-07-11)**: slotted **right after R1**, ahead of the M7.6→M9 feature tail — pulled up from its former pre-M8 slot. Rationale: `app.rs` is ~10.8k lines (~6.3k production + ~4.5k tests) and grew ~1k in ~2 days of feature work; every builder/reviewer pays the full-file context cost, and five more feature/hardening milestones would each pay it and add to it. A behaviour-preserving split is safest at **peak test coverage** (804+ tests now — the net that proves no behaviour changed) and must run at a **clean barrier** (its own session, zero other open branches, one module extracted per PR) since it maximally conflicts with any concurrent branch. Run order within: `app.rs` first (biggest win), then the other >1k files.
 
-**Next**: M8
+**Next**: M7.6
 
 ---
 
