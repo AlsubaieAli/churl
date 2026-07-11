@@ -2342,6 +2342,81 @@ fn env_editor_collection_override_marker_and_legend() {
     );
 }
 
+// ---- Ephemeral peek + copy for masked secrets (drive-test note #3) ----
+
+#[test]
+fn env_peek_reveals_resolved_value_then_p_copies() {
+    // `p` on the masked `api_token` row reveals its RESOLVED value (the workspace
+    // literal) in place; `y` while revealed queues a clipboard copy of that value.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // into workspace rows; row 0 = api_token (masked)
+    // Before peek: masked, literal absent.
+    let masked = snapshot(&mut app);
+    assert!(masked.contains("••••••"), "masked before peek:\n{masked}");
+    assert!(
+        !masked.contains("literal-secret-value"),
+        "literal hidden before peek:\n{masked}"
+    );
+    // Peek: the resolved value is now visible with the affordance.
+    press(&mut app, KeyCode::Char('p'));
+    let revealed = snapshot(&mut app);
+    assert!(
+        revealed.contains("literal-secret-value"),
+        "resolved value revealed in place:\n{revealed}"
+    );
+    // The affordance marker is present next to the value (it may be truncated by
+    // the narrow test pane; the eye glyph + "revea…" prefix always survives).
+    assert!(
+        revealed.contains("👁 revea"),
+        "reveal affordance shown:\n{revealed}"
+    );
+    // `y` copies the revealed value through the existing clipboard path.
+    press(&mut app, KeyCode::Char('y'));
+    let msg = app
+        .pending_copy_message()
+        .expect("copy of the revealed value must be queued");
+    assert!(msg.contains("copied"), "copy confirmed: {msg}");
+}
+
+#[test]
+fn env_peek_does_not_write_the_secret_to_disk() {
+    // No-secret-to-disk proof at the app seam: peeking + copying a masked value
+    // leaves the workspace manifest byte-identical — the reveal is view-state only,
+    // never persisted. (The literal was already on disk as a hand-edited value; we
+    // assert the FILE is unchanged by the peek, i.e. the peek writes nothing.)
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    let manifest = dir.path().join("churl.toml");
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('p')); // reveal
+    press(&mut app, KeyCode::Char('y')); // copy
+    // Move off the row and close — none of it may write.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('q'));
+    let after = std::fs::read_to_string(&manifest).unwrap();
+    assert_eq!(before, after, "a peek+copy writes nothing to disk");
+}
+
+#[test]
+fn env_peek_remasks_on_row_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_env_fixture(dir.path());
+    open_env(&mut app);
+    press(&mut app, KeyCode::Tab); // row 0 = api_token
+    press(&mut app, KeyCode::Char('p')); // reveal
+    assert!(snapshot(&mut app).contains("literal-secret-value"));
+    press(&mut app, KeyCode::Char('j')); // move to base_url
+    let after = snapshot(&mut app);
+    assert!(
+        !after.contains("literal-secret-value"),
+        "moving off the row re-masks:\n{after}"
+    );
+}
+
 // ---- PR 3b: tab strip (multi-buffer) ----
 
 /// One open buffer: the strip renders one tab (the endpoint name), no dirty dot.

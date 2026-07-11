@@ -1396,6 +1396,23 @@ impl App {
         ])
     }
 
+    /// Builds the resolver used by the env-editor's ephemeral peek (drive-test
+    /// note #3). It mirrors [`build_resolver`] but omits the per-endpoint
+    /// `collection` scope — the env editor is not tied to a loaded endpoint, so
+    /// there is no single collection to consult (a collection var resolves
+    /// per-request, not globally). Session captures still sit highest, so a peeked
+    /// `{{token}}` reveals what a standalone send would use. The resolved value is
+    /// returned by value and never stored — the caller hands it straight to the
+    /// editor's transient reveal state.
+    fn build_env_resolver(&self) -> Resolver {
+        Resolver::new(vec![
+            Scope::new("session", self.session_vars()),
+            Scope::new("cli", self.cli_vars.clone()),
+            Scope::new("profile", self.profile_vars()),
+            Scope::new("workspace", self.workspace_vars()),
+        ])
+    }
+
     /// Installs the runtime-dependent pieces: the HTTP client (with the
     /// config-resolved timeout), the execution options (body-size cap), the
     /// off-thread highlight worker, and the history store. Called from
@@ -1473,6 +1490,11 @@ impl App {
                     self.tick_count = self.tick_count.wrapping_add(1);
                     if self.message.as_ref().is_some_and(|s| s.is_expired()) {
                         self.message = None;
+                    }
+                    // Re-mask an ephemeral secret peek on timeout (drive-test
+                    // note #3), on the same 250 ms cadence that expires messages.
+                    if let Some(editor) = self.env_editor.as_mut() {
+                        editor.expire_reveal();
                     }
                 }
                 msg = self.rx.recv() => {
@@ -3002,6 +3024,38 @@ impl App {
                 } else {
                     "no session captures to clear"
                 });
+            }
+            EnvKeyOutcome::RevealRow => {
+                // Ephemeral peek (drive-test note #3): resolve the selected masked
+                // row's value through the SAME resolver a standalone send uses, then
+                // hand the plaintext to the editor's transient reveal state. The
+                // resolved value never touches disk, a log, or any persisted field —
+                // it lives only in the editor's in-memory `reveal` until re-masked.
+                let raw = self
+                    .env_editor
+                    .as_ref()
+                    .and_then(|e| e.peekable_selected_value())
+                    .map(str::to_owned);
+                if let Some(raw) = raw {
+                    let resolved = self.build_env_resolver().substitute(&raw);
+                    if let Some(editor) = self.env_editor.as_mut() {
+                        editor.set_reveal(resolved);
+                    }
+                }
+            }
+            EnvKeyOutcome::CopyRevealed => {
+                // Copy the revealed plaintext through the existing clipboard path
+                // (the "allow copy" the owner asked for). We read it back from the
+                // editor's reveal state (still live) and route it through
+                // `enqueue_clipboard` — the same seam every other copy uses.
+                let revealed = self
+                    .env_editor
+                    .as_ref()
+                    .and_then(|e| e.revealed_value())
+                    .map(str::to_owned);
+                if let Some(value) = revealed {
+                    self.enqueue_clipboard(&value, "copied revealed value");
+                }
             }
         }
         Ok(())

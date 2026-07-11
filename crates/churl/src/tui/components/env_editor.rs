@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -131,6 +132,39 @@ pub enum EnvKeyOutcome {
     /// Clear the current workspace's in-memory Session captures (note #6). The app
     /// empties its store, then the editor rebuilds the Session group's rows.
     ClearSession,
+    /// Ephemeral peek (drive-test note #3): the user pressed the reveal key on a
+    /// masked row. The editor cannot resolve values itself (it is UI-only), so it
+    /// asks the app to resolve the selected row's value through the normal
+    /// [`Resolver`] and hand it back via [`EnvEditorState::set_reveal`]. Nothing is
+    /// revealed until the app answers.
+    RevealRow,
+    /// Copy the currently-revealed value to the clipboard (`y` while a peek is
+    /// active). The app reads [`EnvEditorState::revealed_value`] and routes it
+    /// through the existing clipboard path. A no-op for the app when nothing is
+    /// revealed (the editor only emits this while a reveal is live).
+    CopyRevealed,
+}
+
+/// Default lifetime of an ephemeral secret peek, in seconds — deliberately short
+/// so a revealed secret does not linger on screen. Checked on the app's existing
+/// 250 ms tick (mirrors [`super::message::MESSAGE_EXPIRE_SECS`]).
+pub const REVEAL_EXPIRE_SECS: u64 = 6;
+
+/// An active ephemeral peek (drive-test note #3): exactly one masked row's
+/// **resolved** value revealed in place. This is the ONLY place the plaintext of a
+/// masked value lives in view state, and it is cleared on any row/scope move, mode
+/// change, or timeout — never persisted, never logged. Pinned to a `(scope, row)`
+/// coordinate so a stale reveal can never paint over a different row.
+#[derive(Debug, Clone)]
+pub struct Reveal {
+    /// The scope index the reveal is pinned to.
+    scope: usize,
+    /// The row index the reveal is pinned to.
+    row: usize,
+    /// The resolved plaintext, held transiently for display + the explicit copy.
+    value: String,
+    /// When the reveal began, for the short auto-remask timeout.
+    revealed_at: Instant,
 }
 
 /// Full state of the open environments & variables editor.
@@ -152,6 +186,10 @@ pub struct EnvEditorState {
     pub naming: Option<ProfileNameEdit>,
     /// Inline status/error message shown in the editor footer.
     pub message: Option<String>,
+    /// The active ephemeral secret peek (drive-test note #3), if any. At most one
+    /// row is ever revealed. Cleared on row/scope move, mode change, and timeout;
+    /// its plaintext lives only here, transiently, and is never written or logged.
+    reveal: Option<Reveal>,
     /// True → render the discard confirm instead of accepting close.
     pub pending_close: bool,
     /// Mirror of the app's active profile, for the precedence display; may be
@@ -220,6 +258,7 @@ impl EnvEditorState {
             editing: None,
             naming: None,
             message: None,
+            reveal: None,
             pending_close: false,
             snapshot_active_profile: active_profile.clone(),
             active_profile,
@@ -258,10 +297,101 @@ impl EnvEditorState {
         matches!(self.scope().kind, EnvScopeKind::Session)
     }
 
+    /// Whether the row at `(selected_scope, row)` renders masked — i.e. the peek
+    /// key has something to reveal. This is the SAME predicate `render_var_line`
+    /// uses to decide masking, kept in one place so reveal and mask can never
+    /// disagree: a Session capture (always masked) or a secret-named literal that
+    /// is not a `{{placeholder}}`. Empty values are never masked (nothing to hide).
+    fn row_is_masked(&self, row: usize) -> bool {
+        let Some((name, value)) = self.scope().vars.get(row) else {
+            return false;
+        };
+        !value.is_empty()
+            && (matches!(self.scope().kind, EnvScopeKind::Session)
+                || (looks_like_secret_name(name) && !is_template_placeholder(value)))
+    }
+
+    /// The raw (pre-resolution) value of the selected row, used by the app to
+    /// resolve the reveal. `None` when there is no such row or it is not masked
+    /// (only masked rows are peekable — an already-visible value needs no peek).
+    pub fn peekable_selected_value(&self) -> Option<&str> {
+        if !self.row_is_masked(self.selected_row) {
+            return None;
+        }
+        self.scope()
+            .vars
+            .get(self.selected_row)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Records a resolved plaintext as the active peek, pinned to the currently
+    /// selected `(scope, row)`. Called by the app in response to
+    /// [`EnvKeyOutcome::RevealRow`]. Replaces any prior reveal (only one at a time).
+    pub fn set_reveal(&mut self, value: String) {
+        self.reveal = Some(Reveal {
+            scope: self.selected_scope,
+            row: self.selected_row,
+            value,
+            revealed_at: Instant::now(),
+        });
+    }
+
+    /// The currently-revealed plaintext, if a peek is live AND still pinned to the
+    /// selected row. Used by the app for the explicit `y` copy. `None` re-masks the
+    /// copy path — you can only copy what is actually on screen.
+    pub fn revealed_value(&self) -> Option<&str> {
+        self.reveal
+            .as_ref()
+            .filter(|r| r.scope == self.selected_scope && r.row == self.selected_row)
+            .map(|r| r.value.as_str())
+    }
+
+    /// Clears the active peek immediately (re-masks). Idempotent. Dropping the
+    /// `Reveal` drops its plaintext `String` — nothing lingers in view state.
+    fn clear_reveal(&mut self) {
+        self.reveal = None;
+    }
+
+    /// Whether a peek is currently live and pinned to the selected row (drives the
+    /// on-screen "revealed" affordance + the reveal-aware value rendering).
+    fn selected_row_is_revealed(&self) -> bool {
+        self.reveal
+            .as_ref()
+            .is_some_and(|r| r.scope == self.selected_scope && r.row == self.selected_row)
+    }
+
+    /// Expires the peek if it has outlived [`REVEAL_EXPIRE_SECS`]. Called by the
+    /// app on its 250 ms tick (the same cadence that expires transient messages).
+    /// Returns whether it cleared a reveal (so the caller can request a redraw).
+    pub fn expire_reveal(&mut self) -> bool {
+        if self
+            .reveal
+            .as_ref()
+            .is_some_and(|r| r.revealed_at.elapsed().as_secs() >= REVEAL_EXPIRE_SECS)
+        {
+            self.reveal = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Handles one key event, returning what the app should do next.
     pub fn handle_key(&mut self, key: KeyEvent) -> EnvKeyOutcome {
         // A live message is cleared on the next interaction so it does not linger.
         self.message = None;
+
+        // Ephemeral peek re-masking (drive-test note #3): ANY key other than the
+        // reveal key (`p`) or the copy-while-revealed key (`y`) re-masks. This is
+        // the single seam that satisfies "re-mask on cursor move to another row or
+        // any mode change" — j/k, h/l, Tab, Enter, i, Esc, q, etc. all clear the
+        // peek here before they act, so a revealed value can never survive a move
+        // off its row or a mode switch. `p` re-peeks (refresh); `y` is handled as
+        // the explicit copy below and must keep the reveal alive.
+        let preserves_reveal = matches!(key.code, KeyCode::Char('p') | KeyCode::Char('y'));
+        if !preserves_reveal {
+            self.clear_reveal();
+        }
 
         if self.pending_close {
             return self.handle_confirm_key(key);
@@ -409,6 +539,31 @@ impl EnvEditorState {
             KeyCode::Char('r') => {
                 self.begin_edit(EnvField::Name, false);
                 EnvKeyOutcome::Consumed
+            }
+            // Ephemeral peek (drive-test note #3): reveal the selected MASKED row's
+            // resolved value in place. Read-only for every scope including Session —
+            // it never enters edit mode, never mutates the row. Only masked rows are
+            // peekable; on a visible row it's a no-op with a hint. The app resolves
+            // and calls `set_reveal` in response to `RevealRow` (the editor cannot
+            // resolve — it holds no `Resolver`).
+            KeyCode::Char('p') => {
+                if self.peekable_selected_value().is_some() {
+                    EnvKeyOutcome::RevealRow
+                } else {
+                    self.message = Some("nothing to peek — this value is not masked".to_owned());
+                    EnvKeyOutcome::Consumed
+                }
+            }
+            // Copy the revealed value (the "allow copy" the owner asked for). Only
+            // while a peek is live on the selected row; otherwise a no-op hint so
+            // `y` never silently copies a masked/absent value.
+            KeyCode::Char('y') => {
+                if self.selected_row_is_revealed() {
+                    EnvKeyOutcome::CopyRevealed
+                } else {
+                    self.message = Some("nothing revealed — press p to peek first".to_owned());
+                    EnvKeyOutcome::Consumed
+                }
             }
             KeyCode::Char('w') => EnvKeyOutcome::Save,
             KeyCode::Char('q') | KeyCode::Esc => self.request_close(),
@@ -1222,11 +1377,21 @@ fn render_var_line<'a>(
         pad(name, name_col)
     };
 
+    // An ephemeral peek (drive-test note #3) reveals THIS row's resolved value in
+    // place — but only when the reveal is pinned to exactly this scope+row (guarded
+    // in `revealed_value`), so a stale reveal can never paint another row's secret.
+    let revealed = (row == state.selected_row)
+        .then(|| state.revealed_value())
+        .flatten();
+
     // Session captures are ALWAYS masked — a captured token is a secret
     // regardless of its var name (note #6). Elsewhere, secret-named literal values
-    // are masked unless a placeholder or being edited.
+    // are masked unless a placeholder or being edited. A live peek overrides the
+    // mask for its one row only.
     let value_cell = if editing_value {
         field_with_cursor(editing.unwrap())
+    } else if let Some(plain) = revealed {
+        plain.to_owned()
     } else if !value.is_empty()
         && (matches!(state.scope().kind, EnvScopeKind::Session)
             || (looks_like_secret_name(name) && !is_template_placeholder(value)))
@@ -1247,6 +1412,15 @@ fn render_var_line<'a>(
         Span::raw("  "),
         Span::raw(value_cell),
     ];
+    // A small affordance right on the revealed row: it is a secret currently
+    // visible, and how to re-mask / that it is ephemeral.
+    if revealed.is_some() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "👁 revealed · y copy · any key re-masks",
+            theme.status_error,
+        ));
+    }
     if !tag.is_empty() {
         spans.push(Span::styled(tag, theme.auth_mask));
     }
@@ -1330,7 +1504,9 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &
                 )
             }
             EnvFocus::VarRows => {
-                format!("{dirty}j/k move · read-only (run-populated, masked) · h scopes · q close")
+                format!(
+                    "{dirty}j/k move · p peek · read-only (run-populated, masked) · h scopes · q close"
+                )
             }
         }
     } else {
@@ -1339,7 +1515,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &
                 "{dirty}j/k move · l/enter edit vars · n new profile · r rename · d delete · x activate · w save · q close"
             ),
             EnvFocus::VarRows => format!(
-                "{dirty}j/k move · a add · enter value · r name · d delete · h scopes · w save · q close"
+                "{dirty}j/k move · a add · enter value · r name · d delete · p peek · h scopes · w save · q close"
             ),
         }
     };
@@ -1398,6 +1574,7 @@ mod tests {
             editing: None,
             naming: None,
             message: None,
+            reveal: None,
             pending_close: false,
             active_profile: None,
             snapshot_active_profile: None,
@@ -1641,6 +1818,7 @@ mod tests {
             editing: None,
             naming: None,
             message: None,
+            reveal: None,
             pending_close: false,
             active_profile: None,
             snapshot_active_profile: None,
@@ -1909,5 +2087,180 @@ mod tests {
         let result = s.save(dir.path(), "demo");
         assert!(matches!(result, EnvSaveResult::Ok { .. }));
         assert!(!s.is_dirty(), "save commits the active-profile change");
+    }
+
+    // --- Ephemeral peek + copy (drive-test note #3). ---
+
+    /// Select the Session scope's first row (a masked capture) with VarRows focus.
+    fn on_session_row(s: &mut EnvEditorState) {
+        s.selected_scope = s.scopes.len() - 1;
+        s.focus = EnvFocus::VarRows;
+        s.selected_row = 0;
+    }
+
+    #[test]
+    fn peek_key_on_masked_row_requests_reveal() {
+        // `p` on a masked row asks the app to resolve it (RevealRow). The editor
+        // does NOT reveal on its own — it holds no resolver.
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        assert_eq!(s.handle_key(ch('p')), EnvKeyOutcome::RevealRow);
+        assert!(
+            s.revealed_value().is_none(),
+            "no reveal until the app answers"
+        );
+    }
+
+    #[test]
+    fn peek_on_visible_row_is_a_no_op_hint() {
+        // `p` on a plainly-visible (non-secret) row reveals nothing.
+        let mut s = fixture(); // workspace base_url is not a secret
+        s.focus = EnvFocus::VarRows;
+        s.selected_row = 0;
+        assert_eq!(s.handle_key(ch('p')), EnvKeyOutcome::Consumed);
+        assert!(s.message.as_deref().unwrap().contains("not masked"));
+        assert!(s.revealed_value().is_none());
+    }
+
+    #[test]
+    fn reveal_shows_the_resolved_value_in_place() {
+        // The app hands the resolved plaintext to set_reveal; the row then renders
+        // it verbatim (not the mask) with the "revealed" affordance.
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        assert_eq!(s.handle_key(ch('p')), EnvKeyOutcome::RevealRow);
+        s.set_reveal("T-abc-123".to_owned());
+        assert_eq!(s.revealed_value(), Some("T-abc-123"));
+        let out = render_to_text(&s);
+        assert!(out.contains("T-abc-123"), "resolved value visible:\n{out}");
+        assert!(out.contains("revealed"), "affordance shown:\n{out}");
+    }
+
+    #[test]
+    fn reveal_remasks_on_row_move() {
+        let mut s = fixture_with_session();
+        // Two session rows so a move lands on a different one.
+        let last = s.scopes.len() - 1;
+        s.scopes[last].vars.push(("other".into(), "V-2".into()));
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        assert!(s.revealed_value().is_some());
+        s.handle_key(ch('j')); // move to another row
+        assert!(s.revealed_value().is_none(), "moving off the row re-masks");
+        let out = render_to_text(&s);
+        assert!(
+            !out.contains("T-abc-123"),
+            "no plaintext after move:\n{out}"
+        );
+    }
+
+    #[test]
+    fn reveal_remasks_on_mode_change() {
+        // Leaving the rows pane (h → scope list) re-masks.
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        s.handle_key(ch('h')); // focus → ScopeList (a mode/pane change)
+        assert!(s.revealed_value().is_none(), "changing pane re-masks");
+    }
+
+    #[test]
+    fn reveal_remasks_on_timeout() {
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        // Back-date the reveal past the expiry and tick.
+        if let Some(r) = s.reveal.as_mut() {
+            r.revealed_at = Instant::now() - std::time::Duration::from_secs(REVEAL_EXPIRE_SECS + 1);
+        }
+        assert!(s.expire_reveal(), "expired reveal is cleared");
+        assert!(s.revealed_value().is_none());
+        // A fresh reveal does not expire.
+        s.set_reveal("T-abc-123".to_owned());
+        assert!(!s.expire_reveal());
+        assert!(s.revealed_value().is_some());
+    }
+
+    #[test]
+    fn only_one_row_revealed_at_a_time() {
+        let mut s = fixture_with_session();
+        let last = s.scopes.len() - 1;
+        s.scopes[last].vars.push(("other".into(), "V-2".into()));
+        on_session_row(&mut s);
+        s.set_reveal("first".to_owned());
+        // Move + peek + reveal the second row: the first reveal is gone.
+        s.handle_key(ch('j'));
+        s.handle_key(ch('p'));
+        s.set_reveal("second".to_owned());
+        assert_eq!(s.revealed_value(), Some("second"));
+        // Only the currently-selected (second) row is revealed.
+        s.selected_row = 0;
+        assert!(s.revealed_value().is_none(), "row 0 is re-masked");
+    }
+
+    #[test]
+    fn y_while_revealed_emits_copy_revealed() {
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        assert_eq!(s.handle_key(ch('y')), EnvKeyOutcome::CopyRevealed);
+        // The reveal survives the copy so the app can read the value back.
+        assert_eq!(s.revealed_value(), Some("T-abc-123"));
+    }
+
+    #[test]
+    fn y_without_reveal_is_a_no_op_hint() {
+        let mut s = fixture_with_session();
+        on_session_row(&mut s);
+        assert_eq!(s.handle_key(ch('y')), EnvKeyOutcome::Consumed);
+        assert!(s.message.as_deref().unwrap().contains("nothing revealed"));
+    }
+
+    #[test]
+    fn peek_never_makes_the_session_row_editable() {
+        // The core security invariant: a peek reveals but NEVER enters edit mode,
+        // and the Session group stays read-only under reveal.
+        let mut s = fixture_with_session();
+        let before = s.scopes.clone();
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        assert!(s.editing.is_none(), "peek does not open an editor");
+        // Edit/add/delete keys are still swallowed with the read-only message.
+        s.handle_key(ch('i'));
+        assert!(s.editing.is_none(), "still not editable");
+        s.handle_key(ch('a'));
+        assert!(s.editing.is_none(), "cannot add under reveal");
+        s.handle_key(ch('d'));
+        assert_eq!(s.scopes, before, "no row mutated under reveal");
+        assert!(
+            !s.is_dirty(),
+            "the read-only group never dirties under reveal"
+        );
+    }
+
+    #[test]
+    fn reveal_lives_only_in_view_state_never_in_saved_rows() {
+        // No-persistence proof at the unit seam: the reveal plaintext lives ONLY in
+        // the transient `reveal` field. The scope rows (what save writes) and the
+        // snapshot are untouched by a peek, and clearing the reveal drops the
+        // plaintext entirely.
+        let mut s = fixture_with_session();
+        let rows_before = s.scopes.clone();
+        on_session_row(&mut s);
+        s.handle_key(ch('p'));
+        s.set_reveal("T-abc-123".to_owned());
+        assert_eq!(s.scopes, rows_before, "peek never writes into the rows");
+        // The Session row still holds its stored value; the reveal is separate.
+        s.clear_reveal();
+        assert!(
+            s.reveal.is_none(),
+            "clearing drops the plaintext from view state"
+        );
+        assert!(s.revealed_value().is_none());
     }
 }
