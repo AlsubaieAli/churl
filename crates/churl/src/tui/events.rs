@@ -635,6 +635,14 @@ impl Default for KeyMap {
         // `?` opens the help overlay; `z` zooms the focused pane.
         bind(key!('?'), Action::Help);
         bind(key!(z), Action::Zoom);
+        // Global buffer-tab nav (D2 note #4, owner decision 2026-07-11): `}` next
+        // buffer, `{` prev buffer — fast chip-tab switching from ANY pane, so these
+        // live in the base/global map (not a pane overlay). `[`/`]` are deliberately
+        // NOT touched (they stay Request-pane sub-tab prev/next in that overlay);
+        // `{`/`}` were verified free globally. `<leader>t n/p` and `<leader>t <n>`
+        // keep working — this is an addition.
+        bind(key!('}'), Action::BufferNext);
+        bind(key!('{'), Action::BufferPrev);
         // `SwitchProfile` has no default key binding: it lives in the command
         // palette ("switch profile"). Overlay-level modes (search/palette/jump)
         // still take routing precedence over it.
@@ -1365,6 +1373,57 @@ mod tests {
         assert_eq!(
             keymap.lookup(press(KeyCode::Char('x'), KeyModifiers::NONE)),
             None
+        );
+    }
+
+    /// D2 note #4: `}` / `{` are GLOBAL buffer next/prev — they must resolve from
+    /// any pane (base map, not a pane overlay). Verified from a non-Request pane
+    /// context so a Request-overlay binding can never be what makes them work.
+    #[test]
+    fn brace_keys_are_global_buffer_nav() {
+        let keymap = KeyMap::default();
+        // Global lookup (no pane context).
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Char('}'), KeyModifiers::NONE)),
+            Some(Action::BufferNext),
+            "}} → next buffer globally"
+        );
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Char('{'), KeyModifiers::NONE)),
+            Some(Action::BufferPrev),
+            "{{ → prev buffer globally"
+        );
+        // Fires from a NON-Request pane too (Response overlay has no `{`/`}`), so
+        // it is the global map — not a pane overlay — that resolves them.
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('}'), KeyModifiers::NONE),
+                PaneCtx::Response
+            ),
+            Some(Action::BufferNext),
+            "}} works from the Response pane (global)"
+        );
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char('{'), KeyModifiers::NONE),
+                PaneCtx::Explorer
+            ),
+            Some(Action::BufferPrev),
+            "{{ works from the Explorer pane (global)"
+        );
+        // `[` / `]` remain Request-pane sub-tab nav — untouched, and NOT global.
+        assert_eq!(
+            keymap.lookup(press(KeyCode::Char(']'), KeyModifiers::NONE)),
+            None,
+            "] stays request-overlay only, not global"
+        );
+        assert_eq!(
+            keymap.lookup_ctx(
+                press(KeyCode::Char(']'), KeyModifiers::NONE),
+                PaneCtx::Request
+            ),
+            Some(Action::TabNext),
+            "] is still request sub-tab next"
         );
     }
 
