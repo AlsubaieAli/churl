@@ -329,6 +329,17 @@ pub enum SequenceError {
         /// The offending `endpoint` string.
         endpoint: String,
     },
+    /// After substitution the step's request still carried one or more `{{var}}`
+    /// placeholders no scope resolved — sending it would ship a literal `{{var}}`.
+    /// The step fails loudly instead (honouring the sequence's `on_error`).
+    #[error(
+        "unresolved variable(s): {} — set them in a profile/env or via CLI",
+        names.join(", ")
+    )]
+    Unresolved {
+        /// The unresolved placeholder names (sorted, deduped).
+        names: Vec<String>,
+    },
     /// The endpoint file could not be loaded (missing or unparseable) or its
     /// collection metadata could not be read.
     #[error("step endpoint {endpoint:?}: {source}")]
@@ -443,6 +454,12 @@ pub fn prepare_step(
 
     let mut request = endpoint.request.clone();
     resolver.substitute_request(&mut request);
+    // Fail loud: an unresolved `{{var}}` must not ship a literal placeholder on the
+    // wire. The step fails here (the run's `on_error` decides halt vs continue).
+    let names = crate::template::unresolved_placeholders(&request);
+    if !names.is_empty() {
+        return Err(SequenceError::Unresolved { names });
+    }
     Ok(PreparedStep {
         endpoint_path: path,
         method: request.method,

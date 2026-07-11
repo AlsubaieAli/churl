@@ -68,7 +68,9 @@ crates/
                            #   guardrail; run_load is the wiremock-tested twin the TUI launcher mirrors
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single M9 seam);
                            #   substitute / substitute_request (M6); sequences prepend a highest-precedence
-                           #   `extracted` scope (M7.4) — resolution never forked
+                           #   `extracted` scope (M7.4) — resolution never forked; unresolved_placeholders
+                           #   (note #4b) fails loud: names any {{var}} still present after substitution
+                           #   (reuses parse_placeholder; no literal-brace escape) so the 3 send paths refuse
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
                            #   timeout_secs, max_body_bytes, the M7.5 [load] guardrail caps → Config::load_caps())
                            #   + secrets heuristics (looks_like_secret_name,

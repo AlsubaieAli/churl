@@ -732,6 +732,18 @@ fn load_result_meta(url: &str) -> ResponseMeta {
     }
 }
 
+/// The user-facing "fail loud" message naming unresolved `{{var}}` placeholders,
+/// shared by the two TUI send sites (main-pane send + load-runner open) so their
+/// wording matches the sequence-step error ([`churl_core::sequence::SequenceError::Unresolved`]).
+/// `names` is expected non-empty and already sorted/deduped (as
+/// [`churl_core::template::unresolved_placeholders`] returns).
+fn unresolved_vars_message(names: &[String]) -> String {
+    format!(
+        "unresolved variable(s): {} — set them in a profile/env or via CLI",
+        names.join(", ")
+    )
+}
+
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2220,11 +2232,6 @@ impl App {
             .active_endpoint_buffer()
             .map(|b| String::from(b.editor.lines.clone()))
             .unwrap_or_default();
-        // No client = runtime-free construction (snapshot tests); do nothing.
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-
         let mut request = selected.endpoint.request.clone();
         overwrite_body_text(&mut request, body_text);
 
@@ -2233,6 +2240,21 @@ impl App {
         // clone is discarded after the send). `execute()` stays substitution-free.
         self.build_resolver(&selected)
             .substitute_request(&mut request);
+
+        // Fail loud: refuse to send a request that still carries `{{var}}`
+        // placeholders no scope resolved — a literal `{{...}}` in the URL/headers/
+        // body would otherwise ship and produce a cryptic transport error. Checked
+        // before the client gate so the message surfaces regardless of runtime.
+        let unresolved = churl_core::template::unresolved_placeholders(&request);
+        if !unresolved.is_empty() {
+            self.message = Some(Message::new(unresolved_vars_message(&unresolved)));
+            return;
+        }
+
+        // No client = runtime-free construction (snapshot tests); do nothing.
+        let Some(client) = self.client.clone() else {
+            return;
+        };
 
         self.generation += 1;
         let generation = self.generation;
@@ -3514,6 +3536,14 @@ impl App {
         // substitution-free.
         self.build_resolver(&selected)
             .substitute_request(&mut request);
+        // Fail loud: the load runner resolves ONCE at open time and every copy
+        // reuses this request. An unresolved `{{var}}` means the whole batch would
+        // fire a literal placeholder — refuse to open the runner at all.
+        let unresolved = churl_core::template::unresolved_placeholders(&request);
+        if !unresolved.is_empty() {
+            self.notify(unresolved_vars_message(&unresolved));
+            return;
+        }
         let url = request.url.clone();
         let endpoint_path = self.endpoint_rel_path(&selected);
         self.load_request = Some(request);
@@ -7657,6 +7687,148 @@ mod tests {
         app.set_profile(Some("prod".to_owned()));
         let resolver = app.build_resolver(&selected);
         assert_eq!(resolver.substitute("{{host}}"), "prod.test");
+    }
+
+    /// Loads the single `{{host}}` endpoint from `workspace_fixture` into an active
+    /// buffer (no profile → `host` is unresolved). Shared by the fail-loud send/load
+    /// tests below.
+    fn app_with_unresolved_endpoint(root: &Path) -> App {
+        let mut app = workspace_fixture(root);
+        app.explorer.expand().unwrap();
+        app.explorer.cursor = 1;
+        let selected = app.explorer.select().unwrap().expect("endpoint");
+        app.load_endpoint(selected);
+        app
+    }
+
+    /// Fail loud, path 1 (Ctrl-S / main-pane send): a request that still carries an
+    /// unresolved `{{host}}` after substitution is NOT sent — the message names the
+    /// variable and no request goes in flight.
+    #[test]
+    fn send_refuses_unresolved_variable_with_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_unresolved_endpoint(dir.path());
+        app.send_request();
+        let msg = app.message.as_ref().map(|m| m.text.as_str());
+        assert_eq!(
+            msg,
+            Some("unresolved variable(s): host — set them in a profile/env or via CLI")
+        );
+        assert!(
+            app.active_endpoint_buffer()
+                .is_some_and(|b| b.in_flight.is_none()),
+            "no request must go in flight when a variable is unresolved"
+        );
+        // Sanity: with the `prod` profile active, `host` resolves and the guard does
+        // not fire (proves the check is not firing on a resolved request). The client
+        // is None so nothing spawns; we clear the stale refusal message first and
+        // assert no NEW refusal is set.
+        app.set_profile(Some("prod".to_owned()));
+        app.message = None;
+        app.send_request();
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            None,
+            "a resolved request must not be refused"
+        );
+    }
+
+    /// Fail loud, path 2 (load runner): `open_load_runner` resolves once at open
+    /// time; an unresolved `{{host}}` refuses to open the runner at all (the whole
+    /// batch never fires) and names the variable.
+    #[test]
+    fn load_runner_refuses_unresolved_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_unresolved_endpoint(dir.path());
+        app.open_load_runner();
+        assert_eq!(
+            app.message.as_ref().map(|m| m.text.as_str()),
+            Some("unresolved variable(s): host — set them in a profile/env or via CLI")
+        );
+        assert!(
+            app.load_runner.is_none(),
+            "the load runner must not open with an unresolved variable"
+        );
+        assert!(
+            app.load_request.is_none(),
+            "no request must be armed for the batch"
+        );
+        assert_ne!(app.mode, Mode::LoadRunner);
+    }
+
+    /// Builds a workspace with a single-step sequence whose endpoint request carries
+    /// `{{missing}}` (no scope resolves it), then opens the runner. `on_error`
+    /// selects halt vs continue.
+    fn unresolved_sequence_app(root: &Path, on_error: &str) -> App {
+        std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+        let coll = root.join("api");
+        std::fs::create_dir(&coll).unwrap();
+        // Step 0's request has an unresolved var; step 1 is clean (to prove continue
+        // advances past the failed step).
+        std::fs::write(
+            coll.join("bad.toml"),
+            "seq = 0\nname = \"bad\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{{missing}}\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            coll.join("good.toml"),
+            "seq = 0\nname = \"good\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/ok\"\n",
+        )
+        .unwrap();
+        let seq_dir = root.join("sequences");
+        std::fs::create_dir(&seq_dir).unwrap();
+        std::fs::write(
+            seq_dir.join("flow.toml"),
+            format!(
+                "seq = 0\nname = \"Flow\"\non_error = \"{on_error}\"\n\n[[step]]\nseq = 0\nendpoint = \"api/bad.toml\"\n\n[[step]]\nseq = 1\nendpoint = \"api/good.toml\"\n"
+            ),
+        )
+        .unwrap();
+        let ws = open_workspace(root).unwrap();
+        let mut app = App::new(ws, KeyMap::default()).unwrap();
+        let file = seq_dir.join("flow.toml");
+        let sequence = churl_core::persistence::load_sequence(&file).unwrap();
+        app.open_sequence_runner(super::super::components::explorer::SelectedSequence {
+            name: sequence.name.clone(),
+            file,
+            sequence,
+        });
+        app
+    }
+
+    /// Fail loud, path 3 (sequence step): a step whose request has an unresolved
+    /// `{{var}}` fails that step (via `prepare_step`) with a message naming the var,
+    /// and `on_error = halt` skips the rest.
+    #[test]
+    fn sequence_step_fails_on_unresolved_variable_and_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = unresolved_sequence_app(dir.path(), "halt");
+        // Opening the runner drives step 0 synchronously through `prepare_step`,
+        // which now refuses the unresolved request.
+        match step_status(&app, 0) {
+            StepStatus::HttpError(msg) => assert!(
+                msg.contains("unresolved variable(s): missing"),
+                "step error must name the unresolved variable, got: {msg}"
+            ),
+            other => panic!("expected HttpError for the unresolved step, got {other:?}"),
+        }
+        assert_eq!(
+            step_status(&app, 1),
+            StepStatus::Skipped,
+            "halt must skip the remaining step"
+        );
+        assert!(app.sequence_runner.as_ref().unwrap().finished);
+    }
+
+    /// Fail loud, path 3 with `on_error = continue`: the unresolved step still fails
+    /// with the naming message, but the run proceeds to the next (clean) step.
+    #[test]
+    fn sequence_step_unresolved_continue_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = unresolved_sequence_app(dir.path(), "continue");
+        assert!(matches!(step_status(&app, 0), StepStatus::HttpError(_)));
+        // Continue: step 1 (clean) runs — client is None so it stays Running.
+        assert_eq!(step_status(&app, 1), StepStatus::Running);
     }
 
     /// Regression (M6.6 review #1): on the Body tab in edtui Normal mode, the
