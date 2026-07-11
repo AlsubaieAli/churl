@@ -2632,14 +2632,22 @@ impl App {
         }
     }
 
-    /// `y`: copy the current response view's full text via OSC 52 (capped).
+    /// `y`: copy the current response's full text via OSC 52 (capped).
+    ///
+    /// On a `Done` row this copies the byte-exact body (unchanged). On a `Failed`
+    /// row (drive-test #4a) it copies an honest error blurb — the error message
+    /// plus the request method+URL when known — via the same clipboard path, so
+    /// `y` is never a silent no-op on a transport failure. This branch lives in
+    /// the single shared copy handler used by the main pane, load runner, and
+    /// sequence runner (note #2), so all three unified viewers get it at once.
     fn response_copy_view(&mut self) {
-        let Some(view) = self.response_view_mut() else {
-            return;
-        };
-        let full = view.copy_all().to_owned();
-        let truncated = view.truncated();
-        self.copy_to_clipboard_view(&full, truncated);
+        if let Some(view) = self.response_view_mut() {
+            let full = view.copy_all().to_owned();
+            let truncated = view.truncated();
+            self.copy_to_clipboard_view(&full, truncated);
+        } else if let Some(text) = self.active_response().failure_copy_text() {
+            self.enqueue_clipboard(&text, "copied error");
+        }
     }
 
     /// `Y`: copy the response cursor's logical line via the layered clipboard.
@@ -10102,6 +10110,138 @@ mod tests {
         assert_eq!(
             copied, raw,
             "y returns byte-exact raw wire bytes (tab intact)"
+        );
+    }
+
+    // ---- drive-test #4a: honest, yankable failed-response row ----
+
+    /// `y` on a load-runner `Failed` row copies useful text (the error + URL)
+    /// via the shared copy handler — NOT a silent no-op. The failed row carries
+    /// no `ResponseView`, so this exercises the state-branch fallback.
+    #[test]
+    fn load_failed_row_y_copies_error_not_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = load_app(dir.path(), "https://api.test/ping");
+        app.load_runner.as_mut().unwrap().cfg.total = 1;
+        app.start_load_run();
+        let g = load_gen(&app);
+        app.on_load_result(g, 0, Err("connection refused".to_owned()));
+        app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+        // Sanity: the selected row is Failed (no view to copy).
+        assert!(matches!(
+            app.active_response(),
+            ResponseState::Failed { .. }
+        ));
+
+        app.handle_key(norm('y')).unwrap();
+        let copied = app
+            .pending_clipboard
+            .as_ref()
+            .expect("y on a Failed row must enqueue a copy (not a no-op)")
+            .payload
+            .clone();
+        assert!(
+            copied.contains("connection refused"),
+            "copied text carries the error: {copied:?}"
+        );
+        assert!(
+            copied.contains("https://api.test/ping"),
+            "copied text carries the request URL: {copied:?}"
+        );
+    }
+
+    /// `y` on a sequence-runner `Failed` step copies the error via the SAME
+    /// shared handler — full parity with the load runner and main pane.
+    #[test]
+    fn sequence_failed_step_y_copies_error_not_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = sequence_app(dir.path(), "continue", "");
+        let g = runner_gen(&app);
+        app.on_sequence_step(g, 0, Err("dns error".to_owned()));
+        let runner = app.sequence_runner.as_mut().unwrap();
+        runner.selected = 0;
+        runner.focus = sequence_runner::RunnerFocus::Response;
+        assert!(matches!(
+            app.active_response(),
+            ResponseState::Failed { .. }
+        ));
+
+        app.handle_key(norm('y')).unwrap();
+        let copied = app
+            .pending_clipboard
+            .as_ref()
+            .expect("y on a Failed step must enqueue a copy (not a no-op)")
+            .payload
+            .clone();
+        assert!(
+            copied.contains("dns error"),
+            "copied text carries the error: {copied:?}"
+        );
+    }
+
+    /// `y` on a MAIN-pane `Failed` response copies the error + method + URL
+    /// through the same shared handler (the third unified viewer).
+    #[test]
+    fn main_failed_response_y_copies_error_and_request() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.buffers = vec![Buffer::endpoint(selected_with("a.toml", None))];
+        app.active = 0;
+        app.buffers[0].as_endpoint_mut().unwrap().response = ResponseState::Failed {
+            error: "connection refused".to_owned(),
+            meta: meta(),
+        };
+        app.set_focus(Pane::Response);
+        app.response_copy_view();
+        let copied = app
+            .pending_clipboard
+            .as_ref()
+            .expect("y on a Failed main-pane response must enqueue a copy")
+            .payload
+            .clone();
+        assert!(
+            copied.contains("connection refused"),
+            "carries the error: {copied:?}"
+        );
+        assert!(
+            copied.contains("GET") && copied.contains("https://api.test/x"),
+            "carries the request method+URL from meta: {copied:?}"
+        );
+    }
+
+    /// Unit: `failure_copy_text` yields the request line + error for `Failed`,
+    /// and `None` for every other state (so the copy handler falls through only
+    /// on a failure). Never fabricates a status/body/timing.
+    #[test]
+    fn failure_copy_text_shape() {
+        let failed = ResponseState::Failed {
+            error: "boom".to_owned(),
+            meta: meta(),
+        };
+        let text = failed.failure_copy_text().expect("Failed yields text");
+        assert_eq!(text, "GET https://api.test/x\nerror: boom");
+
+        // Non-Failed states have no failure text.
+        assert!(ResponseState::Idle.failure_copy_text().is_none());
+        assert!(ResponseState::Cancelled.failure_copy_text().is_none());
+        assert!(
+            ResponseState::Dropped {
+                status: 200,
+                timing: None,
+                size: 0,
+            }
+            .failure_copy_text()
+            .is_none(),
+            "Dropped has no body to copy — stays a no-op"
+        );
+
+        // A runner meta with an empty method omits it rather than padding.
+        let url_only = ResponseState::Failed {
+            error: "dns".to_owned(),
+            meta: load_result_meta("https://api.test/ping"),
+        };
+        assert_eq!(
+            url_only.failure_copy_text().unwrap(),
+            "https://api.test/ping\nerror: dns"
         );
     }
 
