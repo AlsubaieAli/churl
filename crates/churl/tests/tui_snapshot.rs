@@ -431,7 +431,7 @@ fn response_search_highlights_and_navigates() {
     let mut app = json_done_app(dir.path(), body);
     // `/` opens the incremental search input.
     press(&mut app, KeyCode::Char('/'));
-    assert_eq!(app.mode, Mode::BodySearch);
+    assert!(matches!(app.mode, Mode::BodySearch));
     type_str(&mut app, "needle");
     // Two matches; the input row shows the count.
     let rendered = snapshot(&mut app);
@@ -441,7 +441,7 @@ fn response_search_highlights_and_navigates() {
     );
     // Commit and step to the next match.
     press(&mut app, KeyCode::Enter);
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     press(&mut app, KeyCode::Char('n'));
     let rendered = snapshot(&mut app);
     assert!(
@@ -537,7 +537,7 @@ fn response_search_esc_clears() {
     press(&mut app, KeyCode::Char('/'));
     type_str(&mut app, "hit");
     press(&mut app, KeyCode::Esc);
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     // Esc clears the live search.
     if let ResponseState::Done { view } = app.response() {
         assert!(view.search().is_none(), "esc must clear the search");
@@ -1024,7 +1024,10 @@ fn every_palette_command_dispatches() {
             Action::Rename => expect_status(&mut app, "nothing selected to rename"),
             Action::Delete => expect_status(&mut app, "nothing selected to delete"),
             Action::SwitchProfile => {
-                assert_eq!(app.mode, Mode::Palette, "{label:?} must open the picker");
+                assert!(
+                    matches!(app.mode, Mode::Palette),
+                    "{label:?} must open the picker"
+                );
                 assert!(app.picker.is_some());
             }
             // The viewer toggles are palette-exposed; with no response they
@@ -1032,7 +1035,10 @@ fn every_palette_command_dispatches() {
             // stays Normal. `TogglePretty` additionally warns (pretty is JSON-body
             // only) rather than silently doing nothing.
             Action::ToggleHeadersView | Action::ToggleWrap | Action::ToggleLineNumbers => {
-                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
+                assert!(
+                    matches!(app.mode, Mode::Normal),
+                    "{label:?} must not open an overlay"
+                );
             }
             Action::TogglePretty => expect_status(&mut app, "pretty: JSON body only"),
             Action::ToggleSortKeys => expect_status(&mut app, "sort: pretty JSON only"),
@@ -1066,9 +1072,8 @@ fn every_palette_command_dispatches() {
             Action::OpenLoadRunner => expect_status(&mut app, "no endpoint selected"),
             // The pick-then-load variant opens the endpoint search overlay first.
             Action::OpenLoadRunnerPick => {
-                assert_eq!(
-                    app.mode,
-                    Mode::Search,
+                assert!(
+                    matches!(app.mode, Mode::Search),
                     "{label:?} must open the search overlay"
                 );
             }
@@ -1078,7 +1083,10 @@ fn every_palette_command_dispatches() {
             | Action::BufferPrev
             | Action::BufferClose
             | Action::BufferCloseAll => {
-                assert_eq!(app.mode, Mode::Normal, "{label:?} must not open an overlay");
+                assert!(
+                    matches!(app.mode, Mode::Normal),
+                    "{label:?} must not open an overlay"
+                );
             }
             other => panic!("palette command {label:?} → {other:?} has no assertion — add one"),
         }
@@ -1161,9 +1169,8 @@ fn switching_endpoints_while_dirty_opens_new_buffer() {
     app.focus = Pane::Explorer;
     press(&mut app, KeyCode::Char('j')); // onto "Create user"
     press(&mut app, KeyCode::Enter);
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "no confirm — endpoint opens directly"
     );
     let selected = app.selected().expect("an endpoint is loaded");
@@ -1209,9 +1216,8 @@ fn search_switch_while_dirty_opens_new_buffer() {
     press(&mut app, KeyCode::Char('/'));
     type_str(&mut app, "get us");
     press(&mut app, KeyCode::Enter);
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "no confirm — search target opens directly"
     );
     assert!(
@@ -1248,9 +1254,8 @@ fn switch_while_dirty_opens_new_buffer() {
     app.focus = Pane::Explorer;
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Enter);
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "endpoint switch opens directly — no confirm"
     );
     assert!(
@@ -1292,10 +1297,13 @@ fn save_failure_blocks_dirty_buffer_close() {
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('t'));
     press(&mut app, KeyCode::Char('x'));
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     press(&mut app, KeyCode::Char('s'));
     // Still open, still dirty, error on the statusline.
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     let selected = app.selected().expect("buffer still open");
     assert!(
         selected.file.ends_with("users/list.toml"),
@@ -1415,7 +1423,10 @@ fn new_endpoint_while_dirty_opens_new_buffer() {
     press(&mut app, KeyCode::Enter);
     // The file exists AND the new endpoint is opened directly — no confirm.
     assert!(dir.path().join("users").join("fresh-one.toml").exists());
-    assert_eq!(app.mode, Mode::Normal, "opens directly, no confirm");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "opens directly, no confirm"
+    );
     let selected = app.selected().unwrap();
     assert!(
         selected.file.ends_with("users/fresh-one.toml"),
@@ -1472,9 +1483,8 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
     // Enter on the same endpoint row: no confirm, no reload.
     app.focus = Pane::Explorer;
     press(&mut app, KeyCode::Enter);
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "same-endpoint reselect needs no confirm"
     );
     let selected = app.selected().unwrap();
@@ -1486,7 +1496,7 @@ fn reselect_same_endpoint_while_dirty_keeps_edits() {
     press(&mut app, KeyCode::Char('k')); // up onto the users collection row
     press(&mut app, KeyCode::Enter); // collapse
     press(&mut app, KeyCode::Enter); // expand
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.selected().unwrap().endpoint.request.url.contains("ZZZ"));
 }
 
@@ -2122,7 +2132,10 @@ fn app_with_clean_env_fixture(root: &Path) -> App {
 fn open_env(app: &mut App) {
     press(app, KeyCode::Char(' '));
     press(app, KeyCode::Char('v'));
-    assert_eq!(app.mode, Mode::EnvEditor, "editor must be open");
+    assert!(
+        matches!(app.mode, Mode::EnvEditor(_)),
+        "editor must be open"
+    );
 }
 
 #[test]
@@ -2281,7 +2294,7 @@ fn env_editor_discard_leaves_disk_untouched() {
     press(&mut app, KeyCode::Enter); // commit → dirty
     press(&mut app, KeyCode::Char('q')); // confirm
     press(&mut app, KeyCode::Char('d')); // discard
-    assert_eq!(app.mode, Mode::Normal, "editor closed");
+    assert!(matches!(app.mode, Mode::Normal), "editor closed");
     let after = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
     assert_eq!(before, after, "discard must not write anything");
 }
@@ -2300,7 +2313,10 @@ fn env_editor_save_refuses_secret_literal() {
     type_str(&mut app, "abc123");
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('w')); // save → refused
-    assert_eq!(app.mode, Mode::EnvEditor, "editor stays open on refusal");
+    assert!(
+        matches!(app.mode, Mode::EnvEditor(_)),
+        "editor stays open on refusal"
+    );
     let after = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
     assert_eq!(before, after, "refused save writes nothing");
     let rendered = snapshot(&mut app);
@@ -2542,6 +2558,9 @@ fn tab_strip_close_dirty_confirm() {
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('t'));
     press(&mut app, KeyCode::Char('x'));
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     insta::assert_snapshot!(snapshot(&mut app));
 }

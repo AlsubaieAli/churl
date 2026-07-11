@@ -19,7 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // only occupies a row while a message is live, so the statusline never moves.
     // The body-search input takes that row when open (vim-style `/query`),
     // shadowing any transient message.
-    let body_search_input: Option<String> = (app.mode == Mode::BodySearch).then(|| {
+    let body_search_input: Option<String> = matches!(app.mode, Mode::BodySearch).then(|| {
         let q = app.body_search_editor.text();
         let matches = match app.active_response() {
             ResponseState::Done { view } => view.search().map(|s| s.count()).unwrap_or(0),
@@ -87,7 +87,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(right_area);
 
     let has_ws = app.workspace.is_some();
-    let explorer_focused = app.focus == Pane::Explorer && app.mode == Mode::Normal;
+    let explorer_focused = app.focus == Pane::Explorer && matches!(app.mode, Mode::Normal);
     let theme = app.theme.clone();
     let dirty = app.is_dirty();
     // Every open dirty buffer's file — each such explorer row gets the accent
@@ -232,9 +232,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 0,
             ),
         };
-    let req_focused = app.focus == Pane::Request && app.mode == Mode::Normal;
+    let req_focused = app.focus == Pane::Request && matches!(app.mode, Mode::Normal);
     let resp_focused =
-        app.focus == Pane::Response && (app.mode == Mode::Normal || app.mode == Mode::BodySearch);
+        app.focus == Pane::Response && matches!(app.mode, Mode::Normal | Mode::BodySearch);
     let jump = app.jump.as_ref();
     let tick_count = app.tick_count;
 
@@ -243,7 +243,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         urlbar_area,
         urlbar::UrlBarCtx {
             request: selected_request,
-            focused: app.focus == Pane::UrlBar && app.mode == Mode::Normal,
+            focused: app.focus == Pane::UrlBar && matches!(app.mode, Mode::Normal),
             editor: url_editor,
             dirty,
             jump_label: jump.and_then(|j| j.label_for_pane(Pane::UrlBar)),
@@ -394,18 +394,48 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // through to the main two-column layout — the search targets the runner's
     // response. The overlay render decision uses this effective mode; every other
     // overlay still keys on the live `app.mode`.
-    let overlay_mode = if app.mode == Mode::BodySearch {
-        app.body_search_return
+    // R1.5 A2: `Mode` is non-`Copy`, so decide the effective overlay by a small
+    // owned tag first (dropping any `&app.mode` borrow), then dispatch. While
+    // body-search is open OVER a runner, the runner mode is parked in
+    // `body_search_return` (which now owns the `LoadRunner(state)` payload), so we
+    // key on that; every other overlay keys on the live mode. The payload-carrying
+    // arms re-borrow the state out of the mode inside their block so the runner
+    // arms can still take `&mut app` for the buffer/highlight bookkeeping.
+    enum Overlay {
+        MethodMenu,
+        Prompt(PromptPurpose),
+        Confirm(ConfirmPurpose),
+        EnvEditor,
+        SequenceEdit,
+        SequenceRun,
+        LoadRunner,
+        None,
+    }
+    let body_searching = matches!(app.mode, Mode::BodySearch);
+    let effective_mode: &Mode = if body_searching {
+        &app.body_search_return
     } else {
-        app.mode
+        &app.mode
     };
-    match overlay_mode {
-        Mode::MethodMenu => {
+    let overlay = match effective_mode {
+        Mode::MethodMenu => Overlay::MethodMenu,
+        Mode::Prompt(purpose) => Overlay::Prompt(*purpose),
+        Mode::Confirm(purpose) => Overlay::Confirm(*purpose),
+        Mode::EnvEditor(_) => Overlay::EnvEditor,
+        Mode::Sequence => match app.sequence_view {
+            SeqView::Edit => Overlay::SequenceEdit,
+            SeqView::Run => Overlay::SequenceRun,
+        },
+        Mode::LoadRunner(_) => Overlay::LoadRunner,
+        _ => Overlay::None,
+    };
+    match overlay {
+        Overlay::MethodMenu => {
             if let Some(method) = app.live_request().map(|r| r.method) {
                 method_menu::render(frame, main, method, &theme);
             }
         }
-        Mode::Prompt(purpose) => {
+        Overlay::Prompt(purpose) => {
             let hint = prompt_hint(app, purpose);
             prompt::render_prompt(
                 frame,
@@ -416,68 +446,66 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 &theme,
             );
         }
-        Mode::Confirm(purpose) => {
+        Overlay::Confirm(purpose) => {
             let (title, question, hint) = confirm_text(purpose, app.pending_close.is_some());
             prompt::render_confirm(frame, main, title, question, hint, &theme);
         }
-        Mode::EnvEditor => {
-            if let Some(editor) = &app.env_editor {
+        Overlay::EnvEditor => {
+            // The editor state lives in the (live) mode — env-editor never hosts
+            // body-search, so it is always `app.mode`, never the parked one.
+            if let Mode::EnvEditor(editor) = &app.mode {
                 env_editor::render(frame, main, editor, &theme);
             }
         }
-        Mode::Sequence => match app.sequence_view {
-            SeqView::Edit => {
-                if let Some(editor) = &app.sequence_editor {
-                    sequence_editor::render(frame, main, editor, &theme);
-                }
+        Overlay::SequenceEdit => {
+            if let Some(editor) = &app.sequence_editor {
+                sequence_editor::render(frame, main, editor, &theme);
             }
-            SeqView::Run => {
-                let tick = app.tick_count;
-                let active = app.active;
-                // These overlays share the active buffer's highlight cache/guard
-                // (keyed by viewport hash, so no cross-contamination); with no
-                // buffer loaded they fall back to a per-frame empty cache — only
-                // cross-frame caching is skipped, invisible to snapshots.
-                let scratch_cache = HashMap::new();
-                let mut scratch_pending = None;
-                let cache = app
+        }
+        Overlay::SequenceRun => {
+            let tick = app.tick_count;
+            let active = app.active;
+            // These overlays share the active buffer's highlight cache/guard
+            // (keyed by viewport hash, so no cross-contamination); with no
+            // buffer loaded they fall back to a per-frame empty cache — only
+            // cross-frame caching is skipped, invisible to snapshots.
+            let scratch_cache = HashMap::new();
+            let mut scratch_pending = None;
+            let cache = app
+                .buffers
+                .get(active)
+                .and_then(Buffer::as_endpoint)
+                .map(|b| &b.highlight_cache)
+                .unwrap_or(&scratch_cache);
+            let job = match app.sequence_runner.as_mut() {
+                Some(runner) => sequence_runner::render(frame, main, runner, tick, cache, &theme),
+                None => None,
+            };
+            if let Some(job) = job {
+                let pending = app
                     .buffers
                     .get(active)
                     .and_then(Buffer::as_endpoint)
-                    .map(|b| &b.highlight_cache)
-                    .unwrap_or(&scratch_cache);
-                let job = match app.sequence_runner.as_mut() {
-                    Some(runner) => {
-                        sequence_runner::render(frame, main, runner, tick, cache, &theme)
-                    }
-                    None => None,
-                };
-                if let Some(job) = job {
-                    let pending = app
-                        .buffers
-                        .get(active)
-                        .and_then(Buffer::as_endpoint)
-                        .map(|b| b.pending_highlight)
-                        .unwrap_or(scratch_pending);
-                    let dup = pending == Some(job.hash);
-                    if !dup && let Some(tx) = &app.highlight_tx {
-                        let hash = job.hash;
-                        if tx.send(job).is_ok() {
-                            match app
-                                .buffers
-                                .get_mut(active)
-                                .and_then(Buffer::as_endpoint_mut)
-                            {
-                                Some(b) => b.pending_highlight = Some(hash),
-                                None => scratch_pending = Some(hash),
-                            }
+                    .map(|b| b.pending_highlight)
+                    .unwrap_or(scratch_pending);
+                let dup = pending == Some(job.hash);
+                if !dup && let Some(tx) = &app.highlight_tx {
+                    let hash = job.hash;
+                    if tx.send(job).is_ok() {
+                        match app
+                            .buffers
+                            .get_mut(active)
+                            .and_then(Buffer::as_endpoint_mut)
+                        {
+                            Some(b) => b.pending_highlight = Some(hash),
+                            None => scratch_pending = Some(hash),
                         }
                     }
                 }
-                let _ = scratch_pending;
             }
-        },
-        Mode::LoadRunner => {
+            let _ = scratch_pending;
+        }
+        Overlay::LoadRunner => {
             let tick = app.tick_count;
             let active = app.active;
             let scratch_cache = HashMap::new();
@@ -488,7 +516,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .and_then(Buffer::as_endpoint)
                 .map(|b| &b.highlight_cache)
                 .unwrap_or(&scratch_cache);
-            let job = match app.load_runner.as_mut() {
+            // R1.5 A2: the runner lives in the mode (or the parked mode during a
+            // body-search over it), disjoint from `buffers`/`highlight_tx`.
+            let job = match App::load_runner_in_mut(&mut app.mode, &mut app.body_search_return) {
                 Some(runner) => load_runner::render(frame, main, runner, tick, cache, &theme),
                 None => None,
             };
@@ -516,7 +546,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
             let _ = scratch_pending;
         }
-        _ => {}
+        Overlay::None => {}
     }
 
     // The URL vim-popup editor (deliverable 7) renders over the main area.

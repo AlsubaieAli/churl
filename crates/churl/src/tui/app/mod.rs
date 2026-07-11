@@ -141,10 +141,14 @@ pub struct App {
     pending_clipboard: Option<PendingCopy>,
     /// The incremental body-search input editor while `Mode::BodySearch` is open.
     body_search_editor: LineEditor,
-    /// The mode to restore when the body-search input closes. `Mode::Normal` for
-    /// the main pane; `Mode::LoadRunner`/`Mode::Sequence` when search was opened
-    /// over a runner Response region (note #2), so closing search returns to the
-    /// runner rather than dropping the user into Normal mode.
+    /// The mode to restore when the body-search input closes, PARKED here while
+    /// `Mode::BodySearch` is active. `Mode::Normal` for the main pane;
+    /// `Mode::LoadRunner(state)`/`Mode::Sequence` when search was opened over a
+    /// runner Response region (note #2), so closing search returns to the runner
+    /// rather than dropping the user into Normal mode. R1.5 A2: since the runner
+    /// state now lives IN the mode, this field owns that parked `LoadRunner(state)`
+    /// payload for the duration of the overlay (moved in/out via `mem::replace`),
+    /// and `load_runner()`/`active_response_surface` consult it while searching.
     body_search_return: Mode,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
@@ -210,8 +214,6 @@ pub struct App {
     help_search_input: bool,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
-    /// The open environments & variables editor (M7.3), when `Mode::EnvEditor`.
-    env_editor: Option<EnvEditorState>,
     /// The unified sequence surface's run-face state (M7.4), when
     /// `Mode::Sequence`. Built lazily on the first run (Edit-only sessions never
     /// allocate it); persists across face flips.
@@ -223,8 +225,6 @@ pub struct App {
     sequence_editor: Option<SequenceEditorState>,
     /// The active face of the unified sequence surface (Edit vs Run).
     sequence_view: SeqView,
-    /// The open concurrent-load runner (M7.5), when `Mode::LoadRunner`.
-    load_runner: Option<LoadRunnerState>,
     /// Abort handle for the single load-batch launcher task; aborting it drops
     /// the launcher's `buffer_unordered`, cancelling ALL in-flight requests.
     load_abort: Option<AbortHandle>,
@@ -420,12 +420,10 @@ impl App {
             help_search_editor: LineEditor::default(),
             help_search_input: false,
             url_edit_mode: UrlEditMode::Inline,
-            env_editor: None,
             sequence_runner: None,
             sequence_abort: None,
             sequence_editor: None,
             sequence_view: SeqView::Edit,
-            load_runner: None,
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
             load_request: None,
@@ -565,21 +563,24 @@ impl App {
     /// over ([`Self::body_search_return`]), so search-into-view keeps targeting the
     /// runner response the `/` was launched from.
     fn active_response_surface(&self) -> ResponseSurface {
-        let effective = if self.mode == Mode::BodySearch {
-            self.body_search_return
+        // When body-search is open, resolve against the mode it was opened over —
+        // parked in `body_search_return` (R1.5 A2: it holds the whole mode, incl.
+        // a `LoadRunner(state)` payload, so the runner surface stays reachable).
+        let effective = if matches!(self.mode, Mode::BodySearch) {
+            &self.body_search_return
         } else {
-            self.mode
+            &self.mode
         };
         match effective {
-            Mode::LoadRunner => match &self.load_runner {
-                Some(runner)
-                    if runner.focus == load_runner::RunnerFocus::Response
-                        && !runner.response_input_captured() =>
+            Mode::LoadRunner(runner) => {
+                if runner.focus == load_runner::RunnerFocus::Response
+                    && !runner.response_input_captured()
                 {
                     ResponseSurface::LoadRunner
+                } else {
+                    ResponseSurface::Main
                 }
-                _ => ResponseSurface::Main,
-            },
+            }
             Mode::Sequence if self.sequence_view == SeqView::Run => match &self.sequence_runner {
                 Some(runner)
                     if runner.focus == sequence_runner::RunnerFocus::Response
@@ -600,8 +601,7 @@ impl App {
     fn active_response(&self) -> &ResponseState {
         match self.active_response_surface() {
             ResponseSurface::LoadRunner => self
-                .load_runner
-                .as_ref()
+                .load_runner()
                 .and_then(|r| r.selected_response())
                 .unwrap_or(&self.orphan_response),
             ResponseSurface::Sequence => self
@@ -621,11 +621,14 @@ impl App {
     /// the orphan slot when nothing is loaded (isolation snapshots).
     fn active_response_mut(&mut self) -> &mut ResponseState {
         match self.active_response_surface() {
-            ResponseSurface::LoadRunner => self
-                .load_runner
-                .as_mut()
-                .and_then(|r| r.selected_response_mut())
-                .unwrap_or(&mut self.orphan_response),
+            // Borrow the runner directly out of the mode / parked mode (disjoint
+            // from `orphan_response`, which the `unwrap_or` also borrows mutably —
+            // a whole-`self` accessor would alias here, so match the field inline).
+            ResponseSurface::LoadRunner => {
+                Self::load_runner_in_mut(&mut self.mode, &mut self.body_search_return)
+                    .and_then(|r| r.selected_response_mut())
+                    .unwrap_or(&mut self.orphan_response)
+            }
             ResponseSurface::Sequence => self
                 .sequence_runner
                 .as_mut()
@@ -649,8 +652,7 @@ impl App {
     fn active_response_geometry(&self) -> &ResponseGeometry {
         match self.active_response_surface() {
             ResponseSurface::LoadRunner => self
-                .load_runner
-                .as_ref()
+                .load_runner()
                 .map(|r| &r.geometry)
                 .unwrap_or(&self.orphan_geometry),
             ResponseSurface::Sequence => self
@@ -668,11 +670,11 @@ impl App {
     /// Mutable active response geometry (see [`Self::active_response_geometry`]).
     fn active_response_geometry_mut(&mut self) -> &mut ResponseGeometry {
         match self.active_response_surface() {
-            ResponseSurface::LoadRunner => self
-                .load_runner
-                .as_mut()
-                .map(|r| &mut r.geometry)
-                .unwrap_or(&mut self.orphan_geometry),
+            ResponseSurface::LoadRunner => {
+                Self::load_runner_in_mut(&mut self.mode, &mut self.body_search_return)
+                    .map(|r| &mut r.geometry)
+                    .unwrap_or(&mut self.orphan_geometry)
+            }
             ResponseSurface::Sequence => self
                 .sequence_runner
                 .as_mut()
@@ -966,7 +968,7 @@ impl App {
                     }
                     // Re-mask an ephemeral secret peek on timeout (drive-test
                     // note #3), on the same 250 ms cadence that expires messages.
-                    if let Some(editor) = self.env_editor.as_mut() {
+                    if let Mode::EnvEditor(editor) = &mut self.mode {
                         editor.expire_reveal();
                     }
                 }
@@ -993,7 +995,12 @@ impl App {
         if self.leader.is_some() {
             return self.handle_leader_key(key);
         }
-        match self.mode {
+        // R1.5 A2: `Mode` is non-`Copy`, so match by reference and dispatch. The
+        // payload-carrying overlay arms (`EnvEditor`/`LoadRunner`) delegate to a
+        // handler that re-borrows the state out of `self.mode` itself; the small
+        // `Copy` purposes are dereferenced out before the `&mut self` call so no
+        // borrow of `self.mode` outlives the dispatch.
+        match &self.mode {
             Mode::Search | Mode::Palette | Mode::WorkspacePicker | Mode::SequencePicker => {
                 self.handle_overlay_key(key)
             }
@@ -1006,11 +1013,17 @@ impl App {
                 self.handle_body_search_key(key);
                 Ok(())
             }
-            Mode::Prompt(purpose) => self.handle_prompt_key(key, purpose),
-            Mode::Confirm(purpose) => self.handle_confirm_key(key, purpose),
-            Mode::EnvEditor => self.handle_env_editor_key(key),
+            Mode::Prompt(purpose) => {
+                let purpose = *purpose;
+                self.handle_prompt_key(key, purpose)
+            }
+            Mode::Confirm(purpose) => {
+                let purpose = *purpose;
+                self.handle_confirm_key(key, purpose)
+            }
+            Mode::EnvEditor(_) => self.handle_env_editor_key(key),
             Mode::Sequence => self.handle_sequence_key(key),
-            Mode::LoadRunner => self.handle_load_runner_key(key),
+            Mode::LoadRunner(_) => self.handle_load_runner_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1565,18 +1578,21 @@ impl App {
     /// Refuse → message (no run); Warn → loud confirm naming the target URL; Ok →
     /// run immediately.
     fn request_load_run(&mut self) {
-        let Some(runner) = self.load_runner.as_ref() else {
+        let Some(runner) = self.load_runner() else {
             return;
         };
+        // Copy/clone what the arms need so the runner borrow (into `self.mode`)
+        // ends before any `&mut self` method (`notify`/`load_runner_mut`).
         let cfg = runner.cfg;
+        let url = runner.url.clone();
         match churl_core::load::check_config(&cfg, &self.load_caps) {
             LoadCheck::Refuse(reason) => self.notify(format!("load refused: {reason}")),
             LoadCheck::Warn(reason) => {
                 let text = format!(
-                    "Fire {} requests at concurrency {} against {}?  ({reason})",
-                    cfg.total, cfg.concurrency, runner.url
+                    "Fire {} requests at concurrency {} against {url}?  ({reason})",
+                    cfg.total, cfg.concurrency
                 );
-                if let Some(runner) = self.load_runner.as_mut() {
+                if let Some(runner) = self.load_runner_mut() {
                     runner.pending_confirm = Some(text);
                 }
             }
@@ -1592,10 +1608,7 @@ impl App {
     /// straggler results are dropped. Always bumps the generation, even for the
     /// first run, so a fresh run starts on a distinct generation.
     fn interrupt_running_batch(&mut self) {
-        let was_running = self
-            .load_runner
-            .as_ref()
-            .is_some_and(LoadRunnerState::is_running);
+        let was_running = self.load_runner().is_some_and(LoadRunnerState::is_running);
         if was_running {
             // Record the partial (whatever completed so far), marked cancelled.
             self.write_load_summary(true);
@@ -1603,7 +1616,7 @@ impl App {
         if let Some(handle) = self.load_abort.take() {
             handle.abort();
         }
-        if let Some(runner) = self.load_runner.as_mut() {
+        if let Some(runner) = self.load_runner_mut() {
             runner.run_generation += 1;
         }
     }
@@ -1614,8 +1627,10 @@ impl App {
     /// so a run interrupted by closing is never lost from `load_batches`.
     fn close_load_runner(&mut self) {
         self.interrupt_running_batch();
-        self.load_runner = None;
         self.load_request = None;
+        // R1.5 A2: setting `Normal` drops the `LoadRunnerState` (no separate field
+        // to clear). `interrupt_running_batch` above already ran while the runner
+        // was still live, so the partial summary / abort are recorded first.
         self.mode = Mode::Normal;
     }
 
@@ -1685,7 +1700,23 @@ impl App {
     }
 
     fn accept_overlay(&mut self) -> Result<()> {
-        let mode = self.mode;
+        // R1.5 A2: `Mode` is non-`Copy`. Only the four payload-free picker modes
+        // reach here, and `close_overlay()` resets the mode below, so snapshot the
+        // relevant variant into an owned tag before the reset (`matches!` on it).
+        enum PickerMode {
+            Search,
+            SequencePicker,
+            Palette,
+            WorkspacePicker,
+            Other,
+        }
+        let mode = match &self.mode {
+            Mode::Search => PickerMode::Search,
+            Mode::SequencePicker => PickerMode::SequencePicker,
+            Mode::Palette => PickerMode::Palette,
+            Mode::WorkspacePicker => PickerMode::WorkspacePicker,
+            _ => PickerMode::Other,
+        };
         let current = self.picker.as_ref().and_then(picker::PickerState::current);
         // Capture all choices + one-shot intents BEFORE close_overlay() clears
         // them, so an empty-result Enter (early-return below) still drops the flags
@@ -1705,7 +1736,7 @@ impl App {
             return Ok(());
         }
         match mode {
-            Mode::Search => {
+            PickerMode::Search => {
                 if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
                     self.focus = Pane::Explorer;
                     // jump_to only navigates; the load goes through the guarded
@@ -1725,7 +1756,7 @@ impl App {
                     }
                 }
             }
-            Mode::SequencePicker => {
+            PickerMode::SequencePicker => {
                 if let Some(path) = sequence_choices.get(index).cloned() {
                     // `sequence_runs` = `<leader>s r` run-vs-edit intent.
                     if sequence_runs {
@@ -1735,7 +1766,7 @@ impl App {
                     }
                 }
             }
-            Mode::Palette => {
+            PickerMode::Palette => {
                 // profile_choices set → resolve a profile; else the command
                 // palette resolves an action.
                 if !profile_choices.is_empty() {
@@ -1746,14 +1777,14 @@ impl App {
                     self.dispatch(action, None)?;
                 }
             }
-            Mode::WorkspacePicker => {
+            PickerMode::WorkspacePicker => {
                 // Through the dirty guard: a workspace target is always "other",
                 // so unsaved edits defer to the discard confirm.
                 if let Some(path) = workspace_choices.get(index).cloned() {
                     self.guarded_load(PendingLoad::Workspace(path))?;
                 }
             }
-            _ => {}
+            PickerMode::Other => {}
         }
         Ok(())
     }
