@@ -42,6 +42,7 @@ pub struct ImportResult {
 
 /// Error importing a curl command.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ImportError {
     /// The command could not be tokenised (unbalanced quotes, trailing `\`).
     #[error("failed to tokenize curl command (unbalanced quotes?)")]

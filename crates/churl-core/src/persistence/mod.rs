@@ -41,6 +41,7 @@ pub const SEQUENCES_DIRNAME: &str = "sequences";
 
 /// Error reading or writing workspace TOML files.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PersistenceError {
     /// A file or directory could not be read.
     #[error("failed to read {path}: {source}")]
