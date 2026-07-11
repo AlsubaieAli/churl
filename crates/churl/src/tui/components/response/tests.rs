@@ -1252,3 +1252,73 @@ fn viewport_width_reported_by_render_excludes_the_gutter() {
     // inner width = 40 - 2 borders = 38; gutter = 2 → body = 36.
     assert_eq!(captured, 36, "viewport_width excludes the gutter");
 }
+
+// ---- A3: render-geometry cache ----
+
+#[test]
+fn geometry_cache_hits_on_unchanged_signature_and_misses_on_change() {
+    // A multi-line body so the geometry is non-trivial to compute.
+    let mut v = view("alpha\nbravo\ncharlie\ndelta\necho");
+
+    // Cold: nothing cached yet, so the first expand is a miss.
+    assert!(
+        !v.rows_cache_hits(false, 20, 0),
+        "cold cache: no rows memo yet"
+    );
+    let first = v.cached_expand_wrap(false, 20, 0);
+    // Warm: the identical signature is now a hit — a re-render on an idle tick
+    // (same generation/mode/fold/wrap/width/h_scroll) reuses the memo instead of
+    // re-walking the body.
+    assert!(
+        v.rows_cache_hits(false, 20, 0),
+        "unchanged signature must hit the rows memo"
+    );
+    let second = v.cached_expand_wrap(false, 20, 0);
+    assert_eq!(first, second, "the cached rows are byte-identical");
+
+    // Changing the width (a resize) is a miss — a different geometry input.
+    assert!(
+        !v.rows_cache_hits(false, 10, 0),
+        "a different width must miss"
+    );
+    // Changing h_scroll (a horizontal pan) is a miss for the rows memo — the char
+    // window each row shows differs.
+    let _ = v.cached_expand_wrap(false, 20, 0); // repopulate the (20,0) slot
+    assert!(
+        !v.rows_cache_hits(false, 20, 4),
+        "a different h_scroll must miss the rows memo"
+    );
+
+    // Toggling wrap changes the geometry ⇒ miss under the new signature.
+    v.toggle_wrap();
+    assert!(
+        !v.rows_cache_hits(true, 20, 0),
+        "wrap toggle changes the signature ⇒ miss"
+    );
+
+    // A generation bump (pretty/sort toggle path) invalidates via the signature.
+    let mut jv = json_view("{\"b\":1,\"a\":2}");
+    let _ = jv.cached_expand_wrap(false, 30, 0);
+    assert!(jv.rows_cache_hits(false, 30, 0));
+    jv.toggle_sort_keys(); // bumps generation + resets folds/search
+    assert!(
+        !jv.rows_cache_hits(false, 30, 0),
+        "generation bump (sort toggle) must invalidate the memo"
+    );
+}
+
+#[test]
+fn max_h_scroll_cache_survives_horizontal_pan() {
+    // The widest-line scan is independent of h_scroll, so a pure pan (viewport-
+    // only movement) must NOT invalidate it. We assert the *result* is stable
+    // across pans (the memo returns the same widest-line bound), which is the
+    // observable contract of caching on a key that omits h_scroll.
+    let mut v = wide_line_view(50);
+    assert_eq!(v.max_h_scroll(10), 40);
+    v.scroll_h(true, 8); // pan the viewport; geometry (widest line) unchanged
+    assert_eq!(
+        v.max_h_scroll(10),
+        40,
+        "widest-line bound is stable across a horizontal pan"
+    );
+}

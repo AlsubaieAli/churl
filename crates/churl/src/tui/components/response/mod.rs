@@ -23,6 +23,7 @@
 //! Search matches are stored against *logical* lines and mapped through the
 //! pipeline for navigation and highlighting.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,63 @@ use crate::tui::highlight::SyntaxToken;
 
 mod render;
 mod text;
+
+/// Identifies the inputs the fold-filtered visible map depends on: the response
+/// `generation` (bumped on every text rebuild — pretty/sort toggles), the view
+/// mode (body vs headers — switched WITHOUT a generation bump, different source
+/// text), and a hash of the folded-opener set. Two views with an equal
+/// [`VisibleSig`] produce a byte-identical [`Visible`] map, so it keys the
+/// visible-map memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleSig {
+    generation: u64,
+    headers: bool,
+    /// Hash of the sorted folded-opener set (same encoding as `viewport_hash`'s
+    /// fold signature). Distinguishes different fold configurations.
+    fold_sig: u64,
+}
+
+/// The full geometry signature for a computed `Vec<DisplayRow>`: everything the
+/// visible map depends on (via [`VisibleSig`]) PLUS the wrap/width/h_scroll the
+/// expansion windows against. Equal signatures ⇒ byte-identical display rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowsSig {
+    visible: VisibleSig,
+    wrap: bool,
+    width: usize,
+    h_scroll: usize,
+}
+
+/// The signature for the `max_h_scroll` widest-visible-line scan: the visible
+/// map inputs PLUS wrap+width, but NOT h_scroll (the widest line is independent
+/// of the current horizontal pan — that is the whole point of computing the
+/// bound). Kept deliberately distinct from [`RowsSig`] so a pure horizontal pan
+/// still hits this cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MaxHScrollSig {
+    visible: VisibleSig,
+    wrap: bool,
+    width: usize,
+}
+
+/// Single-slot memo of the render geometry, hung off the [`ResponseView`] so it
+/// lives and dies with the response (and thus its owning endpoint buffer / runner
+/// state) — bounded to exactly one cached value per product, never grows, and is
+/// dropped when a new response replaces the view. Each slot is keyed on the
+/// signature that captures every input the product depends on (A3): on a frame
+/// whose signature is unchanged the memo is returned verbatim, so recomputing
+/// would produce a byte-identical result and serving the cache changes nothing
+/// observable. A signature mismatch recomputes and replaces the slot.
+#[derive(Debug, Default)]
+struct GeomCache {
+    /// The fold-filtered visible map, keyed on [`VisibleSig`].
+    visible: Option<(VisibleSig, Vec<Visible>)>,
+    /// The wrap-expanded display rows, keyed on [`RowsSig`].
+    rows: Option<(RowsSig, Vec<text::DisplayRow>)>,
+    /// The widest-visible-line char count for `max_h_scroll`, keyed on
+    /// [`MaxHScrollSig`].
+    widest: Option<(MaxHScrollSig, usize)>,
+}
 
 // Re-export the render + text items that external callers reach by path
 // (`response::render`, `response::fmt_bytes`, `help.rs`'s
@@ -48,7 +106,10 @@ pub(crate) use text::smart_case_matches;
 // `ResponseView` impl below (and the `use super::*` test module) reach them by
 // bare name, exactly as before the split. No visibility widening: these stay
 // `pub(in …response)`.
-use text::{digit_count, expand_wrap, index_lines, reformat_body_if_needed, sanitize_for_display};
+use text::{
+    DisplayRow, digit_count, expand_wrap, index_lines, reformat_body_if_needed,
+    sanitize_for_display,
+};
 
 /// Immutable metadata about a request, captured at send time so history and the
 /// error view need nothing from live app state.
@@ -285,6 +346,12 @@ pub struct ResponseView {
     sort_keys: bool,
     /// The active body search, when a search is live.
     search: Option<SearchState>,
+    /// Single-slot memo of the render geometry (visible map / display rows /
+    /// widest line), keyed on the inputs each product depends on (A3). Interior
+    /// mutability so the pure `&self` render/geometry accessors can populate it;
+    /// bounded to one value per product and dropped with the view. Excluded from
+    /// any structural comparison — it is a derived cache, not state.
+    geom_cache: RefCell<GeomCache>,
 }
 
 impl ResponseView {
@@ -346,6 +413,7 @@ impl ResponseView {
             pretty,
             sort_keys,
             search: None,
+            geom_cache: RefCell::new(GeomCache::default()),
         }
     }
 
@@ -436,8 +504,8 @@ impl ResponseView {
     /// fold/wrap pipeline at pane `width` (0 = unwrapped geometry). Used to map
     /// the cursor row back to a logical line for fold-at-cursor and copy-line.
     pub fn logical_at_display_row(&self, row: usize, width: usize) -> Option<usize> {
-        let visible = self.visible_map();
-        let rows = expand_wrap(self, &visible, self.wrap, width, self.h_scroll);
+        let visible = self.cached_visible_map();
+        let rows = self.cached_expand_wrap(self.wrap, width, self.h_scroll);
         rows.get(row).map(|dr| visible[dr.visible_idx].logical())
     }
 
@@ -446,16 +514,16 @@ impl ResponseView {
     /// search match. Returns `None` when the line is not visible (should not
     /// happen after auto-unfold).
     pub fn display_row_for_logical(&self, logical: usize, width: usize) -> Option<usize> {
-        let visible = self.visible_map();
-        let rows = expand_wrap(self, &visible, self.wrap, width, self.h_scroll);
+        let visible = self.cached_visible_map();
+        let rows = self.cached_expand_wrap(self.wrap, width, self.h_scroll);
         rows.iter()
             .position(|dr| visible[dr.visible_idx].logical() == logical)
     }
 
     /// The total number of display rows through the current pipeline at `width`.
     pub fn total_display_rows(&self, width: usize) -> usize {
-        let visible = self.visible_map();
-        expand_wrap(self, &visible, self.wrap, width, self.h_scroll).len()
+        self.cached_expand_wrap(self.wrap, width, self.h_scroll)
+            .len()
     }
 
     // ---- source selection (body vs headers) ----
@@ -554,12 +622,32 @@ impl ResponseView {
         if self.wrap || width == 0 {
             return 0;
         }
-        let visible = self.visible_map();
+        // Cache the widest-visible-line char count (A3) on a signature that
+        // OMITS h_scroll: the widest line is independent of the current pan, so a
+        // pure horizontal scroll (which changes only the viewport, not the
+        // geometry) still hits this memo. wrap/width are keyed because they gate
+        // the scan and shift the bound. Kept distinct from the display-rows memo,
+        // which DOES depend on h_scroll.
+        let sig = MaxHScrollSig {
+            visible: self.visible_sig(),
+            wrap: self.wrap,
+            width,
+        };
+        {
+            let cache = self.geom_cache.borrow();
+            if let Some((cached_sig, widest)) = &cache.widest
+                && *cached_sig == sig
+            {
+                return widest.saturating_sub(width);
+            }
+        }
+        let visible = self.cached_visible_map();
         let widest = visible
             .iter()
             .map(|v| self.logical_line(v.logical()).chars().count())
             .max()
             .unwrap_or(0);
+        self.geom_cache.borrow_mut().widest = Some((sig, widest));
         widest.saturating_sub(width)
     }
 
@@ -708,6 +796,75 @@ impl ResponseView {
             }
         }
         changed
+    }
+
+    // ---- geometry cache (A3) ----
+
+    /// The signature of the current fold-filtered visible map: response
+    /// generation (text rebuilds), view mode (body vs headers — no generation
+    /// bump), and a hash of the folded-opener set. Cheap to compute (O(folds),
+    /// not O(body)); drives the geometry memo below.
+    fn visible_sig(&self) -> VisibleSig {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Same fold-signature encoding as `viewport_hash`: the sorted folded
+        // openers. Empty set ⇒ a stable "no folds" hash.
+        let mut folded: Vec<usize> = self.folded.iter().copied().collect();
+        folded.sort_unstable();
+        folded.hash(&mut hasher);
+        VisibleSig {
+            generation: self.generation,
+            headers: self.view_mode == ViewMode::Headers,
+            fold_sig: hasher.finish(),
+        }
+    }
+
+    /// The fold-filtered visible map, served from the single-slot memo when the
+    /// [`VisibleSig`] is unchanged and recomputed (replacing the slot) otherwise.
+    /// A signature match guarantees the recompute would be byte-identical, so
+    /// serving the memo is behaviour-preserving. Returns an owned `Vec` (the
+    /// callers already took ownership of `visible_map()`'s result).
+    fn cached_visible_map(&self) -> Vec<Visible> {
+        let sig = self.visible_sig();
+        {
+            let cache = self.geom_cache.borrow();
+            if let Some((cached_sig, map)) = &cache.visible
+                && *cached_sig == sig
+            {
+                return map.clone();
+            }
+        }
+        let map = self.visible_map();
+        self.geom_cache.borrow_mut().visible = Some((sig, map.clone()));
+        map
+    }
+
+    /// The wrap-expanded display rows for `(wrap, width, h_scroll)`, served from
+    /// the memo when the full [`RowsSig`] matches and recomputed otherwise.
+    /// The signature covers every input `expand_wrap` reads (the visible map's
+    /// inputs via [`VisibleSig`], plus wrap/width/h_scroll), so a match is
+    /// byte-identical.
+    fn cached_expand_wrap(&self, wrap: bool, width: usize, h_scroll: usize) -> Vec<DisplayRow> {
+        let sig = RowsSig {
+            visible: self.visible_sig(),
+            wrap,
+            width,
+            h_scroll,
+        };
+        {
+            let cache = self.geom_cache.borrow();
+            if let Some((cached_sig, rows)) = &cache.rows
+                && *cached_sig == sig
+            {
+                return rows.clone();
+            }
+        }
+        // `cached_visible_map` shares the same `geom_cache` RefCell; call it
+        // BEFORE re-borrowing to store the rows so the two borrows never overlap.
+        let visible = self.cached_visible_map();
+        let rows = expand_wrap(self, &visible, wrap, width, h_scroll);
+        self.geom_cache.borrow_mut().rows = Some((sig, rows.clone()));
+        rows
     }
 
     // ---- the visible map (fold filter) ----
@@ -914,6 +1071,27 @@ impl ResponseView {
             .map(|&next| next - 1)
             .unwrap_or(self.raw_text.len());
         Some(&self.raw_text[start..end])
+    }
+
+    /// Test-only probe: whether the display-rows geometry memo is currently
+    /// populated with a slot whose signature matches `(wrap, width, h_scroll)` at
+    /// the view's current visible-map signature — i.e. a subsequent
+    /// [`Self::cached_expand_wrap`] call with those args would be a cache HIT
+    /// (served from the memo, no recompute). Used by the A3 cache-hit test to
+    /// lock the optimization without timing.
+    #[cfg(test)]
+    fn rows_cache_hits(&self, wrap: bool, width: usize, h_scroll: usize) -> bool {
+        let want = RowsSig {
+            visible: self.visible_sig(),
+            wrap,
+            width,
+            h_scroll,
+        };
+        self.geom_cache
+            .borrow()
+            .rows
+            .as_ref()
+            .is_some_and(|(sig, _)| *sig == want)
     }
 }
 
