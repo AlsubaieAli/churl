@@ -12,6 +12,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 **0.2.0** — the TUI grows into a full request workbench.
 - Collection interchange — Postman JSON import/export, plus curl paste/copy inside the TUI.
+- Interchange parity — churl-native JSON import, symmetric with the existing export, with dialect auto-detected from the file's envelope.
 - Environments & variables editor — manage workspace, collection, and profile vars, with live precedence display and masked secrets.
 - Quick-jump pickers for requests and workspaces.
 - Request sequences — chain requests into end-to-end flows, extracting values from each response to feed the next (with an in-memory Session store).
@@ -33,7 +34,6 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 ## Planned ⏳
 
-- **Interchange parity** — churl-native JSON import, symmetric with the existing export. (F)
 - **Cross-platform proof** — macOS + Windows CI matrix, MSRV pin, `cargo-deny`, `install.ps1`, Wayland clipboard. (R)
 - **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
 - **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, cross-origin redirect policy. (R)

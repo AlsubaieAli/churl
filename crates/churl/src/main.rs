@@ -104,17 +104,18 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Reads a Postman v2.1 collection JSON file and writes its endpoints into the
-/// workspace rooted at `root`. Shared, testable seam behind
-/// `--import-collection` (the in-TUI import path uses the same
-/// [`churl_core::interchange::write_import`] core helper). Returns a summary.
+/// Reads a collection JSON file (Postman v2.1 or churl-native, auto-detected)
+/// and writes its endpoints into the workspace rooted at `root`. Shared,
+/// testable seam behind `--import-collection` (the in-TUI import path uses the
+/// same [`churl_core::interchange::write_import`] core helper). Returns a
+/// summary.
 fn import_collection_into(
     root: &std::path::Path,
     file: &std::path::Path,
 ) -> Result<churl_core::interchange::ImportSummary> {
     let json = std::fs::read_to_string(file)
         .map_err(|err| eyre!("cannot read {}: {err}", file.display()))?;
-    let import = churl_core::interchange::import_postman_v21(&json)?;
+    let import = churl_core::interchange::import_json(&json)?;
     let summary = churl_core::interchange::write_import(root, &import)?;
     Ok(summary)
 }
@@ -334,6 +335,37 @@ mod tests {
             !nested_toml.contains("ghp_literal"),
             "literal secret leaked: {nested_toml}"
         );
+    }
+
+    const NATIVE_FIXTURE: &str = r#"{
+        "churl_version": 1,
+        "name": "Native API",
+        "collections": [
+            { "name": "users", "endpoints": [
+                { "name": "list", "request": { "method": "GET", "url": "https://api.test/users" } },
+                { "name": "make", "request": { "method": "POST", "url": "https://api.test/users",
+                    "auth": { "type": "bearer", "token": "{{token}}" } } }
+            ] }
+        ]
+    }"#;
+
+    #[test]
+    fn import_collection_into_auto_detects_native_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("native.json");
+        std::fs::write(&file, NATIVE_FIXTURE).unwrap();
+
+        let summary = import_collection_into(root, &file).unwrap();
+        assert_eq!(summary.endpoints, 2);
+        assert_eq!(summary.collections, 1);
+
+        // Native endpoints land under a collection named for their group ("users").
+        let listed = root.join("users").join("list.toml");
+        assert!(listed.exists(), "missing {}", listed.display());
+        let ep = churl_core::persistence::load_endpoint(&listed).unwrap();
+        assert_eq!(ep.name, "list");
+        assert_eq!(ep.request.url, "https://api.test/users");
     }
 
     #[test]

@@ -169,7 +169,7 @@ impl App {
                 return Ok(());
             }
         };
-        let import = match interchange::import_postman_v21(&json) {
+        let import = match interchange::import_json(&json) {
             Ok(import) => import,
             Err(err) => {
                 self.notify(format!("import failed: {err}"));
