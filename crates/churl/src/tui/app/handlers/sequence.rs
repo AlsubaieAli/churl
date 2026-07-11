@@ -108,14 +108,19 @@ impl App {
             items.push(name);
             choices.push(file);
         }
-        self.sequence_choices = choices;
-        self.sequence_pick_runs = run;
         let title = if run {
             " Run sequence "
         } else {
             " Open sequence "
         };
-        self.picker = Some(picker::PickerState::new(title, items));
+        // R1.5 A2: the sequence files + the run-vs-edit `runs` intent (folding the
+        // old `sequence_pick_runs` bool) travel WITH the finder in the variant, so
+        // the accepted index addresses only these `paths` and the intent can't leak.
+        self.picker = Some(Picker::Sequence {
+            state: picker::PickerState::new(title, items),
+            paths: choices,
+            runs: run,
+        });
         self.mode = Mode::SequencePicker;
     }
 

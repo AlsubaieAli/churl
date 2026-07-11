@@ -79,28 +79,18 @@ pub struct App {
     /// Focused pane in [`Mode::Normal`].
     pub focus: Pane,
     pub mode: Mode,
-    /// The open overlay's picker, when `mode` is Search or Palette.
-    pub picker: Option<picker::PickerState>,
-    search_targets: Vec<(usize, usize)>,
-    palette_actions: Vec<Action>,
-    /// Profile-name items behind an open profile picker (index-aligned;
-    /// `None` marks the "(none)" entry). Non-empty only while switching profiles.
-    profile_choices: Vec<Option<String>>,
-    /// Canonical workspace paths behind an open workspace picker (index-aligned
-    /// with the picker items). Non-empty only while `mode` is
-    /// [`Mode::WorkspacePicker`].
-    workspace_choices: Vec<PathBuf>,
-    /// Sequence files behind an open [`Mode::SequencePicker`] (index-aligned with
-    /// the picker items). Non-empty only while that picker is open.
-    sequence_choices: Vec<PathBuf>,
-    /// One-shot flag: the endpoint search overlay was opened to pick a target for
-    /// the load runner (`<leader>l f`). Set on open, consumed + cleared when the
-    /// pick lands (the endpoint loads, then the load runner opens over it).
-    load_runner_after_pick: bool,
-    /// One-shot flag mirroring `load_runner_after_pick`: the sequence picker was
-    /// opened to RUN the chosen sequence (`<leader>s r`) rather than edit it
-    /// (`<leader>s o`). Set on open, consumed + cleared on accept / close.
-    sequence_pick_runs: bool,
+    /// The ONE open fuzzy-picker overlay, when `mode` is a picker mode
+    /// (Search/Palette/WorkspacePicker/SequencePicker); `None` otherwise.
+    ///
+    /// R1.5 A2 (audit H3): this used to be a bare `Option<picker::PickerState>`
+    /// multiplexed against three parallel item `Vec`s (`profile_choices`
+    /// /`workspace_choices`/`sequence_choices`) + `search_targets`/`palette_actions`
+    /// and three one-shot `bool`s (`load_runner_after_pick`/`sequence_pick_runs`
+    /// /`auth_picker`). The [`Picker`] enum now carries each kind's items + one-shot
+    /// intent IN its variant, so the selected index can only address its own list
+    /// and a stale flag can't leak across kinds. Reach the shared finder/selection
+    /// via [`App::picker_state`]/[`App::picker_state_mut`].
+    pub picker: Option<Picker>,
     /// Active jump-mode state, when `mode` is [`Mode::Jump`].
     pub jump: Option<JumpState>,
     keymap: KeyMap,
@@ -170,8 +160,6 @@ pub struct App {
     pub tick_count: u64,
     /// The text prompt's line editor while a [`Mode::Prompt`] overlay is open.
     pub prompt_editor: LineEditor,
-    /// True while the open picker is the auth-kind picker (vs search/palette/profile).
-    auth_picker: bool,
     /// The endpoint-switch target deferred behind an open
     /// [`ConfirmPurpose::DiscardChanges`] overlay; resolved by `s`/`d`, dropped
     /// by `Esc`.
@@ -372,13 +360,6 @@ impl App {
             focus: Pane::Explorer,
             mode: Mode::Normal,
             picker: None,
-            search_targets: Vec::new(),
-            palette_actions: Vec::new(),
-            profile_choices: Vec::new(),
-            workspace_choices: Vec::new(),
-            sequence_choices: Vec::new(),
-            load_runner_after_pick: false,
-            sequence_pick_runs: false,
             jump: None,
             keymap,
             theme: Theme::default(),
@@ -403,7 +384,6 @@ impl App {
             keymap_warned: false,
             tick_count: 0,
             prompt_editor: LineEditor::default(),
-            auth_picker: false,
             pending_load: None,
             pending_close: None,
             zoom: None,
@@ -1440,10 +1420,78 @@ impl App {
         len
     }
 
+    /// The shared query/filter/selection state of the open picker overlay, if any.
+    /// R1.5 A2: the finder+items+index live inside the [`Picker`] variant now, so
+    /// render/overlay-key/tests reach it uniformly through this seam.
+    pub fn picker_state(&self) -> Option<&picker::PickerState> {
+        self.picker.as_ref().map(Picker::state)
+    }
+
+    /// The shared picker state (mutable) of the open picker overlay, if any.
+    pub fn picker_state_mut(&mut self) -> Option<&mut picker::PickerState> {
+        self.picker.as_mut().map(Picker::state_mut)
+    }
+
+    /// Whether the open picker is a `<leader>l f` load-runner target pick — the
+    /// `after_pick` intent that folded the old `load_runner_after_pick` bool.
+    /// `false` unless the open picker is a `Search` with the intent armed. Test
+    /// seam replacing direct field reads.
+    #[cfg(test)]
+    pub(crate) fn picker_after_pick(&self) -> bool {
+        matches!(
+            self.picker,
+            Some(Picker::Search {
+                after_pick: true,
+                ..
+            })
+        )
+    }
+
+    /// Whether the open sequence picker is a `<leader>s r` run pick — the `runs`
+    /// intent that folded the old `sequence_pick_runs` bool. `false` unless the
+    /// open picker is a `Sequence` with `runs`. Test seam.
+    #[cfg(test)]
+    pub(crate) fn picker_sequence_runs(&self) -> bool {
+        matches!(self.picker, Some(Picker::Sequence { runs: true, .. }))
+    }
+
+    /// The profile-name choices behind an open profile picker (empty when the open
+    /// picker isn't a `Profile`). Test seam replacing the old `profile_choices`.
+    #[cfg(test)]
+    pub(crate) fn picker_profiles(&self) -> &[Option<String>] {
+        match &self.picker {
+            Some(Picker::Profile { profiles, .. }) => profiles,
+            _ => &[],
+        }
+    }
+
+    /// The workspace-path choices behind an open workspace picker (empty when the
+    /// open picker isn't a `Workspace`). Test seam replacing `workspace_choices`.
+    #[cfg(test)]
+    pub(crate) fn picker_workspaces(&self) -> &[PathBuf] {
+        match &self.picker {
+            Some(Picker::Workspace { paths, .. }) => paths,
+            _ => &[],
+        }
+    }
+
+    /// Whether the open picker is the auth-kind picker (`Picker::Auth`) — the
+    /// variant that folded the old `auth_picker` bool. Test seam.
+    #[cfg(test)]
+    pub(crate) fn picker_is_auth(&self) -> bool {
+        matches!(self.picker, Some(Picker::Auth { .. }))
+    }
+
     fn open_search(&mut self) -> Result<()> {
         let items = super::components::search::open(&mut self.explorer)?;
-        self.picker = Some(items.picker);
-        self.search_targets = items.targets;
+        // R1.5 A2: the targets travel WITH the finder in the variant, so the
+        // accepted index can only address its own list. `after_pick` starts false;
+        // `open_load_runner_pick` flips it right after (a `<leader>l f` pick).
+        self.picker = Some(Picker::Search {
+            state: items.picker,
+            targets: items.targets,
+            after_pick: false,
+        });
         self.mode = Mode::Search;
         // Opening search parses every collection eagerly — surface any files the
         // lenient load skipped.
@@ -1453,8 +1501,10 @@ impl App {
 
     fn open_palette(&mut self) {
         let items = palette::open();
-        self.picker = Some(items.picker);
-        self.palette_actions = items.actions;
+        self.picker = Some(Picker::Palette {
+            state: items.picker,
+            actions: items.actions,
+        });
         self.mode = Mode::Palette;
     }
 
@@ -1544,8 +1594,10 @@ impl App {
                 labels.push(label);
             }
         }
-        self.profile_choices = choices;
-        self.picker = Some(picker::PickerState::new(" Switch profile ", labels));
+        self.picker = Some(Picker::Profile {
+            state: picker::PickerState::new(" Switch profile ", labels),
+            profiles: choices,
+        });
         self.mode = Mode::Palette;
     }
 
@@ -1566,7 +1618,12 @@ impl App {
     /// `open_load_runner` once the endpoint has loaded.
     fn open_load_runner_pick(&mut self) -> Result<()> {
         self.open_search()?;
-        self.load_runner_after_pick = true;
+        // R1.5 A2: the old `load_runner_after_pick` one-shot bool is now the
+        // `after_pick` field of the freshly-opened `Picker::Search` variant, so the
+        // intent can't outlive its picker or leak onto a non-search picker.
+        if let Some(Picker::Search { after_pick, .. }) = &mut self.picker {
+            *after_pick = true;
+        }
         Ok(())
     }
 
@@ -1631,15 +1688,11 @@ impl App {
     }
 
     fn close_overlay(&mut self) {
+        // R1.5 A2: dropping the `Picker` drops ALL of its variant data — the item
+        // `Vec`s AND the one-shot intents (`after_pick`/`runs`) that used to be
+        // separate `App` fields cleared here. So an Esc-cancelled pick can no longer
+        // leak an intent into the next `/` search or sequence pick.
         self.picker = None;
-        self.profile_choices.clear();
-        self.workspace_choices.clear();
-        self.sequence_choices.clear();
-        self.auth_picker = false;
-        // Clear the one-shot picker intents so an Esc-cancelled pick never leaks
-        // into the next `<leader>f` / `/` search (`<leader>l f`) or sequence pick.
-        self.load_runner_after_pick = false;
-        self.sequence_pick_runs = false;
         self.mode = Mode::Normal;
     }
 
@@ -1668,13 +1721,15 @@ impl App {
             items.push(display_workspace_path(&path));
             choices.push(PathBuf::from(path));
         }
-        self.workspace_choices = choices;
-        self.picker = Some(picker::PickerState::new(" Switch workspace ", items));
+        self.picker = Some(Picker::Workspace {
+            state: picker::PickerState::new(" Switch workspace ", items),
+            paths: choices,
+        });
         self.mode = Mode::WorkspacePicker;
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(picker) = &mut self.picker else {
+        let Some(picker) = self.picker.as_mut().map(Picker::state_mut) else {
             self.close_overlay();
             return Ok(());
         };
@@ -1696,44 +1751,30 @@ impl App {
     }
 
     fn accept_overlay(&mut self) -> Result<()> {
-        // R1.5 A2: `Mode` is non-`Copy`. Only the four payload-free picker modes
-        // reach here, and `close_overlay()` resets the mode below, so snapshot the
-        // relevant variant into an owned tag before the reset (`matches!` on it).
-        enum PickerMode {
-            Search,
-            SequencePicker,
-            Palette,
-            WorkspacePicker,
-            Other,
-        }
-        let mode = match &self.mode {
-            Mode::Search => PickerMode::Search,
-            Mode::SequencePicker => PickerMode::SequencePicker,
-            Mode::Palette => PickerMode::Palette,
-            Mode::WorkspacePicker => PickerMode::WorkspacePicker,
-            _ => PickerMode::Other,
+        // R1.5 A2: take the whole `Picker` out (its items + one-shot intents travel
+        // WITH the finder in the variant), then reset the mode. `close_overlay()`
+        // would drop the picker before we can read it, so `take` it first, then
+        // clear the mode ourselves. An empty-result Enter (no `current` index) still
+        // resets the mode + drops the picker — dropping the intents exactly as the
+        // old field-clears did.
+        let Some(picker) = self.picker.take() else {
+            self.mode = Mode::Normal;
+            return Ok(());
         };
-        let current = self.picker.as_ref().and_then(picker::PickerState::current);
-        // Capture all choices + one-shot intents BEFORE close_overlay() clears
-        // them, so an empty-result Enter (early-return below) still drops the flags
-        // while a real pick can act on them.
-        let profile_choices = std::mem::take(&mut self.profile_choices);
-        let workspace_choices = std::mem::take(&mut self.workspace_choices);
-        let sequence_choices = std::mem::take(&mut self.sequence_choices);
-        let after_pick = std::mem::take(&mut self.load_runner_after_pick);
-        let sequence_runs = std::mem::take(&mut self.sequence_pick_runs);
-        let auth_picker = self.auth_picker;
-        self.close_overlay();
+        let current = picker.state().current();
+        self.mode = Mode::Normal;
         let Some(index) = current else {
             return Ok(());
         };
-        if auth_picker {
-            self.set_auth_kind(index);
-            return Ok(());
-        }
-        match mode {
-            PickerMode::Search => {
-                if let Some(&(collection, endpoint)) = self.search_targets.get(index) {
+        // The selected index can ONLY address the variant's own list — a stale-index
+        // or wrong-`Vec` pairing (the old H3 hazard) is unrepresentable.
+        match picker {
+            Picker::Search {
+                targets,
+                after_pick,
+                ..
+            } => {
+                if let Some(&(collection, endpoint)) = targets.get(index) {
                     self.focus = Pane::Explorer;
                     // jump_to only navigates; the load goes through the guarded
                     // seam so dirty edits are never lost silently.
@@ -1752,35 +1793,34 @@ impl App {
                     }
                 }
             }
-            PickerMode::SequencePicker => {
-                if let Some(path) = sequence_choices.get(index).cloned() {
-                    // `sequence_runs` = `<leader>s r` run-vs-edit intent.
-                    if sequence_runs {
+            Picker::Sequence { paths, runs, .. } => {
+                if let Some(path) = paths.get(index).cloned() {
+                    // `runs` = `<leader>s r` run-vs-edit intent.
+                    if runs {
                         self.run_sequence_at(path);
                     } else {
                         self.open_picked_sequence(path)?;
                     }
                 }
             }
-            PickerMode::Palette => {
-                // profile_choices set → resolve a profile; else the command
-                // palette resolves an action.
-                if !profile_choices.is_empty() {
-                    if let Some(choice) = profile_choices.get(index).cloned() {
-                        self.set_profile(choice);
-                    }
-                } else if let Some(&action) = self.palette_actions.get(index) {
+            Picker::Profile { profiles, .. } => {
+                if let Some(choice) = profiles.get(index).cloned() {
+                    self.set_profile(choice);
+                }
+            }
+            Picker::Palette { actions, .. } => {
+                if let Some(&action) = actions.get(index) {
                     self.dispatch(action, None)?;
                 }
             }
-            PickerMode::WorkspacePicker => {
+            Picker::Workspace { paths, .. } => {
                 // Through the dirty guard: a workspace target is always "other",
                 // so unsaved edits defer to the discard confirm.
-                if let Some(path) = workspace_choices.get(index).cloned() {
+                if let Some(path) = paths.get(index).cloned() {
                     self.guarded_load(PendingLoad::Workspace(path))?;
                 }
             }
-            PickerMode::Other => {}
+            Picker::Auth { .. } => self.set_auth_kind(index),
         }
         Ok(())
     }
@@ -1916,7 +1956,7 @@ mod state;
 // original crate-internal visibility via a plain `use`.
 use state::{
     APP_CHANNEL_CAPACITY, Buffer, EndpointBuffer, InFlightRequest, PendingClose, PendingCopy,
-    PendingLoad, ResponseSurface, fold_body_text, overwrite_body_text,
+    PendingLoad, Picker, ResponseSurface, fold_body_text, overwrite_body_text,
 };
 pub use state::{
     AppMsg, ConfirmPurpose, LeaderState, LeftPane, Mode, Pane, PromptPurpose, SeqView, ZoomPane,

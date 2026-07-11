@@ -504,8 +504,12 @@ impl App {
             "Bearer".to_owned(),
             "ApiKey".to_owned(),
         ];
-        self.picker = Some(picker::PickerState::new(" Auth kind ", labels));
-        self.auth_picker = true;
+        // R1.5 A2: the auth-kind picker is its own `Picker::Auth` variant (folding
+        // the old `auth_picker` bool) — the accept path matches the variant, not a
+        // side flag, so it can't be confused with the profile/command palette.
+        self.picker = Some(Picker::Auth {
+            state: picker::PickerState::new(" Auth kind ", labels),
+        });
         self.mode = Mode::Palette;
     }
 

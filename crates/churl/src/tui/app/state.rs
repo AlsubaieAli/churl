@@ -129,6 +129,99 @@ pub enum Mode {
     LoadRunner(LoadRunnerState),
 }
 
+/// The state of the ONE open fuzzy-picker overlay, when `mode` is one of the
+/// four picker modes ([`Mode::Search`]/[`Mode::Palette`]/[`Mode::WorkspacePicker`]
+/// /[`Mode::SequencePicker`]). `None` when no picker is open.
+///
+/// R1.5 A2 (audit H3): the picker used to be a bare `Option<PickerState>`
+/// multiplexed against three parallel item `Vec`s (`profile_choices`
+/// /`workspace_choices`/`sequence_choices`) + `search_targets`/`palette_actions`,
+/// plus three one-shot `bool`s (`load_runner_after_pick`/`sequence_pick_runs`
+/// /`auth_picker`). The picker *kind* was inferred from [`Mode`] + which `Vec`
+/// was non-empty + which flag was set, and the selected index addressed whichever
+/// `Vec` matched **by convention** — a stale index or wrong-`Vec` pairing was an
+/// out-of-bounds hazard. Now the items travel WITH the finder inside the variant,
+/// so the [`PickerState::current`] index can only address its own list, and the
+/// one-shot flags are variant fields consumed on accept — `(kind, wrong-items)`
+/// and `(kind, stale-flag)` are unrepresentable.
+///
+/// The shared [`PickerState`] (query/filter/selection over display strings) is the
+/// `state` field of every variant; reach it uniformly via
+/// [`App::picker_state`]/[`App::picker_state_mut`]. The `Mode::*` picker variants
+/// stay as-is (they gate key routing + the render overlay) — this fold consolidates
+/// the picker's OWN state only, not the mode axis.
+#[derive(Debug)]
+pub enum Picker {
+    /// The fuzzy endpoint-search overlay ([`Mode::Search`]). `targets[i]` is the
+    /// `(collection, endpoint)` explorer position for item `i`. `after_pick`
+    /// (folds the old `load_runner_after_pick` one-shot) means the pick was made
+    /// to choose a load-runner target (`<leader>l f`): accepting loads the
+    /// endpoint, then chains into the load runner.
+    Search {
+        state: picker::PickerState,
+        targets: Vec<(usize, usize)>,
+        after_pick: bool,
+    },
+    /// The command palette ([`Mode::Palette`]). `actions[i]` is the [`Action`]
+    /// dispatched when item `i` is accepted.
+    Palette {
+        state: picker::PickerState,
+        actions: Vec<Action>,
+    },
+    /// The profile switcher ([`Mode::Palette`], distinct from the command palette
+    /// by variant, not by an empty-`Vec` convention). `profiles[i]` is the raw
+    /// profile name for item `i` (`None` = the "(none)" entry).
+    Profile {
+        state: picker::PickerState,
+        profiles: Vec<Option<String>>,
+    },
+    /// The quick-jump workspace switcher ([`Mode::WorkspacePicker`]). `paths[i]` is
+    /// the canonical workspace root for item `i`.
+    Workspace {
+        state: picker::PickerState,
+        paths: Vec<PathBuf>,
+    },
+    /// The sequence picker ([`Mode::SequencePicker`]). `paths[i]` is the sequence
+    /// file for item `i`. `runs` (folds the old `sequence_pick_runs` one-shot) =
+    /// `<leader>s r` run-vs-`<leader>s o` edit intent: accepting a pick RUNS the
+    /// chosen sequence when `true`, opens it in the Edit face when `false`.
+    Sequence {
+        state: picker::PickerState,
+        paths: Vec<PathBuf>,
+        runs: bool,
+    },
+    /// The auth-kind picker ([`Mode::Palette`], folds the old `auth_picker` bool):
+    /// None / Basic / Bearer / ApiKey, addressed by the accepted item index
+    /// directly (no side `Vec`).
+    Auth { state: picker::PickerState },
+}
+
+impl Picker {
+    /// The shared query/filter/selection state, regardless of kind.
+    pub(in crate::tui::app) fn state(&self) -> &picker::PickerState {
+        match self {
+            Picker::Search { state, .. }
+            | Picker::Palette { state, .. }
+            | Picker::Profile { state, .. }
+            | Picker::Workspace { state, .. }
+            | Picker::Sequence { state, .. }
+            | Picker::Auth { state } => state,
+        }
+    }
+
+    /// The shared query/filter/selection state (mutable).
+    pub(in crate::tui::app) fn state_mut(&mut self) -> &mut picker::PickerState {
+        match self {
+            Picker::Search { state, .. }
+            | Picker::Palette { state, .. }
+            | Picker::Profile { state, .. }
+            | Picker::Workspace { state, .. }
+            | Picker::Sequence { state, .. }
+            | Picker::Auth { state } => state,
+        }
+    }
+}
+
 /// What a [`Mode::Prompt`] is collecting text for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptPurpose {
