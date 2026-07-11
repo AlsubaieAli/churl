@@ -214,17 +214,15 @@ pub struct App {
     help_search_input: bool,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
-    /// The unified sequence surface's run-face state (M7.4), when
-    /// `Mode::Sequence`. Built lazily on the first run (Edit-only sessions never
-    /// allocate it); persists across face flips.
-    sequence_runner: Option<SequenceRunnerState>,
     /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
+    ///
+    /// R1.5 A2: the unified sequence surface's run-face state, edit-face state, and
+    /// active face used to live in three parallel fields here
+    /// (`sequence_runner`/`sequence_editor`/`sequence_view`). They now live IN the
+    /// [`Mode::Sequence`] variant (`{ view, editor, runner }`) so they cannot exist
+    /// without the mode; this abort handle stays here because it outlives no mode —
+    /// it must survive a Run→Edit face flip and is aborted on cancel/re-run/close.
     sequence_abort: Option<AbortHandle>,
-    /// The unified sequence surface's edit-face state (M7.4 §4), when
-    /// `Mode::Sequence`. Built when the surface opens; persists across face flips.
-    sequence_editor: Option<SequenceEditorState>,
-    /// The active face of the unified sequence surface (Edit vs Run).
-    sequence_view: SeqView,
     /// Abort handle for the single load-batch launcher task; aborting it drops
     /// the launcher's `buffer_unordered`, cancelling ALL in-flight requests.
     load_abort: Option<AbortHandle>,
@@ -420,10 +418,7 @@ impl App {
             help_search_editor: LineEditor::default(),
             help_search_input: false,
             url_edit_mode: UrlEditMode::Inline,
-            sequence_runner: None,
             sequence_abort: None,
-            sequence_editor: None,
-            sequence_view: SeqView::Edit,
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
             load_request: None,
@@ -565,7 +560,8 @@ impl App {
     fn active_response_surface(&self) -> ResponseSurface {
         // When body-search is open, resolve against the mode it was opened over —
         // parked in `body_search_return` (R1.5 A2: it holds the whole mode, incl.
-        // a `LoadRunner(state)` payload, so the runner surface stays reachable).
+        // the `LoadRunner(state)` / `Sequence{..}` payloads, so the runner surface
+        // stays reachable).
         let effective = if matches!(self.mode, Mode::BodySearch) {
             &self.body_search_return
         } else {
@@ -581,15 +577,17 @@ impl App {
                     ResponseSurface::Main
                 }
             }
-            Mode::Sequence if self.sequence_view == SeqView::Run => match &self.sequence_runner {
-                Some(runner)
-                    if runner.focus == sequence_runner::RunnerFocus::Response
-                        && !runner.response_input_captured() =>
-                {
-                    ResponseSurface::Sequence
-                }
-                _ => ResponseSurface::Main,
-            },
+            // R1.5 A2: the Run-face runner now lives in the `Mode::Sequence` payload
+            // (of the effective mode), not a parallel field.
+            Mode::Sequence {
+                view: SeqView::Run,
+                runner: Some(runner),
+                ..
+            } if runner.focus == sequence_runner::RunnerFocus::Response
+                && !runner.response_input_captured() =>
+            {
+                ResponseSurface::Sequence
+            }
             _ => ResponseSurface::Main,
         }
     }
@@ -605,8 +603,7 @@ impl App {
                 .and_then(|r| r.selected_response())
                 .unwrap_or(&self.orphan_response),
             ResponseSurface::Sequence => self
-                .sequence_runner
-                .as_ref()
+                .sequence_runner()
                 .and_then(|r| r.selected_response())
                 .unwrap_or(&self.orphan_response),
             ResponseSurface::Main => match self.active_endpoint_buffer() {
@@ -629,11 +626,11 @@ impl App {
                     .and_then(|r| r.selected_response_mut())
                     .unwrap_or(&mut self.orphan_response)
             }
-            ResponseSurface::Sequence => self
-                .sequence_runner
-                .as_mut()
-                .and_then(|r| r.selected_response_mut())
-                .unwrap_or(&mut self.orphan_response),
+            ResponseSurface::Sequence => {
+                Self::sequence_runner_in_mut(&mut self.mode, &mut self.body_search_return)
+                    .and_then(|r| r.selected_response_mut())
+                    .unwrap_or(&mut self.orphan_response)
+            }
             ResponseSurface::Main => match self
                 .buffers
                 .get_mut(self.active)
@@ -656,8 +653,7 @@ impl App {
                 .map(|r| &r.geometry)
                 .unwrap_or(&self.orphan_geometry),
             ResponseSurface::Sequence => self
-                .sequence_runner
-                .as_ref()
+                .sequence_runner()
                 .map(|r| &r.geometry)
                 .unwrap_or(&self.orphan_geometry),
             ResponseSurface::Main => match self.active_endpoint_buffer() {
@@ -675,11 +671,11 @@ impl App {
                     .map(|r| &mut r.geometry)
                     .unwrap_or(&mut self.orphan_geometry)
             }
-            ResponseSurface::Sequence => self
-                .sequence_runner
-                .as_mut()
-                .map(|r| &mut r.geometry)
-                .unwrap_or(&mut self.orphan_geometry),
+            ResponseSurface::Sequence => {
+                Self::sequence_runner_in_mut(&mut self.mode, &mut self.body_search_return)
+                    .map(|r| &mut r.geometry)
+                    .unwrap_or(&mut self.orphan_geometry)
+            }
             ResponseSurface::Main => match self
                 .buffers
                 .get_mut(self.active)
@@ -1022,7 +1018,7 @@ impl App {
                 self.handle_confirm_key(key, purpose)
             }
             Mode::EnvEditor(_) => self.handle_env_editor_key(key),
-            Mode::Sequence => self.handle_sequence_key(key),
+            Mode::Sequence { .. } => self.handle_sequence_key(key),
             Mode::LoadRunner(_) => self.handle_load_runner_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }

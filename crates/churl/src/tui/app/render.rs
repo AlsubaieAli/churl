@@ -422,7 +422,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Prompt(purpose) => Overlay::Prompt(*purpose),
         Mode::Confirm(purpose) => Overlay::Confirm(*purpose),
         Mode::EnvEditor(_) => Overlay::EnvEditor,
-        Mode::Sequence => match app.sequence_view {
+        // R1.5 A2: the active face lives in the (effective) `Mode::Sequence`
+        // payload. While body-search is open over the Run-face Response region the
+        // sequence mode is parked in `body_search_return` (= `effective_mode`), so
+        // this keys on the face carried there.
+        Mode::Sequence { view, .. } => match view {
             SeqView::Edit => Overlay::SequenceEdit,
             SeqView::Run => Overlay::SequenceRun,
         },
@@ -458,7 +462,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         Overlay::SequenceEdit => {
-            if let Some(editor) = &app.sequence_editor {
+            // The editor lives in the (live) mode — the Edit face never hosts
+            // body-search (only the Run-face Response region does), so the overlay
+            // is only chosen when `effective_mode == app.mode`.
+            if let Mode::Sequence {
+                editor: Some(editor),
+                ..
+            } = &app.mode
+            {
                 sequence_editor::render(frame, main, editor, &theme);
             }
         }
@@ -477,7 +488,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .and_then(Buffer::as_endpoint)
                 .map(|b| &b.highlight_cache)
                 .unwrap_or(&scratch_cache);
-            let job = match app.sequence_runner.as_mut() {
+            // R1.5 A2: the runner lives in the mode (or the parked mode during a
+            // body-search over its Response region), disjoint from
+            // `buffers`/`highlight_tx`.
+            let job = match App::sequence_runner_in_mut(&mut app.mode, &mut app.body_search_return)
+            {
                 Some(runner) => sequence_runner::render(frame, main, runner, tick, cache, &theme),
                 None => None,
             };

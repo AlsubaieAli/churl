@@ -7,6 +7,77 @@
 use super::super::*;
 
 impl App {
+    /// The open sequence surface's run-face state, if a runner is built (R1.5 A2).
+    /// The state now lives in the [`Mode::Sequence`] variant, not a parallel field.
+    /// While body-search is open OVER the runner (`Mode::BodySearch`), the sequence
+    /// mode is parked in `body_search_return`, so it is also consulted — the
+    /// runner's response surface must stay reachable through a `/` search (note #2,
+    /// mirrors [`App::load_runner`]).
+    pub(in crate::tui::app) fn sequence_runner(&self) -> Option<&SequenceRunnerState> {
+        match &self.mode {
+            Mode::Sequence { runner, .. } => runner.as_ref(),
+            Mode::BodySearch => match &self.body_search_return {
+                Mode::Sequence { runner, .. } => runner.as_ref(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Mutable accessor for the open sequence runner (R1.5 A2). Consults the same
+    /// two locations as [`App::sequence_runner`] (the mode, or the parked mode while
+    /// body-search is open over the runner).
+    pub(in crate::tui::app) fn sequence_runner_mut(&mut self) -> Option<&mut SequenceRunnerState> {
+        Self::sequence_runner_in_mut(&mut self.mode, &mut self.body_search_return)
+    }
+
+    /// Field-level resolver for the runner behind the mut accessor. Split out as an
+    /// associated fn taking the two field borrows explicitly (mirrors
+    /// [`App::load_runner_in_mut`]) so callers that also need a disjoint `&mut self`
+    /// field (e.g. `orphan_response` in an `unwrap_or`) can borrow the runner
+    /// without aliasing the whole `App`.
+    pub(in crate::tui::app) fn sequence_runner_in_mut<'a>(
+        mode: &'a mut Mode,
+        parked: &'a mut Mode,
+    ) -> Option<&'a mut SequenceRunnerState> {
+        match mode {
+            Mode::Sequence { runner, .. } => runner.as_mut(),
+            Mode::BodySearch => match parked {
+                Mode::Sequence { runner, .. } => runner.as_mut(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The open sequence surface's edit-face state, if an editor is built (R1.5 A2).
+    /// The editor never hosts body-search (only the Run-face Response region does),
+    /// so — unlike the runner — this consults only the live mode.
+    pub(in crate::tui::app) fn sequence_editor(&self) -> Option<&SequenceEditorState> {
+        match &self.mode {
+            Mode::Sequence { editor, .. } => editor.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Mutable accessor for the open sequence editor (see [`App::sequence_editor`]).
+    pub(in crate::tui::app) fn sequence_editor_mut(&mut self) -> Option<&mut SequenceEditorState> {
+        match &mut self.mode {
+            Mode::Sequence { editor, .. } => editor.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// The active face of the open sequence surface (R1.5 A2). `SeqView` is `Copy`,
+    /// so this hands back an owned value, dropping the `self.mode` borrow — callers
+    /// can then act via `&mut self`. `None` when not in a sequence surface.
+    pub(in crate::tui::app) fn sequence_view(&self) -> Option<SeqView> {
+        match &self.mode {
+            Mode::Sequence { view, .. } => Some(*view),
+            _ => None,
+        }
+    }
+
     /// Runs the sequence under the sub-pane cursor (`<leader>s r` / palette / `r`
     /// on the sequences sub-pane). Notifies when no sequence is selected.
     pub(in crate::tui::app) fn run_selected_sequence(&mut self) {
@@ -88,14 +159,20 @@ impl App {
             .into_iter()
             .cloned()
             .collect();
-        self.sequence_runner = Some(SequenceRunnerState::new(
-            selected.name,
-            selected.file,
-            selected.sequence.on_error,
-            steps,
-        ));
-        self.mode = Mode::Sequence;
-        self.sequence_view = SeqView::Run;
+        // R1.5 A2: construct the surface INTO the mode — Run face, no editor yet
+        // (built lazily on the first Run→Edit flip), runner live. No parallel
+        // `sequence_*` fields, so `(Mode::Sequence, None runner in Run face)` after
+        // a fresh run is unrepresentable.
+        self.mode = Mode::Sequence {
+            view: SeqView::Run,
+            editor: None,
+            runner: Some(SequenceRunnerState::new(
+                selected.name,
+                selected.file,
+                selected.sequence.on_error,
+                steps,
+            )),
+        };
         self.start_sequence_run();
     }
 
@@ -117,7 +194,7 @@ impl App {
         if let Some(handle) = self.sequence_abort.take() {
             handle.abort();
         }
-        let Some(runner) = self.sequence_runner.as_mut() else {
+        let Some(runner) = self.sequence_runner_mut() else {
             return;
         };
         runner.reset_for_rerun();
@@ -138,7 +215,7 @@ impl App {
             return;
         };
         let scopes = self.sequence_run_scopes();
-        let Some(runner) = self.sequence_runner.as_mut() else {
+        let Some(runner) = self.sequence_runner_mut() else {
             return;
         };
         let run_generation = runner.run_generation;
@@ -197,13 +274,20 @@ impl App {
         index: usize,
         outcome: Result<Response, String>,
     ) {
-        let Some(runner) = self.sequence_runner.as_mut() else {
-            return;
-        };
-        if run_generation != runner.run_generation {
-            return; // stale — a cancel or re-run superseded this step
+        // R1.5 A2: the runner lives in `self.mode`, so a live runner borrow now
+        // aliases `self` — and `self.sequence_abort = None` below is a `self` field
+        // write. Do the stale-generation gate through the immutable accessor (borrow
+        // dropped at the `if`), clear the abort handle, THEN take the mut borrow.
+        let stale = self
+            .sequence_runner()
+            .is_none_or(|r| run_generation != r.run_generation);
+        if stale {
+            return; // no runner, or a cancel/re-run superseded this step
         }
         self.sequence_abort = None;
+        let Some(runner) = self.sequence_runner_mut() else {
+            return;
+        };
         let step = match runner.steps.get(index) {
             Some(row) => row.step.clone(),
             None => return,
@@ -267,7 +351,7 @@ impl App {
         index: usize,
         result: churl_core::sequence::StepResult,
     ) {
-        let Some(runner) = self.sequence_runner.as_mut() else {
+        let Some(runner) = self.sequence_runner_mut() else {
             return;
         };
         if let Some(row) = runner.steps.get_mut(index) {
@@ -287,7 +371,7 @@ impl App {
 
     /// Advances to the step after `index`, or finishes the run.
     pub(in crate::tui::app) fn advance_sequence(&mut self, index: usize) {
-        let Some(runner) = self.sequence_runner.as_mut() else {
+        let Some(runner) = self.sequence_runner_mut() else {
             return;
         };
         let next = index + 1;
@@ -306,7 +390,7 @@ impl App {
         if let Some(handle) = self.sequence_abort.take() {
             handle.abort();
         }
-        let Some(runner) = self.sequence_runner.as_mut() else {
+        let Some(runner) = self.sequence_runner_mut() else {
             return;
         };
         runner.run_generation += 1;
@@ -386,13 +470,26 @@ impl App {
             self.toggle_sequence_view();
             return Ok(());
         }
-        match self.sequence_view {
+        // R1.5 A2: `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
+        // `SeqView` is `Copy`, so read the active face out of the arm without
+        // holding the borrow. The dispatcher only routes here on `Mode::Sequence`,
+        // so a non-Sequence mode is unreachable (the old fall-through went nowhere).
+        let Some(view) = self.sequence_view() else {
+            return Ok(());
+        };
+        match view {
             SeqView::Edit => {
-                let Some(editor) = self.sequence_editor.as_mut() else {
+                // Produce the editor outcome inside the `self.mode` borrow, then
+                // drop the borrow (via the owned `outcome`) before the `&mut self`
+                // save/close follow-ups. No editor ⇒ close (the fold makes an
+                // Edit-face-with-no-editor rare, but it is still a legal state — a
+                // just-deleted editor — so keep the close, not a panic).
+                let Some(editor) = self.sequence_editor_mut() else {
                     self.close_sequence_surface();
                     return Ok(());
                 };
-                match editor.handle_key(key) {
+                let outcome = editor.handle_key(key);
+                match outcome {
                     EditorOutcome::Consumed => {}
                     EditorOutcome::Save => {
                         self.save_sequence_editor()?;
@@ -406,17 +503,20 @@ impl App {
                 }
             }
             SeqView::Run => {
-                if self.sequence_runner.is_none() {
-                    self.close_sequence_surface();
-                    return Ok(());
-                }
                 // Response-region keys route through the shared response path FIRST
                 // (note #2); anything not a response action delegates to the runner.
                 if self.try_route_runner_response_key(key) {
                     return Ok(());
                 }
-                let runner = self.sequence_runner.as_mut().expect("checked above");
-                match runner.handle_key(key) {
+                // R1.5 A2: the runner lives in the mode; the old `is_none()→close`
+                // guard + `.expect("checked above")` collapse into one accessor —
+                // no runner (a Run face with none built) still closes the surface.
+                let Some(runner) = self.sequence_runner_mut() else {
+                    self.close_sequence_surface();
+                    return Ok(());
+                };
+                let outcome = runner.handle_key(key);
+                match outcome {
                     RunnerOutcome::Consumed => {}
                     RunnerOutcome::Rerun => self.start_sequence_run(),
                     RunnerOutcome::Cancel => self.cancel_sequence_run(),
@@ -433,7 +533,13 @@ impl App {
     /// (re)builds the runner from the saved steps before switching. The run
     /// itself is never auto-started here — the user presses `r` in the Run face.
     pub(in crate::tui::app) fn toggle_sequence_view(&mut self) {
-        match self.sequence_view {
+        // R1.5 A2: `view`/`editor`/`runner` live in the `Mode::Sequence` payload.
+        // Read the face out (Copy), act, then mutate the payload fields back through
+        // the arm. Not in a sequence surface ⇒ nothing to flip.
+        let Some(view) = self.sequence_view() else {
+            return;
+        };
+        match view {
             SeqView::Run => {
                 // Run→Edit is always safe, but the editor may not exist yet: a
                 // `<leader>s r` run opens the runner face WITHOUT building an editor
@@ -443,21 +549,26 @@ impl App {
                 // close_sequence_surface. Build the editor synchronously here (from
                 // the runner's saved file, the single source of truth) so focus
                 // transfers into the Edit face on the flip itself.
-                if self.sequence_editor.is_none() {
-                    let Some(path) = self.sequence_runner.as_ref().map(|r| r.path.clone()) else {
+                if self.sequence_editor().is_none() {
+                    let Some(path) = self.sequence_runner().map(|r| r.path.clone()) else {
                         // No runner either — nothing to edit; leave the surface as-is
                         // rather than stranding it in a face with no component.
                         return;
                     };
                     match persistence::load_sequence(&path) {
                         Ok(sequence) => {
+                            // `endpoint_rel_paths` takes `&mut self`; call it (no
+                            // sequence borrow live) before writing the editor back.
                             let endpoints = self.endpoint_rel_paths();
-                            self.sequence_editor = Some(SequenceEditorState::new(
+                            let built = SequenceEditorState::new(
                                 sequence.name.clone(),
                                 path,
                                 &sequence,
                                 endpoints,
-                            ));
+                            );
+                            if let Mode::Sequence { editor, .. } = &mut self.mode {
+                                *editor = Some(built);
+                            }
                         }
                         Err(err) => {
                             // Couldn't load the file to edit — stay in Run face with
@@ -467,10 +578,12 @@ impl App {
                         }
                     }
                 }
-                self.sequence_view = SeqView::Edit;
+                if let Mode::Sequence { view, .. } = &mut self.mode {
+                    *view = SeqView::Edit;
+                }
             }
             SeqView::Edit => {
-                let Some(editor) = self.sequence_editor.as_ref() else {
+                let Some(editor) = self.sequence_editor() else {
                     return;
                 };
                 if editor.is_dirty() {
@@ -499,16 +612,14 @@ impl App {
                 if let Some(handle) = self.sequence_abort.take() {
                     handle.abort();
                 }
-                if let Some(runner) = self.sequence_runner.as_mut() {
-                    runner.run_generation += 1;
+                let built = SequenceRunnerState::new(name, file, sequence.on_error, steps);
+                if let Mode::Sequence { view, runner, .. } = &mut self.mode {
+                    if let Some(runner) = runner.as_mut() {
+                        runner.run_generation += 1;
+                    }
+                    *runner = Some(built);
+                    *view = SeqView::Run;
                 }
-                self.sequence_runner = Some(SequenceRunnerState::new(
-                    name,
-                    file,
-                    sequence.on_error,
-                    steps,
-                ));
-                self.sequence_view = SeqView::Run;
             }
         }
     }
@@ -520,12 +631,13 @@ impl App {
             handle.abort();
         }
         // Bump the generation so a straggler result is dropped after close.
-        if let Some(runner) = self.sequence_runner.as_mut() {
+        if let Some(runner) = self.sequence_runner_mut() {
             runner.run_generation += 1;
         }
-        self.sequence_runner = None;
-        self.sequence_editor = None;
-        self.sequence_view = SeqView::Edit;
+        // R1.5 A2: setting `Normal` drops the whole `Mode::Sequence` payload
+        // (editor + runner) — no separate `sequence_*` fields to clear. The
+        // generation bump above ran while the runner was still live, so a landed
+        // straggler is already dropped by the guard.
         self.mode = Mode::Normal;
     }
 
@@ -584,11 +696,13 @@ impl App {
         sequence: &churl_core::model::Sequence,
     ) {
         let endpoints = self.endpoint_rel_paths();
-        self.sequence_editor = Some(SequenceEditorState::new(name, file, sequence, endpoints));
-        // A fresh open starts with no run built; the run face is entered lazily.
-        self.sequence_runner = None;
-        self.mode = Mode::Sequence;
-        self.sequence_view = SeqView::Edit;
+        // R1.5 A2: construct the surface INTO the mode — Edit face, editor built,
+        // no runner yet (the run face is entered lazily on the first Ctrl-R flip).
+        self.mode = Mode::Sequence {
+            view: SeqView::Edit,
+            editor: Some(SequenceEditorState::new(name, file, sequence, endpoints)),
+            runner: None,
+        };
     }
 
     /// Commits the "new sequence" name prompt: creates the file and opens the
@@ -612,7 +726,7 @@ impl App {
     /// Saves the editor's sequence through the format-preserving seam and reloads
     /// the explorer so the change is visible. Returns whether the save took.
     pub(in crate::tui::app) fn save_sequence_editor(&mut self) -> Result<bool> {
-        let Some(editor) = self.sequence_editor.as_ref() else {
+        let Some(editor) = self.sequence_editor() else {
             return Ok(false);
         };
         let path = editor.path().to_owned();
@@ -627,7 +741,7 @@ impl App {
         };
         match persistence::save_sequence(&path, &sequence) {
             Ok(()) => {
-                if let Some(editor) = self.sequence_editor.as_mut() {
+                if let Some(editor) = self.sequence_editor_mut() {
                     editor.mark_saved();
                 }
                 self.reload_explorer()?;

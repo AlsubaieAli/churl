@@ -474,26 +474,13 @@ impl App {
                         let path = selected.file;
                         match persistence::delete_sequence(&path) {
                             Ok(()) => {
-                                // A sequence editor/runner is a modal overlay
-                                // (`Mode::Sequence`) and so cannot be open while this
-                                // confirm runs in `Mode::Normal`; but if a stale
-                                // editor/runner state still points at the just-deleted
-                                // file, drop it so a later save can't resurrect the
-                                // file and the runner can't act on a vanished target.
-                                if self
-                                    .sequence_editor
-                                    .as_ref()
-                                    .is_some_and(|e| e.path() == path)
-                                {
-                                    self.sequence_editor = None;
-                                }
-                                if self
-                                    .sequence_runner
-                                    .as_ref()
-                                    .is_some_and(|r| r.path == path)
-                                {
-                                    self.sequence_runner = None;
-                                }
+                                // R1.5 A2: the sequence editor/runner state now lives
+                                // INSIDE the `Mode::Sequence` variant. This confirm
+                                // runs in `Mode::Confirm(DeleteSequence)`, so that
+                                // state is definitionally absent (dropped when the
+                                // surface closed) — the old defensive "if a stale
+                                // editor/runner points at this file, drop it" block is
+                                // now unreachable by construction and is gone.
                                 // reload_explorer clamps the sub-pane cursor to the
                                 // new sequence count, so selection lands on the
                                 // next/previous sequence (or the empty-state
