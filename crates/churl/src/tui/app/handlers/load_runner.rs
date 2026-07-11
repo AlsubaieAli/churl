@@ -302,12 +302,22 @@ impl App {
             max_ms: ms(stats.max),
             mean_ms: ms(stats.mean),
         };
-        if let Some(Err(err)) = self
+        // Feed the same consecutive-failure counter the per-request history
+        // writes use, so a persistent SQLite failure surfaces the sticky flag
+        // regardless of which write hit it (B3). A disabled store (`None`) is not
+        // a failure and leaves the counter untouched.
+        if let Some(result) = self
             .history
             .as_ref()
             .map(|store| store.insert_load_batch(&summary))
         {
-            self.notify(format!("load history write failed: {err}"));
+            match result {
+                Ok(_) => self.note_history_write(true),
+                Err(err) => {
+                    self.note_history_write(false);
+                    self.notify(format!("load history write failed: {err}"));
+                }
+            }
         }
     }
 

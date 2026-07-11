@@ -68,13 +68,22 @@ pub struct HighlightJob {
 /// selects the embedded syntect theme (Nord for dark, InspiredGithub for light)
 /// so response bodies match the pane palette. Runs until the sender drops or the
 /// app channel closes.
-pub fn spawn(app_tx: Sender<AppMsg>, light: bool) -> std::sync::mpsc::Sender<HighlightJob> {
+///
+/// Returns `None` if the OS refuses the thread (EAGAIN under fd/thread
+/// exhaustion) rather than panicking: highlighting is best-effort (already
+/// absent under `TestBackend`), so the app degrades to plain, un-highlighted
+/// response rendering instead of aborting at startup (audit B4).
+pub fn spawn(app_tx: Sender<AppMsg>, light: bool) -> Option<std::sync::mpsc::Sender<HighlightJob>> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<HighlightJob>();
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("churl-highlight".to_owned())
         .spawn(move || worker(job_rx, app_tx, light))
-        .expect("spawn highlight worker thread");
-    job_tx
+    {
+        Ok(_) => Some(job_tx),
+        // Drop `job_tx` (the receiver's other end) so nothing dangles; the app
+        // simply never gets a sender and renders bodies without highlighting.
+        Err(_) => None,
+    }
 }
 
 /// The worker loop: lazily loads the syntax/theme sets, then highlights each job.
@@ -175,6 +184,21 @@ mod tests {
             SyntaxToken::Plain
         );
         assert_eq!(SyntaxToken::from_content_type(None), SyntaxToken::Plain);
+    }
+
+    #[test]
+    fn spawn_returns_a_sender_on_success() {
+        // On a healthy runtime the worker thread spawns and `spawn` hands back a
+        // live sender. The `Option` return exists so a thread-spawn *failure*
+        // (EAGAIN under fd/thread exhaustion) degrades to `None` — plain,
+        // un-highlighted rendering — instead of panicking (audit B4). A real
+        // EAGAIN can't be forced deterministically in-process without exhausting
+        // the host, so this test pins the success arm and the graceful contract;
+        // the degrade path is exercised by `App::install_runtime` treating `None`
+        // as "highlighting disabled" (every render site guards on `Some`).
+        let (app_tx, _app_rx) = tokio::sync::mpsc::channel::<AppMsg>(8);
+        let sender = spawn(app_tx, false);
+        assert!(sender.is_some(), "healthy spawn yields a job sender");
     }
 
     #[test]

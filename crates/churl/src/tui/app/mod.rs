@@ -148,6 +148,12 @@ pub struct App {
     /// statusline (send hints, history/errors, merges, CRUD results); auto-expires
     /// after `Message::EXPIRE_SECS`.
     message: Option<Message>,
+    /// Consecutive history/load-summary write failures. A single write failure
+    /// only flashes a 250 ms toast that can scroll past unnoticed on a busy
+    /// session, so once this crosses [`Self::HISTORY_FAIL_THRESHOLD`] the status
+    /// bar shows a sticky "⚠ history not recording" flag (audit B3). Reset to 0
+    /// on any successful write, which also clears the flag.
+    history_write_failures: u32,
     /// Load-time keymap conflict/shadow warnings (M7.10), surfaced as a
     /// first-frame statusline toast. Empty for a clean config. Populated from
     /// [`KeyMap::validate`] by the TUI entry point; a `false` `keymap_warned`
@@ -346,6 +352,29 @@ pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
 }
 
 impl App {
+    /// How many consecutive history/load-summary write failures trigger the
+    /// sticky "history not recording" status-bar flag (audit B3). Set to 1 so the
+    /// very first persistent failure surfaces stickily — a healthy session (zero
+    /// failures) never shows it, so existing snapshots are unaffected.
+    pub(in crate::tui::app) const HISTORY_FAIL_THRESHOLD: u32 = 1;
+
+    /// Whether history writes are currently failing hard enough to warrant the
+    /// sticky status-bar warning (drives [`statusline`] rendering).
+    pub(in crate::tui::app) fn history_failing(&self) -> bool {
+        self.history_write_failures >= Self::HISTORY_FAIL_THRESHOLD
+    }
+
+    /// Records the outcome of a history/load-summary write: a failure bumps the
+    /// consecutive-failure counter (arming the sticky flag past the threshold); any
+    /// success resets it to 0, clearing the flag (audit B3).
+    pub(in crate::tui::app) fn note_history_write(&mut self, ok: bool) {
+        if ok {
+            self.history_write_failures = 0;
+        } else {
+            self.history_write_failures = self.history_write_failures.saturating_add(1);
+        }
+    }
+
     /// Builds the app around an optionally opened workspace and a keymap, with the
     /// default theme, no CLI vars, and no active profile. Snapshot tests use this;
     /// [`App::with_config`] wires the theme/profile/vars from config + CLI.
@@ -380,6 +409,7 @@ impl App {
             highlight_tx: None,
             history: None,
             message: None,
+            history_write_failures: 0,
             keymap_warnings: Vec::new(),
             keymap_warned: false,
             tick_count: 0,
@@ -876,7 +906,10 @@ impl App {
             max_body_bytes: config.max_body_bytes(),
         };
         self.load_caps = config.load_caps();
-        self.highlight_tx = Some(highlight::spawn(self.tx.clone(), self.theme.is_light()));
+        // A spawn failure degrades to plain rendering (audit B4): `spawn` returns
+        // `None`, `highlight_tx` stays `None`, and every render site already guards
+        // on `if let Some(tx) = &app.highlight_tx`, so the viewer renders fine.
+        self.highlight_tx = highlight::spawn(self.tx.clone(), self.theme.is_light());
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
                 Ok(store) => self.history = Some(store),
@@ -955,7 +988,32 @@ impl App {
                 }
             }
         }
+        // Quit path (audit B1): the loop has exited but the tokio runtime is still
+        // alive, so record an interrupted history row for every buffer with an
+        // in-flight request BEFORE the runtime drops and aborts those tasks. Their
+        // `AppMsg::Response` would otherwise never land and the request — possibly
+        // already completed on the wire — would vanish from history with no trace.
+        self.record_inflight_on_quit();
         Ok(())
+    }
+
+    /// On quit, mirror [`Self::cancel_request`] for every in-flight buffer: abort
+    /// the task and write an interrupted history row (`write_history(meta, None,
+    /// None)`), so a request the user quit mid-flight is still recorded (audit B1).
+    /// Synchronous — never blocks quit on network completion.
+    fn record_inflight_on_quit(&mut self) {
+        // Drain each buffer's in-flight handle first (a short-lived immutable
+        // borrow), then write history (needs `&mut self`) — same ordering the
+        // response/cancel paths use to avoid overlapping borrows.
+        let in_flight: Vec<InFlightRequest> = self
+            .buffers
+            .iter_mut()
+            .filter_map(|b| b.as_endpoint_mut().and_then(|e| e.in_flight.take()))
+            .collect();
+        for req in in_flight {
+            req.handle.abort();
+            self.write_history(&req.meta, None, None);
+        }
     }
 
     /// Routes one key event (see the module docs for the precedence rules).

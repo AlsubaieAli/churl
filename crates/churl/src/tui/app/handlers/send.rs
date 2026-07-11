@@ -228,8 +228,16 @@ impl App {
             duration_ms: duration.map(|d| d.as_millis() as u64),
             endpoint_path: meta.endpoint_path.clone(),
         };
-        if let Some(Err(err)) = self.history.as_ref().map(|store| store.insert(&entry)) {
-            self.message = Some(Message::new(format!("history write failed: {err}")));
+        // No store (history disabled) is not a write *failure* — leave the
+        // failure counter untouched. Only a real insert result flips it (B3).
+        if let Some(result) = self.history.as_ref().map(|store| store.insert(&entry)) {
+            match result {
+                Ok(_) => self.note_history_write(true),
+                Err(err) => {
+                    self.note_history_write(false);
+                    self.message = Some(Message::new(format!("history write failed: {err}")));
+                }
+            }
         }
     }
 }

@@ -375,6 +375,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             profile: app.active_profile.as_deref(),
             dirty,
             in_flight,
+            history_failing: app.history_failing(),
             tick_count: app.tick_count,
             theme: &theme,
         },
