@@ -25,72 +25,16 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 
 use churl_core::model::{Response, Timing};
 
 use super::fold::{self, FoldRegion};
 use crate::tui::highlight::SyntaxToken;
 
+mod geometry;
 mod render;
+mod state;
 mod text;
-
-/// Identifies the inputs the fold-filtered visible map depends on: the response
-/// `generation` (bumped on every text rebuild — pretty/sort toggles), the view
-/// mode (body vs headers — switched WITHOUT a generation bump, different source
-/// text), and a hash of the folded-opener set. Two views with an equal
-/// [`VisibleSig`] produce a byte-identical [`Visible`] map, so it keys the
-/// visible-map memo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VisibleSig {
-    generation: u64,
-    headers: bool,
-    /// Hash of the sorted folded-opener set (same encoding as `viewport_hash`'s
-    /// fold signature). Distinguishes different fold configurations.
-    fold_sig: u64,
-}
-
-/// The full geometry signature for a computed `Vec<DisplayRow>`: everything the
-/// visible map depends on (via [`VisibleSig`]) PLUS the wrap/width/h_scroll the
-/// expansion windows against. Equal signatures ⇒ byte-identical display rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RowsSig {
-    visible: VisibleSig,
-    wrap: bool,
-    width: usize,
-    h_scroll: usize,
-}
-
-/// The signature for the `max_h_scroll` widest-visible-line scan: the visible
-/// map inputs PLUS wrap+width, but NOT h_scroll (the widest line is independent
-/// of the current horizontal pan — that is the whole point of computing the
-/// bound). Kept deliberately distinct from [`RowsSig`] so a pure horizontal pan
-/// still hits this cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MaxHScrollSig {
-    visible: VisibleSig,
-    wrap: bool,
-    width: usize,
-}
-
-/// Single-slot memo of the render geometry, hung off the [`ResponseView`] so it
-/// lives and dies with the response (and thus its owning endpoint buffer / runner
-/// state) — bounded to exactly one cached value per product, never grows, and is
-/// dropped when a new response replaces the view. Each slot is keyed on the
-/// signature that captures every input the product depends on (A3): on a frame
-/// whose signature is unchanged the memo is returned verbatim, so recomputing
-/// would produce a byte-identical result and serving the cache changes nothing
-/// observable. A signature mismatch recomputes and replaces the slot.
-#[derive(Debug, Default)]
-struct GeomCache {
-    /// The fold-filtered visible map, keyed on [`VisibleSig`].
-    visible: Option<(VisibleSig, Vec<Visible>)>,
-    /// The wrap-expanded display rows, keyed on [`RowsSig`].
-    rows: Option<(RowsSig, Vec<text::DisplayRow>)>,
-    /// The widest-visible-line char count for `max_h_scroll`, keyed on
-    /// [`MaxHScrollSig`].
-    widest: Option<(MaxHScrollSig, usize)>,
-}
 
 // Re-export the render + text items that external callers reach by path
 // (`response::render`, `response::fmt_bytes`, `help.rs`'s
@@ -102,6 +46,20 @@ pub use render::{RenderCtx, RenderOutcome, collapsed_summary, fmt_bytes, render}
 pub use text::clamp_scroll;
 pub(crate) use text::smart_case_matches;
 
+// Re-export the state + geometry items so every existing path
+// (`response::ResponseState`, `response::ViewMode`, `response::ResponseMeta`,
+// `response::SearchState`, `response::ResponseGeometry`) resolves unchanged after
+// the split. Visibilities match the originals exactly: the public types stay
+// `pub`; the parent/sibling-visible fold-map entry, failure helper, geometry
+// signatures and cache stay `pub(in …response)` (the child-module equivalent of
+// the pre-split module-private scope — no `pub`/`pub(crate)` widening).
+pub use geometry::ResponseGeometry;
+pub(in crate::tui::components::response) use geometry::{
+    GeomCache, MaxHScrollSig, RowsSig, VisibleSig,
+};
+pub use state::{ResponseMeta, ResponseState, SearchState, ViewMode};
+pub(in crate::tui::components::response) use state::{Visible, failed_request_line};
+
 // Pull the module-private text helpers into this module's namespace so the
 // `ResponseView` impl below (and the `use super::*` test module) reach them by
 // bare name, exactly as before the split. No visibility widening: these stay
@@ -110,166 +68,6 @@ use text::{
     DisplayRow, digit_count, expand_wrap, index_lines, reformat_body_if_needed,
     sanitize_for_display,
 };
-
-/// Immutable metadata about a request, captured at send time so history and the
-/// error view need nothing from live app state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponseMeta {
-    /// HTTP method string, e.g. `"GET"`.
-    pub method: String,
-    /// Requested URL (verbatim; no templating in M3).
-    pub url: String,
-    /// Workspace-relative path of the originating endpoint file, when known.
-    pub endpoint_path: Option<String>,
-    /// Send time as Unix milliseconds.
-    pub executed_at_ms: i64,
-}
-
-/// Which body the viewer shows. Reset to [`ViewMode::Body`] on each new response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewMode {
-    /// The response body (default).
-    Body,
-    /// The response headers, one `name: value` per line.
-    Headers,
-}
-
-/// The response pane's state machine.
-///
-/// The `Done` variant carries the full [`ResponseView`] inline (the common,
-/// hot path — read on every render). Boxing it to satisfy `large_enum_variant`
-/// would add an allocation + indirection on that path and ripple through ~20
-/// match sites for a variant that is almost always the live one, so we keep it
-/// inline and silence the lint here.
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub enum ResponseState {
-    /// No request has been sent yet.
-    Idle,
-    /// A request is in flight; `started` drives the elapsed-time readout.
-    InFlight {
-        /// When the in-flight request began.
-        started: Instant,
-    },
-    /// The last request was cancelled by the user.
-    Cancelled,
-    /// The last request failed; carries the stringified error and its metadata.
-    Failed {
-        /// Human-readable error.
-        error: String,
-        /// Metadata of the failed request.
-        meta: ResponseMeta,
-    },
-    /// A response arrived and is ready to view.
-    Done {
-        /// The virtualised view over the response body.
-        view: ResponseView,
-    },
-    /// A completed response whose body was deliberately not retained by the
-    /// load runner's memory bound (R0). The status/timing/size are kept for an
-    /// honest placeholder, but the body bytes are gone and NOT reconstructable —
-    /// selecting this row shows a "not retained" note instead of the viewer.
-    Dropped {
-        /// The HTTP status code.
-        status: u16,
-        /// The request timing, when it completed with one.
-        timing: Option<Duration>,
-        /// The response body size in bytes (for the placeholder).
-        size: usize,
-    },
-}
-
-impl ResponseState {
-    /// The idle default as a `const`, so `&self` accessors can return a
-    /// `'static` reference when nothing is loaded.
-    pub const IDLE: ResponseState = ResponseState::Idle;
-
-    /// The copyable text for a [`ResponseState::Failed`] row (drive-test #4a):
-    /// the error message plus the request method+URL when known, so a transport
-    /// failure is yankable with `y` for debugging. Returns `None` for every
-    /// other state — the copy handler falls back to this only when there is no
-    /// [`ResponseView`] to copy (i.e. the row is not `Done`), keeping the three
-    /// unified viewers' `Done` copy path untouched. Never fabricates a
-    /// status/body/timing a transport failure genuinely lacks; it copies only
-    /// what is honestly known. `meta.method`/`url` may be empty (the runner
-    /// metas set only the URL) — an empty part is omitted rather than padded.
-    pub fn failure_copy_text(&self) -> Option<String> {
-        let ResponseState::Failed { error, meta } = self else {
-            return None;
-        };
-        let mut out = String::new();
-        let request_line = failed_request_line(meta);
-        if let Some(line) = request_line {
-            out.push_str(&line);
-            out.push('\n');
-        }
-        out.push_str("error: ");
-        out.push_str(error);
-        Some(out)
-    }
-}
-
-/// The `METHOD URL` line for a failed request, from its [`ResponseMeta`], or
-/// just the URL when the method is empty (runner metas), or `None` when neither
-/// is known. Shared by the failure render panel and the failure copy text so
-/// the two can never drift.
-fn failed_request_line(meta: &ResponseMeta) -> Option<String> {
-    match (meta.method.trim(), meta.url.trim()) {
-        ("", "") => None,
-        ("", url) => Some(url.to_owned()),
-        (method, "") => Some(method.to_owned()),
-        (method, url) => Some(format!("{method} {url}")),
-    }
-}
-
-/// A literal-substring search over the current view's logical lines. Matches are
-/// stored as `(logical line, byte range within that line)`.
-#[derive(Debug, Default, Clone)]
-pub struct SearchState {
-    /// The current query text.
-    pub query: String,
-    /// `(logical line, byte start, byte end)` per match, in reading order.
-    matches: Vec<(usize, usize, usize)>,
-    /// Index of the current match within `matches`, when there is one.
-    current: Option<usize>,
-}
-
-impl SearchState {
-    /// The number of matches.
-    pub fn count(&self) -> usize {
-        self.matches.len()
-    }
-
-    /// The 1-based ordinal of the current match, when any.
-    pub fn current_ordinal(&self) -> Option<usize> {
-        self.current.map(|i| i + 1)
-    }
-}
-
-/// A visible logical line after the fold filter: either a real line, or a
-/// fold-header standing in for a collapsed region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Visible {
-    /// A normal logical line at this index.
-    Line(usize),
-    /// A folded region's opener line; the region hides `hidden` inner lines.
-    FoldHeader {
-        /// The opener logical line index.
-        line: usize,
-        /// How many inner lines are hidden (for the `⋯ N lines` suffix).
-        hidden: usize,
-    },
-}
-
-impl Visible {
-    /// The logical line index this visible entry maps to.
-    fn logical(self) -> usize {
-        match self {
-            Visible::Line(l) => l,
-            Visible::FoldHeader { line, .. } => line,
-        }
-    }
-}
 
 /// A virtualised view over one arrived response body, built once on arrival.
 /// Also owns the per-response viewer UI state (view mode, folds, wrap, search)
@@ -1092,42 +890,6 @@ impl ResponseView {
             .rows
             .as_ref()
             .is_some_and(|(sig, _)| *sig == want)
-    }
-}
-
-/// The per-response cursor/scroll geometry that lives *outside* the
-/// [`ResponseView`] (which owns view-mode/folds/wrap/pretty/search state). One of
-/// these is carried by the main-pane endpoint buffer AND by each runner state, so
-/// the shared `response_*` action handlers can operate on whichever surface is the
-/// active response (note #2: unified viewer). The `h_scroll` lives on the view
-/// itself; the highlight cache + pending-highlight guard stay on the endpoint
-/// buffer (the runners share it in render).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ResponseGeometry {
-    /// Body scroll offset (clamped to the viewport at render time).
-    pub scroll: usize,
-    /// Viewer cursor as a display-row index (post-fold, post-wrap).
-    pub cursor: usize,
-    /// Total display rows in the viewer as of the last render.
-    pub total_rows: usize,
-    /// Last rendered body height, for half-page scrolling.
-    pub viewport_height: usize,
-    /// Last rendered body width, for cursor→logical mapping (wrap geometry).
-    pub viewport_width: usize,
-}
-
-impl ResponseGeometry {
-    /// Writes the render outcome's clamped scroll/cursor + measured geometry back
-    /// into this struct after a [`render`] call (the caller still applies the
-    /// clamped `h_scroll` to the view + enqueues the highlight job — those live
-    /// elsewhere). Shared by the main pane and both runner render paths so the
-    /// write-back can never drift.
-    pub fn apply_render_outcome(&mut self, outcome: &RenderOutcome) {
-        self.scroll = outcome.clamped_scroll;
-        self.cursor = outcome.clamped_cursor;
-        self.total_rows = outcome.total_rows;
-        self.viewport_height = outcome.viewport_height;
-        self.viewport_width = outcome.viewport_width;
     }
 }
 #[cfg(test)]
