@@ -308,7 +308,7 @@ fn step_status(app: &App, i: usize) -> StepStatus {
 fn sequence_runner_opens_with_first_step_running() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_app(dir.path(), "halt", "");
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Run);
     let runner = app.sequence_runner.as_ref().unwrap();
     assert_eq!(runner.steps.len(), 3);
@@ -479,16 +479,15 @@ fn sequence_response_search_and_copy() {
     let mut app = seq_app_with_response(dir.path(), raw);
     render_once(&mut app);
     app.handle_key(norm('/')).unwrap();
-    assert_eq!(app.mode, Mode::BodySearch);
-    assert_eq!(app.body_search_return, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::BodySearch));
+    assert!(matches!(app.body_search_return, Mode::Sequence));
     for c in "needle".chars() {
         app.handle_key(norm(c)).unwrap();
     }
     assert!(seq_view(&app).search().is_some_and(|s| s.count() >= 2));
     app.handle_key(keyc(KeyCode::Esc)).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Sequence,
+    assert!(
+        matches!(app.mode, Mode::Sequence),
         "Esc returns to the sequence runner"
     );
 
@@ -957,11 +956,11 @@ fn sequence_editor_create_add_step_save() {
 
     // `<leader>a` with no sequence selected → new-sequence name prompt.
     app.edit_selected_sequence().unwrap();
-    assert_eq!(app.mode, Mode::Prompt(PromptPurpose::NewSequence));
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)));
     app.prompt_editor = LineEditor::new("Auth flow");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Edit);
 
     // `a` opens the picker, Enter accepts the first endpoint.
@@ -1040,7 +1039,10 @@ fn sequence_editor_duplicate_rule_names_refuse_save() {
     enter(&mut app);
     ch(&mut app, 'w'); // save → refused
 
-    assert_eq!(app.mode, Mode::Sequence, "editor stays open on refusal");
+    assert!(
+        matches!(app.mode, Mode::Sequence),
+        "editor stays open on refusal"
+    );
     assert_eq!(app.sequence_view, SeqView::Edit);
     assert!(
         app.message
@@ -1091,7 +1093,7 @@ fn ctrl_r(app: &mut App) {
 fn sequence_surface_opens_in_edit_face() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_surface_app(dir.path());
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Edit);
     assert!(app.sequence_editor.is_some());
     assert!(app.sequence_runner.is_none(), "run built lazily");
@@ -1103,7 +1105,7 @@ fn sequence_surface_opens_in_edit_face() {
 fn run_sequence_opens_in_run_face() {
     let dir = tempfile::tempdir().unwrap();
     let app = sequence_app(dir.path(), "halt", "");
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Run);
     assert!(app.sequence_runner.is_some());
 }
@@ -1129,9 +1131,8 @@ fn ctrl_r_from_runner_only_builds_editor_synchronously() {
         app.sequence_editor.is_some(),
         "editor built synchronously on the flip"
     );
-    assert_eq!(
-        app.mode,
-        Mode::Sequence,
+    assert!(
+        matches!(app.mode, Mode::Sequence),
         "surface stays open — not exited to Normal"
     );
     // The editor is loaded from the same saved sequence (single source of truth).
@@ -1139,7 +1140,10 @@ fn ctrl_r_from_runner_only_builds_editor_synchronously() {
     // And a further keypress is handled by the editor, not a dead-surface exit.
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Sequence, "still in the editor after a key");
+    assert!(
+        matches!(app.mode, Mode::Sequence),
+        "still in the editor after a key"
+    );
 }
 
 /// `Ctrl-R` on a CLEAN editor flips to the Run face, building the runner from
@@ -1194,7 +1198,7 @@ fn close_sequence_surface_clears_everything() {
     assert!(app.sequence_runner.is_some());
     assert!(app.sequence_editor.is_some());
     app.close_sequence_surface();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.sequence_runner.is_none());
     assert!(app.sequence_editor.is_none());
     assert!(app.sequence_abort.is_none());
@@ -1243,13 +1247,13 @@ fn jump_label_focuses_pane() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Jump);
+    assert!(matches!(app.mode, Mode::Jump));
     assert!(app.jump.is_some());
     // `p` is the Response mnemonic (M7.10 stage B — `s` moved to Sequences,
     // Response took `p` for res`p`onse).
     app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.jump.is_none());
     assert_eq!(app.focus, Pane::Response);
 }
@@ -1268,9 +1272,8 @@ fn jump_labels_no_rows() {
     // `d` was a row label pre-B; now it maps to nothing in jump-mode.
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Jump,
+    assert!(
+        matches!(app.mode, Mode::Jump),
         "a non-label key does not exit jump-mode"
     );
     assert_eq!(app.explorer.cursor, cursor_before, "no row was selected");
@@ -1289,10 +1292,13 @@ fn jump_f_again_cancels() {
     app.explorer.expand().unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Jump);
+    assert!(matches!(app.mode, Mode::Jump));
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal, "f (no longer a label) cancels");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "f (no longer a label) cancels"
+    );
     assert!(app.jump.is_none());
 }
 
@@ -1305,7 +1311,7 @@ fn jump_esc_cancels() {
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.jump.is_none());
     assert_eq!(app.focus, before);
 }
@@ -1318,7 +1324,10 @@ fn jump_ignores_unknown_char() {
         .unwrap();
     app.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Jump, "unknown char must not exit jump-mode");
+    assert!(
+        matches!(app.mode, Mode::Jump),
+        "unknown char must not exit jump-mode"
+    );
 }
 
 /// `with_config` rejects an unknown profile name, listing the available ones.
@@ -1421,14 +1430,14 @@ fn load_runner_refuses_unresolved_variable() {
         Some("unresolved variable(s): host — set them in a profile/env or via CLI")
     );
     assert!(
-        app.load_runner.is_none(),
+        app.load_runner().is_none(),
         "the load runner must not open with an unresolved variable"
     );
     assert!(
         app.load_request.is_none(),
         "no request must be armed for the batch"
     );
-    assert_ne!(app.mode, Mode::LoadRunner);
+    assert!(!matches!(app.mode, Mode::LoadRunner(_)));
 }
 
 /// Builds a workspace with a single-step sequence whose endpoint request carries
@@ -1582,7 +1591,7 @@ fn switch_profile_picker_sets_active() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
     app.dispatch(Action::SwitchProfile, None).unwrap();
-    assert_eq!(app.mode, Mode::Palette);
+    assert!(matches!(app.mode, Mode::Palette));
     // Choices: (none), dev, prod.
     assert_eq!(app.profile_choices.len(), 3);
     if let Some(picker) = app.picker.as_mut() {
@@ -2014,7 +2023,7 @@ fn jump_into_collapsed_pane_transfers_zoom() {
     assert_eq!(app.zoom, Some(ZoomPane::Response));
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Jump);
+    assert!(matches!(app.mode, Mode::Jump));
     // 'r' is the Request pane mnemonic.
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
         .unwrap();
@@ -2142,7 +2151,7 @@ fn jump_e_lands_on_endpoints_from_sequences() {
     assert_eq!(app.left_active, LeftPane::Sequences);
     // Enter jump-mode and press the Explorer `e` label.
     app.dispatch(Action::Jump, None).unwrap();
-    assert_eq!(app.mode, Mode::Jump);
+    assert!(matches!(app.mode, Mode::Jump));
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.focus, Pane::Explorer);
@@ -2250,16 +2259,15 @@ fn empty_sequences_pane_add_and_nav_never_panic() {
         app.dispatch(action, None).unwrap();
     }
     // Select (Enter) with no sequence opened the new-sequence name prompt.
-    assert_eq!(app.mode, Mode::Prompt(PromptPurpose::NewSequence));
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)));
     assert_eq!(app.explorer.seq_cursor(), 0, "cursor stays pinned at 0");
     assert!(app.explorer.selected_sequence().is_none());
 
     // `<leader>s a` (EditSequence) reaches the same add entry point.
     app.mode = Mode::Normal;
     app.dispatch(Action::EditSequence, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Prompt(PromptPurpose::NewSequence),
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)),
         "<leader>s a opens the add-sequence prompt from the empty pane"
     );
     // `r` (RunSequence) with nothing selected is a safe no-op (no panic).
@@ -2299,7 +2307,7 @@ fn explorer_nav_routes_to_seq_cursor_when_sequences_active() {
     assert_eq!(app.explorer.cursor, tree_cursor, "tree cursor untouched");
     // Enter opens the unified surface (Edit face) on the hovered sequence.
     app.dispatch(Action::Select, None).unwrap();
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Edit);
 }
 
@@ -2315,7 +2323,7 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
 
     // `<leader>s r` opens the picker with the run intent armed.
     app.dispatch(Action::RunSequencePick, None).unwrap();
-    assert_eq!(app.mode, Mode::SequencePicker);
+    assert!(matches!(app.mode, Mode::SequencePicker));
     assert!(app.sequence_pick_runs, "run intent armed on the picker");
 
     // Highlight the SECOND sequence and accept it.
@@ -2324,7 +2332,7 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
     app.accept_overlay().unwrap();
 
     // The runner opened over the CHOSEN sequence (index 1), not sequences[0].
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Run);
     let runner = app.sequence_runner.as_ref().expect("runner opened");
     assert_eq!(runner.name, chosen, "ran the chosen sequence, not #0");
@@ -2341,10 +2349,10 @@ fn open_sequence_pick_edits_not_runs() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(dir.path());
     app.dispatch(Action::OpenSequencePicker, None).unwrap();
-    assert_eq!(app.mode, Mode::SequencePicker);
+    assert!(matches!(app.mode, Mode::SequencePicker));
     assert!(!app.sequence_pick_runs, "edit path: run intent not armed");
     app.accept_overlay().unwrap();
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(
         app.sequence_view,
         SeqView::Edit,
@@ -2359,7 +2367,7 @@ fn r_on_sequences_subpane_runs_hovered_sequence() {
     app.dispatch(Action::FocusSequencesToggle, None).unwrap();
     // `r` maps to Rename, but on the sequences sub-pane it runs the sequence.
     app.dispatch(Action::Rename, None).unwrap();
-    assert_eq!(app.mode, Mode::Sequence);
+    assert!(matches!(app.mode, Mode::Sequence));
     assert_eq!(app.sequence_view, SeqView::Run);
     assert!(app.sequence_runner.is_some());
 }
@@ -2379,9 +2387,8 @@ fn leader_s_space_opens_the_sequence_picker() {
         Some(LeaderState::Submenu("sequences".to_owned()))
     );
     press(&mut app, ' ');
-    assert_eq!(
-        app.mode,
-        Mode::SequencePicker,
+    assert!(
+        matches!(app.mode, Mode::SequencePicker),
         "s <leader> opens the sequence picker"
     );
     assert!(
@@ -2450,22 +2457,27 @@ fn pickers_open_a_mode_never_run_last() {
     let d1 = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(d1.path());
     app.dispatch(Action::OpenSequencePicker, None).unwrap();
-    assert_eq!(app.mode, Mode::SequencePicker, "s o/s f open a picker");
+    assert!(
+        matches!(app.mode, Mode::SequencePicker),
+        "s o/s f open a picker"
+    );
     assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
 
     let d2 = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(d2.path());
     app.dispatch(Action::RunSequencePick, None).unwrap();
-    assert_eq!(app.mode, Mode::SequencePicker, "s r opens a picker");
+    assert!(
+        matches!(app.mode, Mode::SequencePicker),
+        "s r opens a picker"
+    );
     assert!(app.sequence_runner.is_none(), "no sequence ran on entry");
 
     // Endpoint request picker (`<leader>f`) opens the search overlay.
     let d3 = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(d3.path());
     app.dispatch(Action::QuickJumpRequests, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Search,
+    assert!(
+        matches!(app.mode, Mode::Search),
         "<leader>f opens the endpoint picker"
     );
 
@@ -2474,12 +2486,14 @@ fn pickers_open_a_mode_never_run_last() {
     let d4 = tempfile::tempdir().unwrap();
     let mut app = seq_pane_app(d4.path());
     app.dispatch(Action::OpenLoadRunnerPick, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Search,
+    assert!(
+        matches!(app.mode, Mode::Search),
         "<leader>l f opens the endpoint picker"
     );
-    assert!(app.load_runner.is_none(), "no load runner opened on entry");
+    assert!(
+        app.load_runner().is_none(),
+        "no load runner opened on entry"
+    );
 }
 
 #[test]
@@ -2539,9 +2553,8 @@ fn tree_mutating_keys_suppressed_on_sequences_subpane() {
 
     // `d` → the delete-SEQUENCE confirm (never the tree delete prompt).
     app.dispatch(Action::Delete, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Confirm(ConfirmPurpose::DeleteSequence),
+    assert!(
+        matches!(app.mode, Mode::Confirm(ConfirmPurpose::DeleteSequence)),
         "d on the sequences sub-pane confirms a sequence delete, not a tree delete"
     );
     // Back out so the rest of the assertions run from Normal.
@@ -2550,17 +2563,15 @@ fn tree_mutating_keys_suppressed_on_sequences_subpane() {
 
     // `N` → no new-collection prompt; mode stays Normal.
     app.dispatch(Action::NewCollection, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "N must not open a new-collection prompt"
     );
 
     // `n` → the new-SEQUENCE prompt (not new-endpoint).
     app.dispatch(Action::NewEndpoint, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Prompt(PromptPurpose::NewSequence),
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)),
         "n on the sequences sub-pane creates a new sequence"
     );
 }
@@ -2584,11 +2595,14 @@ fn d_confirm_y_deletes_hovered_sequence() {
 
     // `d` opens the confirm, `y` performs the delete.
     app.dispatch(Action::Delete, None).unwrap();
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DeleteSequence));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DeleteSequence)
+    ));
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
 
-    assert_eq!(app.mode, Mode::Normal, "confirm closes on y");
+    assert!(matches!(app.mode, Mode::Normal), "confirm closes on y");
     assert!(!deleted_path.exists(), "sequence file removed from disk");
     assert_eq!(app.explorer.sequences_len(), 1, "pane refreshed");
     // Selection lands sensibly on the surviving sequence.
@@ -2626,7 +2640,10 @@ fn deleting_last_sequence_empties_pane_and_reconciles_focus() {
     let only = app.explorer.selected_sequence().unwrap().file;
 
     app.dispatch(Action::Delete, None).unwrap();
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DeleteSequence));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DeleteSequence)
+    ));
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
 
@@ -2652,9 +2669,8 @@ fn d_on_empty_sequences_subpane_notifies() {
     assert!(app.explorer.selected_sequence().is_none());
 
     app.dispatch(Action::Delete, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Normal,
+    assert!(
+        matches!(app.mode, Mode::Normal),
         "no confirm when nothing is selected"
     );
 }
@@ -2672,9 +2688,11 @@ fn tree_mutating_keys_work_normally_on_endpoints() {
     app.explorer.cursor = 0; // on collection "api"
 
     app.dispatch(Action::Delete, None).unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Prompt(PromptPurpose::DeleteCollectionConfirm),
+    assert!(
+        matches!(
+            app.mode,
+            Mode::Prompt(PromptPurpose::DeleteCollectionConfirm)
+        ),
         "d still deletes the selected collection on the endpoints tree"
     );
 }
@@ -2840,7 +2858,10 @@ fn f_jump_reaches_the_sequences_pane() {
     // Pressing `s` jumps to the sequences sub-pane.
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal, "a label jump closes jump-mode");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "a label jump closes jump-mode"
+    );
     assert_eq!(app.focus, Pane::Explorer);
     assert_eq!(app.left_active, LeftPane::Sequences);
 }
@@ -3189,9 +3210,8 @@ fn leader_leader_opens_request_picker() {
     );
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Search,
+    assert!(
+        matches!(app.mode, Mode::Search),
         "<leader><leader> opens the search overlay"
     );
     let picker = app.picker.as_ref().expect("picker open");
@@ -3208,7 +3228,7 @@ fn workspace_picker_empty_without_history() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
     app.dispatch(Action::QuickJumpWorkspaces, None).unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.picker.is_none());
     assert_eq!(
         app.message.as_ref().map(|m| m.text.as_str()),
@@ -3228,7 +3248,7 @@ fn workspace_picker_lists_recent() {
     app.history = Some(store);
 
     app.dispatch(Action::QuickJumpWorkspaces, None).unwrap();
-    assert_eq!(app.mode, Mode::WorkspacePicker);
+    assert!(matches!(app.mode, Mode::WorkspacePicker));
     let picker = app.picker.as_ref().expect("picker open");
     assert_eq!(picker.items, vec!["/ws/beta", "/ws/alpha"]);
     assert_eq!(
@@ -3309,13 +3329,16 @@ fn dirty_workspace_switch_defers_to_confirm() {
     app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
         .unwrap();
     // Deferred: confirm overlay open, switch not yet performed.
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "demo");
 
     // Discard: the switch goes through.
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
     assert!(app.selected().is_none());
 }
@@ -3370,16 +3393,15 @@ fn workspace_switch_s_saves_all_dirty_buffers() {
     other_workspace_fixture(dir_b.path());
     app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
         .unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Confirm(ConfirmPurpose::DiscardChanges),
+    assert!(
+        matches!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges)),
         "multi-dirty switch reaches the confirm"
     );
 
     // `s`: save all, then switch (all clean).
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "other");
     // BOTH files were written — the non-active buffer (beta) was not lost.
     let alpha = std::fs::read_to_string(dir_a.path().join("api/alpha.toml")).unwrap();
@@ -3416,9 +3438,8 @@ fn workspace_switch_guards_on_nonactive_dirty() {
     other_workspace_fixture(dir_b.path());
     app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
         .unwrap();
-    assert_eq!(
-        app.mode,
-        Mode::Confirm(ConfirmPurpose::DiscardChanges),
+    assert!(
+        matches!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges)),
         "non-active dirty must still guard the switch"
     );
 }
@@ -3449,12 +3470,15 @@ fn workspace_switch_s_refused_save_aborts_switch() {
     other_workspace_fixture(dir_b.path());
     app.guarded_load(PendingLoad::Workspace(dir_b.path().to_path_buf()))
         .unwrap();
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
         .unwrap();
     // Switch aborted: still on workspace "demo", both buffers kept.
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert_eq!(
         app.workspace.as_ref().unwrap().manifest().name,
         "demo",
@@ -3488,19 +3512,19 @@ fn load_app(root: &Path, url: &str) -> App {
 }
 
 fn load_gen(app: &App) -> u64 {
-    app.load_runner.as_ref().unwrap().run_generation
+    app.load_runner().unwrap().run_generation
 }
 
 fn load_status(app: &App, i: usize) -> LoadStatus {
-    app.load_runner.as_ref().unwrap().results[i].status.clone()
+    app.load_runner().unwrap().results[i].status.clone()
 }
 
 #[test]
 fn load_runner_opens_with_resolved_request() {
     let dir = tempfile::tempdir().unwrap();
     let app = load_app(dir.path(), "https://api.test/ping");
-    assert_eq!(app.mode, Mode::LoadRunner);
-    let runner = app.load_runner.as_ref().unwrap();
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+    let runner = app.load_runner().unwrap();
     assert_eq!(runner.url, "https://api.test/ping");
     assert_eq!(runner.endpoint_path.as_deref(), Some("api/ping.toml"));
     assert!(!runner.running, "must not auto-run");
@@ -3553,17 +3577,14 @@ fn load_runner_pick_dirty_opens_new_buffer_and_runner() {
     let alpha_file = app.selected().unwrap().file.clone();
 
     app.open_load_runner_pick().unwrap();
-    assert_eq!(app.mode, Mode::Search);
+    assert!(matches!(app.mode, Mode::Search));
     assert!(app.load_runner_after_pick, "intent armed");
     // Pick the DIFFERENT endpoint (beta).
     pick_search(&mut app, "beta");
 
     // No confirm — the runner opens over the freshly-focused beta buffer.
-    assert_eq!(app.mode, Mode::LoadRunner);
-    assert_eq!(
-        app.load_runner.as_ref().unwrap().url,
-        "https://api.test/beta"
-    );
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+    assert_eq!(app.load_runner().unwrap().url, "https://api.test/beta");
     assert_eq!(app.buffers.len(), 2, "beta pushed as a new buffer");
     assert_eq!(app.selected().unwrap().display_path, "api/beta");
     let alpha_idx = app.buffer_index_for_path(&alpha_file).unwrap();
@@ -3582,12 +3603,12 @@ fn load_runner_pick_clean_loads_and_opens_runner() {
     assert!(!app.is_dirty());
     app.open_load_runner_pick().unwrap();
     pick_search(&mut app, "beta");
-    assert_eq!(app.mode, Mode::LoadRunner, "clean pick opens the runner");
-    // The runner targets the newly-picked endpoint, not the previously loaded one.
-    assert_eq!(
-        app.load_runner.as_ref().unwrap().url,
-        "https://api.test/beta"
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "clean pick opens the runner"
     );
+    // The runner targets the newly-picked endpoint, not the previously loaded one.
+    assert_eq!(app.load_runner().unwrap().url, "https://api.test/beta");
     assert!(!app.load_runner_after_pick);
 }
 
@@ -3601,7 +3622,7 @@ fn load_runner_pick_esc_clears_flag() {
     assert!(app.load_runner_after_pick);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(
         !app.load_runner_after_pick,
         "esc-cancel must clear the one-shot intent"
@@ -3631,7 +3652,7 @@ fn load_runner_pick_empty_enter_clears_flag() {
         !app.load_runner_after_pick,
         "empty-result Enter must clear the one-shot intent"
     );
-    assert!(app.load_runner.is_none());
+    assert!(app.load_runner().is_none());
 }
 
 #[test]
@@ -3640,20 +3661,20 @@ fn load_run_injected_results_update_stats_and_finish() {
     let mut app = load_app(dir.path(), "https://api.test/ping");
     app.history = Some(HistoryStore::in_memory().unwrap());
     // total=3, then start (client None → 3 pending rows, running).
-    app.load_runner.as_mut().unwrap().cfg.total = 3;
+    app.load_runner_mut().unwrap().cfg.total = 3;
     app.start_load_run();
     let g = load_gen(&app);
-    assert!(app.load_runner.as_ref().unwrap().running);
+    assert!(app.load_runner().unwrap().running);
     assert_eq!(load_status(&app, 0), LoadStatus::Pending);
 
     app.on_load_started(g, 0);
     assert_eq!(load_status(&app, 0), LoadStatus::Running);
     app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
     app.on_load_result(g, 1, Ok(ok_resp(500, "b")));
-    assert!(!app.load_runner.as_ref().unwrap().finished);
+    assert!(!app.load_runner().unwrap().finished);
     app.on_load_result(g, 2, Err("connection refused".to_owned()));
 
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(runner.finished && !runner.running && !runner.cancelled);
     assert_eq!(runner.completed, 3);
     assert_eq!(runner.stats.ok, 1);
@@ -3705,23 +3726,17 @@ fn json_resp(body: &str) -> Response {
 /// shares. `body` is the raw wire body.
 fn load_app_with_response(root: &Path, body: &str) -> App {
     let mut app = load_app(root, "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 1;
+    app.load_runner_mut().unwrap().cfg.total = 1;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Ok(json_resp(body)));
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
     app
 }
 
 /// The selected load-runner row's live `ResponseView`, for white-box asserts.
 fn load_view(app: &App) -> &ResponseView {
-    match app
-        .load_runner
-        .as_ref()
-        .unwrap()
-        .selected_response()
-        .unwrap()
-    {
+    match app.load_runner().unwrap().selected_response().unwrap() {
         ResponseState::Done { view } => view,
         other => panic!("selected row is not Done: {other:?}"),
     }
@@ -3758,7 +3773,7 @@ fn load_response_surface_gated_on_focus() {
     let mut app = load_app_with_response(dir.path(), "{\"b\":1,\"a\":2}");
     assert_eq!(app.active_response_surface(), ResponseSurface::LoadRunner);
     // Refocus config: a response action must now be a no-op on the runner view.
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::ConfigHeader;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::ConfigHeader;
     assert_eq!(app.active_response_surface(), ResponseSurface::Main);
     let before = load_view(&app).pretty();
     app.handle_key(norm('p')).unwrap();
@@ -3819,7 +3834,7 @@ fn load_response_fold_uses_runner_cursor() {
     render_once(&mut app);
     let rows_before = load_view(&app).total_display_rows(40);
     // Cursor at the opener line (row 0 is `{`, row 1 is `"outer": {`).
-    app.load_runner.as_mut().unwrap().geometry.cursor = 1;
+    app.load_runner_mut().unwrap().geometry.cursor = 1;
     app.handle_key(norm('o')).unwrap();
     let rows_after = load_view(&app).total_display_rows(40);
     assert!(
@@ -3836,10 +3851,9 @@ fn load_response_search_targets_runner_and_returns() {
     let mut app = load_app_with_response(dir.path(), "{\"needle\":\"needle\"}");
     render_once(&mut app);
     app.handle_key(norm('/')).unwrap();
-    assert_eq!(app.mode, Mode::BodySearch);
-    assert_eq!(
-        app.body_search_return,
-        Mode::LoadRunner,
+    assert!(matches!(app.mode, Mode::BodySearch));
+    assert!(
+        matches!(app.body_search_return, Mode::LoadRunner(_)),
         "search remembers to return to the runner"
     );
     for c in "needle".chars() {
@@ -3850,7 +3864,85 @@ fn load_response_search_targets_runner_and_returns() {
         "search found matches in the runner view"
     );
     app.handle_key(keyc(KeyCode::Esc)).unwrap();
-    assert_eq!(app.mode, Mode::LoadRunner, "Esc returns to the runner");
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "Esc returns to the runner"
+    );
+}
+
+/// R1.5 A2 regression lock: a load result that lands WHILE body-search is open
+/// over the runner must reach the PARKED runner state (moved into
+/// `body_search_return` when `/` opened `Mode::BodySearch`), not fall on the
+/// floor because `self.mode` is momentarily `Mode::BodySearch`. Proves
+/// `load_runner_mut()` resolves the parked state, the batch finalizes mid-search
+/// (finished + summary written), and Esc restores `Mode::LoadRunner(state)` with
+/// the recorded result intact. Guards the fold against PRs 2–3 touching this area.
+#[test]
+fn load_result_lands_on_parked_runner_during_body_search() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two-copy batch so landing copy #1 finalizes the run (finished + summary),
+    // exercising every `load_runner()`/`load_runner_mut()` seam on the FINISH path
+    // while the runner is parked behind body-search.
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    app.load_runner_mut().unwrap().cfg.total = 2;
+    app.start_load_run();
+    let g = load_gen(&app);
+    // Copy #0 lands normally (runner still live in `Mode::LoadRunner`); focus its
+    // Response region so `/` targets the runner surface.
+    app.on_load_result(g, 0, Ok(json_resp("{\"needle\":\"needle\"}")));
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    render_once(&mut app);
+
+    // Open body-search over the runner → mode flips to BodySearch, runner parked.
+    app.handle_key(norm('/')).unwrap();
+    assert!(matches!(app.mode, Mode::BodySearch));
+    assert!(
+        matches!(app.body_search_return, Mode::LoadRunner(_)),
+        "the runner state is parked in body_search_return, not dropped"
+    );
+    // The parked runner is still reachable through the accessor mid-search.
+    assert!(
+        app.load_runner().is_some(),
+        "load_runner() resolves the parked runner while Mode::BodySearch"
+    );
+    assert!(
+        !app.load_runner().unwrap().finished,
+        "batch not finished yet — copy #1 still pending"
+    );
+
+    // Copy #1 lands WHILE body-search is active. It must reach the parked runner.
+    app.on_load_result(g, 1, Ok(json_resp("{\"ok\":true}")));
+
+    // The result reached the parked runner: row #1 recorded and the batch
+    // finalized (finished flips true, written on the finish path via load_runner()).
+    assert!(matches!(app.mode, Mode::BodySearch), "still searching");
+    assert_eq!(
+        load_status(&app, 1),
+        LoadStatus::Ok(200),
+        "copy #1 recorded on the PARKED runner mid-search"
+    );
+    assert!(
+        app.load_runner().unwrap().finished,
+        "batch finished on the parked runner (last copy landed)"
+    );
+
+    // Esc out of body-search → the runner mode is restored intact, with BOTH
+    // results still present (row #0 from before the search, row #1 landed during).
+    app.handle_key(keyc(KeyCode::Esc)).unwrap();
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "Esc restores Mode::LoadRunner"
+    );
+    assert_eq!(load_status(&app, 0), LoadStatus::Ok(200), "row #0 intact");
+    assert_eq!(
+        load_status(&app, 1),
+        LoadStatus::Ok(200),
+        "row #1 (landed mid-search) survived the restore"
+    );
+    assert!(
+        app.load_runner().unwrap().finished,
+        "finished state survived the restore"
+    );
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
@@ -3889,11 +3981,11 @@ fn load_response_hscroll_and_byte_exact_copy() {
 fn load_failed_row_y_copies_error_not_noop() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 1;
+    app.load_runner_mut().unwrap().cfg.total = 1;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Err("connection refused".to_owned()));
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
     // Sanity: the selected row is Failed (no view to copy).
     assert!(matches!(
         app.active_response(),
@@ -3924,11 +4016,11 @@ fn load_failed_row_y_copies_error_not_noop() {
 fn load_dropped_row_y_sets_message_not_silent_noop() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 1;
+    app.load_runner_mut().unwrap().cfg.total = 1;
     app.start_load_run();
     // Force the selected row into the memory-evicted Dropped state.
     {
-        let runner = app.load_runner.as_mut().unwrap();
+        let runner = app.load_runner_mut().unwrap();
         runner.results[0].response = ResponseState::Dropped {
             status: 200,
             timing: None,
@@ -3964,10 +4056,10 @@ fn load_dropped_row_y_sets_message_not_silent_noop() {
 fn load_dropped_row_shift_y_sets_message_not_silent_noop() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 1;
+    app.load_runner_mut().unwrap().cfg.total = 1;
     app.start_load_run();
     {
-        let runner = app.load_runner.as_mut().unwrap();
+        let runner = app.load_runner_mut().unwrap();
         runner.results[0].response = ResponseState::Dropped {
             status: 200,
             timing: None,
@@ -3993,11 +4085,11 @@ fn load_dropped_row_shift_y_sets_message_not_silent_noop() {
 fn load_failed_row_shift_y_sets_message_not_silent_noop() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 1;
+    app.load_runner_mut().unwrap().cfg.total = 1;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Err("connection refused".to_owned()));
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
     assert!(matches!(
         app.active_response(),
         ResponseState::Failed { .. }
@@ -4117,19 +4209,19 @@ fn load_response_cursor_nav_shared_path() {
         .join(",");
     let mut app = load_app_with_response(dir.path(), &format!("{{{body}}}"));
     render_once(&mut app);
-    assert_eq!(app.load_runner.as_ref().unwrap().geometry.cursor, 0);
+    assert_eq!(app.load_runner().unwrap().geometry.cursor, 0);
     app.handle_key(norm('j')).unwrap();
     assert_eq!(
-        app.load_runner.as_ref().unwrap().geometry.cursor,
+        app.load_runner().unwrap().geometry.cursor,
         1,
         "j moved the runner cursor down via the shared path"
     );
     app.handle_key(shift('G')).unwrap();
-    let bottom = app.load_runner.as_ref().unwrap().geometry.cursor;
+    let bottom = app.load_runner().unwrap().geometry.cursor;
     assert!(bottom > 1, "G jumped to the bottom row");
     app.handle_key(norm('k')).unwrap();
     assert_eq!(
-        app.load_runner.as_ref().unwrap().geometry.cursor,
+        app.load_runner().unwrap().geometry.cursor,
         bottom - 1,
         "k moved up one"
     );
@@ -4142,18 +4234,18 @@ fn load_runner_nav_not_shadowed_by_response() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app_with_response(dir.path(), "{\"a\":1}");
     assert_eq!(
-        app.load_runner.as_ref().unwrap().focus,
+        app.load_runner().unwrap().focus,
         load_runner::RunnerFocus::Response
     );
     // Tab cycles Response → ConfigHeader (runner-owned; not a response action).
     app.handle_key(keyc(KeyCode::Tab)).unwrap();
     assert_eq!(
-        app.load_runner.as_ref().unwrap().focus,
+        app.load_runner().unwrap().focus,
         load_runner::RunnerFocus::ConfigHeader,
         "Tab still cycles regions"
     );
     // Back to Response; Ctrl-R still (re-)runs the batch (bumps generation).
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Response;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Response;
     let g0 = load_gen(&app);
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
         .unwrap();
@@ -4170,14 +4262,14 @@ fn load_runner_q_closes_from_response_focus() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app_with_response(dir.path(), "{\"a\":1}");
     // The one-copy batch has finished (not running), so q closes immediately.
-    assert!(!app.load_runner.as_ref().unwrap().is_running());
+    assert!(!app.load_runner().unwrap().is_running());
     assert_eq!(
-        app.load_runner.as_ref().unwrap().focus,
+        app.load_runner().unwrap().focus,
         load_runner::RunnerFocus::Response
     );
     app.handle_key(norm('q')).unwrap();
-    assert!(app.load_runner.is_none(), "q still closes the runner");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.load_runner().is_none(), "q still closes the runner");
+    assert!(matches!(app.mode, Mode::Normal));
 }
 
 /// PRESERVED NAV: when Results-focused, `j`/`k` still select rows (the response
@@ -4186,17 +4278,17 @@ fn load_runner_q_closes_from_response_focus() {
 fn load_results_selection_not_shadowed() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 3;
+    app.load_runner_mut().unwrap().cfg.total = 3;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Ok(json_resp("{\"a\":1}")));
     app.on_load_result(g, 1, Ok(json_resp("{\"b\":2}")));
     app.on_load_result(g, 2, Ok(json_resp("{\"c\":3}")));
-    app.load_runner.as_mut().unwrap().focus = load_runner::RunnerFocus::Results;
-    app.load_runner.as_mut().unwrap().selected = 0;
+    app.load_runner_mut().unwrap().focus = load_runner::RunnerFocus::Results;
+    app.load_runner_mut().unwrap().selected = 0;
     app.handle_key(norm('j')).unwrap();
     assert_eq!(
-        app.load_runner.as_ref().unwrap().selected,
+        app.load_runner().unwrap().selected,
         1,
         "j selects the next results row (not response scroll)"
     );
@@ -4206,13 +4298,13 @@ fn load_results_selection_not_shadowed() {
 fn load_stale_result_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 2;
+    app.load_runner_mut().unwrap().cfg.total = 2;
     app.start_load_run();
     let g = load_gen(&app);
     // A result from a superseded generation must not land.
     app.on_load_result(g + 99, 0, Ok(ok_resp(200, "x")));
     assert_eq!(load_status(&app, 0), LoadStatus::Pending);
-    assert_eq!(app.load_runner.as_ref().unwrap().completed, 0);
+    assert_eq!(app.load_runner().unwrap().completed, 0);
 }
 
 #[test]
@@ -4220,13 +4312,13 @@ fn load_cancel_marks_pending_and_writes_partial_summary() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
     app.history = Some(HistoryStore::in_memory().unwrap());
-    app.load_runner.as_mut().unwrap().cfg.total = 4;
+    app.load_runner_mut().unwrap().cfg.total = 4;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
     app.cancel_load_run();
 
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(runner.finished && runner.cancelled && !runner.running);
     assert_eq!(load_status(&app, 0), LoadStatus::Ok(200));
     assert!(
@@ -4260,7 +4352,7 @@ fn load_cancel_marks_pending_and_writes_partial_summary() {
 fn load_cancel_records_time_to_cancel_for_launched_rows() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
-    app.load_runner.as_mut().unwrap().cfg.total = 3;
+    app.load_runner_mut().unwrap().cfg.total = 3;
     app.start_load_run();
     let g = load_gen(&app);
     // Mark rows 0 and 1 launched (InFlight); leave row 2 never-launched.
@@ -4268,7 +4360,7 @@ fn load_cancel_records_time_to_cancel_for_launched_rows() {
     app.on_load_started(g, 1);
     app.cancel_load_run();
 
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert_eq!(runner.results[0].status, LoadStatus::Cancelled);
     assert!(
         runner.results[0].timing.is_some(),
@@ -4290,17 +4382,17 @@ fn load_rerun_while_running_writes_cancelled_summary_and_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
     app.history = Some(HistoryStore::in_memory().unwrap());
-    app.load_runner.as_mut().unwrap().cfg.total = 4;
+    app.load_runner_mut().unwrap().cfg.total = 4;
     app.start_load_run();
     let g1 = load_gen(&app);
     app.on_load_result(g1, 0, Ok(ok_resp(200, "a")));
-    assert!(app.load_runner.as_ref().unwrap().running);
+    assert!(app.load_runner().unwrap().running);
 
     // Ctrl-R while running: cancel-record the partial, then restart fresh
     // (Run is Ctrl-R as of the 2026-07-10 owner decision).
     app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
         .unwrap();
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(runner.running, "a fresh run started");
     assert!(!runner.finished && !runner.cancelled);
     assert!(runner.run_generation > g1, "fresh run on a new generation");
@@ -4335,7 +4427,7 @@ fn load_close_while_running_writes_cancelled_summary() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
     app.history = Some(HistoryStore::in_memory().unwrap());
-    app.load_runner.as_mut().unwrap().cfg.total = 4;
+    app.load_runner_mut().unwrap().cfg.total = 4;
     app.start_load_run();
     let g = load_gen(&app);
     app.on_load_result(g, 0, Ok(ok_resp(200, "a")));
@@ -4344,11 +4436,11 @@ fn load_close_while_running_writes_cancelled_summary() {
     // Close mid-run: `q` asks to confirm, `y` closes.
     app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .unwrap();
-    assert!(app.load_runner.as_ref().unwrap().confirming_close);
+    assert!(app.load_runner().unwrap().confirming_close);
     app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
-    assert!(app.load_runner.is_none(), "runner closed");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.load_runner().is_none(), "runner closed");
+    assert!(matches!(app.mode, Mode::Normal));
 
     // Closing mid-run recorded the partial (cancelled) summary.
     let batches = app
@@ -4368,9 +4460,9 @@ fn load_guardrail_refuse_blocks_the_run() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
     // Above the hard cap (default max_total = 10_000).
-    app.load_runner.as_mut().unwrap().cfg.total = 20_000;
+    app.load_runner_mut().unwrap().cfg.total = 20_000;
     app.request_load_run();
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(!runner.running, "a refused run never starts");
     assert!(runner.pending_confirm.is_none(), "refuse does not prompt");
     assert!(app.message.is_some(), "refusal is surfaced loudly");
@@ -4381,9 +4473,9 @@ fn load_guardrail_warn_requires_confirm_then_runs() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_app(dir.path(), "https://api.test/ping");
     // Above warn_total (default 100), below the hard cap.
-    app.load_runner.as_mut().unwrap().cfg.total = 500;
+    app.load_runner_mut().unwrap().cfg.total = 500;
     app.request_load_run();
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(!runner.running, "warn does not run immediately");
     let confirm = runner.pending_confirm.clone().expect("confirm shown");
     assert!(
@@ -4397,7 +4489,7 @@ fn load_guardrail_warn_requires_confirm_then_runs() {
     // Accepting the confirm (`y`) starts the run.
     app.handle_load_runner_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .unwrap();
-    let runner = app.load_runner.as_ref().unwrap();
+    let runner = app.load_runner().unwrap();
     assert!(runner.pending_confirm.is_none());
     assert!(runner.running, "confirmed run started");
     assert_eq!(runner.results.len(), 500);
@@ -4447,7 +4539,7 @@ async fn load_cancel_aborts_the_batch_live() {
     app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
     app.history = Some(HistoryStore::in_memory().unwrap());
     {
-        let cfg = &mut app.load_runner.as_mut().unwrap().cfg;
+        let cfg = &mut app.load_runner_mut().unwrap().cfg;
         cfg.total = 20;
         cfg.concurrency = 2;
         cfg.interval = Duration::ZERO;
@@ -4467,7 +4559,7 @@ async fn load_cancel_aborts_the_batch_live() {
         "cancel must abort the batch: the server saw {seen}/20 copies (all fired → cancel leaked)"
     );
     assert!(
-        app.load_runner.as_ref().unwrap().cancelled,
+        app.load_runner().unwrap().cancelled,
         "runner marked cancelled"
     );
 }
@@ -4763,12 +4855,15 @@ fn close_dirty_buffer_confirm_discard_and_cancel() {
     *app.test_editor() = EditorState::new(Lines::from("edited"));
     assert!(app.is_dirty());
     app.close_buffer(0);
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     assert!(matches!(app.pending_close, Some(PendingClose::One(_))));
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
     assert!(app.buffers.is_empty(), "d discards + closes");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.pending_close.is_none());
 
     // Esc keeps the buffer.
@@ -4779,7 +4874,7 @@ fn close_dirty_buffer_confirm_discard_and_cancel() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.buffers.len(), 1, "Esc keeps the dirty buffer");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.pending_close.is_none());
 }
 
@@ -4790,7 +4885,10 @@ fn close_clean_buffer_no_confirm() {
     app.open_or_focus_buffer(selected_with("a.toml", None));
     app.close_buffer(0);
     assert!(app.buffers.is_empty());
-    assert_eq!(app.mode, Mode::Normal, "clean close needs no confirm");
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "clean close needs no confirm"
+    );
 }
 
 /// close-all with two dirty buffers prompts one at a time; `d` on each drains
@@ -4809,20 +4907,26 @@ fn close_all_two_dirty_sequential_prompts() {
 
     app.close_all_buffers();
     // Clean B closed immediately; A + C queued behind the confirm.
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     assert!(matches!(app.pending_close, Some(PendingClose::All(_))));
     assert_eq!(app.buffers.len(), 2, "B closed immediately");
 
     // Discard first dirty (A) -> prompt for C.
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.mode, Mode::Confirm(ConfirmPurpose::DiscardChanges));
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm(ConfirmPurpose::DiscardChanges)
+    ));
     assert_eq!(app.buffers.len(), 1, "A closed, C remains");
     // Discard C -> empty.
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
         .unwrap();
     assert!(app.buffers.is_empty(), "queue drained");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.pending_close.is_none());
 }
 
@@ -4848,7 +4952,7 @@ fn close_all_esc_mid_queue_aborts_remaining() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.buffers.len(), 1, "C stays open after Esc");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(app.mode, Mode::Normal));
     assert!(app.pending_close.is_none());
 }
 

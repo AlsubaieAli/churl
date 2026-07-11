@@ -232,8 +232,12 @@ impl App {
         }
         // Remember where to return: Normal for the main pane, or the live runner
         // mode when search was opened over a runner Response region (note #2).
-        self.body_search_return = self.mode;
-        self.mode = Mode::BodySearch;
+        // R1.5 A2: `mem::replace` MOVES the current mode (incl. a
+        // `LoadRunner(state)` payload) into `body_search_return` instead of copying
+        // it — `Mode` is no longer `Copy`, and the runner state must survive the
+        // body-search overlay (it is read back via `load_runner()`, which consults
+        // `body_search_return` while `Mode::BodySearch` is active).
+        self.body_search_return = std::mem::replace(&mut self.mode, Mode::BodySearch);
     }
 
     /// Handles one key while the body-search input is open. Every keystroke
@@ -242,13 +246,15 @@ impl App {
     pub(in crate::tui::app) fn handle_body_search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = self.body_search_return;
+                // Move the parked mode back (restoring any `LoadRunner(state)`),
+                // leaving `Normal` behind in `body_search_return`.
+                self.mode = std::mem::replace(&mut self.body_search_return, Mode::Normal);
                 if let Some(view) = self.response_view_mut() {
                     view.clear_search();
                 }
             }
             KeyCode::Enter => {
-                self.mode = self.body_search_return;
+                self.mode = std::mem::replace(&mut self.body_search_return, Mode::Normal);
                 self.response_center_on_match();
             }
             _ => {

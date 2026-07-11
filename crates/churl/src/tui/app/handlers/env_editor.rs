@@ -19,21 +19,27 @@ impl App {
             self.cli_vars.clone(),
             &session,
         ) {
-            Ok(state) => {
-                self.env_editor = Some(state);
-                self.mode = Mode::EnvEditor;
-            }
+            // R1.5 A2: one transition — construct the state INTO the mode. No
+            // parallel `env_editor` field to set first, so `(Mode::EnvEditor, None)`
+            // is unrepresentable.
+            Ok(state) => self.mode = Mode::EnvEditor(state),
             Err(err) => self.notify(format!("couldn't open editor: {err}")),
         }
     }
 
     /// Routes a key to the open env editor and acts on its outcome (save / close).
+    ///
+    /// R1.5 A2: the editor state lives in `self.mode`; a non-`EnvEditor` mode here
+    /// is now unreachable by construction (the router only dispatches this on
+    /// `Mode::EnvEditor(_)`), so the old defensive `is_none()→Normal` guard is
+    /// gone. The key is handled INSIDE the `&mut self.mode` borrow, which is
+    /// dropped (via the `outcome` local) before any `&mut self` method runs.
     pub(in crate::tui::app) fn handle_env_editor_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(editor) = self.env_editor.as_mut() else {
-            self.mode = Mode::Normal;
+        let Mode::EnvEditor(editor) = &mut self.mode else {
             return Ok(());
         };
-        match editor.handle_key(key) {
+        let outcome = editor.handle_key(key);
+        match outcome {
             EnvKeyOutcome::Consumed => {}
             EnvKeyOutcome::Save => {
                 self.env_save()?;
@@ -51,7 +57,7 @@ impl App {
                 // rebuild the editor's read-only Session group so it reflects it.
                 let cleared = self.clear_session_vars();
                 let session = self.session_vars();
-                if let Some(editor) = self.env_editor.as_mut() {
+                if let Mode::EnvEditor(editor) = &mut self.mode {
                     editor.set_session_vars(&session);
                 }
                 self.notify(if cleared {
@@ -66,14 +72,13 @@ impl App {
                 // hand the plaintext to the editor's transient reveal state. The
                 // resolved value never touches disk, a log, or any persisted field —
                 // it lives only in the editor's in-memory `reveal` until re-masked.
-                let raw = self
-                    .env_editor
-                    .as_ref()
-                    .and_then(|e| e.peekable_selected_value())
-                    .map(str::to_owned);
+                let raw = match &self.mode {
+                    Mode::EnvEditor(editor) => editor.peekable_selected_value().map(str::to_owned),
+                    _ => None,
+                };
                 if let Some(raw) = raw {
                     let resolved = self.build_env_resolver().substitute(&raw);
-                    if let Some(editor) = self.env_editor.as_mut() {
+                    if let Mode::EnvEditor(editor) = &mut self.mode {
                         editor.set_reveal(resolved);
                     }
                 }
@@ -83,11 +88,10 @@ impl App {
                 // (the "allow copy" the owner asked for). We read it back from the
                 // editor's reveal state (still live) and route it through
                 // `enqueue_clipboard` — the same seam every other copy uses.
-                let revealed = self
-                    .env_editor
-                    .as_ref()
-                    .and_then(|e| e.revealed_value())
-                    .map(str::to_owned);
+                let revealed = match &self.mode {
+                    Mode::EnvEditor(editor) => editor.revealed_value().map(str::to_owned),
+                    _ => None,
+                };
                 if let Some(value) = revealed {
                     self.enqueue_clipboard(&value, "copied revealed value");
                 }
@@ -97,11 +101,10 @@ impl App {
                 // regression fix (note #3): a visible value needs no peek to copy.
                 // Same clipboard seam as every other copy; the value is taken raw,
                 // exactly as the row renders it (no template resolution).
-                let value = self
-                    .env_editor
-                    .as_ref()
-                    .and_then(|e| e.selected_row_value())
-                    .map(str::to_owned);
+                let value = match &self.mode {
+                    Mode::EnvEditor(editor) => editor.selected_row_value().map(str::to_owned),
+                    _ => None,
+                };
                 if let Some(value) = value {
                     self.enqueue_clipboard(&value, "copied value");
                 }
@@ -110,9 +113,9 @@ impl App {
         Ok(())
     }
 
-    /// Closes the editor and returns to normal mode.
+    /// Closes the editor and returns to normal mode. R1.5 A2: setting `Normal`
+    /// drops the [`EnvEditorState`] automatically (no separate field to clear).
     pub(in crate::tui::app) fn close_env_editor(&mut self) {
-        self.env_editor = None;
         self.mode = Mode::Normal;
     }
 
@@ -129,10 +132,13 @@ impl App {
             .as_ref()
             .map(|ws| ws.manifest().name.clone())
             .unwrap_or_default();
-        let Some(editor) = self.env_editor.as_mut() else {
+        // Save inside a scoped `&mut self.mode` borrow that ends before we touch
+        // other `self` fields (`save` returns an owned `EnvSaveResult`).
+        let Mode::EnvEditor(editor) = &mut self.mode else {
             return Ok(false);
         };
-        match editor.save(&root, &name) {
+        let result = editor.save(&root, &name);
+        match result {
             EnvSaveResult::Ok { active_profile, .. } => {
                 // Live-refresh: re-open the manifest and reload the explorer so the
                 // send-time resolver (workspace/collection/profile vars) reflects
