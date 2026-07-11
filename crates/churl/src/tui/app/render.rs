@@ -384,7 +384,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         message::render(frame, area, text, &theme);
     }
 
-    if let Some(picker_state) = &app.picker {
+    // R1.5 A2: the shared finder/selection lives inside the `Picker` variant; the
+    // render is kind-agnostic, so draw from the shared `state()` slice.
+    if let Some(picker_state) = app.picker_state() {
         picker::render(frame, main, picker_state, &theme);
     }
 

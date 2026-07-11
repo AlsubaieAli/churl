@@ -1001,7 +1001,7 @@ fn every_palette_command_dispatches() {
     for (index, (label, action)) in palette::COMMANDS.iter().enumerate() {
         let mut app = App::new(None, KeyMap::default()).unwrap();
         press(&mut app, KeyCode::Char(':'));
-        if let Some(picker) = app.picker.as_mut() {
+        if let Some(picker) = app.picker_state_mut() {
             picker.selected = index;
         }
         // Accept via Enter → dispatch.

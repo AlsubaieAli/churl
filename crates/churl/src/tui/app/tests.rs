@@ -1606,13 +1606,92 @@ fn switch_profile_picker_sets_active() {
     app.dispatch(Action::SwitchProfile, None).unwrap();
     assert!(matches!(app.mode, Mode::Palette));
     // Choices: (none), dev, prod.
-    assert_eq!(app.profile_choices.len(), 3);
-    if let Some(picker) = app.picker.as_mut() {
+    assert_eq!(app.picker_profiles().len(), 3);
+    if let Some(picker) = app.picker_state_mut() {
         picker.selected = 2; // prod
     }
     app.accept_overlay().unwrap();
     assert_eq!(app.active_profile.as_deref(), Some("prod"));
-    assert!(app.profile_choices.is_empty());
+    // R1.5 A2: accept drops the whole picker (profiles included) — no residual choices.
+    assert!(app.picker_profiles().is_empty());
+}
+
+/// R1.5 A2 (audit H3, PR 3): the auth-kind picker is its own `Picker::Auth`
+/// variant, and accepting a selection swaps the loaded endpoint's `request.auth`
+/// to the matching kind. Locks the accept path for the one picker kind that had
+/// no coverage before the fold — the index→`Auth` mapping (`set_auth_kind`) is
+/// reached only through this variant now.
+#[test]
+fn auth_kind_picker_accept_sets_request_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    // Load the sole endpoint so `selected()` is populated (the picker refuses to
+    // open otherwise).
+    app.explorer.expand().unwrap();
+    app.guarded_load(PendingLoad::Row(1)).unwrap();
+    assert!(app.selected().is_some(), "an endpoint is loaded");
+    assert!(
+        app.selected().unwrap().endpoint.request.auth.is_none(),
+        "fixture endpoint starts with no auth"
+    );
+
+    // Open the auth-kind picker → it is the `Picker::Auth` variant.
+    app.open_auth_kind_picker();
+    assert!(matches!(app.mode, Mode::Palette));
+    assert!(
+        app.picker_is_auth(),
+        "the open picker is the auth-kind picker"
+    );
+    assert_eq!(
+        app.picker_state().unwrap().items,
+        vec!["None", "Basic", "Bearer", "ApiKey"],
+        "labels in index order (index → kind mapping)"
+    );
+
+    // Drive selection through the finder (filter to "Bearer") then Enter, mirroring
+    // the other picker-accept tests — index 2 = Bearer.
+    for c in "Bearer".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Normal), "accept closes the picker");
+    assert!(app.picker.is_none());
+    assert!(
+        matches!(
+            app.selected().unwrap().endpoint.request.auth,
+            Some(churl_core::model::Auth::Bearer { .. })
+        ),
+        "Bearer selection set request.auth to Auth::Bearer"
+    );
+
+    // A second index confirms the index→kind mapping: index 3 = ApiKey.
+    app.open_auth_kind_picker();
+    if let Some(picker) = app.picker_state_mut() {
+        picker.selected = 3;
+    }
+    app.accept_overlay().unwrap();
+    assert!(
+        matches!(
+            app.selected().unwrap().endpoint.request.auth,
+            Some(churl_core::model::Auth::ApiKey { .. })
+        ),
+        "ApiKey selection (index 3) set request.auth to Auth::ApiKey"
+    );
+
+    // Esc-cancel leaves the current auth (ApiKey) untouched.
+    app.open_auth_kind_picker();
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(
+        matches!(
+            app.selected().unwrap().endpoint.request.auth,
+            Some(churl_core::model::Auth::ApiKey { .. })
+        ),
+        "Esc-cancel does not change request.auth"
+    );
 }
 
 /// A newer message replaces the current one in the dedicated message row.
@@ -2337,10 +2416,10 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
     // `<leader>s r` opens the picker with the run intent armed.
     app.dispatch(Action::RunSequencePick, None).unwrap();
     assert!(matches!(app.mode, Mode::SequencePicker));
-    assert!(app.sequence_pick_runs, "run intent armed on the picker");
+    assert!(app.picker_sequence_runs(), "run intent armed on the picker");
 
     // Highlight the SECOND sequence and accept it.
-    app.picker.as_mut().unwrap().move_down();
+    app.picker_state_mut().unwrap().move_down();
     let chosen = ordering[1].0.clone();
     app.accept_overlay().unwrap();
 
@@ -2350,7 +2429,7 @@ fn run_sequence_pick_runs_the_chosen_sequence() {
     let runner = app.sequence_runner().expect("runner opened");
     assert_eq!(runner.name, chosen, "ran the chosen sequence, not #0");
     assert!(
-        !app.sequence_pick_runs,
+        !app.picker_sequence_runs(),
         "one-shot intent cleared after accept"
     );
 }
@@ -2363,7 +2442,10 @@ fn open_sequence_pick_edits_not_runs() {
     let mut app = seq_pane_app(dir.path());
     app.dispatch(Action::OpenSequencePicker, None).unwrap();
     assert!(matches!(app.mode, Mode::SequencePicker));
-    assert!(!app.sequence_pick_runs, "edit path: run intent not armed");
+    assert!(
+        !app.picker_sequence_runs(),
+        "edit path: run intent not armed"
+    );
     app.accept_overlay().unwrap();
     assert!(matches!(app.mode, Mode::Sequence { .. }));
     assert_eq!(
@@ -2405,7 +2487,7 @@ fn leader_s_space_opens_the_sequence_picker() {
         "s <leader> opens the sequence picker"
     );
     assert!(
-        !app.sequence_pick_runs,
+        !app.picker_sequence_runs(),
         "s <leader> is the open/edit finder, not run"
     );
     assert_eq!(app.leader, None, "submenu dispatch dismisses the popup");
@@ -3177,7 +3259,7 @@ fn profile_picker_marks_active() {
     let mut app = workspace_fixture(dir.path());
     // No active profile: (none) is marked.
     app.dispatch(Action::SwitchProfile, None).unwrap();
-    let picker = app.picker.as_ref().unwrap();
+    let picker = app.picker_state().unwrap();
     assert_eq!(picker.items[0], "● (none)");
     assert_eq!(picker.items[1], "dev");
     assert_eq!(picker.items[2], "prod");
@@ -3187,7 +3269,7 @@ fn profile_picker_marks_active() {
     let mut app2 = workspace_fixture(dir2.path());
     app2.active_profile = Some("dev".to_owned());
     app2.dispatch(Action::SwitchProfile, None).unwrap();
-    let picker2 = app2.picker.as_ref().unwrap();
+    let picker2 = app2.picker_state().unwrap();
     assert_eq!(picker2.items[0], "(none)");
     assert_eq!(picker2.items[1], "● dev");
     assert_eq!(picker2.items[2], "prod");
@@ -3227,7 +3309,7 @@ fn leader_leader_opens_request_picker() {
         matches!(app.mode, Mode::Search),
         "<leader><leader> opens the search overlay"
     );
-    let picker = app.picker.as_ref().expect("picker open");
+    let picker = app.picker_state().expect("picker open");
     assert!(
         picker.items.iter().any(|i| i.contains("Get user")),
         "request picker lists the workspace endpoints: {:?}",
@@ -3262,10 +3344,10 @@ fn workspace_picker_lists_recent() {
 
     app.dispatch(Action::QuickJumpWorkspaces, None).unwrap();
     assert!(matches!(app.mode, Mode::WorkspacePicker));
-    let picker = app.picker.as_ref().expect("picker open");
+    let picker = app.picker_state().expect("picker open");
     assert_eq!(picker.items, vec!["/ws/beta", "/ws/alpha"]);
     assert_eq!(
-        app.workspace_choices,
+        app.picker_workspaces(),
         vec![PathBuf::from("/ws/beta"), PathBuf::from("/ws/alpha")]
     );
 }
@@ -3591,7 +3673,7 @@ fn load_runner_pick_dirty_opens_new_buffer_and_runner() {
 
     app.open_load_runner_pick().unwrap();
     assert!(matches!(app.mode, Mode::Search));
-    assert!(app.load_runner_after_pick, "intent armed");
+    assert!(app.picker_after_pick(), "intent armed");
     // Pick the DIFFERENT endpoint (beta).
     pick_search(&mut app, "beta");
 
@@ -3605,7 +3687,7 @@ fn load_runner_pick_dirty_opens_new_buffer_and_runner() {
         app.buffers[alpha_idx].is_dirty(),
         "alpha's unsaved edits are preserved in its own buffer"
     );
-    assert!(!app.load_runner_after_pick);
+    assert!(!app.picker_after_pick());
 }
 
 /// A clean `<leader>l f` pick loads the endpoint AND opens the load runner.
@@ -3622,7 +3704,7 @@ fn load_runner_pick_clean_loads_and_opens_runner() {
     );
     // The runner targets the newly-picked endpoint, not the previously loaded one.
     assert_eq!(app.load_runner().unwrap().url, "https://api.test/beta");
-    assert!(!app.load_runner_after_pick);
+    assert!(!app.picker_after_pick());
 }
 
 /// BLOCKER 3a: Esc-cancelling the `<leader>l f` picker clears the one-shot flag
@@ -3632,12 +3714,12 @@ fn load_runner_pick_esc_clears_flag() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = load_pick_app(dir.path());
     app.open_load_runner_pick().unwrap();
-    assert!(app.load_runner_after_pick);
+    assert!(app.picker_after_pick());
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert!(matches!(app.mode, Mode::Normal));
     assert!(
-        !app.load_runner_after_pick,
+        !app.picker_after_pick(),
         "esc-cancel must clear the one-shot intent"
     );
 }
@@ -3654,15 +3736,14 @@ fn load_runner_pick_empty_enter_clears_flag() {
             .unwrap();
     }
     assert!(
-        app.picker
-            .as_ref()
+        app.picker_state()
             .and_then(picker::PickerState::current)
             .is_none(),
         "no current item for a non-matching query"
     );
     app.accept_overlay().unwrap();
     assert!(
-        !app.load_runner_after_pick,
+        !app.picker_after_pick(),
         "empty-result Enter must clear the one-shot intent"
     );
     assert!(app.load_runner().is_none());
