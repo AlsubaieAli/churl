@@ -17,6 +17,18 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 use crate::config::{auth_secret_violations, collection_secret_violations, secret_violations};
 use crate::model::{CollectionMeta, Endpoint, Method, OnError, Request, Sequence, Workspace};
 
+mod merge;
+mod naming;
+
+// The merge + naming clusters live in child modules (M7.11). Their items are
+// pulled into this module's namespace so in-crate call sites — and `super::*` in
+// the inline `tests` module — resolve them unqualified, exactly as before the
+// split. `slug_of` is the public API (`persistence::slug_of`), re-exported `pub`
+// so its path is unchanged.
+use merge::merge_tables;
+pub use naming::slug_of;
+use naming::{collection_dir_name, is_reserved_file_slug, slugify, unique_endpoint_path};
+
 /// Filename of the workspace manifest inside a workspace root.
 pub const MANIFEST_FILENAME: &str = "churl.toml";
 
@@ -26,50 +38,6 @@ pub const FOLDER_FILENAME: &str = "folder.toml";
 /// Reserved workspace subdirectory holding request sequences (`sequences/<slug>.toml`).
 /// It is *not* a collection — [`OpenWorkspace::collections`] excludes it.
 pub const SEQUENCES_DIRNAME: &str = "sequences";
-
-/// File stems churl reserves inside a collection directory. An endpoint (or
-/// sequence) file written verbatim as one of these would overshadow a reserved
-/// `*.toml` — silently and invisibly: a `churl.toml` endpoint parses as the
-/// workspace manifest (the note vanishes), a `folder.toml` endpoint parses as
-/// collection metadata. These are the manifest/folder filenames *without* their
-/// `.toml` extension.
-///
-/// `slugify` lowercases, so these match case-insensitively for free — `"Churl"`
-/// and `"CHURL.TOML"` slug to `churl` / `churl-toml` respectively; only the bare
-/// word is reserved (`churl-toml` is safe). The sequences *directory* is NOT
-/// here: a file named `sequences.toml` inside a collection is harmless (the
-/// reserved `sequences/` is a top-level directory — see [`RESERVED_DIR_NAMES`]).
-const RESERVED_FILE_STEMS: &[&str] = &[
-    // Kept in sync with the filename constants via `reserved_stems_match_constants`.
-    "churl", "folder",
-];
-
-/// Directory names churl reserves at the workspace root. A collection directory
-/// written verbatim as one of these would shadow churl's own directory — the
-/// `sequences/` dir is excluded from [`OpenWorkspace::collections`], so a
-/// collection literally named `sequences` would silently vanish from the tree.
-/// (The manifest/folder stems are *files*, not directories, so a collection
-/// named `churl`/`folder` is not a hazard — only `sequences` is.)
-const RESERVED_DIR_NAMES: &[&str] = &[SEQUENCES_DIRNAME];
-
-/// Whether `slug` collides with a reserved endpoint/sequence *file* stem.
-/// `slugify` already lowercases, so a plain equality check is case-insensitive.
-fn is_reserved_file_slug(slug: &str) -> bool {
-    RESERVED_FILE_STEMS.contains(&slug)
-}
-
-/// Whether `slug` collides with a reserved collection *directory* name.
-fn is_reserved_dir_slug(slug: &str) -> bool {
-    RESERVED_DIR_NAMES.contains(&slug)
-}
-
-/// The filesystem slug churl would derive from a display `name` (kebab-case,
-/// lowercase, ASCII). Public so UI layers can detect when a create/rename was
-/// disambiguated — compare this to the final on-disk stem and surface the
-/// difference (fail-loud on the reserved-name collision, never a silent bump).
-pub fn slug_of(name: &str) -> String {
-    slugify(name)
-}
 
 /// Error reading or writing workspace TOML files.
 #[derive(Debug, thiserror::Error)]
@@ -192,52 +160,6 @@ pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, PersistenceError> {
     Ok(doc.to_string())
 }
 
-/// Derives a filesystem slug (kebab-case, lowercase, ASCII) from an endpoint or
-/// collection name. Runs of non-alphanumeric characters collapse to a single `-`;
-/// leading/trailing `-` are trimmed. An empty result falls back to `"unnamed"`.
-fn slugify(name: &str) -> String {
-    let mut slug = String::new();
-    let mut prev_dash = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    let trimmed = slug.trim_matches('-');
-    if trimmed.is_empty() {
-        "unnamed".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-/// Picks an unused `<slug>.toml` path inside `dir`, appending `-2`, `-3`, … on
-/// collision (matching the corpus convention of plain suffixes).
-///
-/// A slug equal to a reserved file stem (see [`RESERVED_FILE_STEMS`]) is treated
-/// as already occupied so it disambiguates exactly like a filename clash (`churl`
-/// → `churl-2.toml`) instead of clobbering the manifest/folder file — the display
-/// `name` inside the file is untouched. Callers surface the final stem when it
-/// was bumped (fail-loud, no silent no-op).
-fn unique_endpoint_path(dir: &Path, slug: &str) -> PathBuf {
-    let first = dir.join(format!("{slug}.toml"));
-    if !first.exists() && !is_reserved_file_slug(slug) {
-        return first;
-    }
-    let mut n = 2;
-    loop {
-        let candidate = dir.join(format!("{slug}-{n}.toml"));
-        if !candidate.exists() {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
 /// The next `seq` for a new endpoint in `dir`: one past the maximum existing
 /// endpoint `seq` (plain +1 — the corpus uses no fixed step), or `0` when the
 /// collection is empty. Unreadable/malformed files are ignored here (an empty
@@ -330,27 +252,6 @@ pub fn delete_endpoint(path: &Path) -> Result<(), PersistenceError> {
         path: path.to_owned(),
         source,
     })
-}
-
-/// Resolves the on-disk directory name for a collection `slug` under `parent`,
-/// bumping a **reserved** directory slug (see [`RESERVED_DIR_NAMES`] — i.e. a
-/// collection literally named `sequences`) to the first free `<slug>-N` so it can
-/// never overshadow the sequences directory. A non-reserved slug is returned
-/// verbatim — the caller still decides what to do if that directory already
-/// exists ([`create_collection`] errors `AlreadyExists`; import reuses it), so
-/// this helper does **not** disambiguate on plain existence.
-fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
-    if !is_reserved_dir_slug(slug) {
-        return parent.join(slug);
-    }
-    let mut n = 2;
-    loop {
-        let candidate = parent.join(format!("{slug}-{n}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-        n += 1;
-    }
 }
 
 /// Creates a new collection directory named `name` (slugified) under `root`. No
@@ -933,109 +834,9 @@ fn normalize_item(item: &mut Item) {
     }
 }
 
-/// Merges `new` into `old` in place, preserving `old`'s decor wherever the value is
-/// unchanged:
-///
-/// - keys present in `old` but absent in `new` are removed;
-/// - unchanged values are left untouched (their comments/formatting survive);
-/// - changed scalar values are replaced, copying the old value's decor so inline
-///   comments survive;
-/// - nested tables recurse; arrays-of-tables merge element-wise (see
-///   [`merge_arrays_of_tables`]) — survivors keep their decor even when the array
-///   grows or shrinks; only added/removed tables change.
-fn merge_tables(old: &mut Table, new: &Table) {
-    let stale: Vec<String> = old
-        .iter()
-        .map(|(key, _)| key.to_owned())
-        .filter(|key| !new.contains_key(key))
-        .collect();
-    for key in stale {
-        old.remove(&key);
-    }
-    for (key, new_item) in new.iter() {
-        match old.get_mut(key) {
-            Some(old_item) => merge_items(old_item, new_item),
-            None => {
-                old.insert(key, new_item.clone());
-            }
-        }
-    }
-}
-
-/// Recursive worker for [`merge_tables`].
-fn merge_items(old: &mut Item, new: &Item) {
-    match (old, new) {
-        (Item::Table(old_table), Item::Table(new_table)) => merge_tables(old_table, new_table),
-        (Item::ArrayOfTables(old_tables), Item::ArrayOfTables(new_tables)) => {
-            merge_arrays_of_tables(old_tables, new_tables);
-        }
-        (Item::Value(old_value), Item::Value(new_value)) => {
-            if !values_equal(old_value, new_value) {
-                let decor = old_value.decor().clone();
-                *old_value = new_value.clone();
-                *old_value.decor_mut() = decor;
-            }
-        }
-        (old, new) => *old = new.clone(),
-    }
-}
-
-/// Merges two arrays-of-tables element-wise, preserving the decor
-/// (comments/whitespace/order) of every surviving table — even when the length
-/// changes (R1 D3). Overlapping indices recurse through [`merge_tables`] (so a
-/// survivor keeps its `# comments`); genuinely new trailing tables are appended
-/// from `new`; trailing tables that disappeared are truncated.
-///
-/// This replaces the old wholesale `*old = new.clone()` on any length change,
-/// which discarded all decor on surviving siblings — breaking the module's
-/// format-preserving promise for `[[array-of-tables]]` (e.g. `[[request.headers]]`).
-fn merge_arrays_of_tables(old: &mut ArrayOfTables, new: &ArrayOfTables) {
-    // 1. Recurse into the overlapping prefix — survivors keep their decor.
-    let overlap = old.len().min(new.len());
-    for i in 0..overlap {
-        if let (Some(old_table), Some(new_table)) = (old.get_mut(i), new.get(i)) {
-            merge_tables(old_table, new_table);
-        }
-    }
-    // 2. Append tables that are new (grew).
-    for i in old.len()..new.len() {
-        if let Some(new_table) = new.get(i) {
-            old.push(new_table.clone());
-        }
-    }
-    // 3. Truncate tables that disappeared (shrank) — remove from the tail.
-    while old.len() > new.len() {
-        old.remove(old.len() - 1);
-    }
-}
-
-/// Semantic value equality, ignoring decor (whitespace/comments) and string style.
-fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::String(a), Value::String(b)) => a.value() == b.value(),
-        (Value::Integer(a), Value::Integer(b)) => a.value() == b.value(),
-        (Value::Float(a), Value::Float(b)) => a.value() == b.value(),
-        (Value::Boolean(a), Value::Boolean(b)) => a.value() == b.value(),
-        (Value::Datetime(a), Value::Datetime(b)) => a.value() == b.value(),
-        (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|(item_a, item_b)| values_equal(item_a, item_b))
-        }
-        (Value::InlineTable(a), Value::InlineTable(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(key, value_a)| {
-                    b.get(key)
-                        .is_some_and(|value_b| values_equal(value_a, value_b))
-                })
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::naming::{RESERVED_DIR_NAMES, RESERVED_FILE_STEMS, is_reserved_dir_slug};
     use super::*;
 
     /// The reserved sets must stay in sync with the filename/dir constants, or an

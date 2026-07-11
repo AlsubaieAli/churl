@@ -15,3 +15,5 @@ mod load_runner;
 mod response;
 mod send;
 mod sequence;
+mod vars;
+mod workspace;
