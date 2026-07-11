@@ -264,6 +264,7 @@ fn assert_request_eq(a: &Request, b: &Request) {
     assert_eq!(a.method, b.method, "method");
     assert_eq!(a.url, b.url, "url");
     assert_eq!(a.headers, b.headers, "headers");
+    assert_eq!(a.params, b.params, "params");
     assert_eq!(a.body, b.body, "body");
     assert_eq!(a.auth, b.auth, "auth");
 }
@@ -651,6 +652,18 @@ fn native_import_rejects_missing_version() {
     let err = import_churl_native(r#"{ "name": "x", "collections": [] }"#).unwrap_err();
     match err {
         InterchangeError::UnsupportedSchema(msg) => assert!(msg.contains("churl_version"), "{msg}"),
+        other => panic!("expected UnsupportedSchema, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_import_rejects_non_integer_version() {
+    // Present but the wrong type: the error names the real problem, not "missing".
+    let err = import_churl_native(r#"{ "churl_version": "1", "collections": [] }"#).unwrap_err();
+    match err {
+        InterchangeError::UnsupportedSchema(msg) => {
+            assert!(msg.contains("non-negative integer"), "{msg}");
+        }
         other => panic!("expected UnsupportedSchema, got {other:?}"),
     }
 }

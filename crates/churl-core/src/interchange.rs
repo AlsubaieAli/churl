@@ -168,14 +168,18 @@ pub fn import_churl_native(json: &str) -> Result<CollectionImport, InterchangeEr
         .as_object()
         .ok_or_else(|| InterchangeError::UnsupportedSchema("top level is not an object".into()))?;
 
-    let version = obj
-        .get("churl_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            InterchangeError::UnsupportedSchema(
+    let version = match obj.get("churl_version") {
+        None => {
+            return Err(InterchangeError::UnsupportedSchema(
                 "missing churl_version — not a churl-native collection".into(),
-            )
-        })?;
+            ));
+        }
+        Some(raw) => raw.as_u64().ok_or_else(|| {
+            InterchangeError::UnsupportedSchema(format!(
+                "churl_version must be a non-negative integer, got {raw}"
+            ))
+        })?,
+    };
     if version > CHURL_NATIVE_VERSION {
         return Err(InterchangeError::UnsupportedSchema(format!(
             "churl-native file version {version} is newer than this build supports \
