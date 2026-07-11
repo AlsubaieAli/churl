@@ -112,6 +112,9 @@ pub enum Action {
     Rename,
     /// Delete the selected endpoint or collection (with a confirm).
     Delete,
+    /// Delete the selected sequence in the Sequences sub-pane (with a y/n
+    /// confirm). Parallels [`Action::Delete`] for the endpoints tree (note #6).
+    DeleteSequence,
     /// Toggle the explorer sidebar (hide / reopen).
     ToggleExplorer,
     /// Switch focus/zoom between the endpoints tree and the sequences sub-pane
@@ -259,6 +262,7 @@ const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::NewCollection, "new-collection", "new collection"),
     (Action::Rename, "rename", "rename"),
     (Action::Delete, "delete", "delete"),
+    (Action::DeleteSequence, "delete-sequence", "delete sequence"),
     (
         Action::ToggleExplorer,
         "toggle-explorer",
