@@ -145,6 +145,90 @@ fn headers_render_as_array_of_tables() {
     assert_eq!(load_endpoint(&path).unwrap(), endpoint);
 }
 
+// ---- R1 D3: array-of-tables comment preservation on length change ---------
+
+/// Helper: an endpoint with `n` headers `H0..H{n-1}` (all enabled), no auth.
+fn endpoint_with_headers(name: &str, n: usize) -> Endpoint {
+    Endpoint {
+        seq: 0,
+        name: name.into(),
+        request: Request {
+            method: Method::Get,
+            url: "https://api.example.com".into(),
+            headers: (0..n)
+                .map(|i| Header {
+                    name: format!("H{i}"),
+                    value: format!("v{i}"),
+                    enabled: true,
+                })
+                .collect(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+        },
+    }
+}
+
+/// A `# comment` on a surviving `[[request.headers]]` entry must byte-survive a
+/// shrink (3→2) AND a grow (2→3). Before R1 D3 the array-of-tables merge fell
+/// through to a wholesale clone on any length change, discarding all decor.
+#[test]
+fn array_of_tables_comment_survives_length_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headers.toml");
+
+    // Start from a real 3-header save, then hand-annotate the MIDDLE header table
+    // with a comment (simulating a user's hand edit).
+    save_endpoint(&path, &endpoint_with_headers("hdrs", 3)).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    // Inject a comment line just above the second `[[request.headers]]` block.
+    let annotated = {
+        let mut blocks = text.match_indices("[[request.headers]]");
+        let _first = blocks.next().unwrap();
+        let (second_at, _) = blocks.next().expect("three header blocks");
+        let mut s = String::with_capacity(text.len() + 32);
+        s.push_str(&text[..second_at]);
+        s.push_str("# keep-me: the middle header\n");
+        s.push_str(&text[second_at..]);
+        s
+    };
+    fs::write(&path, &annotated).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains("# keep-me"));
+
+    // Shrink 3 → 2: drop the LAST header. The middle survivor's comment must stay.
+    let mut ep = load_endpoint(&path).unwrap();
+    assert_eq!(ep.request.headers.len(), 3);
+    ep.request.headers.pop(); // now H0, H1
+    save_endpoint(&path, &ep).unwrap();
+    let after_shrink = fs::read_to_string(&path).unwrap();
+    assert!(
+        after_shrink.contains("# keep-me: the middle header"),
+        "comment on surviving header lost on shrink:\n{after_shrink}"
+    );
+    assert_eq!(after_shrink.matches("[[request.headers]]").count(), 2);
+    // Data is correct after the shrink.
+    assert_eq!(load_endpoint(&path).unwrap(), ep);
+
+    // Grow 2 → 3: append a new header. Survivors' comment still preserved.
+    ep.request.headers.push(Header {
+        name: "H2b".into(),
+        value: "v2b".into(),
+        enabled: true,
+    });
+    save_endpoint(&path, &ep).unwrap();
+    let after_grow = fs::read_to_string(&path).unwrap();
+    assert!(
+        after_grow.contains("# keep-me: the middle header"),
+        "comment lost on grow:\n{after_grow}"
+    );
+    assert_eq!(after_grow.matches("[[request.headers]]").count(), 3);
+    assert!(
+        after_grow.contains("H2b"),
+        "new header appended:\n{after_grow}"
+    );
+    assert_eq!(load_endpoint(&path).unwrap(), ep);
+}
+
 #[test]
 fn auth_merge_add_change_kind_and_remove() {
     let dir = tempfile::tempdir().unwrap();
@@ -935,6 +1019,182 @@ fn delete_collection_removes_dir_recursively() {
     create_endpoint(&coll, "Ping").unwrap();
     delete_collection(&coll).unwrap();
     assert!(!coll.exists());
+}
+
+// ---- R1 D1: reserved-name guards ------------------------------------------
+//
+// A create/rename whose name slugs to a reserved churl stem (`churl` / `folder`
+// / `sequences`) must never produce an on-disk file/dir that overshadows the
+// manifest, folder metadata, or sequences directory. It disambiguates like a
+// name clash (`churl` -> `churl-2.toml`) while the display `name` stays intact.
+
+/// The load-loss bug: an endpoint named `churl` slugged to `churl` and wrote
+/// `churl.toml`, silently overwriting the workspace manifest. It must now land on
+/// a `-2` stem, leave the manifest byte-intact, and stay loadable with its typed
+/// name preserved.
+#[test]
+fn create_endpoint_named_churl_never_overshadows_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    save_workspace_manifest(root.path(), &demo_workspace()).unwrap();
+    let manifest = root.path().join("churl.toml");
+    let manifest_before = fs::read(&manifest).unwrap();
+
+    // The collection dir doubles as a workspace-root-shaped dir for this test:
+    // creating an endpoint named "churl" inside it must not write `churl.toml`.
+    let coll = create_collection(root.path(), "api").unwrap();
+    // Plant a sibling manifest inside the collection so an overwrite is visible.
+    save_workspace_manifest(&coll, &demo_workspace()).unwrap();
+    let coll_manifest_before = fs::read(coll.join("churl.toml")).unwrap();
+
+    let path = create_endpoint(&coll, "churl").unwrap();
+    assert_ne!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "churl.toml",
+        "an endpoint named churl must not be written as churl.toml"
+    );
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "churl-2.toml",
+        "reserved slug disambiguates like a name clash"
+    );
+
+    // Both manifests survived byte-for-byte.
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_before);
+    assert_eq!(
+        fs::read(coll.join("churl.toml")).unwrap(),
+        coll_manifest_before
+    );
+
+    // The endpoint round-trips with the user's typed display name.
+    let ep = load_endpoint(&path).unwrap();
+    assert_eq!(ep.name, "churl");
+}
+
+/// Case-folding and the other reserved words: `Churl`, `folder`, `CHURL.TOML`
+/// each disambiguate; the manifest/folder stems never land verbatim.
+#[test]
+fn create_endpoint_reserved_variants_all_disambiguate() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "c").unwrap();
+    for name in ["Churl", "folder", "FOLDER"] {
+        let path = create_endpoint(&coll, name).unwrap();
+        let stem = path
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        // The bare reserved stem never appears as the on-disk filename — it was
+        // disambiguated (`churl` -> `churl-2`, `folder` -> `folder-2`, …).
+        assert!(
+            stem != "churl" && stem != "folder",
+            "reserved name {name} landed on {stem}"
+        );
+        assert_ne!(path.file_name().unwrap().to_str().unwrap(), "churl.toml");
+        assert_ne!(path.file_name().unwrap().to_str().unwrap(), "folder.toml");
+    }
+    // `CHURL.TOML` slugs to `churl-toml` (NOT reserved) — lands verbatim.
+    let ok = create_endpoint(&coll, "CHURL.TOML").unwrap();
+    assert_eq!(
+        ok.file_name().unwrap().to_str().unwrap(),
+        "churl-toml.toml",
+        "a slug that merely contains a reserved word is safe"
+    );
+}
+
+/// A collection named `sequences` must not become the reserved `sequences/`
+/// directory (which `collections()` excludes — the collection would vanish).
+#[test]
+fn create_collection_named_sequences_never_shadows_sequences_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let coll = create_collection(root.path(), "sequences").unwrap();
+    assert_ne!(
+        coll.file_name().unwrap().to_str().unwrap(),
+        "sequences",
+        "a `sequences` collection must not shadow the reserved dir"
+    );
+    assert_eq!(coll.file_name().unwrap().to_str().unwrap(), "sequences-2");
+
+    // The collection is actually visible (not excluded like the reserved dir).
+    save_workspace_manifest(root.path(), &demo_workspace()).unwrap();
+    let ws = OpenWorkspace::open(root.path()).unwrap();
+    let names: Vec<String> = ws
+        .collections()
+        .unwrap()
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "sequences-2"),
+        "collection is listed: {names:?}"
+    );
+}
+
+/// Renaming an endpoint *into* a reserved name is the same hazard as creating
+/// one, and must disambiguate too.
+#[test]
+fn rename_endpoint_into_reserved_name_disambiguates() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "c").unwrap();
+    let path = create_endpoint(&coll, "Ping").unwrap();
+
+    let new_path = rename_endpoint(&path, "churl").unwrap();
+    assert_ne!(
+        new_path.file_name().unwrap().to_str().unwrap(),
+        "churl.toml",
+        "rename into a reserved name must not write churl.toml"
+    );
+    assert!(!path.exists(), "old file moved");
+    let ep = load_endpoint(&new_path).unwrap();
+    assert_eq!(ep.name, "churl", "display name is what the user typed");
+}
+
+/// Property-style: no user-supplied name can yield a reserved on-disk stem, for
+/// either endpoints or collections.
+#[test]
+fn no_name_yields_a_reserved_on_disk_stem() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = create_collection(dir.path(), "c").unwrap();
+    for name in [
+        "churl",
+        "Churl",
+        "CHURL",
+        "  churl  ",
+        "folder",
+        "Folder",
+        "sequences",
+        "Sequences",
+        "churl!!!",
+        "**folder**",
+    ] {
+        // Endpoints: never a reserved *file* stem (`churl`/`folder`). A
+        // `sequences.toml` endpoint file inside a collection is harmless — only
+        // the top-level `sequences/` DIRECTORY is reserved — so it is allowed.
+        let ep_path = create_endpoint(&coll, name).unwrap();
+        let ep_stem = ep_path
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(
+            ep_stem != "churl" && ep_stem != "folder",
+            "endpoint name {name:?} produced reserved file stem {ep_stem:?}"
+        );
+        // Collections.
+        let root = tempfile::tempdir().unwrap();
+        let cdir = create_collection(root.path(), name).unwrap();
+        let cstem = cdir
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert_ne!(
+            cstem, "sequences",
+            "collection {name:?} shadowed sequences/"
+        );
+    }
 }
 
 #[test]

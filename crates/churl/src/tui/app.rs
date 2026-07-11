@@ -249,6 +249,16 @@ enum PendingClose {
     All(std::collections::VecDeque<std::path::PathBuf>),
 }
 
+/// Capacity of the bounded app channel (R1 D4a). Generous headroom for the
+/// bursty senders (a load run fires `total` `LoadResult`s, the highlight worker a
+/// steady trickle of `Highlighted`s) while still bounding memory: an
+/// arbitrarily long / high-`total` session can no longer flood the queue with
+/// unbounded owned `Response`/`Highlighted` bodies. All senders live in spawned
+/// async tasks (`.send().await` applies natural backpressure) or the dedicated
+/// highlight OS thread (`blocking_send`) — never on the render/UI thread — so a
+/// full queue slows a producer without ever stalling input.
+const APP_CHANNEL_CAPACITY: usize = 1024;
+
 /// Messages delivered to the event loop over the app channel. No longer `Copy`
 /// since M3: results and highlighted lines carry owned data.
 #[derive(Debug)]
@@ -584,8 +594,8 @@ pub struct App {
     /// Set to exit the event loop.
     pub should_quit: bool,
     /// Sender half of the app channel (cloned into background tasks from M3 on).
-    pub tx: mpsc::UnboundedSender<AppMsg>,
-    rx: mpsc::UnboundedReceiver<AppMsg>,
+    pub tx: mpsc::Sender<AppMsg>,
+    rx: mpsc::Receiver<AppMsg>,
     /// The shared reqwest client; `None` in snapshot-test construction (runtime-free).
     pub client: Option<Client>,
     /// Per-execution knobs (body-size cap) resolved from config in
@@ -758,6 +768,37 @@ fn nothing_to_copy_message(state: &ResponseState) -> &'static str {
     }
 }
 
+/// The on-disk stem a create/rename landed on, or `None` when it matched the
+/// naive slug of the typed name (no disambiguation happened). Used to fail loud
+/// when a reserved-name collision (R1 D1) bumped the filename — the user must see
+/// the real stem, never a silent rename.
+fn disambiguated_stem(typed: &str, path: &Path) -> Option<String> {
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    if stem == persistence::slug_of(typed) {
+        None
+    } else {
+        Some(stem.to_owned())
+    }
+}
+
+/// The confirmation message for a create, noting the actual on-disk name when it
+/// was disambiguated (e.g. an endpoint named `churl` written as `churl-2`).
+fn created_message(typed: &str, path: &Path) -> String {
+    match disambiguated_stem(typed, path) {
+        Some(stem) => format!("created {typed} (as {stem} — name was reserved)"),
+        None => format!("created {typed}"),
+    }
+}
+
+/// The confirmation message for a rename, noting the actual on-disk name when it
+/// was disambiguated (reserved-name collision, R1 D1).
+fn renamed_message(typed: &str, path: &Path) -> String {
+    match disambiguated_stem(typed, path) {
+        Some(stem) => format!("renamed to {typed} (as {stem} — name was reserved)"),
+        None => format!("renamed to {typed}"),
+    }
+}
+
 /// The current Unix time in milliseconds (saturating to `0` before the epoch).
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -804,7 +845,7 @@ impl App {
     /// [`App::with_config`] wires the theme/profile/vars from config + CLI.
     pub fn new(workspace: Option<OpenWorkspace>, keymap: KeyMap) -> Result<Self> {
         let explorer = ExplorerState::new(workspace.as_ref())?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(APP_CHANNEL_CAPACITY);
         Ok(Self {
             workspace,
             explorer,
@@ -2065,16 +2106,38 @@ impl App {
         Ok(())
     }
 
+    /// Focuses buffer `idx`, evicting the *previously* active buffer's highlight
+    /// cache when leaving it (R1 D4c). Only the active buffer enqueues highlight
+    /// jobs, so an inactive buffer's cache is dead weight that would otherwise
+    /// accumulate across every open buffer — bounding total highlight-cache
+    /// memory to (active buffers × 64) rather than (all buffers × 64). The
+    /// pending-highlight guard is cleared too so re-focusing re-enqueues cleanly.
+    /// A same-index focus is a no-op (never evicts the buffer you're staying on).
+    fn set_active_buffer(&mut self, idx: usize) {
+        if idx == self.active {
+            return;
+        }
+        if let Some(b) = self
+            .buffers
+            .get_mut(self.active)
+            .and_then(Buffer::as_endpoint_mut)
+        {
+            b.highlight_cache.clear();
+            b.pending_highlight = None;
+        }
+        self.active = idx;
+    }
+
     /// Dedup-or-push: focus an already-open buffer for the same endpoint file
     /// (keeping its edits/response), else push a fresh buffer. Never replaces
     /// another buffer — each endpoint keeps its own edit/response/dirty state.
     fn open_or_focus_buffer(&mut self, selected: SelectedEndpoint) {
         if let Some(i) = self.buffer_index_for_path(&selected.file) {
-            self.active = i;
+            self.set_active_buffer(i);
             return;
         }
         self.buffers.push(Buffer::endpoint(selected));
-        self.active = self.buffers.len() - 1;
+        self.set_active_buffer(self.buffers.len() - 1);
     }
 
     /// Cycles to the next (`forward`) or previous buffer, wrapping. No-op when empty.
@@ -2083,11 +2146,12 @@ impl App {
         if len == 0 {
             return;
         }
-        self.active = if forward {
+        let next = if forward {
             (self.active + 1) % len
         } else {
             (self.active + len - 1) % len
         };
+        self.set_active_buffer(next);
     }
 
     /// Jumps directly to the `n`th open buffer/tab (1-based; `<leader>t <n>`,
@@ -2101,7 +2165,7 @@ impl App {
             self.notify(format!("no tab {n}"));
             return;
         }
-        self.active = n - 1;
+        self.set_active_buffer(n - 1);
     }
 
     /// The active buffer index that should be selected after the buffer at
@@ -2325,11 +2389,15 @@ impl App {
             let outcome = churl_core::http::execute(&client, &request, &options)
                 .await
                 .map_err(|err| err.to_string());
-            let _ = tx.send(AppMsg::Response {
-                generation,
-                outcome,
-                meta: task_meta,
-            });
+            // Bounded channel (R1 D4a): this is a spawned async task, so awaiting
+            // on a full queue applies backpressure without stalling the UI thread.
+            let _ = tx
+                .send(AppMsg::Response {
+                    generation,
+                    outcome,
+                    meta: task_meta,
+                })
+                .await;
         });
 
         if let Some(b) = self.active_endpoint_buffer_mut() {
@@ -3318,11 +3386,13 @@ impl App {
                     let outcome = churl_core::http::execute(&client, &request, &options)
                         .await
                         .map_err(|err| err.to_string());
-                    let _ = tx.send(AppMsg::SequenceStep {
-                        run_generation,
-                        index,
-                        outcome,
-                    });
+                    let _ = tx
+                        .send(AppMsg::SequenceStep {
+                            run_generation,
+                            index,
+                            outcome,
+                        })
+                        .await;
                 });
                 self.sequence_abort = Some(handle.abort_handle());
             }
@@ -3792,18 +3862,22 @@ impl App {
                                 tokio::time::sleep(target - elapsed).await;
                             }
                         }
-                        let _ = tx.send(AppMsg::LoadStarted {
-                            run_generation,
-                            index,
-                        });
+                        let _ = tx
+                            .send(AppMsg::LoadStarted {
+                                run_generation,
+                                index,
+                            })
+                            .await;
                         let outcome = churl_core::http::execute(&client, &request, &options)
                             .await
                             .map_err(|err| err.to_string());
-                        let _ = tx.send(AppMsg::LoadResult {
-                            run_generation,
-                            index,
-                            outcome,
-                        });
+                        let _ = tx
+                            .send(AppMsg::LoadResult {
+                                run_generation,
+                                index,
+                                outcome,
+                            })
+                            .await;
                     }
                 })
                 .buffer_unordered(concurrency)
@@ -5190,7 +5264,7 @@ impl App {
                 match persistence::create_endpoint(&dir, &text) {
                     Ok(path) => {
                         self.reload_explorer()?;
-                        self.message = Some(Message::new(format!("created {text}")));
+                        self.message = Some(Message::new(created_message(&text, &path)));
                         // File target — no cross-endpoint confirm in the
                         // multi-buffer model.
                         self.guarded_load(PendingLoad::File(path))?;
@@ -5203,9 +5277,9 @@ impl App {
                     return Ok(());
                 };
                 match persistence::create_collection(&root, &text) {
-                    Ok(_) => {
+                    Ok(dir) => {
                         self.reload_explorer()?;
-                        self.message = Some(Message::new(format!("created {text}")));
+                        self.message = Some(Message::new(created_message(&text, &dir)));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -5268,13 +5342,16 @@ impl App {
                             // Move the cursor onto the renamed row without
                             // touching the request pane.
                             self.explorer.select_file(&new_path)?;
+                            self.message =
+                                Some(Message::new(renamed_message(&new_name, &new_path)));
                         } else {
                             self.reload_explorer()?;
+                            self.message =
+                                Some(Message::new(renamed_message(&new_name, &new_path)));
                             // Guarded: selecting the renamed endpoint must not
                             // silently discard dirty edits on the loaded one.
                             self.guarded_load(PendingLoad::File(new_path))?;
                         }
-                        self.message = Some(Message::new(format!("renamed to {new_name}")));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -5296,7 +5373,7 @@ impl App {
                             }
                         }
                         self.reload_explorer()?;
-                        self.message = Some(Message::new(format!("renamed to {new_name}")));
+                        self.message = Some(Message::new(renamed_message(&new_name, &new_dir)));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -11192,6 +11269,69 @@ mod tests {
             "A edited",
             "A's edit survived the round-trip"
         );
+    }
+
+    /// R1 D4c: switching away from a buffer evicts its highlight cache, so total
+    /// cached-line memory is bounded by (active buffers × 64), not all buffers.
+    /// The buffer you land ON is untouched; a same-index focus never evicts.
+    #[test]
+    fn buffer_switch_evicts_inactive_highlight_cache() {
+        let mut app = App::new(None, KeyMap::default()).unwrap();
+        app.open_or_focus_buffer(selected_with("a.toml", None)); // active = 0
+        app.open_or_focus_buffer(selected_with("b.toml", None)); // active = 1
+
+        // Seed a cache entry in BOTH buffers.
+        for i in [0usize, 1] {
+            let b = app.buffers[i].as_endpoint_mut().unwrap();
+            b.highlight_cache.insert(i as u64, vec![Line::from("x")]);
+            b.pending_highlight = Some(i as u64);
+        }
+        assert_eq!(app.active, 1);
+
+        // Cycle to buffer 0: buffer 1 (the one we left) must be evicted; buffer 0
+        // (the one we land on) keeps its cache.
+        app.buffer_cycle(false); // 1 -> 0
+        assert_eq!(app.active, 0);
+        assert!(
+            app.buffers[1]
+                .as_endpoint()
+                .unwrap()
+                .highlight_cache
+                .is_empty(),
+            "left buffer's cache evicted"
+        );
+        assert!(
+            app.buffers[1]
+                .as_endpoint()
+                .unwrap()
+                .pending_highlight
+                .is_none()
+        );
+        assert_eq!(
+            app.buffers[0].as_endpoint().unwrap().highlight_cache.len(),
+            1,
+            "landed buffer keeps its cache"
+        );
+
+        // Re-focusing the SAME buffer is a no-op — its cache is not wiped.
+        app.set_active_buffer(0);
+        assert_eq!(
+            app.buffers[0].as_endpoint().unwrap().highlight_cache.len(),
+            1,
+            "same-index focus does not evict"
+        );
+
+        // At most one buffer (the active one) ever holds a cache after switches,
+        // so the total is bounded by active-buffers, not all-buffers.
+        let with_cache = app
+            .buffers
+            .iter()
+            .filter(|b| {
+                b.as_endpoint()
+                    .is_some_and(|e| !e.highlight_cache.is_empty())
+            })
+            .count();
+        assert_eq!(with_cache, 1, "only the active buffer retains a cache");
     }
 
     /// `buffer_cycle` wraps forward/backward and no-ops on an empty list.
