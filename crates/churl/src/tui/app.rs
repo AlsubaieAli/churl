@@ -3083,6 +3083,20 @@ impl App {
                     self.enqueue_clipboard(&value, "copied revealed value");
                 }
             }
+            EnvKeyOutcome::CopyValue => {
+                // Copy a plainly-visible (non-masked) row's value directly — the D2
+                // regression fix (note #3): a visible value needs no peek to copy.
+                // Same clipboard seam as every other copy; the value is taken raw,
+                // exactly as the row renders it (no template resolution).
+                let value = self
+                    .env_editor
+                    .as_ref()
+                    .and_then(|e| e.selected_row_value())
+                    .map(str::to_owned);
+                if let Some(value) = value {
+                    self.enqueue_clipboard(&value, "copied value");
+                }
+            }
         }
         Ok(())
     }

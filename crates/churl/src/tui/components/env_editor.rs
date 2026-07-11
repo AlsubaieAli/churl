@@ -143,6 +143,12 @@ pub enum EnvKeyOutcome {
     /// through the existing clipboard path. A no-op for the app when nothing is
     /// revealed (the editor only emits this while a reveal is live).
     CopyRevealed,
+    /// Copy the selected NON-masked row's value directly (`y` on a plainly-visible
+    /// row — drive-test D2 note #3). No peek is needed for a value that is already
+    /// on screen: masked/secret rows keep the reveal-first gate ([`CopyRevealed`]),
+    /// visible rows copy outright. The app reads [`EnvEditorState::selected_row_value`]
+    /// and routes it through the same clipboard path.
+    CopyValue,
 }
 
 /// Default lifetime of an ephemeral secret peek, in seconds — deliberately short
@@ -344,6 +350,17 @@ impl EnvEditorState {
             .as_ref()
             .filter(|r| r.scope == self.selected_scope && r.row == self.selected_row)
             .map(|r| r.value.as_str())
+    }
+
+    /// The raw value of the selected row, verbatim as it renders on a NON-masked
+    /// row. Used by the app for the direct `y` copy of a plainly-visible value
+    /// (drive-test D2 note #3) — it never resolves templates, so what copies is
+    /// exactly what the row shows. `None` when there is no selected row.
+    pub fn selected_row_value(&self) -> Option<&str> {
+        self.scope()
+            .vars
+            .get(self.selected_row)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Clears the active peek immediately (re-masks). Idempotent. Dropping the
@@ -577,14 +594,23 @@ impl EnvEditorState {
                     EnvKeyOutcome::Consumed
                 }
             }
-            // Copy the revealed value (the "allow copy" the owner asked for). Only
-            // while a peek is live on the selected row; otherwise a no-op hint so
-            // `y` never silently copies a masked/absent value.
+            // Copy the selected value (drive-test D2 note #3). A masked/secret row
+            // keeps the never-expose-secrets stance: it must be peeked first, so `y`
+            // only copies while a reveal is live (else a "press p" hint). A plainly
+            // VISIBLE row has nothing to hide — `y` copies its value outright, no
+            // peek needed (the D2 regression: a non-masked value was uncopyable).
             KeyCode::Char('y') => {
-                if self.selected_row_is_revealed() {
-                    EnvKeyOutcome::CopyRevealed
+                if self.row_is_masked(self.selected_row) {
+                    if self.selected_row_is_revealed() {
+                        EnvKeyOutcome::CopyRevealed
+                    } else {
+                        self.message = Some("nothing revealed — press p to peek first".to_owned());
+                        EnvKeyOutcome::Consumed
+                    }
+                } else if self.selected_row_value().is_some_and(|v| !v.is_empty()) {
+                    EnvKeyOutcome::CopyValue
                 } else {
-                    self.message = Some("nothing revealed — press p to peek first".to_owned());
+                    self.message = Some("nothing to copy — this value is empty".to_owned());
                     EnvKeyOutcome::Consumed
                 }
             }
@@ -2293,11 +2319,38 @@ mod tests {
     }
 
     #[test]
-    fn y_without_reveal_is_a_no_op_hint() {
+    fn y_on_masked_row_without_reveal_is_a_no_op_hint() {
+        // A masked/secret row keeps the never-expose-secrets gate: `y` refuses
+        // until an explicit peek reveals it, hinting `p`.
         let mut s = fixture_with_session();
         on_session_row(&mut s);
         assert_eq!(s.handle_key(ch('y')), EnvKeyOutcome::Consumed);
         assert!(s.message.as_deref().unwrap().contains("nothing revealed"));
+    }
+
+    #[test]
+    fn y_on_visible_row_copies_value_directly() {
+        // D2 regression fix (note #3): a plainly-visible (non-masked) value copies
+        // outright with `y` — no peek needed. The app reads it back verbatim.
+        let mut s = fixture(); // workspace base_url is not a secret
+        s.focus = EnvFocus::VarRows;
+        s.selected_row = 0;
+        assert_eq!(s.handle_key(ch('y')), EnvKeyOutcome::CopyValue);
+        assert_eq!(s.selected_row_value(), Some("https://api.example.com"));
+        // No peek was involved and none is created.
+        assert!(s.revealed_value().is_none());
+    }
+
+    #[test]
+    fn y_on_empty_visible_row_is_a_no_op_hint() {
+        // Nothing to copy when the visible value is empty — a hint, not a silent
+        // no-op (drive-test: `y` must never quietly do nothing).
+        let mut s = fixture();
+        s.scopes[0].vars.push(("blank".into(), String::new()));
+        s.focus = EnvFocus::VarRows;
+        s.selected_row = s.scopes[0].vars.len() - 1;
+        assert_eq!(s.handle_key(ch('y')), EnvKeyOutcome::Consumed);
+        assert!(s.message.as_deref().unwrap().contains("empty"));
     }
 
     #[test]
