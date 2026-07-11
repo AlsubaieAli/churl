@@ -1,0 +1,197 @@
+use super::*;
+
+/// Gate on [`crate::config::auth_secret_violations`] shared by every
+/// churl-initiated endpoint serialization.
+fn check_auth_secrets(ep: &Endpoint) -> Result<(), PersistenceError> {
+    let violations = auth_secret_violations(ep);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(PersistenceError::SecretsInAuth { names: violations })
+    }
+}
+
+/// Loads an [`Endpoint`] from a single endpoint TOML file.
+pub fn load_endpoint(path: &Path) -> Result<Endpoint, PersistenceError> {
+    load_value(path)
+}
+
+/// Saves an [`Endpoint`] to `path`, preserving comments and formatting of an
+/// existing file (see [module docs](self)).
+///
+/// Refuses with [`PersistenceError::SecretsInAuth`] when the endpoint's auth
+/// carries literal secret values instead of `{{var}}` placeholders.
+pub fn save_endpoint(path: &Path, ep: &Endpoint) -> Result<(), PersistenceError> {
+    check_auth_secrets(ep)?;
+    save_value(path, ep)
+}
+
+/// Serializes an [`Endpoint`] to its on-disk TOML shape (identical to a fresh
+/// [`save_endpoint`]) without touching the filesystem — used by `churl import`
+/// to print to stdout.
+///
+/// Refuses with [`PersistenceError::SecretsInAuth`] exactly like
+/// [`save_endpoint`]: a redirected stdout is a workspace file too.
+pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, PersistenceError> {
+    check_auth_secrets(ep)?;
+    let mut doc =
+        toml_edit::ser::to_document(ep).map_err(|source| PersistenceError::Serialize {
+            path: PathBuf::from("<stdout>"),
+            source,
+        })?;
+    normalize_table(doc.as_table_mut());
+    Ok(doc.to_string())
+}
+
+/// The next `seq` for a new endpoint in `dir`: one past the maximum existing
+/// endpoint `seq` (plain +1 — the corpus uses no fixed step), or `0` when the
+/// collection is empty. Unreadable/malformed files are ignored here (an empty
+/// collection and a broken one both start at `0`; broken files surface on load).
+fn next_seq(dir: &Path) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut max: Option<u32> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|e| e.to_str()) != Some("toml")
+            || path.file_name().and_then(|n| n.to_str()) == Some(FOLDER_FILENAME)
+        {
+            continue;
+        }
+        if let Ok(ep) = load_endpoint(&path) {
+            max = Some(max.map_or(ep.seq, |m| m.max(ep.seq)));
+        }
+    }
+    max.map_or(0, |m| m + 1)
+}
+
+/// Creates a new endpoint file in the collection directory `dir` with a default
+/// GET request and an empty URL. The filename is a slug of `name`
+/// (collision-suffixed); `seq` is auto-assigned to one past the collection's
+/// current maximum (see [`next_seq`]). Returns the created file's path.
+///
+/// An empty name is [`PersistenceError::EmptyName`]. The default endpoint carries
+/// no auth, so the secrets gate is never hit here.
+pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
+    if name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let path = unique_endpoint_path(dir, &slugify(name));
+    let endpoint = Endpoint {
+        seq: next_seq(dir),
+        name: name.trim().to_owned(),
+        request: Request {
+            method: Method::Get,
+            url: String::new(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+        },
+    };
+    save_endpoint(&path, &endpoint)?;
+    Ok(path)
+}
+
+/// Renames the endpoint at `path`: updates its `name` (via the format-preserving
+/// merge save) *and* renames the file to a fresh slug of `new_name` in the same
+/// directory. Both changes happen or neither — the file is written under the old
+/// path first, then moved, so a secrets refusal aborts before any move. Returns
+/// the new file path.
+///
+/// An empty `new_name` is [`PersistenceError::EmptyName`]; a slug collision with a
+/// different existing file is [`PersistenceError::AlreadyExists`].
+pub fn rename_endpoint(path: &Path, new_name: &str) -> Result<PathBuf, PersistenceError> {
+    if new_name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let mut endpoint = load_endpoint(path)?;
+    endpoint.name = new_name.trim().to_owned();
+    // Write the name change first (this also runs the secrets gate).
+    save_endpoint(path, &endpoint)?;
+
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let slug = slugify(new_name);
+    // An unchanged, non-reserved slug keeps the file where it is — its own path
+    // must not count as a collision. A reserved slug always falls through to
+    // `unique_endpoint_path` so it disambiguates even if the file already sat on
+    // a reserved stem.
+    if !is_reserved_file_slug(&slug) && dir.join(format!("{slug}.toml")) == path {
+        return Ok(path.to_owned());
+    }
+    let new_path = unique_endpoint_path(dir, &slug);
+    std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
+        path: new_path.clone(),
+        source,
+    })?;
+    Ok(new_path)
+}
+
+/// Deletes the endpoint file at `path`.
+pub fn delete_endpoint(path: &Path) -> Result<(), PersistenceError> {
+    std::fs::remove_file(path).map_err(|source| PersistenceError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Creates a new collection directory named `name` (slugified) under `root`. No
+/// `folder.toml` is written — that stays lazy until the collection gains vars
+/// (matching [`load_collection_meta`]'s missing-is-empty behaviour). Returns the
+/// created directory path.
+///
+/// A slug equal to a reserved directory name (see [`RESERVED_DIR_NAMES`], i.e.
+/// `sequences`) is disambiguated with a `-2`/`-3` suffix so it never overshadows
+/// churl's own directories — the display name (the on-disk dir name) is what
+/// callers surface.
+///
+/// An empty name is [`PersistenceError::EmptyName`]; an already-existing target
+/// directory is [`PersistenceError::AlreadyExists`] (import reuse relies on this).
+pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
+    if name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let dir = collection_dir_name(root, &slugify(name));
+    if dir.exists() {
+        return Err(PersistenceError::AlreadyExists { path: dir });
+    }
+    std::fs::create_dir(&dir).map_err(|source| PersistenceError::Write {
+        path: dir.clone(),
+        source,
+    })?;
+    Ok(dir)
+}
+
+/// Renames the collection directory `dir` to a fresh slug of `new_name` in the
+/// same parent. Returns the new directory path.
+///
+/// An empty name is [`PersistenceError::EmptyName`]; an existing target directory
+/// is [`PersistenceError::AlreadyExists`].
+pub fn rename_collection(dir: &Path, new_name: &str) -> Result<PathBuf, PersistenceError> {
+    if new_name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let parent = dir.parent().unwrap_or(Path::new("."));
+    let new_dir = collection_dir_name(parent, &slugify(new_name));
+    if new_dir == dir {
+        return Ok(new_dir);
+    }
+    if new_dir.exists() {
+        return Err(PersistenceError::AlreadyExists { path: new_dir });
+    }
+    std::fs::rename(dir, &new_dir).map_err(|source| PersistenceError::Write {
+        path: new_dir.clone(),
+        source,
+    })?;
+    Ok(new_dir)
+}
+
+/// Deletes the collection directory `dir` and everything inside it.
+pub fn delete_collection(dir: &Path) -> Result<(), PersistenceError> {
+    std::fs::remove_dir_all(dir).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })
+}
