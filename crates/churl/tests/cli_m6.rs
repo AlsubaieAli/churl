@@ -11,21 +11,31 @@ fn churl_in(dir: &std::path::Path, args: &[&str]) -> Output {
         .expect("failed to spawn churl")
 }
 
-/// Writes `config.toml` to every location `dirs::config_dir()` might resolve to
-/// under `home`, and returns the env vars (`HOME`, `XDG_CONFIG_HOME`) that pin the
-/// config discovery there — portable across Linux (XDG) and macOS (Library).
+/// Decodes captured stdout and normalizes line endings to `\n` so `\nLeader\n`
+/// anchors and substring matches hold on Windows, where a `\r\n` could otherwise
+/// slip in. `str::lines()` already tolerates `\r\n`, but raw `find`/slice on the
+/// whole string does not — this makes every assertion OS-robust.
+fn stdout_lf(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone())
+        .expect("stdout is utf-8")
+        .replace("\r\n", "\n")
+}
+
+/// Writes `contents` to a config file under `home` and returns the env
+/// (`CHURL_CONFIG`) that pins config discovery to exactly that file. This is the
+/// only portable way to redirect config on all three OSes: `dirs::config_dir()`
+/// reads `%APPDATA%` from the process token on Windows and ignores `HOME`/
+/// `XDG_CONFIG_HOME`, so the older "plant into every candidate dir + set
+/// HOME/XDG" approach never reached the config the binary actually loads on
+/// Windows (the bad-config-must-error test then wrongly passed, since no config
+/// was loaded at all).
 fn planted_config(
     home: &std::path::Path,
     contents: &str,
 ) -> Vec<(&'static str, std::path::PathBuf)> {
-    let xdg = home.join(".config");
-    let mac = home.join("Library").join("Application Support");
-    for base in [&xdg, &mac] {
-        let dir = base.join("churl");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.toml"), contents).unwrap();
-    }
-    vec![("HOME", home.to_path_buf()), ("XDG_CONFIG_HOME", xdg)]
+    let path = home.join("config.toml");
+    std::fs::write(&path, contents).unwrap();
+    vec![("CHURL_CONFIG", path)]
 }
 
 #[test]
@@ -45,7 +55,7 @@ fn keymaps_prints_default_map() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_lf(&output);
     // Every line for a default binding is marked (default); sorted by action name.
     assert!(stdout.contains("quit"), "{stdout}");
     assert!(stdout.contains("(default)"), "{stdout}");
@@ -73,7 +83,7 @@ fn keymaps_marks_overridden_bindings() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_lf(&output);
     // open-palette now has an extra binding → marked overridden.
     let palette_line = stdout
         .lines()
@@ -98,7 +108,7 @@ fn keymaps_prints_leader_section() {
     }
     let output = cmd.output().expect("spawn churl");
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_lf(&output);
     // A "Leader" header appears, with toggle-explorer bound to `e`.
     let leader_idx = stdout
         .find("\nLeader\n")
@@ -126,7 +136,7 @@ fn keymaps_marks_overridden_leader_binding() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_lf(&output);
     let leader_idx = stdout.find("\nLeader\n").expect("Leader section");
     let after = &stdout[leader_idx..];
     // `save` now has a leader binding → the leader `save` line is overridden.
@@ -167,7 +177,7 @@ fn keymaps_applies_leader_submenu_remap() {
         "config with leader submenu tables must load; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_lf(&output);
     let leader_idx = stdout.find("\nLeader\n").expect("Leader section");
     let after = &stdout[leader_idx..];
     // run-sequence is reachable only through the sequences submenu; the remap
