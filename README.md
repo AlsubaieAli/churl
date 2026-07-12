@@ -87,18 +87,54 @@ cargo install --git https://github.com/AlsubaieAli/churl churl
 
 ### Updating
 
-Updating uses the same command as installing — check what you're running
-with `churl --version`:
+The simplest way to update a binary install is the built-in self-updater:
+
+```sh
+churl update          # check the latest release, confirm, verify, and self-replace
+churl update --check  # just report whether a newer version is available
+churl update -y       # skip the confirmation prompt
+```
+
+`churl update` queries the latest GitHub release, and if you're already on it
+does nothing. Otherwise it downloads the asset for your platform, **verifies its
+SHA-256**, backs the current binary up to `churl.bak` beside itself, and
+atomically replaces the running binary — so a failed update always leaves a
+working churl in place.
+
+For installs managed by another tool, use its own update path (check what you're
+running with `churl --version`):
 
 | Installed via | Update with |
 |---|---|
-| curl \| sh | Re-run the installer with `--force` (always resolves the latest stable) |
-| Prebuilt binary | Download the newer archive and replace the binary |
+| curl \| sh | `churl update`, or re-run the installer with `--force` |
+| Prebuilt binary | `churl update`, or download the newer archive and replace the binary |
 | `cargo install churl` | `cargo install churl` — cargo rebuilds when a newer version is published |
 | git | `cargo install --git … churl --force` (`--force` reinstalls even if the version number hasn't changed) |
 
-There's no self-update command yet (`churl update` is a roadmap candidate),
-and no package-manager distribution (Homebrew/AUR) so far.
+No package-manager distribution (Homebrew/AUR) so far.
+
+### Uninstalling
+
+```sh
+churl uninstall           # removes the binary; prints the config + state paths left behind
+churl uninstall --purge   # also deletes churl's config dir and state.sqlite (asks first; -y to skip)
+```
+
+Uninstall never touches your workspace files (`churl.toml`, collections,
+`sequences/`) — only the churl binary and, with `--purge`, churl's own config and
+local state database.
+
+### Pinning a churl version per workspace
+
+Drop a `.churl-version` file at a workspace root naming a single version:
+
+```sh
+echo 0.2.0 > .churl-version
+```
+
+When you launch churl in that workspace with a **different** version, it prints a
+one-line warning and runs anyway — it never blocks you or switches versions (it's
+an advisory hint, nvmrc-style). Delete the file to remove the pin.
 
 ### Beta releases
 

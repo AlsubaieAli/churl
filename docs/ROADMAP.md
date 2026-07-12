@@ -20,6 +20,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 - Response viewer polish — JSON pretty-printing, fold/wrap, in-viewer search, line-number gutter, control-char/ANSI sanitizing.
 - Navigation & keymap unification — a 4-region Tab model, jump-to-pane, and a fully data-driven remappable keymap with load-time conflict warnings.
 - Durability hardening — atomic saves, SQLite WAL + migration locking, comment-preserving TOML merges, reserved-name guards, and bounded memory/disk growth.
+- Cross-platform proof — macOS + Windows CI matrix, `cargo-deny`, `install.ps1`, native Wayland clipboard.
 
 **0.1.x** — first public release and the automated release train.
 - The core TUI: three-pane layout, vim-style navigation, request execution, virtualized response rendering, and history.
@@ -30,12 +31,10 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 ## In progress 🚧
 
-- **Hygiene & docs-restructure** (refactor + docs).
+- **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
 
 ## Planned ⏳
 
-- **Cross-platform proof** — macOS + Windows CI matrix, `cargo-deny`, `install.ps1`, Wayland clipboard. (R)
-- **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
 - **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, cross-origin redirect policy. (R)
 - **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence. (F)
 - **Cookies + proxy** — cookie-jar persistence and HTTP(S) proxy support. (F)

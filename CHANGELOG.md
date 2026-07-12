@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `churl update` — verified, reversible in-place self-update from the latest GitHub release
+- `churl uninstall` — remove the binary, with `--purge` to also delete churl's config and local state
+- optional `.churl-version` workspace pin — warns when the running binary differs, never blocks
+
 ## [0.2.0](https://github.com/AlsubaieAli/churl/compare/v0.1.3...v0.2.0) - 2026-07-11
 
 ### Added
