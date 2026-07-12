@@ -7,10 +7,17 @@
 //! files (`churl.toml`, collections, `sequences/`) — those are the user's data,
 //! not churl's.
 //!
-//! The path-selection logic is a pure function ([`removal_plan`]) so it is
-//! unit-tested against tempdir-scoped config/state paths, asserting workspace
-//! files are never selected. The TTY prompt is not part of that function.
+//! The path-selection logic is pure ([`config_removal_target`] + [`removal_plan`])
+//! so it is unit-tested against tempdir-scoped config/state paths, asserting
+//! workspace files are never selected. The TTY prompt is not part of it.
+//!
+//! Safety invariant on `--purge`: only a *churl-owned* config directory (the one
+//! platform discovery yields, `<config_dir>/churl/`) is ever removed recursively.
+//! A `CHURL_CONFIG` override names a *user-owned file* that may live inside a
+//! workspace — its parent is off-limits, so the override removes only the file it
+//! names. See [`config_removal_target`].
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
@@ -29,18 +36,18 @@ pub struct RemovalPlan {
 }
 
 /// Computes which paths an uninstall removes, given the running executable, the
-/// churl config directory, the state-db path, and whether `--purge` was passed.
-/// `config_dir`/`state_db` are `Option` because platform discovery can fail;
-/// a `None` is simply omitted (never guessed).
+/// resolved config removal target (from [`config_removal_target`]), the state-db
+/// path, and whether `--purge` was passed. `config_target`/`state_db` are
+/// `Option` because discovery can fail; a `None` is simply omitted (never guessed).
 ///
 /// Guarantees, asserted by tests:
 /// - the binary is always in `remove`;
-/// - config dir + state db move to `remove` **only** under `purge`, else `kept`;
-/// - nothing outside these churl-owned paths is ever selected (workspace files
-///   are never passed in, so they can never appear).
+/// - config target + state db move to `remove` **only** under `purge`, else `kept`;
+/// - the config target is whatever [`config_removal_target`] resolved — a
+///   churl-owned dir (platform) or the exact override file, never a workspace dir.
 pub fn removal_plan(
     exe: &Path,
-    config_dir: Option<&Path>,
+    config_target: Option<&Path>,
     state_db: Option<&Path>,
     purge: bool,
 ) -> RemovalPlan {
@@ -48,7 +55,7 @@ pub fn removal_plan(
         remove: vec![exe.to_owned()],
         kept: Vec::new(),
     };
-    for path in [config_dir, state_db].into_iter().flatten() {
+    for path in [config_target, state_db].into_iter().flatten() {
         if purge {
             plan.remove.push(path.to_owned());
         } else {
@@ -58,17 +65,34 @@ pub fn removal_plan(
     plan
 }
 
-/// The churl config *directory* (parent of the config file), honouring the
-/// `CHURL_CONFIG` override exactly as [`churl_core::config::load_global_config`]
-/// does. `None` when neither the override nor platform discovery yields a path.
-fn config_dir() -> Option<PathBuf> {
-    if let Some(path) =
-        std::env::var_os(churl_core::config::CONFIG_PATH_ENV).filter(|v| !v.is_empty())
-    {
-        // The override names the config *file*; its parent is the dir churl owns.
-        return Path::new(&path).parent().map(Path::to_owned);
+/// Resolves the single config path `--purge` may remove, given the raw
+/// `CHURL_CONFIG` override value (`None`/empty ⇒ unset). Split from process-env
+/// reading so the derivation itself is unit-testable.
+///
+/// **Safety-critical distinction** (the P0 this guards):
+/// - **No override** → platform discovery yields `<config_dir>/churl/config.toml`;
+///   its parent `<config_dir>/churl/` is a directory churl *owns*, so that
+///   directory is returned and removed recursively.
+/// - **Override set** → `CHURL_CONFIG` names a *user-supplied file* that may live
+///   inside a workspace (per the config override contract). Its parent is
+///   off-limits — we return the **file itself**, never its directory, so
+///   `--purge` can never `remove_dir_all` a user's project directory.
+///
+/// `remove_path` then does the right recursive-vs-file removal by inspecting the
+/// path's own type at delete time.
+fn config_removal_target(override_value: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(path) = override_value.filter(|v| !v.is_empty()) {
+        // User-owned file: remove exactly it, never its (possibly workspace) dir.
+        return Some(PathBuf::from(path));
     }
+    // churl-owned directory: `<config_dir>/churl/` (parent of the config file).
     churl_core::config::global_config_path().and_then(|p| p.parent().map(Path::to_owned))
+}
+
+/// The process-env-backed config removal target (reads `CHURL_CONFIG`).
+fn config_target() -> Option<PathBuf> {
+    let value = std::env::var_os(churl_core::config::CONFIG_PATH_ENV);
+    config_removal_target(value.as_deref())
 }
 
 /// `churl uninstall`: remove the binary (default) and, under `--purge` + a
@@ -78,7 +102,12 @@ fn config_dir() -> Option<PathBuf> {
 /// - `yes`: skip the confirmation prompt.
 pub fn run_uninstall(purge: bool, yes: bool) -> Result<()> {
     let exe = std::env::current_exe().wrap_err("cannot locate the running executable")?;
-    let plan = removal_plan(&exe, config_dir().as_deref(), state_db().as_deref(), purge);
+    let plan = removal_plan(
+        &exe,
+        config_target().as_deref(),
+        state_db().as_deref(),
+        purge,
+    );
 
     if purge {
         println!("The following will be permanently removed:");
@@ -190,26 +219,49 @@ mod tests {
     }
 
     #[test]
-    fn purge_never_selects_workspace_files() {
-        // Model a workspace alongside churl's own dirs; only churl-owned paths
-        // are ever passed to the plan, so workspace files can't be selected.
+    fn override_config_target_is_the_file_never_its_workspace_dir() {
+        // P0 regression: `CHURL_CONFIG` may point at a config file *inside* a
+        // user's workspace. `--purge` must remove that file only — never its
+        // parent workspace directory. Exercises the real derivation.
         let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("project");
+        std::fs::create_dir_all(workspace.join("users")).unwrap();
+        let workspace_config = workspace.join("churl.toml");
+        std::fs::write(&workspace_config, "").unwrap();
+
+        let target = config_removal_target(Some(workspace_config.as_os_str())).unwrap();
+        // The resolved target is the file itself, not the workspace directory.
+        assert_eq!(target, workspace_config);
+
         let exe = dir.path().join("churl");
-        let config = dir.path().join("config");
         let state = dir.path().join("state.sqlite");
-        let workspace_manifest = dir.path().join("workspace/churl.toml");
-        let collection = dir.path().join("workspace/users/list.toml");
-        let sequences = dir.path().join("workspace/sequences");
+        let plan = removal_plan(&exe, Some(&target), Some(&state), true);
 
-        let plan = removal_plan(&exe, Some(&config), Some(&state), true);
+        assert!(
+            plan.remove.contains(&workspace_config),
+            "the named config file should be removable"
+        );
+        assert!(
+            !plan.remove.contains(&workspace),
+            "the workspace directory must NEVER be in the removal set: {}",
+            workspace.display()
+        );
+        // And the actual delete of the target must not take the workspace with
+        // it: removing the file leaves the workspace and its siblings intact.
+        remove_path(&target).unwrap();
+        assert!(!workspace_config.exists());
+        assert!(workspace.join("users").exists(), "workspace dir destroyed");
+    }
 
-        for hazard in [&workspace_manifest, &collection, &sequences] {
-            assert!(
-                !plan.remove.contains(hazard),
-                "workspace file must never be removed: {}",
-                hazard.display()
-            );
+    #[test]
+    fn no_override_config_target_is_the_platform_churl_dir() {
+        // With no override, the target is the churl-owned `<config_dir>/churl`
+        // directory (parent of the config file) — safe to remove recursively.
+        let target = config_removal_target(None);
+        if let Some(target) = target {
+            assert_eq!(target.file_name().and_then(|n| n.to_str()), Some("churl"));
         }
+        // (On a platform where discovery yields None, there's nothing to assert.)
     }
 
     #[test]
