@@ -294,9 +294,20 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-/// Loads the global config from [`global_config_path`]. Yields [`Config::default`]
-/// when the platform config directory is unknown or the file is missing.
+/// The environment variable that pins the global config file to an explicit
+/// path, overriding platform discovery. Deterministic on every OS — unlike
+/// `dirs::config_dir()`, which reads `%APPDATA%` from the process token on
+/// Windows (ignoring `HOME`/`XDG_CONFIG_HOME`), so it is the only portable way
+/// for tests/CI to point churl at a config they control on all three platforms.
+pub const CONFIG_PATH_ENV: &str = "CHURL_CONFIG";
+
+/// Loads the global config. Discovery order: an explicit [`CONFIG_PATH_ENV`]
+/// override wins; otherwise the platform path from [`global_config_path`].
+/// Yields [`Config::default`] when neither is set or the file is missing.
 pub fn load_global_config() -> Result<Config, ConfigError> {
+    if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).filter(|v| !v.is_empty()) {
+        return load_config(Path::new(&path));
+    }
     match global_config_path() {
         Some(path) => load_config(&path),
         None => Ok(Config::default()),

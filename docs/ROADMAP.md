@@ -34,7 +34,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 ## Planned ⏳
 
-- **Cross-platform proof** — macOS + Windows CI matrix, MSRV pin, `cargo-deny`, `install.ps1`, Wayland clipboard. (R)
+- **Cross-platform proof** — macOS + Windows CI matrix, `cargo-deny`, `install.ps1`, Wayland clipboard. (R)
 - **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
 - **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, cross-origin redirect policy. (R)
 - **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence. (F)

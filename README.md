@@ -32,6 +32,28 @@ curl -fsSL https://github.com/AlsubaieAli/churl/releases/latest/download/install
 | `--force` | Overwrite an existing `churl` binary |
 | `--dry-run` | Print the resolved URL and target, download nothing |
 
+### PowerShell (Windows)
+
+```powershell
+irm https://github.com/AlsubaieAli/churl/releases/latest/download/install.ps1 | iex
+```
+
+The script downloads the Windows binary, verifies its SHA-256 checksum, and
+installs to `%LOCALAPPDATA%\Programs\churl`. To pass options, download and run
+it directly:
+
+```powershell
+irm https://github.com/AlsubaieAli/churl/releases/latest/download/install.ps1 -OutFile install.ps1
+pwsh install.ps1 -To C:\Tools\churl -Force
+```
+
+| Option | Effect |
+|---|---|
+| `-To DIR` | Install to `DIR` instead of `%LOCALAPPDATA%\Programs\churl` |
+| `-Tag TAG` | Install a specific release, including betas (e.g. `-Tag v0.2.0-beta.1`) |
+| `-Force` | Overwrite an existing `churl` binary |
+| `-DryRun` | Print the resolved URL and target, download nothing |
+
 ### Prebuilt binaries
 
 Download the archive for your platform from the

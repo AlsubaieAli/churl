@@ -1,0 +1,74 @@
+# cargo-deny configuration — supply-chain gate run in CI.
+# Covers advisories, licenses, bans, and sources. Advisories here subsume the
+# standalone `cargo audit` job (see docs/DECISIONS.md).
+
+[graph]
+# Check every target the release matrix builds for, so a Windows- or
+# Linux-only dependency's license/advisory is not silently skipped.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# RustSec advisory DB. Vulnerabilities and yanked crates hard-fail (the
+# security-relevant part). `unmaintained` only warns — matching the cargo-audit
+# job this replaces, which never failed on merely-unmaintained crates — because
+# our two hits (bincode 1.3.3, yaml-rust 0.4.5) are transitive under `syntect`
+# with no safe upgrade available; hard-failing would block every build on a
+# dependency we can't fix here. A real vulnerability still fails the job.
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+# Scoped ignores — each is a specific advisory judged unreachable in *our* usage,
+# not a blanket suppression. Drop an entry the moment its upstream fix lands.
+ignore = [
+    # quick-xml 0.39.4 DoS via malicious XML (quadratic attr scan / unbounded
+    # namespace alloc). Reached ONLY through wayland-scanner, a build-time
+    # proc-macro that parses the trusted, vendored Wayland protocol XML shipped
+    # inside the wayland-rs crates — never attacker-controlled runtime input, so
+    # the DoS is unreachable. wayland-scanner 0.31 pins quick-xml "0.39"
+    # (can't take the fixed >=0.41), so the fix must come from a wayland-scanner
+    # release; revisit when one ships and remove these two lines.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
+
+[licenses]
+version = 2
+# Explicit allow-list — every license the resolved tree actually carries, not a
+# blanket allow. churl itself is `MIT OR Apache-2.0`. Update this list (not a
+# wildcard) when a new dependency introduces a new license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    # Boost Software License — permissive, OSI-approved. From clipboard-win and
+    # error-code (arboard's Windows clipboard backend).
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Fail on a security-relevant or license-ambiguous crate landing in the tree.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Only crates.io. A git or alternate-registry dependency must be added here
+# explicitly, so a supply-chain source swap can't slip in unreviewed.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

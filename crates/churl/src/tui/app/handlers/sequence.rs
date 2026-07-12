@@ -688,7 +688,7 @@ impl App {
             .filter_map(|path| {
                 path.strip_prefix(&root)
                     .ok()
-                    .map(|rel| rel.to_string_lossy().into_owned())
+                    .map(crate::tui::app::rel_to_logical)
             })
             .collect()
     }

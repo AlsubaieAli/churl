@@ -14,7 +14,7 @@ use churl_core::model::{
 use churl_core::persistence::{
     OpenWorkspace, load_sequence, save_endpoint, save_sequence, save_workspace_manifest,
 };
-use churl_core::sequence::{RunScopes, StepResult, prepare_step, run_sequence};
+use churl_core::sequence::{RunScopes, SequenceError, StepResult, prepare_step, run_sequence};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request as WmRequest, ResponseTemplate};
 
@@ -398,6 +398,88 @@ fn prepare_step_rejects_traversal() {
     let escaping = step("../escape.toml", &[]);
     let err = prepare_step(root, &escaping, &BTreeMap::new(), &RunScopes::default());
     assert!(err.is_err(), "traversal endpoint must be rejected");
+}
+
+/// The traversal guard must reject every escaping shape on *every* platform,
+/// and let benign relative paths through. Endpoint strings use `/`, which the
+/// guard treats as a separator on all platforms (a step file is authored once
+/// and must resolve identically on Windows and Unix). The guard rejects a
+/// leading `..` or `.`-embedded `..`, an absolute POSIX path, and a `~` is just
+/// a normal segment (no shell expansion).
+#[test]
+fn prepare_step_rejects_traversal_shapes_cross_platform() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[]);
+    for bad in ["../escape.toml", "a/../../escape.toml", "/etc/passwd"] {
+        let err = prepare_step(
+            root,
+            &step(bad, &[]),
+            &BTreeMap::new(),
+            &RunScopes::default(),
+        );
+        assert!(err.is_err(), "escaping endpoint {bad:?} must be rejected");
+    }
+}
+
+/// A Windows drive-prefixed absolute path (`C:\...`) parses to a `Prefix`
+/// component on Windows and must be rejected there. On Unix the same string is
+/// a single odd-but-contained filename (no `Prefix`), so it is *not* a
+/// traversal — it simply resolves to a missing in-root file. Either way the
+/// call never escapes the root and never panics; we assert the platform-correct
+/// outcome so the guard's Windows behaviour is actually pinned by CI.
+#[test]
+fn prepare_step_drive_prefix_is_platform_correct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[]);
+    let err = prepare_step(
+        root,
+        &step("C:\\Windows\\System32\\churl.toml", &[]),
+        &BTreeMap::new(),
+        &RunScopes::default(),
+    )
+    .expect_err("must fail (never escape the root, never panic)");
+    if cfg!(windows) {
+        // The drive prefix parses to a `Prefix` component → rejected as traversal.
+        assert!(
+            matches!(err, SequenceError::Traversal { .. }),
+            "drive-prefixed path must be a Traversal rejection on Windows, got {err:?}"
+        );
+    } else {
+        // On Unix the whole string is one odd filename inside the root — not a
+        // traversal, just a missing endpoint (a distinct, non-panicking kind).
+        assert!(
+            matches!(err, SequenceError::Endpoint { .. }),
+            "on Unix this is a missing in-root file, not a traversal, got {err:?}"
+        );
+    }
+}
+
+/// A plain relative endpoint with a `./` prefix (a `CurDir` component) is
+/// benign: it must resolve like the bare path, not be flagged as traversal.
+/// This holds identically on both separators.
+#[test]
+fn prepare_step_allows_curdir_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[]);
+    write_endpoint(
+        root,
+        "c/echo.toml",
+        &get_endpoint("echo", "https://httpbin.test/get"),
+    );
+    // `./c/echo.toml` carries a leading CurDir component the guard must allow.
+    let prepared = prepare_step(
+        root,
+        &step("./c/echo.toml", &[]),
+        &BTreeMap::new(),
+        &RunScopes::default(),
+    );
+    assert!(
+        prepared.is_ok(),
+        "a ./ prefix is a CurDir component, not a traversal"
+    );
 }
 
 #[test]

@@ -240,8 +240,11 @@ impl App {
         }
         match std::fs::write(&target, contents) {
             Ok(()) => {
-                let shown = target.strip_prefix(&root).unwrap_or(&target);
-                self.notify(format!("exported to {}", shown.display()));
+                let shown = target
+                    .strip_prefix(&root)
+                    .map(crate::tui::app::rel_to_logical)
+                    .unwrap_or_else(|_| target.display().to_string());
+                self.notify(format!("exported to {shown}"));
             }
             Err(err) => self.notify(format!("export failed: {err}")),
         }
