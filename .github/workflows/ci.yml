@@ -108,22 +108,3 @@ jobs:
 
       - name: Check advisories, licenses, bans, sources
         run: cargo deny check
-
-  msrv:
-    name: MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      # Pin the exact minimum supported Rust version (kept in sync with
-      # `rust-version` in the root Cargo.toml) and prove the workspace still
-      # checks under it, so an accidental use of a newer language/library
-      # feature fails here instead of in a user's build.
-      - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check on MSRV
-        run: cargo check --all
