@@ -46,6 +46,10 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
     let url_edit = config.url_edit()?;
     let theme = Theme::resolve(config.theme.as_deref(), &config.theme_colors)?;
     let cwd = std::env::current_dir()?;
+    // Advisory version pin: warn (never refuse) if `.churl-version` at the
+    // workspace root names a version the running binary does not satisfy. To
+    // stderr before raw mode, so it is visible in the launching shell.
+    warn_on_version_mismatch(&cwd);
     let workspace = app::open_workspace(&cwd)?;
     let mut app = App::with_config(workspace, keymap, theme, cli_vars, profile)?;
     app.set_url_edit_mode(url_edit);
@@ -56,4 +60,26 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
     let result = app.run(&mut terminal).await;
     restore();
     result
+}
+
+/// Surfaces the advisory version pin at workspace load: if `.churl-version` at
+/// `workspace_root` names a version the running binary does not satisfy, print a
+/// warning to stderr and continue. Absent or matching ⇒ nothing. A malformed or
+/// unreadable pin degrades silently (an advisory hint must never block launch).
+/// The pure discovery/parse/compare live in [`churl_core::pin`].
+pub(crate) fn warn_on_version_mismatch(workspace_root: &std::path::Path) {
+    use churl_core::pin::{PinCheck, check_pin, discover_pin, read_pin};
+
+    let Some(path) = discover_pin(workspace_root) else {
+        return;
+    };
+    let Ok(Some(pinned)) = read_pin(&path) else {
+        return;
+    };
+    if let PinCheck::Mismatch { pinned, running } = check_pin(&pinned, env!("CARGO_PKG_VERSION")) {
+        eprintln!(
+            "churl: warning: workspace pins version {pinned}, but this is churl {running} \
+             (running anyway; see `.churl-version`)"
+        );
+    }
 }

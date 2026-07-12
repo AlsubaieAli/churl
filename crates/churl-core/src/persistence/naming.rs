@@ -20,9 +20,16 @@ use super::*;
 /// word is reserved (`churl-toml` is safe). The sequences *directory* is NOT
 /// here: a file named `sequences.toml` inside a collection is harmless (the
 /// reserved `sequences/` is a top-level directory — see [`RESERVED_DIR_NAMES`]).
+///
+/// `churl-version` is reserved because it is the slug of the `.churl-version`
+/// pin file ([`crate::pin::PIN_FILENAME`]): keeping it off the create/rename
+/// path stops an endpoint from being slugged into a name that reads as the
+/// version-pin marker.
 pub(super) const RESERVED_FILE_STEMS: &[&str] = &[
-    // Kept in sync with the filename constants via `reserved_stems_match_constants`.
-    "churl", "folder",
+    // Kept in sync with the filename/pin constants via `reserved_stems_match_constants`.
+    "churl",
+    "folder",
+    "churl-version",
 ];
 
 /// Directory names churl reserves at the workspace root. A collection directory
