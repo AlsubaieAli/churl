@@ -288,6 +288,19 @@ fn disambiguated_stem(typed: &str, path: &Path) -> Option<String> {
     }
 }
 
+/// Renders a workspace-relative path as a portable, OS-independent identifier:
+/// path components joined with `/` on every platform. These strings are
+/// persisted (e.g. a sequence step's `endpoint`), so a path produced on Windows
+/// must not embed `\` — otherwise the collection stops resolving when it moves
+/// to another OS. Windows accepts `/` on the read side, so normalizing only the
+/// written form is sufficient.
+pub(in crate::tui::app) fn rel_to_logical(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
 /// The confirmation message for a create, noting the actual on-disk name when it
 /// was disambiguated (e.g. an endpoint named `churl` written as `churl-2`).
 fn created_message(typed: &str, path: &Path) -> String {
@@ -1450,11 +1463,7 @@ impl App {
     /// open workspace.
     fn endpoint_rel_path(&self, selected: &SelectedEndpoint) -> Option<String> {
         let root = self.workspace.as_ref()?.root();
-        selected
-            .file
-            .strip_prefix(root)
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned())
+        selected.file.strip_prefix(root).ok().map(rel_to_logical)
     }
 
     // ---- Response viewer actions ----
