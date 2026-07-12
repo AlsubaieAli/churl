@@ -4,10 +4,12 @@
 //! **Strategy** (DECISIONS.md — reverses the original "OSC 52, no native dep"):
 //!
 //! 1. **Native first** — [`arboard`] talks to the real OS clipboard (macOS
-//!    NSPasteboard, Windows, Linux **X11**). This is the only path that reliably
-//!    reaches the system clipboard across terminals and multiplexers. Native
-//!    Wayland is NOT enabled here (arboard's `wayland-data-control` feature is
-//!    off), so a pure-Wayland session (no XWayland) uses the OSC 52 fallback.
+//!    NSPasteboard, Windows, Linux **Wayland and X11**). This is the only path
+//!    that reliably reaches the system clipboard across terminals and
+//!    multiplexers. With arboard's `wayland-data-control` feature on, a session
+//!    exposing `WAYLAND_DISPLAY` uses the native wl-data-control protocol and
+//!    only falls back to X11 if that fails — so a pure-Wayland session (no
+//!    XWayland) now copies natively instead of via OSC 52.
 //!    On Linux the X11 selection is owned by the running process and is cleared
 //!    when it exits; churl is a long-lived TUI, so a copy survives for the whole
 //!    session — acceptable, and we do not spawn a persistence daemon.
