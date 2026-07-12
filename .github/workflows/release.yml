@@ -24,8 +24,8 @@ jobs:
       # at an assetless release and curl|sh installs 404 in that window.
       # finalize-release flips stable tags to full releases once all
       # binaries are attached; -suffix tags (v0.2.0-beta.1) stay prerelease
-      # forever. install.sh is attached here so
-      # `releases/latest/download/install.sh` resolves.
+      # forever. install.sh and install.ps1 are attached here so
+      # `releases/latest/download/install.{sh,ps1}` resolve.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,7 +48,7 @@ jobs:
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" $prerelease \
               --title "$GITHUB_REF_NAME" "$@"
-          gh release upload "$GITHUB_REF_NAME" install.sh --clobber
+          gh release upload "$GITHUB_REF_NAME" install.sh install.ps1 --clobber
 
   build-release:
     name: Build ${{ matrix.target }}
@@ -98,19 +98,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
       # Exercise the real end-to-end path against the just-built release
       # assets: download archive + checksum, verify, install, run. Catches
-      # asset-naming drift between the release action and install.sh — e.g.
+      # asset-naming drift between the release action and the installer — e.g.
       # the churl-<t>.sha256 vs churl-<t>.tar.gz.sha256 mismatch that made
       # every install 404 on the checksum step through v0.1.2.
       - name: Install via install.sh from this release
+        if: runner.os != 'Windows'
         run: |
           sh install.sh --tag "$GITHUB_REF_NAME" --to "$HOME/.local/bin" --force
           "$HOME/.local/bin/churl" --version
+
+      # Windows runs the PowerShell installer end-to-end against the just-built
+      # zip asset, proving install.ps1's download/checksum/extract path and the
+      # release action's asset naming agree.
+      - name: Install via install.ps1 from this release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:USERPROFILE 'churl-bin'
+          pwsh install.ps1 -Tag $env:GITHUB_REF_NAME -To $dir -Force
+          & (Join-Path $dir 'churl.exe') --version
 
   finalize-release:
     name: Mark release stable
