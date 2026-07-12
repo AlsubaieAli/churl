@@ -29,10 +29,16 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum UpdateDecision {
     /// The running version is already the latest — no download.
     UpToDate,
-    /// A different version is available (newer or, unusually, older than the
-    /// running build). Carries the target version to move to.
-    Available {
-        /// The version offered by the latest release.
+    /// The latest release is strictly newer than the running build — the only
+    /// case that proceeds to download + replace.
+    Newer {
+        /// The (newer) version offered by the latest release.
+        latest: String,
+    },
+    /// The running build is newer than the latest release (e.g. a local dev
+    /// build). Reported by `--check` but never auto-downgraded.
+    Older {
+        /// The (older) version the latest release carries.
         latest: String,
     },
 }
@@ -75,33 +81,45 @@ pub fn asset_names(target: &str) -> (String, String) {
 }
 
 /// Decides whether an update is warranted by comparing the running version to
-/// the `latest` release tag. Semver-aware when both parse (so `0.10.0` > `0.9.0`
-/// compares numerically); otherwise falls back to exact string inequality.
-/// Anything that is not exactly the running version is [`UpdateDecision::Available`]
-/// — the guard is "already current ⇒ do nothing", not "only upgrade".
+/// the `latest` release tag. Both sides have a single optional leading `v`
+/// stripped. Semver-aware when both parse (so `0.10.0` > `0.9.0` compares
+/// numerically and direction is known); a non-semver mismatch can't be ordered,
+/// so it is reported as [`UpdateDecision::Newer`] (the safe default — a user who
+/// asked to update, offered the option, still confirms). Equal ⇒ up-to-date.
+///
+/// Only [`UpdateDecision::Newer`] proceeds to download; [`UpdateDecision::Older`]
+/// (a local build ahead of the latest release) is reported but never
+/// auto-downgraded.
 pub fn compare_versions(current: &str, latest: &str) -> UpdateDecision {
-    let current = current.trim();
-    let latest = normalize_tag(latest);
-    let same = match (
+    let current = normalize_tag(current);
+    let latest_str = normalize_tag(latest);
+    match (
         semver::Version::parse(current),
-        semver::Version::parse(latest),
+        semver::Version::parse(latest_str),
     ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => current == latest,
-    };
-    if same {
-        UpdateDecision::UpToDate
-    } else {
-        UpdateDecision::Available {
-            latest: latest.to_owned(),
-        }
+        (Ok(running), Ok(released)) => match released.cmp(&running) {
+            std::cmp::Ordering::Equal => UpdateDecision::UpToDate,
+            std::cmp::Ordering::Greater => UpdateDecision::Newer {
+                latest: latest_str.to_owned(),
+            },
+            std::cmp::Ordering::Less => UpdateDecision::Older {
+                latest: latest_str.to_owned(),
+            },
+        },
+        // Direction is unknowable without semver on both sides: equal ⇒ current,
+        // otherwise treat as an available update (still gated by the confirm).
+        _ if current == latest_str => UpdateDecision::UpToDate,
+        _ => UpdateDecision::Newer {
+            latest: latest_str.to_owned(),
+        },
     }
 }
 
-/// Strips a leading `v` from a release tag (`v0.2.0` → `0.2.0`) so it compares
-/// against the crate version, which carries no prefix.
+/// Strips a single leading `v` from a version/tag (`v0.2.0` → `0.2.0`) so a
+/// `v`-prefixed release tag compares against the crate version (no prefix).
 fn normalize_tag(tag: &str) -> &str {
-    tag.trim().strip_prefix('v').unwrap_or(tag.trim())
+    let tag = tag.trim();
+    tag.strip_prefix('v').unwrap_or(tag)
 }
 
 /// Extracts the expected hex digest for `archive_name` from a `sha256sum`-format
@@ -161,12 +179,17 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// Copies `exe` to `<name>.bak` beside it so a failed/undesired update is
-/// reversible, returning the backup path. Pure I/O — split out so the backup
-/// step is testable against a fake binary without invoking `self_replace`
-/// (which always targets the *real* running executable).
+/// reversible, returning the backup path. The path is **canonicalized first**:
+/// `self_replace` resolves symlinks and replaces the *real* target, so on a
+/// symlinked install (e.g. Homebrew) the backup must land beside the real binary,
+/// not the symlink — otherwise the `.bak` would sit next to a link the swap left
+/// untouched. Pure I/O — split out so the backup step is testable against a fake
+/// binary without invoking `self_replace` (which always targets `current_exe()`).
 pub fn backup_binary(exe: &Path) -> Result<std::path::PathBuf> {
-    let backup = backup_path(exe);
-    std::fs::copy(exe, &backup)
+    let resolved = std::fs::canonicalize(exe)
+        .wrap_err_with(|| format!("failed to resolve the binary path {}", exe.display()))?;
+    let backup = backup_path(&resolved);
+    std::fs::copy(&resolved, &backup)
         .wrap_err_with(|| format!("failed to back up current binary to {}", backup.display()))?;
     Ok(backup)
 }
@@ -295,7 +318,13 @@ fn extract_from_zip(archive: &[u8]) -> Result<Vec<u8>> {
     let mut zip = zip::ZipArchive::new(reader).wrap_err("failed to open release zip")?;
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).wrap_err("failed to read a zip entry")?;
-        let name = file.name().rsplit('/').next().unwrap_or(file.name());
+        // Zip entries may use either separator; a nested `churl-<target>\churl.exe`
+        // must still match on Windows-produced archives.
+        let name = file
+            .name()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(file.name());
         if name == "churl.exe" {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
@@ -325,7 +354,14 @@ pub async fn run_update(check_only: bool, yes: bool) -> Result<()> {
             println!("churl {CURRENT_VERSION} is already the latest release.");
             return Ok(());
         }
-        UpdateDecision::Available { latest } => latest,
+        UpdateDecision::Older { latest } => {
+            // A local build ahead of the latest release — report, never downgrade.
+            println!(
+                "churl {CURRENT_VERSION} is newer than the latest release ({latest}); nothing to do."
+            );
+            return Ok(());
+        }
+        UpdateDecision::Newer { latest } => latest,
     };
 
     println!("churl {CURRENT_VERSION} → {latest}");
@@ -404,47 +440,79 @@ mod tests {
     }
 
     #[test]
-    fn target_triple_resolves_on_supported_hosts() {
-        // Whatever host runs the tests must be one of the five published
-        // targets (CI covers all three OSes), so this is always Some here.
-        assert!(target_triple().is_some());
+    fn target_triple_matches_the_host() {
+        // Assert the *correct* triple for the compiling host, not merely `Some`.
+        let expected = if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+            Some("aarch64-apple-darwin")
+        } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+            Some("x86_64-apple-darwin")
+        } else if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+            Some("x86_64-unknown-linux-musl")
+        } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
+            Some("aarch64-unknown-linux-musl")
+        } else if cfg!(all(target_arch = "x86_64", target_os = "windows")) {
+            Some("x86_64-pc-windows-msvc")
+        } else {
+            None
+        };
+        assert_eq!(target_triple(), expected);
     }
 
     #[test]
     fn compare_versions_same_is_up_to_date() {
         assert_eq!(compare_versions("0.2.0", "0.2.0"), UpdateDecision::UpToDate);
-        // Leading `v` on the tag is normalised away.
+        // Leading `v` on either side is normalised away.
         assert_eq!(
             compare_versions("0.2.0", "v0.2.0"),
+            UpdateDecision::UpToDate
+        );
+        assert_eq!(
+            compare_versions("v0.2.0", "0.2.0"),
             UpdateDecision::UpToDate
         );
     }
 
     #[test]
-    fn compare_versions_newer_is_available() {
+    fn compare_versions_newer_release_is_offered() {
         assert_eq!(
             compare_versions("0.2.0", "v0.3.0"),
-            UpdateDecision::Available {
+            UpdateDecision::Newer {
                 latest: "0.3.0".to_owned()
             }
         );
         // Numeric, not lexical: 0.10.0 > 0.9.0.
         assert_eq!(
             compare_versions("0.9.0", "0.10.0"),
-            UpdateDecision::Available {
+            UpdateDecision::Newer {
                 latest: "0.10.0".to_owned()
             }
         );
     }
 
     #[test]
-    fn compare_versions_older_tag_is_still_available() {
-        // "already current ⇒ do nothing"; any difference (even a lower tag) is
-        // offered — the guard is equality, not strict-greater.
+    fn compare_versions_local_build_ahead_is_older_not_downgraded() {
+        // A dev build newer than the latest release must NOT be offered a
+        // downgrade — it resolves to Older, which `run_update` refuses to install.
         assert_eq!(
             compare_versions("0.3.0", "0.2.0"),
-            UpdateDecision::Available {
+            UpdateDecision::Older {
                 latest: "0.2.0".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn compare_versions_non_semver_mismatch_is_offered() {
+        // Direction is unknowable, so a differing non-semver tag is offered
+        // (still gated behind the confirm), while an equal one is up-to-date.
+        assert_eq!(
+            compare_versions("nightly", "nightly"),
+            UpdateDecision::UpToDate
+        );
+        assert_eq!(
+            compare_versions("nightly", "stable"),
+            UpdateDecision::Newer {
+                latest: "stable".to_owned()
             }
         );
     }
@@ -493,9 +561,10 @@ mod tests {
         let exe = dir.path().join("churl");
         std::fs::write(&exe, b"OLD-BINARY").unwrap();
 
-        // 1) Back up the current binary.
+        // 1) Back up the current binary. The returned path is `<real>/churl.bak`
+        // (canonicalized — the tempdir may itself be under a symlinked prefix).
         let backup = backup_binary(&exe).unwrap();
-        assert_eq!(backup, dir.path().join("churl.bak"));
+        assert_eq!(backup.file_name().unwrap(), "churl.bak");
         assert_eq!(std::fs::read(&backup).unwrap(), b"OLD-BINARY");
 
         // 2) Stage the new bytes, then atomically rename over the fake binary —
@@ -508,6 +577,26 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), b"OLD-BINARY");
     }
 
+    // On a symlinked install (Homebrew-style), `self_replace` resolves the link
+    // and replaces the *real* binary, so the `.bak` must land beside the real
+    // target — not the symlink.
+    #[cfg(unix)]
+    #[test]
+    fn backup_binary_resolves_symlink_to_the_real_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-churl");
+        std::fs::write(&real, b"REAL-BINARY").unwrap();
+        let link = dir.path().join("churl");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let backup = backup_binary(&link).unwrap();
+
+        // The backup sits next to the REAL binary, named after it — not the link.
+        let real_canon = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(backup, real_canon.with_file_name("real-churl.bak"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"REAL-BINARY");
+    }
+
     #[test]
     fn backup_path_appends_bak() {
         assert_eq!(
@@ -518,5 +607,68 @@ mod tests {
             backup_path(Path::new("C:/bin/churl.exe")),
             Path::new("C:/bin/churl.exe.bak")
         );
+    }
+
+    // --- archive extraction (item 4) --------------------------------------
+
+    /// Builds an in-memory gzip tarball with one entry at `entry_path`.
+    fn make_targz(entry_path: &str, contents: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        builder
+            .append_data(&mut header, entry_path, contents)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Builds an in-memory zip with one entry at `entry_path`.
+    fn make_zip(entry_path: &str, contents: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file::<_, ()>(entry_path, zip::write::FileOptions::default())
+            .unwrap();
+        zip.write_all(contents).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn extract_targz_flat_and_nested() {
+        let flat = make_targz("churl", b"BIN-FLAT");
+        assert_eq!(
+            extract_binary(&flat, "x86_64-unknown-linux-musl").unwrap(),
+            b"BIN-FLAT"
+        );
+        let nested = make_targz("churl-x86_64-unknown-linux-musl/churl", b"BIN-NESTED");
+        assert_eq!(
+            extract_binary(&nested, "x86_64-unknown-linux-musl").unwrap(),
+            b"BIN-NESTED"
+        );
+    }
+
+    #[test]
+    fn extract_zip_flat_and_nested() {
+        let flat = make_zip("churl.exe", b"WIN-FLAT");
+        assert_eq!(
+            extract_binary(&flat, "x86_64-pc-windows-msvc").unwrap(),
+            b"WIN-FLAT"
+        );
+        let nested = make_zip("churl-x86_64-pc-windows-msvc/churl.exe", b"WIN-NESTED");
+        assert_eq!(
+            extract_binary(&nested, "x86_64-pc-windows-msvc").unwrap(),
+            b"WIN-NESTED"
+        );
+    }
+
+    #[test]
+    fn extract_bails_when_no_binary_present() {
+        let tar_no_bin = make_targz("README.md", b"docs");
+        assert!(extract_binary(&tar_no_bin, "x86_64-unknown-linux-musl").is_err());
+        let zip_no_bin = make_zip("README.md", b"docs");
+        assert!(extract_binary(&zip_no_bin, "x86_64-pc-windows-msvc").is_err());
     }
 }

@@ -87,29 +87,31 @@ pub fn parse_pin(text: &str) -> Option<String> {
 
 /// Compares the running binary version against a workspace `pinned` version.
 ///
-/// Semver-aware when *both* strings parse as semantic versions: the check is
-/// exact-version equality (a pin names one version; build metadata is ignored
-/// per semver rules, so `1.2.3+ci` satisfies a `1.2.3` pin). When either side
-/// is not valid semver, it falls back to exact string equality (nvmrc-style),
-/// so a non-semver tag still compares sensibly and never panics.
+/// A single optional leading `v` is stripped from each side first (so a
+/// `v0.2.0` pin matches a `0.2.0` build — matching how release tags are
+/// normalised). Semver-aware when both then parse: it compares the precedence
+/// fields (major.minor.patch + pre-release), ignoring build metadata (`+meta`
+/// carries no precedence per the semver spec, so `1.2.3+ci` satisfies `1.2.3`).
+/// When either side is not valid semver, it falls back to exact string equality
+/// (nvmrc-style), so a non-semver tag still compares sensibly and never panics.
 pub fn check_pin(pinned: &str, running: &str) -> PinCheck {
     let pinned = pinned.trim();
     let running = running.trim();
+    let pinned_v = strip_v(pinned);
+    let running_v = strip_v(running);
     let satisfied = match (
-        semver::Version::parse(pinned),
-        semver::Version::parse(running),
+        semver::Version::parse(pinned_v),
+        semver::Version::parse(running_v),
     ) {
-        // Compare the precedence fields (major.minor.patch + pre-release) and
-        // ignore build metadata (`+meta`), which carries no version precedence
-        // per the semver spec — so `1.2.3+ci` satisfies a `1.2.3` pin.
         (Ok(want), Ok(have)) => {
             want.major == have.major
                 && want.minor == have.minor
                 && want.patch == have.patch
                 && want.pre == have.pre
         }
-        // Either side is not semver → exact string match (nvmrc-style).
-        _ => pinned == running,
+        // Either side is not semver → exact string match on the v-stripped forms
+        // (nvmrc-style), so `v0.2.0` still equals `0.2.0` in the fallback too.
+        _ => pinned_v == running_v,
     };
     if satisfied {
         PinCheck::Satisfied
@@ -119,6 +121,12 @@ pub fn check_pin(pinned: &str, running: &str) -> PinCheck {
             running: running.to_owned(),
         }
     }
+}
+
+/// Strips a single optional leading `v` from a version string (`v0.2.0` →
+/// `0.2.0`), leaving everything else untouched.
+fn strip_v(version: &str) -> &str {
+    version.strip_prefix('v').unwrap_or(version)
 }
 
 #[cfg(test)]
@@ -148,6 +156,22 @@ mod tests {
     #[test]
     fn check_pin_semver_ignores_build_metadata() {
         assert_eq!(check_pin("0.2.0", "0.2.0+ci.7"), PinCheck::Satisfied);
+    }
+
+    #[test]
+    fn check_pin_strips_leading_v_no_spurious_warn() {
+        // A `v`-prefixed pin (or build) must not warn against the bare version.
+        assert_eq!(check_pin("v0.2.0", "0.2.0"), PinCheck::Satisfied);
+        assert_eq!(check_pin("0.2.0", "v0.2.0"), PinCheck::Satisfied);
+        assert_eq!(check_pin("v0.2.0", "v0.2.0"), PinCheck::Satisfied);
+        // A genuine mismatch still warns, preserving the user's literal strings.
+        assert_eq!(
+            check_pin("v0.3.0", "0.2.0"),
+            PinCheck::Mismatch {
+                pinned: "v0.3.0".to_owned(),
+                running: "0.2.0".to_owned(),
+            }
+        );
     }
 
     #[test]
