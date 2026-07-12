@@ -1,0 +1,7 @@
+# Normalize all text files to LF in the working tree on every platform, so git's
+# autocrlf never rewrites line endings on Windows checkout. churl's persistence
+# saves LF, and the byte-identity round-trip tests compare a re-saved file
+# against its `include_str!` fixture — a CRLF-converted fixture fails those on
+# Windows even though the code is correct. Binary files are auto-detected and
+# left untouched.
+* text=auto eol=lf
