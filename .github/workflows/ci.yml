@@ -49,8 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned, not @stable: clippy's lint set changes between releases, and the
+      # matrix legs can otherwise resolve different stable versions at the same
+      # time (one runner image ahead of another), so a lint fails on one OS and
+      # passes on the other for no code reason. Pin both legs to one version;
+      # bump deliberately to adopt new lints.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy
 
