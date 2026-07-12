@@ -24,6 +24,19 @@ all-features = true
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
+# Scoped ignores — each is a specific advisory judged unreachable in *our* usage,
+# not a blanket suppression. Drop an entry the moment its upstream fix lands.
+ignore = [
+    # quick-xml 0.39.4 DoS via malicious XML (quadratic attr scan / unbounded
+    # namespace alloc). Reached ONLY through wayland-scanner, a build-time
+    # proc-macro that parses the trusted, vendored Wayland protocol XML shipped
+    # inside the wayland-rs crates — never attacker-controlled runtime input, so
+    # the DoS is unreachable. wayland-scanner 0.31 pins quick-xml "0.39"
+    # (can't take the fixed >=0.41), so the fix must come from a wayland-scanner
+    # release; revisit when one ships and remove these two lines.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 version = 2
