@@ -86,8 +86,8 @@ jobs:
           # Strict in CI: fail on any snapshot not already committed.
           INSTA_UPDATE: "no"
 
-  security-audit:
-    name: Security audit
+  deny:
+    name: Supply-chain (cargo-deny)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -97,16 +97,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Run cargo-audit directly rather than rustsec/audit-check: that action
-      # has no Node.js 24 release (it targets the deprecated node20). Running
-      # the tool ourselves fails the job on advisories and needs no checks:write.
-      - name: Install cargo-audit
+      # cargo-deny subsumes the old cargo-audit job: its advisories check reads
+      # the same RustSec DB, and it adds license / bans / sources gates in one
+      # pass (config in deny.toml). Installed via taiki-e/install-action —
+      # prebuilt binary, no compile — for the same reason cargo-audit was.
+      - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
+          tool: cargo-deny
 
-      - name: Audit dependencies
-        run: cargo audit
+      - name: Check advisories, licenses, bans, sources
+        run: cargo deny check
 
   msrv:
     name: MSRV
