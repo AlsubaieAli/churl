@@ -81,6 +81,8 @@ crates/
                            #   applies AuthWire effects (enabled user header with the same name wins)
       import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error)
       export.rs            # Endpoint → curl command (shlex::try_quote; round-trip contract with import)
+      pin.rs               # optional `.churl-version` workspace pin (pure: discover/parse/compare,
+                           #   semver-aware w/ exact-string fallback); warn-only, the bin displays it
     tests/
       persistence.rs       # comment-preservation corpus, manifest+secrets, lazy loading
       roundtrip_prop.rs    # proptest Endpoint round-trip
@@ -91,9 +93,14 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps, tutorial) | TUI; #[tokio::main]
+      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps, tutorial,
+                           #   update, uninstall) | TUI; #[tokio::main]
       tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
-      tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin)
+      update.rs            # churl update: verified self-replace from GitHub releases (self_replace crate);
+                           #   pure target→asset/version-compare/checksum fns, network+swap bin-only
+      uninstall.rs         # churl uninstall: binary by default, config+state behind --purge (pure removal_plan)
+      tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin);
+                           #   warns once on a `.churl-version` mismatch at workspace load
       tui/
         app/               # App state + orchestration (directory module; mod.rs is the spine)
           mod.rs           # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor/

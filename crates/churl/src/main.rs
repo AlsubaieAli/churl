@@ -6,6 +6,8 @@ use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
 mod tutorial;
+mod uninstall;
+mod update;
 
 #[derive(Debug, Parser)]
 #[command(name = "churl", about = "Terminal HTTP client", version)]
@@ -46,6 +48,24 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
     },
+    /// Update churl in place to the latest GitHub release (verified, reversible)
+    Update {
+        /// Report the available version and exit without downloading or replacing
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
+    /// Remove the churl binary; `--purge` also removes churl's config and state
+    Uninstall {
+        /// Also delete churl's config directory and local state database
+        #[arg(long)]
+        purge: bool,
+        /// Skip the confirmation prompt (only relevant with `--purge`)
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 }
 
 /// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
@@ -73,6 +93,12 @@ async fn main() -> Result<()> {
         }
         Some(Command::Tutorial { dir }) => {
             tutorial::run_tutorial(dir)?;
+        }
+        Some(Command::Update { check, yes }) => {
+            update::run_update(check, yes).await?;
+        }
+        Some(Command::Uninstall { purge, yes }) => {
+            uninstall::run_uninstall(purge, yes)?;
         }
         None => {
             let vars = parse_vars(&cli.vars)?;

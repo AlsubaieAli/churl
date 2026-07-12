@@ -165,6 +165,13 @@ mod tests {
             RESERVED_FILE_STEMS.contains(&folder_stem),
             "folder stem missing"
         );
+        // The `.churl-version` pin file's slug must be reserved too, so no
+        // create/rename slugs an endpoint into the version-pin marker name.
+        let pin_stem = crate::pin::PIN_FILENAME.trim_start_matches('.');
+        assert!(
+            RESERVED_FILE_STEMS.contains(&pin_stem),
+            "pin stem missing: {pin_stem}"
+        );
         // Dir names: the sequences directory.
         assert!(
             RESERVED_DIR_NAMES.contains(&SEQUENCES_DIRNAME),
