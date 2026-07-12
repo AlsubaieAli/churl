@@ -14,11 +14,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Four independent checks, each its own job so they run in parallel and can be
+# Independent checks, each its own job so they run in parallel and can be
 # required individually in branch protection. No `needs:` between them — none
-# depends on another's output (see docs/DECISIONS.md, 2026-07-09). Format skips
-# the Cargo cache: `cargo fmt --check` never compiles, so there is nothing to
-# cache and the restore would only cost time.
+# depends on another's output (see docs/DECISIONS.md, 2026-07-09). Test and
+# Lint fan out across an OS matrix (fail-fast off) so cross-platform behaviour
+# is proven per-OS; each matrix leg is its own required check. Format skips the
+# Cargo cache: `cargo fmt --check` never compiles, so there is nothing to cache
+# and the restore would only cost time.
 jobs:
   format:
     name: Format
@@ -35,8 +37,15 @@ jobs:
         run: cargo fmt --all --check
 
   lint:
-    name: Lint
-    runs-on: ubuntu-latest
+    name: Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Clippy runs on Windows too so it sees the cfg-gated clipboard and path
+    # code that never compiles on Linux (arboard's Windows backend, Windows
+    # path semantics). fail-fast off so one OS's lint miss doesn't mask another.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -52,8 +61,16 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The test suite runs on all three tier-1 desktop OSes so cross-platform
+    # path behaviour (separators, dirs resolution, Windows reserved names) is
+    # actually exercised. fail-fast off so a failure on one OS still reports
+    # the others.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
