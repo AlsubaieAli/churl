@@ -14,13 +14,6 @@
 //! any endpoint still carrying a literal secret auth value — exactly like
 //! [`crate::persistence`]. Placeholders pass through verbatim in both directions.
 
-// The import/export fns return `Result<_, InterchangeError>`, whose `Persistence`
-// variant carries a large `PersistenceError`. `result_large_err` flags the wide
-// Result, but these are cold, one-shot import/export paths (not hot loops), and
-// boxing the variant would fight thiserror's `#[from]` derivation at every `?`
-// site for no real gain — so we accept the size here rather than churn the API.
-#![allow(clippy::result_large_err)]
-
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
