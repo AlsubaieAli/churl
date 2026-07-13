@@ -1446,3 +1446,184 @@ fn warn_policy_never_blocks_new_name_anchored_secret() {
         decision.warning_locations()
     );
 }
+
+// ---- M7.9: recursive collection tree (workspace = root collection) ----
+
+/// Writes an endpoint TOML into `dir` (created if needed).
+fn write_endpoint(dir: &Path, file: &str, seq: u32, name: &str, url: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join(file),
+        format!("seq = {seq}\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"{url}\"\n"),
+    )
+    .unwrap();
+}
+
+/// Back-compat regression: a pre-M7.9-shaped FLAT workspace (collections one
+/// deep, no root endpoints) loads IDENTICALLY under the recursive model — the
+/// same top-level collections, the same endpoints, and the `churl.toml` `[vars]`
+/// are exactly the root collection's vars.
+#[test]
+fn m79_flat_workspace_loads_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(
+        root.join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nbase = \"https://api.example.com\"\n",
+    )
+    .unwrap();
+    write_endpoint(
+        &root.join("users"),
+        "list.toml",
+        0,
+        "List",
+        "https://x/users",
+    );
+    write_endpoint(
+        &root.join("orders"),
+        "list.toml",
+        0,
+        "List",
+        "https://x/orders",
+    );
+
+    let ws = OpenWorkspace::open(root).unwrap();
+
+    // Top-level collections unchanged: name-sorted, exactly the two dirs.
+    let cols = ws.collections().unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["orders", "users"]);
+
+    // Each collection's endpoints unchanged.
+    let users = cols.iter().find(|c| c.name == "users").unwrap();
+    let eps = users.endpoints().unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].1.name, "List");
+
+    // The root collection IS the workspace root; its vars are the churl.toml vars.
+    let rootc = ws.root_collection();
+    assert_eq!(rootc.path, root);
+    assert_eq!(rootc.name, "demo");
+    assert_eq!(
+        ws.manifest().vars.get("base").map(String::as_str),
+        Some("https://api.example.com")
+    );
+    // A flat workspace has no root-level endpoints.
+    assert!(rootc.endpoints().unwrap().is_empty());
+}
+
+/// A root-level endpoint (an endpoint file directly under the workspace root) is
+/// enumerated by the root collection's `endpoints()`, and the manifest
+/// (`churl.toml`) / `folder.toml` are NOT parsed as endpoints.
+#[test]
+fn m79_root_endpoint_enumerated_and_manifest_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    fs::write(root.join("folder.toml"), "[vars]\nx = \"1\"\n").unwrap();
+    write_endpoint(root, "ping.toml", 0, "Ping", "https://x/ping");
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let rootc = ws.root_collection();
+    let eps = rootc.endpoints().unwrap();
+    assert_eq!(
+        eps.len(),
+        1,
+        "only ping.toml is an endpoint (not churl/folder)"
+    );
+    assert_eq!(eps[0].1.name, "Ping");
+}
+
+/// Reserved-names per level: `sequences/` is reserved AT THE ROOT ONLY. A
+/// `sequences` directory NESTED under a sub-collection is an ordinary
+/// sub-collection, not churl's sequence store.
+#[test]
+fn m79_sequences_reserved_at_root_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    fs::create_dir_all(root.join("sequences")).unwrap(); // root: reserved
+    let api = root.join("api");
+    fs::create_dir_all(api.join("sequences")).unwrap(); // nested: a real collection
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    // Root: sequences/ excluded.
+    let top = ws.collections().unwrap();
+    assert!(top.iter().all(|c| c.name != "sequences"));
+    assert!(top.iter().any(|c| c.name == "api"));
+
+    // Nested: api/sequences IS a sub-collection.
+    let api_col = top.iter().find(|c| c.name == "api").unwrap();
+    let subs = api_col.sub_collections().unwrap();
+    assert_eq!(
+        subs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["sequences"],
+        "a nested `sequences` dir is a normal sub-collection"
+    );
+}
+
+/// Arbitrary-depth nesting: sub-collections recurse with no cap; each level's
+/// endpoints and children resolve independently.
+#[test]
+fn m79_nested_collections_recurse_arbitrary_depth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let deep = root.join("a").join("b").join("c");
+    write_endpoint(&deep, "leaf.toml", 0, "Leaf", "https://x/leaf");
+    write_endpoint(&root.join("a"), "mid.toml", 0, "Mid", "https://x/mid");
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let a = ws
+        .collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "a")
+        .unwrap();
+    assert_eq!(a.endpoints().unwrap().len(), 1); // mid.toml
+    let b = a.sub_collections().unwrap().into_iter().next().unwrap();
+    assert_eq!(b.name, "b");
+    let c = b.sub_collections().unwrap().into_iter().next().unwrap();
+    assert_eq!(c.name, "c");
+    let leaf = c.endpoints().unwrap();
+    assert_eq!(leaf.len(), 1);
+    assert_eq!(leaf[0].1.name, "Leaf");
+    assert!(c.sub_collections().unwrap().is_empty());
+}
+
+/// Per-level `folder.toml`/`churl.toml` skip: a sub-collection's own `folder.toml`
+/// (and a stray nested `churl.toml`) are never listed as endpoints.
+#[test]
+fn m79_reserved_files_skipped_at_every_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let sub = root.join("api");
+    write_endpoint(&sub, "get.toml", 0, "Get", "https://x/get");
+    fs::write(sub.join("folder.toml"), "[vars]\nk = \"v\"\n").unwrap();
+    fs::write(sub.join("churl.toml"), "name = \"nested\"\n").unwrap();
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let api = ws
+        .collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "api")
+        .unwrap();
+    let eps = api.endpoints().unwrap();
+    assert_eq!(
+        eps.len(),
+        1,
+        "only get.toml — folder/churl skipped at this level"
+    );
+    assert_eq!(eps[0].1.name, "Get");
+    // The sub-collection's own folder.toml vars still load.
+    assert_eq!(
+        load_collection_meta(&sub)
+            .unwrap()
+            .vars
+            .get("k")
+            .map(String::as_str),
+        Some("v")
+    );
+}

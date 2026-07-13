@@ -21,7 +21,9 @@ use crate::model::{Auth, Request};
 /// ordered by precedence in the resolver (earlier scopes win).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
-    /// Diagnostic scope name (`"cli"`, `"profile"`, `"collection"`, `"workspace"`).
+    /// Diagnostic scope name (`"session"`, `"cli"`, `"profile"`, `"collection"`).
+    /// The collection scope repeats once per ancestor collection (leaf → root),
+    /// all sharing the `"collection"` name — the resolver walks them in order.
     pub name: &'static str,
     /// Variable name → value map for this scope.
     pub vars: BTreeMap<String, String>,

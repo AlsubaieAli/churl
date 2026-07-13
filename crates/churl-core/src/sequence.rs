@@ -299,7 +299,10 @@ pub struct RunScopes {
     pub cli: BTreeMap<String, String>,
     /// The active profile's vars.
     pub profile: BTreeMap<String, String>,
-    /// Workspace-level `[vars]` (lowest, before process env).
+    /// Root-collection `[vars]` — the `churl.toml` `[vars]` (M7.9: the root
+    /// collection replaced the old separate workspace scope). The outermost
+    /// collection rung, appended after the step's ancestor chain (before process
+    /// env). The field name is kept for API stability.
     pub workspace: BTreeMap<String, String>,
 }
 
@@ -413,16 +416,20 @@ fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
 }
 
 /// Prepares a step for execution: resolves its endpoint (rejecting traversal),
-/// loads it and its collection vars, builds the resolver with the **extracted
-/// scope prepended (highest precedence)**, and returns the substituted request.
+/// loads it and its collection ancestor-chain vars, builds the resolver with the
+/// **extracted scope prepended (highest precedence)**, and returns the
+/// substituted request.
 ///
 /// The scope chain is
-/// `extracted > session > cli > profile > collection > workspace` (then process
-/// env, via [`Resolver`]). Prepending scopes preserves the single resolver seam
-/// — resolution is never forked. `session` sits below `extracted` (a same-run
-/// capture still wins) and above `cli` (a captured token is not shadowed by an
-/// ambient same-named var); it is the same in-memory Session store a standalone
-/// send resolves against.
+/// `extracted > session > cli > profile > [leaf-collection … root-collection]`
+/// (then process env, via [`Resolver`]). Prepending scopes preserves the single
+/// resolver seam — resolution is never forked. `session` sits below `extracted` (a
+/// same-run capture still wins) and above `cli` (a captured token is not shadowed
+/// by an ambient same-named var); it is the same in-memory Session store a
+/// standalone send resolves against. The collection scope is the step's ancestor
+/// chain walked innermost → outermost up to the workspace root (M7.9
+/// inherit-and-override), mirroring the send-time [`crate::template::Resolver`];
+/// `scopes.workspace` carries the root collection's `[vars]` as the outermost rung.
 pub fn prepare_step(
     workspace_root: &Path,
     step: &SequenceStep,
@@ -434,20 +441,31 @@ pub fn prepare_step(
         endpoint: step.endpoint.clone(),
         source: Box::new(source),
     })?;
-    let collection_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let meta = load_collection_meta(collection_dir).map_err(|source| SequenceError::Endpoint {
-        endpoint: step.endpoint.clone(),
-        source: Box::new(source),
-    })?;
 
-    let resolver = Resolver::new(vec![
+    let mut resolver_scopes = vec![
         Scope::new("extracted", extracted.clone()),
         Scope::new("session", scopes.session.clone()),
         Scope::new("cli", scopes.cli.clone()),
         Scope::new("profile", scopes.profile.clone()),
-        Scope::new("collection", meta.vars),
-        Scope::new("workspace", scopes.workspace.clone()),
-    ]);
+    ];
+    // Collection ancestor chain, innermost → outermost: the step's own collection
+    // `folder.toml`, then each parent directory up to (but not including) the
+    // workspace root. A root-level step endpoint (collection dir == root) pushes
+    // none here and sees only the root vars appended below.
+    let mut dir = path.parent().unwrap_or(workspace_root).to_path_buf();
+    while dir != workspace_root && dir.starts_with(workspace_root) {
+        let meta = load_collection_meta(&dir).map_err(|source| SequenceError::Endpoint {
+            endpoint: step.endpoint.clone(),
+            source: Box::new(source),
+        })?;
+        resolver_scopes.push(Scope::new("collection", meta.vars));
+        let Some(parent) = dir.parent() else { break };
+        dir = parent.to_path_buf();
+    }
+    // Root collection vars (outermost) — the M7.9 replacement for the old
+    // standalone `workspace` scope.
+    resolver_scopes.push(Scope::new("collection", scopes.workspace.clone()));
+    let resolver = Resolver::new(resolver_scopes);
 
     let mut request = endpoint.request.clone();
     resolver.substitute_request(&mut request);

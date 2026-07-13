@@ -117,6 +117,19 @@ impl OpenWorkspace {
         &self.manifest
     }
 
+    /// The workspace root viewed **as the root collection**. Its `path` is the
+    /// workspace root and its `name` is the manifest name (the root collection's
+    /// display name). Root-level endpoints are the endpoint files directly under
+    /// the root (`churl.toml`/`folder.toml`/`sequences` excluded by
+    /// [`Collection::endpoints`]); its sub-collections are [`Self::collections`]
+    /// (the `sequences/` skip lives there, root-only).
+    pub fn root_collection(&self) -> Collection {
+        Collection {
+            name: self.manifest.name.clone(),
+            path: self.root.clone(),
+        }
+    }
+
     /// Lists the workspace's collections: every immediate subdirectory of the root
     /// whose name does not start with `.`, sorted by name. Nothing is parsed —
     /// endpoint files are read only when [`Collection::endpoints`] is called.
@@ -264,6 +277,38 @@ impl Collection {
             files.push(path);
         }
         Ok(files)
+    }
+
+    /// Lists this collection's immediate sub-collections: every child directory
+    /// whose name does not start with `.`, sorted by name. Nothing is parsed.
+    ///
+    /// Unlike [`OpenWorkspace::collections`] (the root), the reserved `sequences/`
+    /// directory is **not** skipped here — `sequences` is reserved at the root
+    /// level only (it is a global, root-owned role, like profiles). A `sequences`
+    /// directory nested under a sub-collection is therefore an ordinary
+    /// sub-collection, not churl's sequence store.
+    pub fn sub_collections(&self) -> Result<Vec<Collection>, PersistenceError> {
+        let read_err = |source| PersistenceError::Read {
+            path: self.path.clone(),
+            source,
+        };
+        let mut collections = Vec::new();
+        for entry in std::fs::read_dir(&self.path).map_err(read_err)? {
+            let entry = entry.map_err(read_err)?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') || !path.is_dir() {
+                continue;
+            }
+            collections.push(Collection {
+                name: name.to_owned(),
+                path,
+            });
+        }
+        collections.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(collections)
     }
 
     /// Parses every `*.toml` file in the collection directory (excluding the
