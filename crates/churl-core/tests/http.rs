@@ -968,3 +968,132 @@ async fn strip_307_preserves_body_but_strips_auth_cross_origin() {
         "307 still strips auth headers on a cross-origin hop"
     );
 }
+
+/// Builds a GET to `url` carrying one custom header `name: value`.
+fn get_with_header(url: String, name: &str, value: &str) -> Request {
+    let mut request = get(url);
+    request.headers = vec![Header {
+        name: name.to_owned(),
+        value: value.to_owned(),
+        enabled: true,
+    }];
+    request
+}
+
+#[tokio::test]
+async fn strip_drops_secret_shaped_value_under_innocent_name_cross_origin() {
+    // The value anchor: an innocent-NAMED header ("auth" is not a secret-name
+    // marker) whose VALUE is a real token must NOT reach a foreign origin.
+    // Fails on a name-only strip set; passes with the value anchor.
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_header(
+        format!("{}/start", origin_a.uri()),
+        "X-Custom-Auth",
+        "sk-live-LEAKME1234567890abcDEF",
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        !has_header(&at_b, "x-custom-auth"),
+        "a secret-shaped value under an opaque name must be stripped cross-origin"
+    );
+}
+
+#[tokio::test]
+async fn strip_keeps_secret_shaped_value_header_same_origin() {
+    // The same opaque-named secret-shaped header is preserved on a SAME-origin
+    // hop — stripping only bites when the origin actually changes.
+    let origin_a = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_a)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/dest"))
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_header(
+        format!("{}/start", origin_a.uri()),
+        "X-Custom-Auth",
+        "sk-live-LEAKME1234567890abcDEF",
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    let reqs = origin_a.received_requests().await.unwrap();
+    let dest = reqs
+        .iter()
+        .find(|r| r.url.path() == "/dest")
+        .expect("the same-origin hop was followed");
+    assert!(
+        has_header(dest, "x-custom-auth"),
+        "same-origin hops keep even a secret-shaped header"
+    );
+}
+
+#[tokio::test]
+async fn strip_does_not_over_strip_innocent_header_cross_origin() {
+    // The value anchor must not over-strip: an innocent NAME and innocent VALUE
+    // (a short low-entropy request id) survives a cross-origin hop.
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_header(
+        format!("{}/start", origin_a.uri()),
+        "X-Request-Id",
+        "abc123",
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        has_header(&at_b, "x-request-id"),
+        "a plain non-secret header must survive a cross-origin hop"
+    );
+}

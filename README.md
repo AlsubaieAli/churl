@@ -209,6 +209,12 @@ echo service — so your first request works immediately without any sign-up.
 theme = "dark"           # "dark" (default) or "light"
 timeout_secs = 30        # request timeout in seconds
 max_body_bytes = 10485760  # response body cap (10 MB default)
+redirect = "strip"       # cross-origin redirect policy: "strip" (default),
+                         # "strict", or "follow-all". "strip" follows redirects
+                         # but drops standard and detected-secret auth headers
+                         # when a hop crosses the origin (scheme+host+port);
+                         # prefer "strict" when following untrusted redirects
+                         # (it surfaces a cross-origin 3xx instead of following).
 
 [theme_colors]
 # Override individual theme slots with named ANSI colours or #rrggbb hex.

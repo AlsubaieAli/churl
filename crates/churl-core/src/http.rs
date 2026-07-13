@@ -135,9 +135,10 @@ pub async fn execute(
     let url = build_url(request, auth_wire.as_ref())?;
     let mut builder = client.request(reqwest_method(request.method), url);
 
-    // Names of headers that carry auth material for THIS request. On a
-    // cross-origin redirect under `strip`, exactly these are dropped so no
-    // credential ever reaches a foreign origin. `Authorization` and `Cookie`
+    // Names of headers that carry auth material for THIS request — the NAME
+    // anchor of the cross-origin strip set (`strip_auth_headers` also applies a
+    // VALUE anchor at strip time, so a header need not be listed here to be
+    // dropped if its value looks like a secret). `Authorization` and `Cookie`
     // are always in the set (standard credential-bearing headers); any
     // secret-named header the user set, and the churl-injected auth header, are
     // added below. Compared case-insensitively at strip time.
@@ -217,13 +218,16 @@ pub async fn execute(
 ///
 /// Security predicate: a credential must never reach an origin the user didn't
 /// send it to. Under [`RedirectPolicy::Strip`] (the default), when a hop's
-/// target origin (scheme + host + port) differs from the current origin, every
-/// header in `auth_header_names` is dropped before following — reqwest's own
-/// stripping only covers a fixed five headers and would miss a secret-named
-/// custom header, so we do it ourselves. [`RedirectPolicy::Strict`] refuses to
-/// follow a cross-origin hop at all and surfaces the 3xx response.
-/// [`RedirectPolicy::FollowAll`] keeps every header across origins (the
-/// foot-gun) and warns once.
+/// target origin (scheme + host + port) differs from the current origin, a
+/// header is dropped before following if EITHER its name is auth-bearing
+/// (`auth_header_names`) OR its value *looks like* a secret
+/// ([`crate::secrets::looks_like_secret_value`]) — see [`strip_auth_headers`].
+/// The value anchor closes the gap where an opaque-named header carries a real
+/// token (`X-Custom-Auth: sk-live-…`). reqwest's own stripping covers only a
+/// fixed five header *names* and would miss both, so we do it ourselves.
+/// [`RedirectPolicy::Strict`] refuses to follow a cross-origin hop at all and
+/// surfaces the 3xx response. [`RedirectPolicy::FollowAll`] keeps every header
+/// across origins (the foot-gun) and warns once.
 ///
 /// Method/body rewriting matches reqwest/tower-http and RFC 9110: 303 → GET
 /// (unless HEAD) and drop the body; 301/302 → POST becomes GET and drops the
@@ -290,16 +294,26 @@ async fn follow_redirects(
         // be preserved (307/308); otherwise a fresh request with the carried
         // headers is enough.
         let (next_method, keep_body) = redirect_method(status, &prev_method);
-        let mut next = match (keep_body, retained_body) {
-            (true, Some(cloned)) => cloned,
-            _ => reqwest::Request::new(next_method.clone(), next_url.clone()),
+        // The body is only actually carried when it was requested (307/308) AND
+        // the request was cloneable. A non-cloneable body (streaming) yields
+        // `None` and the hop proceeds bodyless — so we must also drop the
+        // payload-describing headers, or a stale `Content-Length`/`Content-Type`
+        // would misdescribe an empty body. (Unreachable today — churl bodies are
+        // in-memory `Vec<u8>`, always cloneable — but correct if that changes.)
+        let (mut next, body_carried) = match (keep_body, retained_body) {
+            (true, Some(cloned)) => (cloned, true),
+            _ => (
+                reqwest::Request::new(next_method.clone(), next_url.clone()),
+                false,
+            ),
         };
         *next.method_mut() = next_method;
         *next.url_mut() = next_url.clone();
         *next.headers_mut() = prev_headers;
-        if !keep_body {
-            // A method downgrade (303, or POST on 301/302) drops the body and
-            // its payload-describing headers, matching reqwest/tower-http.
+        if !body_carried {
+            // A method downgrade (303, or POST on 301/302) or a dropped
+            // non-cloneable body sends no body — so its payload-describing
+            // headers go too, matching reqwest/tower-http.
             *next.body_mut() = None;
             drop_payload_headers(next.headers_mut());
         }
@@ -351,16 +365,32 @@ fn redirect_method(
     }
 }
 
-/// Removes every auth-bearing header (by case-insensitive name) before a
-/// cross-origin hop under `strip`. `names` always includes `authorization` and
-/// `cookie`, plus any secret-named user header and the churl-injected auth
-/// header for this request.
+/// Removes every auth-bearing header before a cross-origin hop under `strip`,
+/// via two anchors so a credential never reaches a foreign origin:
+///
+/// 1. **Name anchor** — the header's name (case-insensitive) is in `names`,
+///    which always includes `authorization` and `cookie`, plus any secret-named
+///    user header and the churl-injected auth header for this request.
+/// 2. **Value anchor** — the header's value *looks like* a secret
+///    ([`crate::secrets::looks_like_secret_value`]: `sk-`/`ghp_`/`AKIA` and
+///    other vendor prefixes, JWTs, long high-entropy runs; a `{{placeholder}}`
+///    is never secret-shaped). This catches an opaque-named credential header
+///    such as `X-Custom-Auth: sk-live-…` that the name anchor alone misses.
+///
+/// Stripping is the safe direction: a value-shape false positive only means a
+/// non-secret header doesn't reach a *different* origin. A whole header entry
+/// (all its values) is removed when either anchor fires for any of its values.
 fn strip_auth_headers(headers: &mut reqwest::header::HeaderMap, names: &[String]) {
-    let to_remove: Vec<reqwest::header::HeaderName> = headers
-        .keys()
-        .filter(|name| names.iter().any(|n| n.eq_ignore_ascii_case(name.as_str())))
-        .cloned()
-        .collect();
+    let mut to_remove: Vec<reqwest::header::HeaderName> = Vec::new();
+    for (name, value) in headers.iter() {
+        let name_hit = names.iter().any(|n| n.eq_ignore_ascii_case(name.as_str()));
+        let value_hit = value
+            .to_str()
+            .is_ok_and(crate::secrets::looks_like_secret_value);
+        if (name_hit || value_hit) && !to_remove.contains(name) {
+            to_remove.push(name.clone());
+        }
+    }
     for name in to_remove {
         headers.remove(&name);
     }
