@@ -82,9 +82,58 @@ pub(super) fn slugify(name: &str) -> String {
     }
 }
 
+/// A held claim on a freshly-created zero-byte `<slug>.toml` placeholder: it owns
+/// the on-disk file until the caller has actually written (or renamed) real
+/// content over it, and deletes the placeholder on drop if that never happened.
+///
+/// The claim creates the file to reserve the name atomically (see
+/// [`claim_endpoint_path`]), but the real save/rename runs *after* and can still
+/// fail (ENOSPC, quota, permission). Without cleanup that failure would leave a
+/// 0-byte `.toml` in the workspace — which the strict loader rejects as a
+/// malformed endpoint and the lenient TUI shows as a phantom broken one. This
+/// guard closes that window: [`commit`](Self::commit) disarms it once the write
+/// succeeds; any early return drops it armed and removes the placeholder, so a
+/// failed create leaves the directory exactly as clean as the old name-only
+/// picker did.
+#[must_use = "the claimed placeholder is removed on drop unless committed"]
+pub(super) struct ClaimGuard {
+    /// `Some` while armed; `None` after a successful [`commit`](Self::commit).
+    path: Option<PathBuf>,
+}
+
+impl ClaimGuard {
+    /// The claimed path (the placeholder currently on disk).
+    pub(super) fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("a live ClaimGuard always holds its path")
+    }
+
+    /// Disarms the guard after the real write/rename succeeded and returns the
+    /// claimed path. The placeholder (now filled, or replaced by the rename) is
+    /// left on disk untouched.
+    pub(super) fn commit(mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("a live ClaimGuard always holds its path")
+    }
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        // Only fires on an armed guard (an uncommitted claim = a post-claim
+        // failure). Best-effort: a leftover 0-byte file is a lesser evil than a
+        // panic in a destructor, and the caller is already returning an error.
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Atomically claims an unused `<slug>.toml` path inside `dir`, appending `-2`,
-/// `-3`, … on collision (matching the corpus convention of plain suffixes), and
-/// returns the claimed path with a zero-byte placeholder already on disk.
+/// `-3`, … on collision (matching the corpus convention of plain suffixes). The
+/// returned [`ClaimGuard`] owns a zero-byte placeholder now on disk and removes it
+/// on drop unless the caller [`commit`](ClaimGuard::commit)s after writing.
 ///
 /// A slug equal to a reserved file stem (see [`RESERVED_FILE_STEMS`]) is treated
 /// as already occupied so it disambiguates exactly like a filename clash (`churl`
@@ -98,11 +147,11 @@ pub(super) fn slugify(name: &str) -> String {
 /// two simultaneous "new endpoint" saves land on distinct files instead of racing
 /// a stale existence probe and clobbering one another. Any other I/O error (a
 /// bad directory, permissions) surfaces to the caller.
-pub(super) fn claim_endpoint_path(dir: &Path, slug: &str) -> std::io::Result<PathBuf> {
+pub(super) fn claim_endpoint_path(dir: &Path, slug: &str) -> std::io::Result<ClaimGuard> {
     let bare = dir.join(format!("{slug}.toml"));
     if !is_reserved_file_slug(slug) {
         match claim_new_file(&bare) {
-            Ok(()) => return Ok(bare),
+            Ok(()) => return Ok(ClaimGuard { path: Some(bare) }),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(err),
         }
@@ -111,7 +160,11 @@ pub(super) fn claim_endpoint_path(dir: &Path, slug: &str) -> std::io::Result<Pat
     loop {
         let candidate = dir.join(format!("{slug}-{n}.toml"));
         match claim_new_file(&candidate) {
-            Ok(()) => return Ok(candidate),
+            Ok(()) => {
+                return Ok(ClaimGuard {
+                    path: Some(candidate),
+                });
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
             Err(err) => return Err(err),
         }

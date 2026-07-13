@@ -118,7 +118,9 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
     }
     // Atomically claim a free `<slug>.toml` (a concurrent "new endpoint" save can
     // never land on the same file), then fill the reserved placeholder in place.
-    let path =
+    // The guard removes the placeholder if the save below fails, so a failed
+    // create never leaves a 0-byte endpoint behind.
+    let claim =
         claim_endpoint_path(dir, &slugify(name)).map_err(|source| PersistenceError::Write {
             path: dir.to_owned(),
             source,
@@ -135,8 +137,8 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
             auth: None,
         },
     };
-    save_endpoint(&path, &endpoint)?;
-    Ok(path)
+    save_endpoint(claim.path(), &endpoint)?;
+    Ok(claim.commit())
 }
 
 /// Renames the endpoint at `path`: updates its `name` (via the format-preserving
@@ -166,16 +168,18 @@ pub fn rename_endpoint(path: &Path, new_name: &str) -> Result<PathBuf, Persisten
         return Ok(path.to_owned());
     }
     // Atomically claim the destination name before moving onto it, so a concurrent
-    // save can't slip a file into the same slot between choosing and renaming.
-    let new_path = claim_endpoint_path(dir, &slug).map_err(|source| PersistenceError::Write {
+    // save can't slip a file into the same slot between choosing and renaming. The
+    // guard removes the placeholder if the rename below fails (the `fs::rename`
+    // replaces it on success).
+    let claim = claim_endpoint_path(dir, &slug).map_err(|source| PersistenceError::Write {
         path: dir.to_owned(),
         source,
     })?;
-    std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
-        path: new_path.clone(),
+    std::fs::rename(path, claim.path()).map_err(|source| PersistenceError::Write {
+        path: claim.path().to_owned(),
         source,
     })?;
-    Ok(new_path)
+    Ok(claim.commit())
 }
 
 /// Deletes the endpoint file at `path`.
