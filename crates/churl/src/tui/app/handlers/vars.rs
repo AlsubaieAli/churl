@@ -22,8 +22,12 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The workspace-level `[vars]`, empty when there is no workspace.
-    pub(in crate::tui::app) fn workspace_vars(&self) -> BTreeMap<String, String> {
+    /// The **root collection's** `[vars]` (the `churl.toml` `[vars]`), empty when
+    /// there is no workspace. M7.9: the root collection replaced the old separate
+    /// workspace scope — same keys, same file — so this is the outermost rung of
+    /// every endpoint's collection ancestor chain, and the sequence run's outermost
+    /// ambient scope.
+    pub(in crate::tui::app) fn root_collection_vars(&self) -> BTreeMap<String, String> {
         self.workspace
             .as_ref()
             .map(|ws| ws.manifest().vars.clone())
@@ -76,35 +80,47 @@ impl App {
 
     /// Builds the template [`Resolver`] for a send of `selected`, in precedence
     /// order: in-memory Session captures → cli `--var` → active profile → the
-    /// endpoint's collection `folder.toml` vars → workspace `[vars]` → process env
-    /// (implicit). The Session scope sits at the top so a standalone
-    /// request using `{{token}}` resolves a value captured by an earlier sequence
-    /// run; it is empty until a Session-target rule writes into it.
+    /// endpoint's **collection ancestor chain**, innermost → outermost (leaf
+    /// collection, its parents, ending at the root collection) → process env
+    /// (implicit).
+    ///
+    /// M7.9 collapsed the workspace into the root collection: there is no separate
+    /// `workspace` scope any more — the root collection's `[vars]` (`churl.toml`,
+    /// the same keys) is the outermost rung of the ancestor chain. Var resolution
+    /// is inherit-and-override: a child collection's var shadows a same-named
+    /// ancestor's; a root-level endpoint sees only the root collection's vars. The
+    /// Session scope sits at the top so a standalone `{{token}}` resolves a value
+    /// captured by an earlier sequence run.
     pub(in crate::tui::app) fn build_resolver(&mut self, selected: &SelectedEndpoint) -> Resolver {
-        let collection_vars = self.explorer.collection_vars(selected.collection);
-        Resolver::new(vec![
+        let ancestor_vars = self.explorer.collection_ancestor_vars(selected.collection);
+        let mut scopes = vec![
             Scope::new("session", self.session_vars()),
             Scope::new("cli", self.cli_vars.clone()),
             Scope::new("profile", self.profile_vars()),
-            Scope::new("collection", collection_vars),
-            Scope::new("workspace", self.workspace_vars()),
-        ])
+        ];
+        // Innermost → outermost collection scopes (leaf … root). All share the
+        // diagnostic name "collection" — the resolver walks them in order, so a
+        // child shadows its ancestors and the root sits last.
+        for vars in ancestor_vars {
+            scopes.push(Scope::new("collection", vars));
+        }
+        Resolver::new(scopes)
     }
 
-    /// Builds the resolver used by the env-editor's ephemeral peek.
-    /// It mirrors [`build_resolver`] but omits the per-endpoint
-    /// `collection` scope — the env editor is not tied to a loaded endpoint, so
-    /// there is no single collection to consult (a collection var resolves
-    /// per-request, not globally). Session captures still sit highest, so a peeked
-    /// `{{token}}` reveals what a standalone send would use. The resolved value is
-    /// returned by value and never stored — the caller hands it straight to the
-    /// editor's transient reveal state.
+    /// Builds the resolver used by the env-editor's ephemeral peek. It mirrors
+    /// [`build_resolver`] but omits the per-endpoint collection ancestor chain —
+    /// the env editor is not tied to a loaded endpoint, so there is no single leaf
+    /// collection to walk (a collection var resolves per-request, not globally). It
+    /// still ends at the **root collection's** `[vars]` (`churl.toml`, the outermost
+    /// scope every endpoint inherits), so a peeked `{{token}}` reveals what a
+    /// root-level send would use. Session captures still sit highest. The resolved
+    /// value is returned by value and never stored.
     pub(in crate::tui::app) fn build_env_resolver(&self) -> Resolver {
         Resolver::new(vec![
             Scope::new("session", self.session_vars()),
             Scope::new("cli", self.cli_vars.clone()),
             Scope::new("profile", self.profile_vars()),
-            Scope::new("workspace", self.workspace_vars()),
+            Scope::new("collection", self.root_collection_vars()),
         ])
     }
 }

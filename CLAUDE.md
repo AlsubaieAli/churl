@@ -47,8 +47,11 @@ crates/
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge; atomic_write: temp→fsync→rename→dir-fsync), lazy OpenWorkspace/Collection;
+                           #   M7.9: workspace root IS the root collection — OpenWorkspace::root_collection()
+                           #   (root endpoints + churl.toml [vars] as root meta), Collection::sub_collections()
+                           #   recurses to arbitrary depth (sequences/ reserved at ROOT only);
                            #   Collection::endpoints() strict + endpoints_lenient() -> CollectionLoad (skip one bad file →
-                           #   warning; both skip folder.toml AND churl.toml);
+                           #   warning; both skip folder.toml AND churl.toml at every level);
                            #   CollectionMeta (folder.toml [vars]) load/save; CRUD seams:
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
                            #   baseline-aware secret gate on every save path — save_*_checked(policy) return

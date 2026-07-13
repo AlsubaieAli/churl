@@ -36,7 +36,8 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 ## Planned ⏳
 
-- **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence. (F)
+- **Nested collections & root-level endpoints** — the workspace becomes one recursive collection tree (the root *is* a collection): collections nest to arbitrary depth and endpoints can live directly at the root (today the tree is one level deep and every endpoint lives inside a collection). Variables inherit down the tree (child overrides parent); existing workspaces keep working unchanged. (F)
+- **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence (from the root or inside any collection). Follows the hierarchy change, since creation targets the tree. (F)
 - **Cookies + proxy** — cookie-jar persistence and HTTP(S) proxy support. (F)
 
 ## Exploring 🔭

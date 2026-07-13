@@ -674,8 +674,12 @@ fn load_seq(path: &Path) -> u32 {
 
 /// Returns the directory for the collection named `name`, creating it when
 /// absent and reusing it when it already exists (matching by slug).
+///
+/// Import always creates top-level collections directly under the workspace root,
+/// so `root` is both the parent and the workspace root (the reserved-`sequences`
+/// bump applies).
 fn ensure_collection(root: &Path, name: &str) -> Result<std::path::PathBuf, InterchangeError> {
-    match persistence::create_collection(root, name) {
+    match persistence::create_collection(root, name, root) {
         Ok(dir) => Ok(dir),
         Err(PersistenceError::AlreadyExists { path }) => Ok(path),
         Err(err) => Err(err.into()),

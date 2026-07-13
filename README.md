@@ -247,9 +247,10 @@ Roughly in order — see [docs/ROADMAP.md](docs/ROADMAP.md) for the authoritativ
 - **Quick-jump pickers** — fuzzy-jump straight to any request or workspace
 - **Request sequences** — chain requests into end-to-end flows with shared state
 - **Concurrent requests** — fire throttled batches for smoke and light load testing
+- **Nested collections & root-level endpoints** — organize requests in a folder tree and create endpoints at the workspace root
 - **Cookies & proxy** — cookie jar persistence and HTTP(S) proxy support
 - **Plugin system** — extend auth schemes, body types, and viewers
-- Also on the backlog: multipart bodies (`curl -F`) and nested folders in the explorer
+- Also on the backlog: multipart bodies (`curl -F`)
 
 ---
 

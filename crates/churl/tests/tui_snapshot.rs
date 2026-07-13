@@ -1019,7 +1019,7 @@ fn every_palette_command_dispatches() {
             Action::Send => expect_status(&mut app, "no endpoint selected"),
             Action::Cancel => expect_status(&mut app, "no request in flight"),
             Action::Save => expect_status(&mut app, "no endpoint to save"),
-            Action::NewEndpoint => expect_status(&mut app, "select a collection first"),
+            Action::NewEndpoint => expect_status(&mut app, "no workspace open"),
             Action::NewCollection => expect_status(&mut app, "no workspace open"),
             Action::Rename => expect_status(&mut app, "nothing selected to rename"),
             Action::Delete => expect_status(&mut app, "nothing selected to delete"),
@@ -1056,7 +1056,7 @@ fn every_palette_command_dispatches() {
             Action::ExportCollectionPostman | Action::ExportCollectionNative => {
                 expect_status(&mut app, "select a collection first")
             }
-            Action::PasteCurl => expect_status(&mut app, "select a collection first"),
+            Action::PasteCurl => expect_status(&mut app, "no workspace open"),
             Action::CopyAsCurl | Action::CopyAsCurlResolved => {
                 expect_status(&mut app, "no endpoint selected")
             }

@@ -183,18 +183,20 @@ fn claim_new_file(path: &Path) -> std::io::Result<()> {
 }
 
 /// Resolves the on-disk directory name for a collection `slug` under `parent`
-/// **without** creating anything, bumping a **reserved** directory slug (see
-/// [`RESERVED_DIR_NAMES`] — i.e. a collection literally named `sequences`) to the
-/// first free `<slug>-N` so it can never overshadow the sequences directory. A
-/// non-reserved slug is returned verbatim — the caller decides what happens if it
-/// already exists.
+/// **without** creating anything. When `reserve` is set, a **reserved** directory
+/// slug (see [`RESERVED_DIR_NAMES`] — i.e. a collection literally named
+/// `sequences`) is bumped to the first free `<slug>-N` so it can never overshadow
+/// the root's `sequences/` store. `reserve` must be `true` only when `parent` is
+/// the **workspace root** (M7.9: `sequences` is reserved at the root level only).
+/// A non-reserved (or non-root) slug is returned verbatim — the caller decides
+/// what happens if it already exists.
 ///
 /// This is the name-only picker for [`rename_collection`], where the claim step is
 /// a directory *move* (`fs::rename`), not a create. The create path
 /// ([`create_collection`]) uses [`claim_collection_dir`] instead, which folds the
 /// atomic `create_dir` into the bump loop.
-pub(super) fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
-    if !is_reserved_dir_slug(slug) {
+pub(super) fn collection_dir_name(parent: &Path, slug: &str, reserve: bool) -> PathBuf {
+    if !(reserve && is_reserved_dir_slug(slug)) {
         return parent.join(slug);
     }
     let mut n = 2;
@@ -208,9 +210,13 @@ pub(super) fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
 }
 
 /// Atomically claims and creates the on-disk directory for a collection `slug`
-/// under `parent`, bumping a **reserved** directory slug (see [`RESERVED_DIR_NAMES`]
-/// — i.e. a collection literally named `sequences`) to the first free `<slug>-N`
-/// so it can never overshadow the sequences directory.
+/// under `parent`. When `reserve` is set, a **reserved** directory slug (see
+/// [`RESERVED_DIR_NAMES`] — i.e. a collection literally named `sequences`) is
+/// bumped to the first free `<slug>-N` so it can never overshadow the root's
+/// `sequences/` store. `reserve` must be `true` only when `parent` is the
+/// **workspace root** — `sequences` is reserved at the root level only (M7.9), so
+/// a sub-collection named `sequences` is created verbatim (the loader already
+/// treats a nested `sequences/` as an ordinary collection).
 ///
 /// A non-reserved slug is created verbatim as `parent/slug`: `create_dir` fails
 /// atomically if that directory already exists, so the caller's contract is
@@ -218,8 +224,12 @@ pub(super) fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
 /// reuses the returned path). A reserved slug never lands on the bare name — its
 /// bump loop creates `<slug>-N` and advances past any concurrently-claimed one, so
 /// the reserved bump can no longer race a stale existence probe.
-pub(super) fn claim_collection_dir(parent: &Path, slug: &str) -> std::io::Result<PathBuf> {
-    if !is_reserved_dir_slug(slug) {
+pub(super) fn claim_collection_dir(
+    parent: &Path,
+    slug: &str,
+    reserve: bool,
+) -> std::io::Result<PathBuf> {
+    if !(reserve && is_reserved_dir_slug(slug)) {
         let dir = parent.join(slug);
         return std::fs::create_dir(&dir).map(|()| dir);
     }

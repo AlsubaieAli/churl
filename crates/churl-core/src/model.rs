@@ -245,32 +245,41 @@ pub struct Profile {
     pub vars: BTreeMap<String, String>,
 }
 
-/// A workspace manifest: the parsed form of a workspace's `churl.toml`.
+/// The **root collection's** metadata: the parsed form of a workspace's
+/// `churl.toml`. The workspace root *is* the root collection (M7.9) — there is no
+/// separate workspace tier. `churl.toml` therefore carries the root collection's
+/// name, its `[vars]` (the lowest collection scope), and the global `[[profiles]]`
+/// (a root-only role, like the `sequences/` store). Sub-collections carry only a
+/// `folder.toml` ([`CollectionMeta`], vars only — no name, no profiles).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
-    /// Workspace name.
+    /// Root-collection name.
     pub name: String,
-    /// Workspace-level template variables (shared defaults) under a `[vars]`
-    /// table; omitted from serialized output when empty. Lowest-precedence scope
-    /// in the [`crate::template::Resolver`] chain (env aside). Values must never
+    /// Root-collection template variables (shared defaults) under a `[vars]`
+    /// table; omitted from serialized output when empty. The **outermost**
+    /// collection scope in the [`crate::template::Resolver`] chain — the root of
+    /// every endpoint's ancestor-chain lookup (env aside). Values must never
     /// contain literal secrets — see [`crate::config::secret_violations`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, String>,
-    /// Named variable profiles; omitted from serialized output when empty.
+    /// Named variable profiles; a global, root-only role (per-collection profiles
+    /// are out of scope). Omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<Profile>,
 }
 
-/// Optional per-collection metadata: the parsed form of a collection's
+/// Optional per-collection metadata: the parsed form of a **sub-collection's**
 /// `folder.toml` (`persistence::FOLDER_FILENAME`, a reserved name and never
 /// listed as an endpoint). Currently just collection-level template variables —
-/// environment-independent defaults, no per-collection profiles.
+/// environment-independent defaults, no per-collection profiles (profiles are a
+/// root-only role; the root collection's meta is [`Workspace`], not this).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionMeta {
     /// Collection-level template variables under a `[vars]` table; omitted from
-    /// serialized output when empty. Sits between profile and workspace scopes in
-    /// the [`crate::template::Resolver`] chain. Values must never contain literal
-    /// secrets — see [`crate::config::collection_secret_violations`].
+    /// serialized output when empty. A rung in the endpoint's ancestor-chain scope
+    /// walk: it overrides its parent collections and the root, and is overridden by
+    /// its own children (M7.9 inherit-and-override). Values must never contain
+    /// literal secrets — see [`crate::config::collection_secret_violations`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, String>,
 }

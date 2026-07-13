@@ -190,35 +190,43 @@ pub fn delete_endpoint(path: &Path) -> Result<(), PersistenceError> {
     })
 }
 
-/// Creates a new collection directory named `name` (slugified) under `root`. No
+/// Creates a new collection directory named `name` (slugified) under `parent`. No
 /// `folder.toml` is written — that stays lazy until the collection gains vars
 /// (matching [`load_collection_meta`]'s missing-is-empty behaviour). Returns the
 /// created directory path.
 ///
-/// A slug equal to a reserved directory name (see [`RESERVED_DIR_NAMES`], i.e.
-/// `sequences`) is disambiguated with a `-2`/`-3` suffix so it never overshadows
-/// churl's own directories — the display name (the on-disk dir name) is what
-/// callers surface.
+/// `workspace_root` is the root of the open workspace. A slug equal to a reserved
+/// directory name (see [`RESERVED_DIR_NAMES`], i.e. `sequences`) is disambiguated
+/// with a `-2`/`-3` suffix **only when creating at the root** (`parent ==
+/// workspace_root`) — `sequences` is reserved at the root level only (M7.9), so a
+/// sub-collection literally named `sequences` is created verbatim (matching the
+/// loader, which treats a nested `sequences/` as an ordinary collection).
 ///
 /// An empty name is [`PersistenceError::EmptyName`]; an already-existing target
 /// directory is [`PersistenceError::AlreadyExists`] (import reuse relies on this).
-pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, PersistenceError> {
+pub fn create_collection(
+    parent: &Path,
+    name: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, PersistenceError> {
     if name.trim().is_empty() {
         return Err(PersistenceError::EmptyName);
     }
     let slug = slugify(name);
+    let reserve = parent == workspace_root;
     // `create_dir` fails atomically if the target already exists, so the claim is
     // the existence check: a non-reserved dir that is already there surfaces as
     // `AlreadyExists` (import reuse relies on the returned path), while a reserved
-    // slug is bumped onto a freshly-created `<slug>-N` with no probe-then-create gap.
-    claim_collection_dir(root, &slug).map_err(|source| {
+    // slug (root only) is bumped onto a freshly-created `<slug>-N` with no
+    // probe-then-create gap.
+    claim_collection_dir(parent, &slug, reserve).map_err(|source| {
         if source.kind() == std::io::ErrorKind::AlreadyExists {
             PersistenceError::AlreadyExists {
-                path: root.join(&slug),
+                path: parent.join(&slug),
             }
         } else {
             PersistenceError::Write {
-                path: root.join(&slug),
+                path: parent.join(&slug),
                 source,
             }
         }
@@ -228,14 +236,24 @@ pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, Persistence
 /// Renames the collection directory `dir` to a fresh slug of `new_name` in the
 /// same parent. Returns the new directory path.
 ///
+/// `workspace_root` is the root of the open workspace: the reserved-`sequences`
+/// bump applies only when `dir` sits directly under the root (M7.9 root-only
+/// reservation), so renaming a sub-collection to `sequences` keeps the verbatim
+/// name.
+///
 /// An empty name is [`PersistenceError::EmptyName`]; an existing target directory
 /// is [`PersistenceError::AlreadyExists`].
-pub fn rename_collection(dir: &Path, new_name: &str) -> Result<PathBuf, PersistenceError> {
+pub fn rename_collection(
+    dir: &Path,
+    new_name: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, PersistenceError> {
     if new_name.trim().is_empty() {
         return Err(PersistenceError::EmptyName);
     }
     let parent = dir.parent().unwrap_or(Path::new("."));
-    let new_dir = collection_dir_name(parent, &slugify(new_name));
+    let reserve = parent == workspace_root;
+    let new_dir = collection_dir_name(parent, &slugify(new_name), reserve);
     if new_dir == dir {
         return Ok(new_dir);
     }

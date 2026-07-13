@@ -985,7 +985,7 @@ fn delete_sequence_removes_file() {
 #[test]
 fn create_collection_makes_dir_without_folder_toml() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "My Orders").unwrap();
+    let coll = create_collection(dir.path(), "My Orders", dir.path()).unwrap();
     assert_eq!(coll.file_name().unwrap().to_str().unwrap(), "my-orders");
     assert!(coll.is_dir());
     assert!(
@@ -997,8 +997,8 @@ fn create_collection_makes_dir_without_folder_toml() {
 #[test]
 fn create_collection_refuses_existing() {
     let dir = tempfile::tempdir().unwrap();
-    create_collection(dir.path(), "orders").unwrap();
-    let err = create_collection(dir.path(), "orders").unwrap_err();
+    create_collection(dir.path(), "orders", dir.path()).unwrap();
+    let err = create_collection(dir.path(), "orders", dir.path()).unwrap_err();
     assert!(
         matches!(err, PersistenceError::AlreadyExists { .. }),
         "{err}"
@@ -1008,11 +1008,11 @@ fn create_collection_refuses_existing() {
 #[test]
 fn rename_collection_moves_dir_with_contents() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "old").unwrap();
+    let coll = create_collection(dir.path(), "old", dir.path()).unwrap();
     let ep = create_endpoint(&coll, "Ping").unwrap();
     assert!(ep.exists());
 
-    let new_coll = rename_collection(&coll, "New Coll").unwrap();
+    let new_coll = rename_collection(&coll, "New Coll", dir.path()).unwrap();
     assert_eq!(new_coll.file_name().unwrap().to_str().unwrap(), "new-coll");
     assert!(!coll.exists());
     assert!(new_coll.join("ping.toml").exists(), "contents moved along");
@@ -1021,7 +1021,7 @@ fn rename_collection_moves_dir_with_contents() {
 #[test]
 fn delete_collection_removes_dir_recursively() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "doomed").unwrap();
+    let coll = create_collection(dir.path(), "doomed", dir.path()).unwrap();
     create_endpoint(&coll, "Ping").unwrap();
     delete_collection(&coll).unwrap();
     assert!(!coll.exists());
@@ -1047,7 +1047,7 @@ fn create_endpoint_named_churl_never_overshadows_manifest() {
 
     // The collection dir doubles as a workspace-root-shaped dir for this test:
     // creating an endpoint named "churl" inside it must not write `churl.toml`.
-    let coll = create_collection(root.path(), "api").unwrap();
+    let coll = create_collection(root.path(), "api", root.path()).unwrap();
     // Plant a sibling manifest inside the collection so an overwrite is visible.
     save_workspace_manifest(&coll, &demo_workspace()).unwrap();
     let coll_manifest_before = fs::read(coll.join("churl.toml")).unwrap();
@@ -1081,7 +1081,7 @@ fn create_endpoint_named_churl_never_overshadows_manifest() {
 #[test]
 fn create_endpoint_reserved_variants_all_disambiguate() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     for name in ["Churl", "folder", "FOLDER"] {
         let path = create_endpoint(&coll, name).unwrap();
         let stem = path
@@ -1113,7 +1113,7 @@ fn create_endpoint_reserved_variants_all_disambiguate() {
 #[test]
 fn create_collection_named_sequences_never_shadows_sequences_dir() {
     let root = tempfile::tempdir().unwrap();
-    let coll = create_collection(root.path(), "sequences").unwrap();
+    let coll = create_collection(root.path(), "sequences", root.path()).unwrap();
     assert_ne!(
         coll.file_name().unwrap().to_str().unwrap(),
         "sequences",
@@ -1136,12 +1136,72 @@ fn create_collection_named_sequences_never_shadows_sequences_dir() {
     );
 }
 
+/// M7.9: `sequences` is reserved at the ROOT level ONLY. A sub-collection
+/// literally named `sequences` (created inside another collection) is written
+/// VERBATIM — never bumped to `sequences-2` — matching the loader, which treats a
+/// nested `sequences/` as an ordinary sub-collection.
+#[test]
+fn create_nested_collection_named_sequences_is_verbatim() {
+    let root = tempfile::tempdir().unwrap();
+    // A top-level collection to nest inside; root is the workspace root.
+    let api = create_collection(root.path(), "api", root.path()).unwrap();
+
+    // Now create a `sequences` sub-collection INSIDE `api` — parent != root, so
+    // the reservation must NOT apply.
+    let nested = create_collection(&api, "sequences", root.path()).unwrap();
+    assert_eq!(
+        nested.file_name().unwrap().to_str().unwrap(),
+        "sequences",
+        "a nested `sequences` collection is created verbatim (root-only reservation)"
+    );
+    assert_eq!(nested, api.join("sequences"));
+
+    // And the loader agrees: `api`'s sub-collections include the verbatim
+    // `sequences` (it is NOT excluded at a non-root level).
+    let api_col = Collection {
+        name: "api".into(),
+        path: api.clone(),
+    };
+    let subs = api_col.sub_collections().unwrap();
+    assert_eq!(
+        subs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["sequences"]
+    );
+}
+
+/// M7.9: renaming a SUB-collection to `sequences` keeps the verbatim name (the
+/// reserved bump is root-only), while renaming a ROOT-level collection to
+/// `sequences` still bumps to `sequences-2`.
+#[test]
+fn rename_collection_to_sequences_bumps_only_at_root() {
+    let root = tempfile::tempdir().unwrap();
+
+    // Root-level rename → bumped.
+    let top = create_collection(root.path(), "top", root.path()).unwrap();
+    let renamed_top = rename_collection(&top, "sequences", root.path()).unwrap();
+    assert_eq!(
+        renamed_top.file_name().unwrap().to_str().unwrap(),
+        "sequences-2",
+        "a root-level collection renamed to `sequences` is bumped"
+    );
+
+    // Nested rename → verbatim.
+    let api = create_collection(root.path(), "api", root.path()).unwrap();
+    let sub = create_collection(&api, "child", root.path()).unwrap();
+    let renamed_sub = rename_collection(&sub, "sequences", root.path()).unwrap();
+    assert_eq!(
+        renamed_sub.file_name().unwrap().to_str().unwrap(),
+        "sequences",
+        "a sub-collection renamed to `sequences` keeps the verbatim name"
+    );
+}
+
 /// Renaming an endpoint *into* a reserved name is the same hazard as creating
 /// one, and must disambiguate too.
 #[test]
 fn rename_endpoint_into_reserved_name_disambiguates() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     let path = create_endpoint(&coll, "Ping").unwrap();
 
     let new_path = rename_endpoint(&path, "churl").unwrap();
@@ -1160,7 +1220,7 @@ fn rename_endpoint_into_reserved_name_disambiguates() {
 #[test]
 fn no_name_yields_a_reserved_on_disk_stem() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     for name in [
         "churl",
         "Churl",
@@ -1189,7 +1249,7 @@ fn no_name_yields_a_reserved_on_disk_stem() {
         );
         // Collections.
         let root = tempfile::tempdir().unwrap();
-        let cdir = create_collection(root.path(), name).unwrap();
+        let cdir = create_collection(root.path(), name, root.path()).unwrap();
         let cstem = cdir
             .file_name()
             .unwrap()
@@ -1310,7 +1370,7 @@ fn create_collection_reserved_bump_advances_past_existing() {
     // `sequences` is reserved, so a create bumps to `-2`; pre-occupy `-2`.
     fs::create_dir(root.path().join("sequences-2")).unwrap();
 
-    let coll = create_collection(root.path(), "sequences").unwrap();
+    let coll = create_collection(root.path(), "sequences", root.path()).unwrap();
     assert_eq!(
         coll.file_name().unwrap().to_str().unwrap(),
         "sequences-3",
@@ -1444,5 +1504,186 @@ fn warn_policy_never_blocks_new_name_anchored_secret() {
             .contains(&"headers.X-Api-Key".to_string()),
         "{:?}",
         decision.warning_locations()
+    );
+}
+
+// ---- M7.9: recursive collection tree (workspace = root collection) ----
+
+/// Writes an endpoint TOML into `dir` (created if needed).
+fn write_endpoint(dir: &Path, file: &str, seq: u32, name: &str, url: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join(file),
+        format!("seq = {seq}\nname = \"{name}\"\n\n[request]\nmethod = \"GET\"\nurl = \"{url}\"\n"),
+    )
+    .unwrap();
+}
+
+/// Back-compat regression: a pre-M7.9-shaped FLAT workspace (collections one
+/// deep, no root endpoints) loads IDENTICALLY under the recursive model — the
+/// same top-level collections, the same endpoints, and the `churl.toml` `[vars]`
+/// are exactly the root collection's vars.
+#[test]
+fn m79_flat_workspace_loads_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(
+        root.join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nbase = \"https://api.example.com\"\n",
+    )
+    .unwrap();
+    write_endpoint(
+        &root.join("users"),
+        "list.toml",
+        0,
+        "List",
+        "https://x/users",
+    );
+    write_endpoint(
+        &root.join("orders"),
+        "list.toml",
+        0,
+        "List",
+        "https://x/orders",
+    );
+
+    let ws = OpenWorkspace::open(root).unwrap();
+
+    // Top-level collections unchanged: name-sorted, exactly the two dirs.
+    let cols = ws.collections().unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["orders", "users"]);
+
+    // Each collection's endpoints unchanged.
+    let users = cols.iter().find(|c| c.name == "users").unwrap();
+    let eps = users.endpoints().unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].1.name, "List");
+
+    // The root collection IS the workspace root; its vars are the churl.toml vars.
+    let rootc = ws.root_collection();
+    assert_eq!(rootc.path, root);
+    assert_eq!(rootc.name, "demo");
+    assert_eq!(
+        ws.manifest().vars.get("base").map(String::as_str),
+        Some("https://api.example.com")
+    );
+    // A flat workspace has no root-level endpoints.
+    assert!(rootc.endpoints().unwrap().is_empty());
+}
+
+/// A root-level endpoint (an endpoint file directly under the workspace root) is
+/// enumerated by the root collection's `endpoints()`, and the manifest
+/// (`churl.toml`) / `folder.toml` are NOT parsed as endpoints.
+#[test]
+fn m79_root_endpoint_enumerated_and_manifest_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    fs::write(root.join("folder.toml"), "[vars]\nx = \"1\"\n").unwrap();
+    write_endpoint(root, "ping.toml", 0, "Ping", "https://x/ping");
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let rootc = ws.root_collection();
+    let eps = rootc.endpoints().unwrap();
+    assert_eq!(
+        eps.len(),
+        1,
+        "only ping.toml is an endpoint (not churl/folder)"
+    );
+    assert_eq!(eps[0].1.name, "Ping");
+}
+
+/// Reserved-names per level: `sequences/` is reserved AT THE ROOT ONLY. A
+/// `sequences` directory NESTED under a sub-collection is an ordinary
+/// sub-collection, not churl's sequence store.
+#[test]
+fn m79_sequences_reserved_at_root_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    fs::create_dir_all(root.join("sequences")).unwrap(); // root: reserved
+    let api = root.join("api");
+    fs::create_dir_all(api.join("sequences")).unwrap(); // nested: a real collection
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    // Root: sequences/ excluded.
+    let top = ws.collections().unwrap();
+    assert!(top.iter().all(|c| c.name != "sequences"));
+    assert!(top.iter().any(|c| c.name == "api"));
+
+    // Nested: api/sequences IS a sub-collection.
+    let api_col = top.iter().find(|c| c.name == "api").unwrap();
+    let subs = api_col.sub_collections().unwrap();
+    assert_eq!(
+        subs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["sequences"],
+        "a nested `sequences` dir is a normal sub-collection"
+    );
+}
+
+/// Arbitrary-depth nesting: sub-collections recurse with no cap; each level's
+/// endpoints and children resolve independently.
+#[test]
+fn m79_nested_collections_recurse_arbitrary_depth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let deep = root.join("a").join("b").join("c");
+    write_endpoint(&deep, "leaf.toml", 0, "Leaf", "https://x/leaf");
+    write_endpoint(&root.join("a"), "mid.toml", 0, "Mid", "https://x/mid");
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let a = ws
+        .collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "a")
+        .unwrap();
+    assert_eq!(a.endpoints().unwrap().len(), 1); // mid.toml
+    let b = a.sub_collections().unwrap().into_iter().next().unwrap();
+    assert_eq!(b.name, "b");
+    let c = b.sub_collections().unwrap().into_iter().next().unwrap();
+    assert_eq!(c.name, "c");
+    let leaf = c.endpoints().unwrap();
+    assert_eq!(leaf.len(), 1);
+    assert_eq!(leaf[0].1.name, "Leaf");
+    assert!(c.sub_collections().unwrap().is_empty());
+}
+
+/// Per-level `folder.toml`/`churl.toml` skip: a sub-collection's own `folder.toml`
+/// (and a stray nested `churl.toml`) are never listed as endpoints.
+#[test]
+fn m79_reserved_files_skipped_at_every_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let sub = root.join("api");
+    write_endpoint(&sub, "get.toml", 0, "Get", "https://x/get");
+    fs::write(sub.join("folder.toml"), "[vars]\nk = \"v\"\n").unwrap();
+    fs::write(sub.join("churl.toml"), "name = \"nested\"\n").unwrap();
+
+    let ws = OpenWorkspace::open(root).unwrap();
+    let api = ws
+        .collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "api")
+        .unwrap();
+    let eps = api.endpoints().unwrap();
+    assert_eq!(
+        eps.len(),
+        1,
+        "only get.toml — folder/churl skipped at this level"
+    );
+    assert_eq!(eps[0].1.name, "Get");
+    // The sub-collection's own folder.toml vars still load.
+    assert_eq!(
+        load_collection_meta(&sub)
+            .unwrap()
+            .vars
+            .get("k")
+            .map(String::as_str),
+        Some("v")
     );
 }
