@@ -24,6 +24,7 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("delete", Action::Delete),
     ("switch profile", Action::SwitchProfile),
     ("environments & vars", Action::OpenEnvEditor),
+    ("reload workspace from disk", Action::Reload),
     ("run sequence", Action::RunSequence),
     ("add sequence", Action::EditSequence),
     ("open sequence", Action::OpenSequencePicker),

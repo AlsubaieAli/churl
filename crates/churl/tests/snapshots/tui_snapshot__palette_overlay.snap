@@ -17,10 +17,10 @@ expression: snapshot(&mut app)
 │           ┃  delete                                              ┃───────────┘
 │           ┃  switch profile                                      ┃───────────┐
 │           ┃  environments & vars                                 ┃           │
+│           ┃  reload workspace from disk                          ┃           │
 │           ┃  run sequence                                        ┃           │
 │           ┃  add sequence                                        ┃           │
 │           ┃  open sequence                                       ┃           │
-│           ┃  load test endpoint (concurrent)                     ┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s a to add          ││                                                │

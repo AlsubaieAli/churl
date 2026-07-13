@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1456
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -12,18 +11,18 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                    ┏ leader ━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│                    ┃ Space  request picker     ┃
-┃                            ┃└────────────────────┃ c  cancel request         ┃
-┃                            ┃┌ Response ──────────┃ e  toggle explorer sidebar┃
-┃                            ┃│no response yet     ┃ p  switch profile         ┃
-┃                            ┃│                    ┃ q  quit                   ┃
-┃                            ┃│no endpoint selected┃ v  Environments & vars    ┃
-┃                            ┃│                    ┃ w  workspace picker       ┃
-┃                            ┃│                    ┃ y  copy request as curl   ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                    ┃ l  ▸ load                 ┃
-┌ Sequences ─────────────────┐│                    ┃ s  ▸ sequences            ┃
-│<leader>s a to add          ││                    ┃ t  ▸ tabs                 ┃
-└────────────────────────────┘└────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃│                 ┏ leader ━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│                 ┃ Space  request picker        ┃
+┃                            ┃│                 ┃ c  cancel request            ┃
+┃                            ┃└─────────────────┃ e  toggle explorer sidebar   ┃
+┃                            ┃┌ Response ───────┃ p  switch profile            ┃
+┃                            ┃│no response yet  ┃ q  quit                      ┃
+┃                            ┃│                 ┃ r  reload workspace from disk┃
+┃                            ┃│no endpoint selec┃ v  Environments & vars       ┃
+┃                            ┃│                 ┃ w  workspace picker          ┃
+┃                            ┃│                 ┃ y  copy request as curl      ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                 ┃ l  ▸ load                    ┃
+┌ Sequences ─────────────────┐│                 ┃ s  ▸ sequences               ┃
+│<leader>s a to add          ││                 ┃ t  ▸ tabs                    ┃
+└────────────────────────────┘└─────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

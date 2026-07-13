@@ -355,6 +355,12 @@ fn default_leader_map() {
         keymap.leader_root_lookup(press(KeyCode::Char('q'), KeyModifiers::NONE)),
         Some(LeaderEntry::Act(Action::Quit))
     );
+    // `<leader>r` reloads the workspace from disk (free at root; plain `r` is
+    // the Explorer-overlay rename, a distinct non-leader state).
+    assert_eq!(
+        keymap.leader_root_lookup(press(KeyCode::Char('r'), KeyModifiers::NONE)),
+        Some(LeaderEntry::Act(Action::Reload))
+    );
     // Submenu descents.
     assert_eq!(
         keymap.leader_root_lookup(press(KeyCode::Char('s'), KeyModifiers::NONE)),

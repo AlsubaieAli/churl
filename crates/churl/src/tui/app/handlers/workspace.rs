@@ -23,6 +23,46 @@ impl App {
         Ok(())
     }
 
+    /// Re-reads the workspace manifest (`churl.toml`) from disk and rebuilds the
+    /// explorer, so external edits to `churl.toml`/`folder.toml` (another editor,
+    /// or a second churl instance) are picked up without a restart. Bound to
+    /// `<leader>r`.
+    ///
+    /// Dirty-guard: reuses [`App::guarded_load`]'s dirty *predicate*
+    /// ([`App::any_buffer_dirty`]) but NOT its resolution. A workspace *switch*
+    /// with dirty buffers opens a discard-changes confirm whose only outcome is
+    /// to *destroy* those buffers — right when you're leaving a workspace, wrong
+    /// for a *refresh* of the current one. So a reload with any dirty buffer
+    /// refuses in place ("save first") and applies nothing, preserving every
+    /// edit. Re-reading the manifest and remapping buffers can shift collection
+    /// indices under an open editor, so refusing while dirty is the safe default.
+    ///
+    /// On a failed manifest re-open the current workspace is left intact and the
+    /// error is surfaced (fail loudly, never half-swap).
+    pub(in crate::tui::app) fn reload_workspace(&mut self) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace to reload");
+            return Ok(());
+        };
+        // Refuse in place rather than discard: same dirty check as guarded_load,
+        // different resolution (a refresh must never destroy open buffers).
+        if self.any_buffer_dirty() {
+            self.notify("unsaved changes — save before reloading from disk");
+            return Ok(());
+        }
+        let reopened = match OpenWorkspace::open(&root) {
+            Ok(ws) => ws,
+            Err(err) => {
+                self.notify(format!("failed to reload workspace: {err}"));
+                return Ok(());
+            }
+        };
+        self.workspace = Some(reopened);
+        self.reload_explorer()?;
+        self.notify("reloaded from disk");
+        Ok(())
+    }
+
     /// Re-derives each buffer's explorer indices from its file path after a tree
     /// reload. Collections are name-sorted, so creating, renaming, or deleting
     /// *another* collection shifts indices — a stale `endpoint.collection` would

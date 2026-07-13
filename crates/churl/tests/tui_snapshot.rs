@@ -1062,6 +1062,8 @@ fn every_palette_command_dispatches() {
             }
             // The env editor needs an open workspace; without one it warns.
             Action::OpenEnvEditor => expect_status(&mut app, "open a workspace first"),
+            // Reload needs an open workspace; without one it warns.
+            Action::Reload => expect_status(&mut app, "no workspace to reload"),
             // Sequences (M7.4): no workspace / no sequence selected → warn.
             Action::RunSequence => expect_status(&mut app, "select a sequence"),
             Action::EditSequence => expect_status(&mut app, "open a workspace first"),

@@ -109,6 +109,11 @@ pub enum Action {
     DeleteSequence,
     /// Toggle the explorer sidebar (hide / reopen).
     ToggleExplorer,
+    /// Re-read the workspace manifest (`churl.toml`) from disk and rebuild the
+    /// explorer, so external edits to `churl.toml`/`folder.toml` (another editor
+    /// or a second churl instance) are picked up without a restart. Defers when
+    /// a buffer is dirty so unsaved edits are never discarded.
+    Reload,
     /// Switch focus/zoom between the endpoints tree and the sequences sub-pane
     /// inside the (focused) explorer column.
     FocusSequencesToggle,
@@ -283,6 +288,7 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
         "toggle-explorer",
         "toggle explorer sidebar",
     ),
+    (Action::Reload, "reload", "reload workspace from disk"),
     (
         Action::FocusSequencesToggle,
         "focus-sequences-toggle",

@@ -1268,6 +1268,7 @@ impl App {
             Action::FocusRequest => self.set_focus(Pane::Request),
             Action::FocusResponse => self.set_focus(Pane::Response),
             Action::ToggleExplorer => self.toggle_explorer(),
+            Action::Reload => self.reload_workspace()?,
             Action::FocusSequencesToggle => self.focus_sequences_toggle(),
             Action::CycleRegionFwd => self.cycle_region(true),
             Action::CycleRegionBack => self.cycle_region(false),
