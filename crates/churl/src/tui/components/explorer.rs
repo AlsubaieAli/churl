@@ -71,13 +71,31 @@ pub struct SelectedEndpoint {
     pub endpoint: Endpoint,
 }
 
-/// A collection plus its lazily loaded endpoints (`None` until first expand) and
-/// its parsed `folder.toml` variables (`None` until first requested).
+/// One node in the recursive collection tree: a collection directory plus its
+/// lazily loaded endpoints (`None` until first expand), its lazily discovered
+/// child collections (`None` until first expand), and its parsed `folder.toml`
+/// variables (`None` until first requested).
+///
+/// The tree is stored **flat** in [`ExplorerState::collections`]: each node holds
+/// its `parent` index and `depth`, and children are addressed by index
+/// (`children`). Node 0 is always the root collection (the workspace root itself),
+/// whose children render at depth 0 and whose own endpoints are the root-level
+/// endpoints. The root node is never drawn as a container row (it is implicitly
+/// always expanded).
 #[derive(Debug)]
 struct CollectionNode {
     collection: Collection,
+    /// Parent node index; `None` only for the root node (index 0).
+    parent: Option<usize>,
+    /// Render depth: the root's children are depth 0, their children depth 1, …
+    /// (the root itself is not rendered). Reused for the `Row.depth` indent.
+    depth: usize,
+    /// Child collection node indices, discovered lazily on first expand. `None`
+    /// until the directory has been scanned.
+    children: Option<Vec<usize>>,
     endpoints: Option<Vec<(PathBuf, Endpoint)>>,
-    /// Cached collection-level template vars from `folder.toml`; loaded lazily.
+    /// Cached collection-level template vars from `folder.toml` (or the root's
+    /// `churl.toml` `[vars]` for node 0); loaded lazily.
     vars: Option<BTreeMap<String, String>>,
     /// Warnings from the last lenient load (one per skipped/unparseable file),
     /// produced once when the collection is first parsed and drained by
@@ -104,6 +122,10 @@ impl CollectionNode {
     /// var resolution must never break sending (unresolved `{{var}}`s stay
     /// verbatim); a malformed `folder.toml` surfaces when the collection is
     /// expanded and its endpoints are parsed.
+    ///
+    /// Node 0 (the root collection) has no `folder.toml` — its vars come from the
+    /// `churl.toml` manifest and are pre-seeded at construction, so this lazy load
+    /// is only ever reached for sub-collections.
     fn vars(&mut self) -> &BTreeMap<String, String> {
         if self.vars.is_none() {
             let vars = load_collection_meta(&self.collection.path)
@@ -143,21 +165,48 @@ pub struct ExplorerState {
 
 impl ExplorerState {
     /// Builds the explorer for a workspace (or an empty one when `None`).
-    /// Lists collection directories only; no endpoint file is parsed.
+    ///
+    /// Node 0 is the **root collection** (the workspace root itself): its
+    /// endpoints (root-level endpoints) and its immediate sub-collections are
+    /// discovered eagerly so the collapsed tree lists them, matching the pre-M7.9
+    /// cold-start (a cheap directory scan; endpoint *bodies* still parse lazily).
+    /// Deeper sub-collections are discovered on first expand.
     pub fn new(workspace: Option<&OpenWorkspace>) -> Result<Self, PersistenceError> {
-        let collections = match workspace {
-            Some(ws) => ws
-                .collections()?
-                .into_iter()
-                .map(|collection| CollectionNode {
+        let mut collections: Vec<CollectionNode> = Vec::new();
+        if let Some(ws) = workspace {
+            // Node 0: the root collection. Its vars are the manifest `[vars]`
+            // (there is no root `folder.toml`), pre-seeded so `vars()` never does a
+            // `folder.toml` lookup for the root.
+            collections.push(CollectionNode {
+                collection: ws.root_collection(),
+                parent: None,
+                depth: 0,
+                children: None,
+                endpoints: None,
+                vars: Some(ws.manifest().vars.clone()),
+                warnings: Vec::new(),
+            });
+            // Root endpoints load eagerly (like a top-level collection's listing).
+            collections[0].load()?;
+            // Top-level collections (the root's `sequences/` skip lives in
+            // `OpenWorkspace::collections`, so it never appears as a collection).
+            let top = ws.collections()?;
+            let mut child_indices = Vec::with_capacity(top.len());
+            for collection in top {
+                let idx = collections.len();
+                child_indices.push(idx);
+                collections.push(CollectionNode {
                     collection,
+                    parent: Some(0),
+                    depth: 0,
+                    children: None,
                     endpoints: None,
                     vars: None,
                     warnings: Vec::new(),
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+                });
+            }
+            collections[0].children = Some(child_indices);
+        }
         // Sequences load eagerly (a small, flat set); a single unparseable file
         // degrades to a warning surfaced via `take_warnings`, never aborts.
         let (sequences, sequence_warnings) = match workspace {
@@ -206,35 +255,102 @@ impl ExplorerState {
         self.scroll
     }
 
-    /// Flattens the tree into the currently visible rows (collections and, when
-    /// expanded, their endpoints). Sequences are NOT tree rows —
-    /// they live in the dedicated sub-pane.
+    /// Flattens the recursive tree into the currently visible rows. The root
+    /// collection (node 0) is never a container row — it is implicitly always
+    /// expanded, so its endpoints (root-level endpoints) render at depth 0 and its
+    /// sub-collections render at depth 0 alongside them. A collection row's
+    /// descendants appear only while it is in [`ExplorerState::expanded`].
+    /// Sequences are NOT tree rows — they live in the dedicated sub-pane.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        for (ci, node) in self.collections.iter().enumerate() {
-            let expanded = self.expanded.contains(&ci);
-            rows.push(Row {
-                depth: 0,
-                kind: RowKind::Collection,
-                name: node.collection.name.clone(),
-                expanded,
-                collection: ci,
-                endpoint: None,
-            });
-            if expanded && let Some(endpoints) = &node.endpoints {
-                for (ei, (_, endpoint)) in endpoints.iter().enumerate() {
-                    rows.push(Row {
-                        depth: 1,
-                        kind: RowKind::Endpoint,
-                        name: endpoint.name.clone(),
-                        expanded: false,
-                        collection: ci,
-                        endpoint: Some(ei),
-                    });
+        // The root node is implicitly expanded; walk it without emitting a row for
+        // it. Root endpoints first (depth 0), then its child collections.
+        if !self.collections.is_empty() {
+            self.push_endpoint_rows(0, &mut rows);
+            if let Some(children) = self.collections[0].children.as_ref() {
+                for &ci in children {
+                    self.push_collection_rows(ci, &mut rows);
                 }
             }
         }
         rows
+    }
+
+    /// Emits the endpoint leaf rows for the collection at `ci` (if its endpoints
+    /// are loaded). Endpoints indent one level under their collection row; the root
+    /// (node 0, which has no row) keeps its endpoints at depth 0.
+    fn push_endpoint_rows(&self, ci: usize, rows: &mut Vec<Row>) {
+        let node = &self.collections[ci];
+        let depth = if node.parent.is_none() {
+            node.depth // root endpoints: not indented (no root row above them)
+        } else {
+            node.depth + 1
+        };
+        if let Some(endpoints) = &node.endpoints {
+            for (ei, (_, endpoint)) in endpoints.iter().enumerate() {
+                rows.push(Row {
+                    depth,
+                    kind: RowKind::Endpoint,
+                    name: endpoint.name.clone(),
+                    expanded: false,
+                    collection: ci,
+                    endpoint: Some(ei),
+                });
+            }
+        }
+    }
+
+    /// Emits the container row for the collection at `ci` and, when it is
+    /// expanded, recursively its sub-collections then its endpoints (sub-folders
+    /// above endpoints, mirroring the tree order).
+    fn push_collection_rows(&self, ci: usize, rows: &mut Vec<Row>) {
+        let node = &self.collections[ci];
+        let expanded = self.expanded.contains(&ci);
+        rows.push(Row {
+            depth: node.depth,
+            kind: RowKind::Collection,
+            name: node.collection.name.clone(),
+            expanded,
+            collection: ci,
+            endpoint: None,
+        });
+        if expanded {
+            if let Some(children) = node.children.as_ref() {
+                for &child in children {
+                    self.push_collection_rows(child, rows);
+                }
+            }
+            self.push_endpoint_rows(ci, rows);
+        }
+    }
+
+    /// Ensures the collection at `ci` has its endpoints parsed and its child
+    /// collections discovered (pushing any new child nodes onto the flat vec).
+    /// Idempotent: a second call is a no-op. Used on expand and by traversal
+    /// helpers that need a node's children materialised.
+    fn ensure_loaded(&mut self, ci: usize) -> Result<(), PersistenceError> {
+        self.collections[ci].load()?;
+        if self.collections[ci].children.is_some() {
+            return Ok(());
+        }
+        let subs = self.collections[ci].collection.sub_collections()?;
+        let depth = self.collections[ci].depth + 1;
+        let mut child_indices = Vec::with_capacity(subs.len());
+        for collection in subs {
+            let idx = self.collections.len();
+            child_indices.push(idx);
+            self.collections.push(CollectionNode {
+                collection,
+                parent: Some(ci),
+                depth,
+                children: None,
+                endpoints: None,
+                vars: None,
+                warnings: Vec::new(),
+            });
+        }
+        self.collections[ci].children = Some(child_indices);
+        Ok(())
     }
 
     fn clamp_cursor(&mut self) {
@@ -356,7 +472,8 @@ impl ExplorerState {
     }
 
     /// `h`: collapse the current collection, or jump from an endpoint to its
-    /// parent collection row.
+    /// parent collection row. A root-level endpoint (owned by node 0, which has no
+    /// container row) has no parent to jump to, so `h` is a no-op there.
     pub fn collapse(&mut self) {
         let Some(row) = self.current_row() else {
             return;
@@ -368,12 +485,15 @@ impl ExplorerState {
             }
             RowKind::Collection => {}
             RowKind::Endpoint => {
-                // Parent collection row: count of visible rows before it.
-                self.cursor = self
+                // Parent collection row: the container row for the owning
+                // collection. Absent for a root endpoint (node 0 draws no row).
+                if let Some(pos) = self
                     .rows()
                     .iter()
                     .position(|r| r.kind == RowKind::Collection && r.collection == row.collection)
-                    .unwrap_or(0);
+                {
+                    self.cursor = pos;
+                }
             }
         }
     }
@@ -388,16 +508,16 @@ impl ExplorerState {
             return Ok(());
         }
         if row.expanded {
-            // Descend onto the first child, if the collection has one.
+            // Descend onto the first child row (sub-collection or endpoint), if any.
             if self
                 .rows()
                 .get(self.cursor + 1)
-                .is_some_and(|next| next.kind == RowKind::Endpoint)
+                .is_some_and(|next| next.depth > row.depth)
             {
                 self.cursor += 1;
             }
         } else {
-            self.collections[row.collection].load()?;
+            self.ensure_loaded(row.collection)?;
             self.expanded.insert(row.collection);
         }
         Ok(())
@@ -408,7 +528,7 @@ impl ExplorerState {
             self.expanded.remove(&collection);
             self.clamp_cursor();
         } else {
-            self.collections[collection].load()?;
+            self.ensure_loaded(collection)?;
             self.expanded.insert(collection);
         }
         Ok(())
@@ -418,16 +538,46 @@ impl ExplorerState {
         let node = self.collections.get(row.collection)?;
         let (file, endpoint) = node.endpoints.as_ref()?.get(row.endpoint?)?;
         Some(SelectedEndpoint {
-            display_path: format!("{}/{}", node.collection.name, endpoint.name),
+            display_path: self.endpoint_display_path(row.collection, &endpoint.name),
             file: file.clone(),
             collection: row.collection,
             endpoint: endpoint.clone(),
         })
     }
 
-    /// The collection-level template vars (`folder.toml` `[vars]`) for the
-    /// `collection`-th collection, loaded lazily and cached. An unknown index or
-    /// missing/invalid `folder.toml` yields an empty map.
+    /// The `collection/.../endpoint` display path for an endpoint named `name` in
+    /// the collection at `ci`. The root collection (node 0) contributes no segment,
+    /// so a root endpoint is just `name` and a top-level-collection endpoint stays
+    /// `collection/name` (unchanged from pre-M7.9); a nested one is the full chain
+    /// `parent/child/name`.
+    fn endpoint_display_path(&self, ci: usize, name: &str) -> String {
+        let mut segments = self.collection_name_chain(ci);
+        segments.push(name.to_owned());
+        segments.join("/")
+    }
+
+    /// The chain of collection display names from the top-level ancestor down to
+    /// the collection at `ci`, excluding the root (node 0). Empty for the root
+    /// itself.
+    fn collection_name_chain(&self, ci: usize) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut cur = Some(ci);
+        while let Some(idx) = cur {
+            let node = &self.collections[idx];
+            if node.parent.is_none() {
+                break; // reached the root; it contributes no segment
+            }
+            chain.push(node.collection.name.clone());
+            cur = node.parent;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The collection-level template vars for the node at `collection`, loaded
+    /// lazily and cached. An unknown index yields an empty map. For a
+    /// sub-collection this is its `folder.toml` `[vars]`; for the root (node 0) it
+    /// is the manifest `[vars]` (pre-seeded).
     pub fn collection_vars(&mut self, collection: usize) -> BTreeMap<String, String> {
         self.collections
             .get_mut(collection)
@@ -435,16 +585,59 @@ impl ExplorerState {
             .unwrap_or_default()
     }
 
-    /// Loads every collection's endpoints and returns their file paths (for the
-    /// sequence editor's add-step picker).
+    /// The endpoint's ancestor **collection scope chain**, innermost → outermost:
+    /// the leaf collection's vars first, then each parent, ending at the root
+    /// collection (node 0). This is the resolver's inherit-and-override walk — a
+    /// child's var shadows a same-named ancestor's, and the root sits last so a
+    /// root endpoint sees only the root's vars. Each map is loaded lazily and
+    /// cached.
+    pub fn collection_ancestor_vars(&mut self, collection: usize) -> Vec<BTreeMap<String, String>> {
+        // Collect the chain of indices leaf → root first (immutable), then read
+        // each node's (mutably-cached) vars.
+        let mut chain = Vec::new();
+        let mut cur = Some(collection);
+        while let Some(idx) = cur {
+            if idx >= self.collections.len() {
+                break;
+            }
+            chain.push(idx);
+            cur = self.collections[idx].parent;
+        }
+        chain
+            .into_iter()
+            .map(|idx| self.collections[idx].vars().clone())
+            .collect()
+    }
+
+    /// Loads every collection's endpoints (recursively, whole tree) and returns
+    /// their file paths (for the sequence editor's add-step picker).
     pub fn all_endpoint_files(&mut self) -> Result<Vec<PathBuf>, PersistenceError> {
+        self.materialize_all()?;
         let mut out = Vec::new();
-        for node in &mut self.collections {
-            for (path, _) in node.load()? {
-                out.push(path.clone());
+        for node in &self.collections {
+            if let Some(endpoints) = &node.endpoints {
+                for (path, _) in endpoints {
+                    out.push(path.clone());
+                }
             }
         }
         Ok(out)
+    }
+
+    /// Fully materialises the tree: parses every collection's endpoints and
+    /// discovers every sub-collection, depth-first from the root. After this,
+    /// `self.collections` holds every node and each node's `endpoints`/`children`
+    /// are `Some`. Used by the whole-tree readers (`all_endpoints`,
+    /// `all_endpoint_files`).
+    fn materialize_all(&mut self) -> Result<(), PersistenceError> {
+        let mut i = 0;
+        while i < self.collections.len() {
+            // `ensure_loaded` may push new child nodes, growing the vec; the index
+            // walk visits them in turn.
+            self.ensure_loaded(i)?;
+            i += 1;
+        }
+        Ok(())
     }
 
     /// Every loaded sequence as `(name, file)`, in explorer order — for the
@@ -469,30 +662,61 @@ impl ExplorerState {
         }
     }
 
-    /// Loads every collection's endpoints (for fuzzy search) and returns
-    /// `(display path, collection index, endpoint index)` for each endpoint.
+    /// Loads every collection's endpoints (recursively, for fuzzy search) and
+    /// returns `(display path, collection node index, endpoint index)` for each
+    /// endpoint, in tree display order (root endpoints first, then each top-level
+    /// collection's subtree — sub-collections before endpoints, matching `rows`).
     pub fn all_endpoints(&mut self) -> Result<Vec<(String, usize, usize)>, PersistenceError> {
+        if self.collections.is_empty() {
+            return Ok(Vec::new()); // no workspace open
+        }
+        self.materialize_all()?;
         let mut out = Vec::new();
-        for (ci, node) in self.collections.iter_mut().enumerate() {
-            let name = node.collection.name.clone();
-            for (ei, (_, endpoint)) in node.load()?.iter().enumerate() {
-                out.push((format!("{}/{}", name, endpoint.name), ci, ei));
+        // Root endpoints (node 0) first, at the top level.
+        self.collect_endpoints(0, &mut out);
+        if let Some(children) = self.collections[0].children.clone() {
+            for ci in children {
+                self.collect_subtree_endpoints(ci, &mut out);
             }
         }
         Ok(out)
     }
 
+    /// Appends `(display_path, ci, ei)` for every endpoint directly in the
+    /// collection at `ci`.
+    fn collect_endpoints(&self, ci: usize, out: &mut Vec<(String, usize, usize)>) {
+        if let Some(endpoints) = &self.collections[ci].endpoints {
+            for (ei, (_, endpoint)) in endpoints.iter().enumerate() {
+                out.push((self.endpoint_display_path(ci, &endpoint.name), ci, ei));
+            }
+        }
+    }
+
+    /// Recursively appends the subtree rooted at `ci` in display order:
+    /// sub-collections first (depth-first), then this collection's own endpoints —
+    /// mirroring `push_collection_rows`.
+    fn collect_subtree_endpoints(&self, ci: usize, out: &mut Vec<(String, usize, usize)>) {
+        if let Some(children) = self.collections[ci].children.clone() {
+            for child in children {
+                self.collect_subtree_endpoints(child, out);
+            }
+        }
+        self.collect_endpoints(ci, out);
+    }
+
     // ---- CRUD support ----
 
-    /// Rebuilds the collection list from `workspace` while preserving the current
-    /// cursor (clamped) and re-expanding collections that were expanded before.
-    /// Endpoint caches are dropped (re-parsed lazily on next expand) so on-disk
-    /// changes are picked up.
+    /// Rebuilds the collection tree from `workspace` while preserving the current
+    /// cursor (clamped) and re-expanding collections that were expanded before
+    /// (matched by directory **path**, since indices shift when siblings
+    /// appear/vanish). Endpoint caches are dropped (re-parsed lazily on next
+    /// expand) so on-disk changes are picked up.
     pub fn reload(&mut self, workspace: Option<&OpenWorkspace>) -> Result<(), PersistenceError> {
-        let expanded_names: HashSet<String> = self
+        // Snapshot the paths of currently-expanded collections before the rebuild.
+        let expanded_paths: HashSet<PathBuf> = self
             .expanded
             .iter()
-            .filter_map(|&ci| self.collections.get(ci).map(|n| n.collection.name.clone()))
+            .filter_map(|&ci| self.collections.get(ci).map(|n| n.collection.path.clone()))
             .collect();
         let cursor = self.cursor;
         let rebuilt = Self::new(workspace)?;
@@ -500,10 +724,13 @@ impl ExplorerState {
         self.sequences = rebuilt.sequences;
         self.sequence_warnings = rebuilt.sequence_warnings;
         self.expanded.clear();
-        // Re-expand collections whose names survived.
-        for (ci, node) in self.collections.iter_mut().enumerate() {
-            if expanded_names.contains(&node.collection.name) {
-                node.load()?;
+        // Re-expand collections whose directory path survived. Descend from the
+        // root so deeper collections are re-discovered and re-expanded too; each
+        // `descend_to_dir` materialises the chain to its target.
+        for path in &expanded_paths {
+            if let Ok(Some(ci)) = self.descend_to_dir(path) {
+                self.ensure_loaded(ci)?;
+                self.expand_ancestors(ci);
                 self.expanded.insert(ci);
             }
         }
@@ -548,6 +775,27 @@ impl ExplorerState {
             .map(|n| n.collection.path.clone())
     }
 
+    /// The collection directory the cursor is "in", for cursor-aware creation
+    /// (M7.9): the selected collection's own directory, the owning collection of
+    /// the selected endpoint, or — when no row is selected (an empty workspace with
+    /// only a root collection) — the **root** directory (node 0). `None` only when
+    /// there is no workspace open at all.
+    ///
+    /// This is what `n` (new endpoint here) and `N` (new sub-collection here) target:
+    /// at the root the new endpoint is a root endpoint and the new collection is a
+    /// top-level one; inside a collection they attach to that collection.
+    pub fn cursor_collection_dir(&self) -> Option<PathBuf> {
+        if let Some(row) = self.current_row() {
+            return self
+                .collections
+                .get(row.collection)
+                .map(|n| n.collection.path.clone());
+        }
+        // No selectable row (e.g. a fresh workspace with no collections and no root
+        // endpoints): fall back to the root collection so `n`/`N` still work.
+        self.collections.first().map(|n| n.collection.path.clone())
+    }
+
     /// The file path of the selected endpoint, if an endpoint row is selected.
     pub fn selected_endpoint_file(&self) -> Option<PathBuf> {
         let row = self.current_row()?;
@@ -572,14 +820,14 @@ impl ExplorerState {
             .map(|(path, _)| path.as_path())
     }
 
-    /// The index of the collection whose directory contains `file`, if any.
-    /// Used to remap a loaded endpoint's collection index after a tree reload
-    /// (name-sorted collections shift indices when siblings appear/vanish).
-    pub fn collection_index_for_file(&self, file: &Path) -> Option<usize> {
+    /// The index of the collection node whose directory contains `file`,
+    /// discovering the chain from the root if necessary. Used to remap a loaded
+    /// endpoint's collection index after a tree reload (name-sorted collections
+    /// shift indices when siblings appear/vanish). Works at any depth, and returns
+    /// node 0 for a root-level endpoint.
+    pub fn collection_index_for_file(&mut self, file: &Path) -> Option<usize> {
         let parent = file.parent()?;
-        self.collections
-            .iter()
-            .position(|n| n.collection.path == parent)
+        self.descend_to_dir(parent).ok().flatten()
     }
 
     /// Whether the cursor is on an endpoint row backed by a *different* file than
@@ -608,34 +856,65 @@ impl ExplorerState {
         }
     }
 
-    /// Expands the collection containing `file`, moves the cursor onto that row,
-    /// and returns the endpoint for loading. Used after create/rename.
+    /// Expands the collection containing `file` (discovering the chain from the
+    /// root as needed), moves the cursor onto that row, and returns the endpoint
+    /// for loading. Used after create/rename. Works at any depth and for
+    /// root-level endpoints.
     pub fn select_file(
         &mut self,
         file: &Path,
     ) -> Result<Option<SelectedEndpoint>, PersistenceError> {
-        // Find (and lazily load) the collection + endpoint index for `file`.
-        let mut target: Option<(usize, usize)> = None;
-        for (ci, node) in self.collections.iter_mut().enumerate() {
-            let dir = node.collection.path.clone();
-            if file.parent() != Some(dir.as_path()) {
-                continue;
-            }
-            let endpoints = node.load()?;
-            if let Some(ei) = endpoints.iter().position(|(p, _)| p == file) {
-                target = Some((ci, ei));
-                break;
-            }
-        }
-        let Some((ci, ei)) = target else {
+        let Some(parent) = file.parent() else {
+            return Ok(None);
+        };
+        // Descend from the root, materialising each level, until we reach the node
+        // whose directory is `parent`.
+        let Some(ci) = self.descend_to_dir(parent)? else {
+            return Ok(None);
+        };
+        self.ensure_loaded(ci)?;
+        let Some(ei) = self.collections[ci]
+            .endpoints
+            .as_ref()
+            .and_then(|eps| eps.iter().position(|(p, _)| p == file))
+        else {
             return Ok(None);
         };
         self.jump_to(ci, ei)
     }
 
-    /// Expands `collection` and moves the cursor onto its `endpoint`-th child,
-    /// returning that endpoint for loading into the request pane. Used by the
-    /// fuzzy search overlay to jump to a result.
+    /// Walks from the root collection down to the node whose directory is `dir`,
+    /// materialising (`ensure_loaded`) each level so the next child is discovered.
+    /// Returns the node index, or `None` if `dir` is outside the tree.
+    fn descend_to_dir(&mut self, dir: &Path) -> Result<Option<usize>, PersistenceError> {
+        if self.collections.is_empty() {
+            return Ok(None);
+        }
+        if self.collections[0].collection.path == dir {
+            return Ok(Some(0));
+        }
+        let mut current = 0usize;
+        loop {
+            self.ensure_loaded(current)?;
+            let children = self.collections[current]
+                .children
+                .clone()
+                .unwrap_or_default();
+            let next = children.into_iter().find(|&c| {
+                let cpath = &self.collections[c].collection.path;
+                cpath == dir || dir.starts_with(cpath)
+            });
+            match next {
+                Some(c) if self.collections[c].collection.path == dir => return Ok(Some(c)),
+                Some(c) => current = c,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// Expands `collection`'s whole ancestor chain, loads it, moves the cursor
+    /// onto its `endpoint`-th child, and returns that endpoint for loading into the
+    /// request pane. Used by the fuzzy search overlay to jump to a result.
     pub fn jump_to(
         &mut self,
         collection: usize,
@@ -644,8 +923,10 @@ impl ExplorerState {
         if collection >= self.collections.len() {
             return Ok(None);
         }
-        self.collections[collection].load()?;
-        self.expanded.insert(collection);
+        self.ensure_loaded(collection)?;
+        // Expand every ancestor (excluding the root, which draws no row and is
+        // always implicitly expanded) so the target endpoint row is visible.
+        self.expand_ancestors(collection);
         if let Some(pos) = self.rows().iter().position(|row| {
             row.kind == RowKind::Endpoint
                 && row.collection == collection
@@ -655,6 +936,22 @@ impl ExplorerState {
         }
         let row = self.current_row();
         Ok(row.as_ref().and_then(|row| self.selected_endpoint(row)))
+    }
+
+    /// Inserts `collection` and each of its ancestors into the expanded set
+    /// (skipping the root, node 0, which is never a container row). The nodes must
+    /// already exist in the vec (call `ensure_loaded`/`materialize` first for the
+    /// leaf); ancestors always exist because a child is only discovered after its
+    /// parent is loaded.
+    fn expand_ancestors(&mut self, collection: usize) {
+        let mut cur = Some(collection);
+        while let Some(idx) = cur {
+            if self.collections[idx].parent.is_none() {
+                break; // the root itself is never in `expanded`
+            }
+            self.expanded.insert(idx);
+            cur = self.collections[idx].parent;
+        }
     }
 }
 

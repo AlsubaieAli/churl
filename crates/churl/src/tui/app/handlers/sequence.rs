@@ -181,15 +181,15 @@ impl App {
         self.start_sequence_run();
     }
 
-    /// The ambient run scopes (cli / active profile / workspace) for a sequence
-    /// run, mirroring the send-time resolver's non-collection layers. The
-    /// per-step collection scope is loaded inside `prepare_step`.
+    /// The ambient run scopes (cli / active profile / root-collection vars) for a
+    /// sequence run, mirroring the send-time resolver's non-collection layers. The
+    /// per-step collection ancestor chain is loaded inside `prepare_step`.
     pub(in crate::tui::app) fn sequence_run_scopes(&self) -> churl_core::sequence::RunScopes {
         churl_core::sequence::RunScopes {
             session: self.session_vars(),
             cli: self.cli_vars.clone(),
             profile: self.profile_vars(),
-            workspace: self.workspace_vars(),
+            workspace: self.root_collection_vars(),
         }
     }
 

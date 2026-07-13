@@ -7,18 +7,23 @@
 use super::super::*;
 
 impl App {
-    /// `n`: prompt for a new endpoint name (under the selected collection).
+    /// `n`: prompt for a new endpoint name, created in the cursor's collection
+    /// context (M7.9 cursor-aware create) — a collection under the cursor, the
+    /// owning collection of the selected endpoint, or the **root** collection when
+    /// nothing is selected (so `n` at the root makes a root-level endpoint).
     pub(in crate::tui::app) fn begin_new_endpoint(&mut self) {
-        if self.explorer.selected_collection_dir().is_none() {
-            self.message = Some(Message::new("select a collection first"));
+        if self.explorer.cursor_collection_dir().is_none() {
+            self.message = Some(Message::new("no workspace open"));
             return;
         }
         self.open_prompt(PromptPurpose::NewEndpoint, "");
     }
 
-    /// `N`: prompt for a new collection name.
+    /// `N`: prompt for a new (sub-)collection name, created under the cursor's
+    /// collection context (M7.9) — a top-level collection at the root, or a
+    /// sub-collection inside the collection under the cursor.
     pub(in crate::tui::app) fn begin_new_collection(&mut self) {
-        if self.workspace.is_none() {
+        if self.explorer.cursor_collection_dir().is_none() {
             self.message = Some(Message::new("no workspace open"));
             return;
         }
@@ -85,10 +90,11 @@ impl App {
         self.open_prompt(PromptPurpose::ExportWorkspace(dialect), &seed);
     }
 
-    /// Palette: prompt for a curl command to import as a new endpoint.
+    /// Palette: prompt for a curl command to import as a new endpoint (in the
+    /// cursor's collection context, or the root collection).
     pub(in crate::tui::app) fn begin_paste_curl(&mut self) {
-        if self.explorer.selected_collection_dir().is_none() {
-            self.notify("select a collection first");
+        if self.explorer.cursor_collection_dir().is_none() {
+            self.notify("no workspace open");
             return;
         }
         self.open_prompt(PromptPurpose::PasteCurl, "");
@@ -253,8 +259,8 @@ impl App {
     /// Commits a paste-curl prompt: import the curl command and create an
     /// endpoint in the selected collection.
     pub(in crate::tui::app) fn commit_paste_curl(&mut self, curl: String) -> Result<()> {
-        let Some(dir) = self.explorer.selected_collection_dir() else {
-            self.notify("select a collection first");
+        let Some(dir) = self.explorer.cursor_collection_dir() else {
+            self.notify("no workspace open");
             return Ok(());
         };
         let result = match churl_core::import::import_curl(&curl) {
@@ -320,7 +326,9 @@ impl App {
     ) -> Result<()> {
         match purpose {
             PromptPurpose::NewEndpoint => {
-                let Some(dir) = self.explorer.selected_collection_dir() else {
+                // Cursor-aware target (M7.9): the collection under the cursor, or
+                // the root collection when nothing is selected (→ a root endpoint).
+                let Some(dir) = self.explorer.cursor_collection_dir() else {
                     return Ok(());
                 };
                 match persistence::create_endpoint(&dir, &text) {
@@ -335,10 +343,12 @@ impl App {
                 }
             }
             PromptPurpose::NewCollection => {
-                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                // Cursor-aware target (M7.9): a sub-collection under the collection
+                // at the cursor, or a top-level collection at the root.
+                let Some(parent) = self.explorer.cursor_collection_dir() else {
                     return Ok(());
                 };
-                match persistence::create_collection(&root, &text) {
+                match persistence::create_collection(&parent, &text) {
                     Ok(dir) => {
                         self.reload_explorer()?;
                         self.message = Some(Message::new(created_message(&text, &dir)));

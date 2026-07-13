@@ -1578,15 +1578,18 @@ fn reload_remaps_selected_collection_index_for_resolver() {
     app.explorer.cursor = 1;
     let selected = app.explorer.select().unwrap().expect("endpoint");
     app.load_endpoint(selected);
-    assert_eq!(app.selected().unwrap().collection, 0);
+    // Node 0 is the root collection (M7.9); "bbb" is the first top-level
+    // collection, node 1.
+    assert_eq!(app.selected().unwrap().collection, 1);
 
-    // Create a collection that sorts *before* "bbb" and reload: "bbb" is
-    // now index 1; the stale index 0 would read "aaa"'s (empty) vars.
+    // Create a collection that sorts *before* "bbb" and reload: name-sorted
+    // top-level collections become [aaa=1, bbb=2], so "bbb" shifts to index 2;
+    // the stale index 1 would read "aaa"'s (empty) vars.
     churl_core::persistence::create_collection(dir.path(), "aaa").unwrap();
     app.reload_explorer().unwrap();
     assert_eq!(
         app.selected().unwrap().collection,
-        1,
+        2,
         "collection index must be remapped from the file path"
     );
     let selected = app.selected().cloned().unwrap();
@@ -5574,5 +5577,130 @@ fn reload_with_corrupt_manifest_keeps_old_workspace() {
             .is_some_and(|m| m.text.starts_with("failed to reload workspace")),
         "the reload failure is surfaced: {:?}",
         app.message.as_ref().map(|m| m.text.as_str())
+    );
+}
+
+// ---- M7.9: variable inheritance (ancestor-chain resolver) ----
+
+/// Loads the endpoint at `file` into the app (via the explorer) and returns it.
+fn load_file(app: &mut App, file: &std::path::Path) -> SelectedEndpoint {
+    let selected = app
+        .explorer
+        .select_file(file)
+        .unwrap()
+        .expect("endpoint loads");
+    app.load_endpoint(selected.clone());
+    selected
+}
+
+/// Var inheritance regression: a child collection's var OVERRIDES its parent's,
+/// which OVERRIDES the root collection's — a single inherit-and-override chain
+/// resolved by `build_resolver`. Same key `who` defined at all three levels; the
+/// deepest wins.
+#[test]
+fn m79_child_overrides_parent_overrides_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nwho = \"root\"\n",
+    )
+    .unwrap();
+    let parent = root.join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(parent.join("folder.toml"), "[vars]\nwho = \"parent\"\n").unwrap();
+    let child = parent.join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(child.join("folder.toml"), "[vars]\nwho = \"child\"\n").unwrap();
+    let leaf = child.join("leaf.toml");
+    std::fs::write(
+        &leaf,
+        "seq = 0\nname = \"Leaf\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://{{who}}/x\"\n",
+    )
+    .unwrap();
+
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let selected = load_file(&mut app, &leaf);
+    let resolver = app.build_resolver(&selected);
+    assert_eq!(
+        resolver.substitute("{{who}}"),
+        "child",
+        "the deepest collection var must win over parent and root"
+    );
+}
+
+/// Var inheritance regression: a var defined only at the root (or a parent)
+/// is INHERITED by a deeper endpoint that does not redefine it.
+#[test]
+fn m79_deep_endpoint_inherits_root_and_parent_vars() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nfrom_root = \"R\"\n",
+    )
+    .unwrap();
+    let parent = root.join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(parent.join("folder.toml"), "[vars]\nfrom_parent = \"P\"\n").unwrap();
+    let child = parent.join("child");
+    std::fs::create_dir(&child).unwrap();
+    let leaf = child.join("leaf.toml");
+    std::fs::write(
+        &leaf,
+        "seq = 0\nname = \"Leaf\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://{{from_root}}/{{from_parent}}\"\n",
+    )
+    .unwrap();
+
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let selected = load_file(&mut app, &leaf);
+    let resolver = app.build_resolver(&selected);
+    assert_eq!(
+        resolver.substitute("{{from_root}}"),
+        "R",
+        "root var inherited"
+    );
+    assert_eq!(
+        resolver.substitute("{{from_parent}}"),
+        "P",
+        "parent var inherited"
+    );
+}
+
+/// Var inheritance regression: a ROOT endpoint sees ONLY the root collection's
+/// vars — no sub-collection var leaks into it (there is no collection ancestor
+/// besides the root).
+#[test]
+fn m79_root_endpoint_sees_only_root_vars() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("churl.toml"),
+        "name = \"demo\"\n\n[vars]\nwho = \"root\"\n",
+    )
+    .unwrap();
+    // A sub-collection that ALSO defines `who` — it must NOT reach the root endpoint.
+    let sub = root.join("api");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("folder.toml"), "[vars]\nwho = \"api\"\n").unwrap();
+    let ping = root.join("ping.toml");
+    std::fs::write(
+        &ping,
+        "seq = 0\nname = \"Ping\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://{{who}}/ping\"\n",
+    )
+    .unwrap();
+
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let selected = load_file(&mut app, &ping);
+    // The root endpoint's owning collection is node 0 (the root).
+    assert_eq!(selected.collection, 0);
+    let resolver = app.build_resolver(&selected);
+    assert_eq!(
+        resolver.substitute("{{who}}"),
+        "root",
+        "a root endpoint resolves only the root collection's vars"
     );
 }
