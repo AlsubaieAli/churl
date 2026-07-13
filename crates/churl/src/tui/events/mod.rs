@@ -295,6 +295,10 @@ impl Default for KeyMap {
         // Copy the loaded request as a curl one-liner (`y` was free). Moved off
         // the Request-overlay `C` so it can't shadow body-editor text input.
         root_bind(key!(y), LeaderEntry::Act(Action::CopyAsCurl));
+        // Reload the workspace from disk (re-read `churl.toml`, rebuild the
+        // explorer); `r` is free at root (plain `r` is the Explorer-overlay
+        // rename, a distinct non-leader state).
+        root_bind(key!(r), LeaderEntry::Act(Action::Reload));
         // Submenu descents (two-level which-key). The submenu names match the
         // seeded `submenus` keys below; config can point new keys at them or
         // create fresh submenus.

@@ -23,6 +23,44 @@ impl App {
         Ok(())
     }
 
+    /// Re-reads the workspace manifest (`churl.toml`) from disk and rebuilds the
+    /// explorer, so external edits to `churl.toml`/`folder.toml` (another editor,
+    /// or a second churl instance) are picked up without a restart. Bound to
+    /// `<leader>r`.
+    ///
+    /// Dirty-guard: like [`App::guarded_load`], a dirty buffer must never lose
+    /// unsaved work. A reload with any dirty buffer is DEFERRED — it refuses and
+    /// tells the user to save first — rather than routing through the
+    /// discard-changes confirm (whose only resolution is to *destroy* buffers,
+    /// the wrong outcome for a refresh-from-disk). Re-reading the manifest and
+    /// remapping buffers can shift collection indices under an open editor, so
+    /// deferring while dirty is the safe default that preserves every edit.
+    ///
+    /// On a failed manifest re-open the current workspace is left intact and the
+    /// error is surfaced (fail loudly, never half-swap).
+    pub(in crate::tui::app) fn reload_workspace(&mut self) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            self.notify("no workspace to reload");
+            return Ok(());
+        };
+        // Reuse the guarded-load dirty check: defer rather than discard.
+        if self.any_buffer_dirty() {
+            self.notify("unsaved changes — save before reloading from disk");
+            return Ok(());
+        }
+        let reopened = match OpenWorkspace::open(&root) {
+            Ok(ws) => ws,
+            Err(err) => {
+                self.notify(format!("failed to reload workspace: {err}"));
+                return Ok(());
+            }
+        };
+        self.workspace = Some(reopened);
+        self.reload_explorer()?;
+        self.notify("reloaded from disk");
+        Ok(())
+    }
+
     /// Re-derives each buffer's explorer indices from its file path after a tree
     /// reload. Collections are name-sorted, so creating, renaming, or deleting
     /// *another* collection shifts indices — a stale `endpoint.collection` would

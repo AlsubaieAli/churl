@@ -5464,3 +5464,83 @@ fn successful_write_history_leaves_flag_clear() {
     );
     assert_eq!(app.history.as_ref().unwrap().recent(10).unwrap().len(), 1);
 }
+
+/// `<leader>r` reload re-reads `churl.toml` from disk: an out-of-band edit to
+/// the manifest (another editor / a second churl instance) is picked up without
+/// a restart. Rewrites the manifest name + workspace vars behind the app's back,
+/// then asserts `reload_workspace` swaps `self.workspace` to the on-disk state.
+#[test]
+fn reload_rereads_manifest_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"before\"\n\n[vars]\nbase = \"old\"\n",
+    )
+    .unwrap();
+    let coll = dir.path().join("api");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("get.toml"),
+        "seq = 0\nname = \"Get\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://x/y\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "before");
+
+    // Mutate the manifest out-of-band: rename the workspace and change a var.
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"after\"\n\n[vars]\nbase = \"new\"\n",
+    )
+    .unwrap();
+    // Add a collection on disk too, so the explorer rebuild is exercised.
+    churl_core::persistence::create_collection(dir.path(), "extra").unwrap();
+
+    app.reload_workspace().unwrap();
+
+    let manifest = app.workspace.as_ref().unwrap().manifest();
+    assert_eq!(manifest.name, "after", "manifest name re-read from disk");
+    assert_eq!(
+        manifest.vars.get("base").map(String::as_str),
+        Some("new"),
+        "workspace vars re-read from disk"
+    );
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("reloaded from disk")
+    );
+}
+
+/// A reload requested while an editor is dirty DEFERS (refuses with a status
+/// message) rather than discarding — the unsaved edit survives and the on-disk
+/// change is NOT applied until the user saves. Mirrors the workspace-switch
+/// dirty guard, but reload never destroys buffers, so it refuses in place.
+#[test]
+fn reload_while_dirty_defers_and_preserves_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.explorer.expand().unwrap();
+    app.guarded_load(PendingLoad::Row(1)).unwrap();
+    *app.test_editor() = EditorState::new(Lines::from("unsaved edit"));
+    assert!(app.is_dirty());
+
+    // Change the manifest on disk, then reload while dirty.
+    std::fs::write(dir.path().join("churl.toml"), "name = \"changed\"\n").unwrap();
+    app.reload_workspace().unwrap();
+
+    // Refused: the dirty edit survives and the on-disk rename was NOT applied.
+    assert!(
+        app.is_dirty(),
+        "the dirty edit must survive a refused reload"
+    );
+    assert_eq!(
+        app.workspace.as_ref().unwrap().manifest().name,
+        "demo",
+        "the workspace was not swapped while dirty"
+    );
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("unsaved changes — save before reloading from disk")
+    );
+}
