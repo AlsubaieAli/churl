@@ -14,8 +14,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
-use crate::config::{auth_secret_violations, collection_secret_violations, secret_violations};
 use crate::model::{CollectionMeta, Endpoint, Method, OnError, Request, Sequence, Workspace};
+use crate::secrets::{
+    SecretDecision, SecretPolicy, scan_collection, scan_endpoint, scan_workspace,
+};
 
 mod atomic;
 mod endpoints;
@@ -44,14 +46,15 @@ use atomic::{load_value, normalize_table, save_value, sort_endpoints};
 // re-exported `pub` so every `persistence::X` path is unchanged.
 pub use endpoints::{
     create_collection, create_endpoint, delete_collection, delete_endpoint, endpoint_to_toml,
-    load_endpoint, rename_collection, rename_endpoint, save_endpoint,
+    load_endpoint, rename_collection, rename_endpoint, save_endpoint, save_endpoint_checked,
 };
 pub use sequences::{
     create_sequence, delete_sequence, load_sequence, rename_sequence, save_sequence,
 };
 pub use workspace::{
     Collection, CollectionLoad, OpenWorkspace, SequenceLoad, load_collection_meta,
-    load_workspace_manifest, save_collection_meta, save_workspace_manifest,
+    load_workspace_manifest, save_collection_meta, save_collection_meta_checked,
+    save_workspace_manifest, save_workspace_manifest_checked,
 };
 
 /// Filename of the workspace manifest inside a workspace root.
@@ -131,6 +134,19 @@ pub enum PersistenceError {
     SecretsInAuth {
         /// Offending fields as `"auth.<field>"` strings.
         names: Vec<String>,
+    },
+    /// Refused to save because this write would *newly author* one or more
+    /// name-anchored literal secrets under the strict policy (see
+    /// [`crate::secrets`]). Carries the offending locations (field paths / var
+    /// names). Pre-existing secrets are grandfathered and never land here — they
+    /// surface as warnings on the successful save instead. This is the widened,
+    /// baseline-aware gate covering auth, headers, URL, params, and env vars; the
+    /// legacy [`SecretsInAuth`](Self::SecretsInAuth) variant is retained for the
+    /// baseline-free `endpoint_to_toml` stdout path.
+    #[error("refusing to save: newly-authored literal secret(s): {}", locations.join(", "))]
+    SecretsRefused {
+        /// Offending locations as field-path / var-name strings.
+        locations: Vec<String>,
     },
     /// A CRUD operation was given an empty (or whitespace-only) name.
     #[error("name must not be empty")]

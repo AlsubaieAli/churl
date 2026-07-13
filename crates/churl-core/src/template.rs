@@ -148,6 +148,20 @@ pub fn unresolved_placeholders(req: &Request) -> Vec<String> {
     names
 }
 
+/// Returns `true` when `input` contains at least one well-formed `{{name}}`
+/// placeholder anywhere (not necessarily as the whole string). Uses the SAME scan
+/// as substitution ([`parse_placeholder`]), so `Bearer {{token}}` counts as
+/// templated while `{{}}` / `{{a b}}` / a bare `{{` do not. Distinct from
+/// [`crate::config::is_template_placeholder`], which requires the *entire* value
+/// to be a single placeholder token — the right test for a raw credential field
+/// (auth value, env var), whereas embedded values (a header carrying a `Bearer `
+/// prefix) need this containment test.
+pub fn contains_placeholder(input: &str) -> bool {
+    let mut names = Vec::new();
+    collect_placeholder_names(input, &mut names);
+    !names.is_empty()
+}
+
 /// Appends the *trimmed* name of every well-formed `{{name}}` placeholder in
 /// `input` to `names`, using the same scan as [`substitute_with`] so the two can
 /// never disagree about what is a placeholder. Duplicates are left for the caller

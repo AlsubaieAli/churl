@@ -137,16 +137,28 @@ impl App {
         let Mode::EnvEditor(editor) = &mut self.mode else {
             return Ok(false);
         };
-        let result = editor.save(&root, &name);
+        let policy = self.secret_policy;
+        let result = editor.save(&root, &name, policy);
         match result {
-            EnvSaveResult::Ok { active_profile, .. } => {
+            EnvSaveResult::Ok {
+                active_profile,
+                warnings,
+                ..
+            } => {
                 // Live-refresh: re-open the manifest and reload the explorer so the
                 // send-time resolver (workspace/collection/profile vars) reflects
                 // the edits immediately.
                 self.active_profile = active_profile;
                 self.workspace = Some(OpenWorkspace::open(&root)?);
                 self.reload_explorer()?;
-                self.notify("saved · vars applied");
+                if warnings.is_empty() {
+                    self.notify("saved · vars applied");
+                } else {
+                    self.notify(format!(
+                        "saved · vars applied · ! secret(s) in {} — move to env",
+                        warnings.join(", ")
+                    ));
+                }
                 Ok(true)
             }
             EnvSaveResult::Refused(msg) | EnvSaveResult::Failed(msg) => {

@@ -112,6 +112,12 @@ pub struct Config {
     /// Resolved via [`Config::load_caps`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<LoadSection>,
+    /// Save-time secret policy: `"strict"` (default) blocks a newly-authored
+    /// name-anchored literal secret and warns on the rest; `"warn"` warns on
+    /// everything and blocks nothing. Resolved via [`Config::secret_policy`],
+    /// which fails loudly on an unknown value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_policy: Option<String>,
 }
 
 /// The `[load]` config table: optional per-field overrides of the load-run
@@ -265,6 +271,21 @@ impl Config {
             }),
         }
     }
+
+    /// The resolved save-time secret policy. An unknown value is a hard error
+    /// (fail loud, like every other config knob).
+    pub fn secret_policy(&self) -> Result<crate::secrets::SecretPolicy, ConfigError> {
+        use crate::secrets::SecretPolicy;
+        match self.secret_policy.as_deref() {
+            None | Some("strict") => Ok(SecretPolicy::Strict),
+            Some("warn") => Ok(SecretPolicy::Warn),
+            Some(other) => Err(ConfigError::BadValue {
+                key: "secret_policy".to_owned(),
+                value: other.to_owned(),
+                expected: "one of: strict, warn",
+            }),
+        }
+    }
 }
 
 /// Returns the path of the global config file (`<config_dir>/churl/config.toml`),
@@ -314,19 +335,51 @@ pub fn load_global_config() -> Result<Config, ConfigError> {
     }
 }
 
-/// Case-insensitive markers that flag a variable name as secret-looking.
+/// Case-insensitive substrings that flag a *name* (variable / header / query
+/// key) as secret-looking. Every marker is audited to stay low-false-positive as
+/// a substring of a real name:
+///
+/// - `token`/`secret`/`password`/`passwd`/`bearer`/`credential`/`authorization`:
+///   original audited set — a name containing any of these is overwhelmingly a
+///   credential. `token` already covers `apitoken`/`access_token`/`id_token`, so
+///   those are not listed separately.
+/// - `api_key`/`apikey`/`api-key`: the three spellings of an API key name.
+/// - `private_key`/`privatekey`: PEM/SSH private-key material.
+/// - `passphrase`: a passphrase is a secret by definition; the `pass` root would
+///   over-match (`passenger`, `bypass`), so the whole word is used.
+/// - `access_key`/`secret_key`/`client_secret`: cloud/OAuth credential names
+///   (AWS access/secret keys, OAuth client secret). `secret_key` is redundant
+///   with `secret` but kept for readable intent; the substring match makes it a
+///   no-op either way.
+/// - `signature`: request-signing material (HMAC/AWS SigV4 `X-Signature`) is a
+///   credential; `signature` as a *name* substring rarely collides with
+///   non-secret fields.
+/// - `pat`: a personal access token, but only as a standalone marker would it
+///   over-match (`path`, `update`, `compatible`), so it is deliberately NOT
+///   included — `token` already catches the spelled-out forms.
+///
+/// Deliberately excluded (too noisy as a substring of a name): `auth` (matches
+/// `author`/`authority`), `session`, `cookie`, `key` (matches `keyword`,
+/// `monkey`). `Authorization`/`Cookie` headers are caught by name at the header
+/// layer without adding these broad substrings here.
 const SECRET_NAME_MARKERS: &[&str] = &[
     "token",
     "secret",
     "password",
     "passwd",
+    "passphrase",
     "api_key",
     "apikey",
     "api-key",
     "authorization",
     "bearer",
     "private_key",
+    "privatekey",
     "credential",
+    "access_key",
+    "secret_key",
+    "client_secret",
+    "signature",
 ];
 
 /// Returns `true` when `name` looks like it names a secret (case-insensitive
@@ -338,12 +391,34 @@ pub fn looks_like_secret_name(name: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
-/// Returns `true` when `value` is a `{{...}}` template placeholder rather than a
-/// literal. The placeholder shape also covers future env references such as
-/// `{{env:FOO}}` (the resolver handles them; until then placeholders are sent verbatim).
+/// Returns `true` when `value` is a single well-formed `{{...}}` template
+/// placeholder rather than a literal. The placeholder shape also covers future
+/// env references such as `{{env:FOO}}` (the resolver handles them; until then
+/// placeholders are sent verbatim).
+///
+/// A well-formed placeholder is exactly one `{{ name }}` run: the value (after an
+/// outer trim) starts with `{{`, ends with `}}`, and the inner token — trimmed of
+/// surrounding whitespace — is a single non-empty run of `[A-Za-z0-9_.:-]` with no
+/// internal whitespace and no further `{{`/`}}`. This rejects the junk the old
+/// loose bracket check accepted (`{{}}`, `{{a b}}`, `{{a}} {{b}}`, `lit}}` /
+/// `{{lit` fragments), so those no longer masquerade as placeholders and slip a
+/// literal secret past the save gate.
 pub fn is_template_placeholder(value: &str) -> bool {
     let trimmed = value.trim();
-    trimmed.starts_with("{{") && trimmed.ends_with("}}")
+    let Some(inner) = trimmed
+        .strip_prefix("{{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+    else {
+        return false;
+    };
+    let name = inner.trim();
+    // A second `{`/`}` inside means more than one token (or a nested/torn brace),
+    // e.g. `{{a}}{{b}}` or `{{{x}}`. The inner token must carry no braces at all.
+    if name.is_empty() || name.contains(['{', '}']) {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
 }
 
 /// Finds secret-named auth fields on `endpoint` whose value is a literal rather
@@ -676,6 +751,39 @@ mod tests {
     }
 
     #[test]
+    fn config_secret_policy_default_and_values() {
+        use crate::secrets::SecretPolicy;
+        // Absent → strict (the safe default).
+        assert_eq!(
+            Config::default().secret_policy().unwrap(),
+            SecretPolicy::Strict
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "secret_policy = \"warn\"\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().secret_policy().unwrap(),
+            SecretPolicy::Warn
+        );
+        std::fs::write(&path, "secret_policy = \"strict\"\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().secret_policy().unwrap(),
+            SecretPolicy::Strict
+        );
+    }
+
+    #[test]
+    fn config_secret_policy_unknown_value_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "secret_policy = \"nope\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        let err = config.secret_policy().unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+        assert!(err.to_string().contains("secret_policy"), "{err}");
+    }
+
+    #[test]
     fn config_load_caps_default_when_absent() {
         let config = Config::default();
         assert_eq!(config.load_caps(), crate::load::LoadCaps::default());
@@ -758,6 +866,61 @@ mod tests {
         }
         for name in ["base_url", "user", "timeout_ms", "region"] {
             assert!(!looks_like_secret_name(name), "{name} should be fine");
+        }
+    }
+
+    #[test]
+    fn broadened_secret_markers_flagged() {
+        // Markers added by the broadening audit.
+        for name in [
+            "passphrase",
+            "PGP_PASSPHRASE",
+            "access_key",
+            "AWS_ACCESS_KEY_ID",
+            "secret_key",
+            "aws_secret_key",
+            "client_secret",
+            "OAUTH_CLIENT_SECRET",
+            "X-Signature",
+            "hmac_signature",
+            "SSH_PRIVATEKEY",
+        ] {
+            assert!(looks_like_secret_name(name), "{name} should look secret");
+        }
+        // Deliberately-excluded roots must stay clean (low false positives).
+        for name in [
+            "author",
+            "authority",
+            "session_id",
+            "cookie",
+            "monkey",
+            "path",
+        ] {
+            assert!(!looks_like_secret_name(name), "{name} should be fine");
+        }
+    }
+
+    #[test]
+    fn placeholder_tightening_rejects_junk_keeps_legit() {
+        // Legit placeholders must still pass (the false-negatives we must not close).
+        for good in ["{{token}}", "{{ token }}", "{{env:API_KEY}}", "{{a.b-c_d}}"] {
+            assert!(is_template_placeholder(good), "{good:?} should pass");
+        }
+        // Junk the old loose bracket check wrongly accepted — now rejected so a
+        // literal secret can't masquerade as a placeholder and skip the gate.
+        for bad in [
+            "{{}}",         // empty
+            "{{ }}",        // whitespace-only
+            "{{a b}}",      // internal space
+            "{{a}} {{b}}",  // two runs
+            "{{a}}{{b}}",   // adjacent runs
+            "prefix {{a}}", // trailing text before
+            "{{a}} suffix", // text after
+            "not a var}}",  // no opening
+            "{{not a var",  // no closing
+            "{{{x}}",       // extra brace
+        ] {
+            assert!(!is_template_placeholder(bad), "{bad:?} should be rejected");
         }
     }
 

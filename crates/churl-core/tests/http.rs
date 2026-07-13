@@ -544,3 +544,37 @@ async fn enabled_user_agent_header_overrides_default() {
         .unwrap();
     assert_eq!(response.status, 200, "user User-Agent header did not win");
 }
+
+/// The secret gate is save-time only: an endpoint carrying a *literal* secret
+/// (e.g. a bearer token or an `?api_key=` in the URL) still sends unchanged. The
+/// send path is never gated — only churl-initiated writes are.
+#[tokio::test]
+async fn literal_secret_still_sends_send_path_ungated() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .and(header(
+            "authorization",
+            "Bearer sk-live-literal-token-value",
+        ))
+        .and(query_param("api_key", "AKIAIOSFODNN7EXAMPLE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/me", server.uri()));
+    request.auth = Some(Auth::Bearer {
+        token: "sk-live-literal-token-value".into(),
+    });
+    request.params.push(Param {
+        name: "api_key".into(),
+        value: "AKIAIOSFODNN7EXAMPLE".into(),
+        enabled: true,
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200, "a literal secret must still send");
+}

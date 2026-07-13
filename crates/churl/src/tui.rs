@@ -44,6 +44,7 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
         eprintln!("churl: keymap warning: {warning}");
     }
     let url_edit = config.url_edit()?;
+    let secret_policy = config.secret_policy()?;
     let theme = Theme::resolve(config.theme.as_deref(), &config.theme_colors)?;
     let cwd = std::env::current_dir()?;
     // Advisory version pin: warn (never refuse) if `.churl-version` at the
@@ -53,6 +54,7 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
     let workspace = app::open_workspace(&cwd)?;
     let mut app = App::with_config(workspace, keymap, theme, cli_vars, profile)?;
     app.set_url_edit_mode(url_edit);
+    app.set_secret_policy(secret_policy);
     app.set_keymap_warnings(keymap_warnings);
     app.install_runtime(&config)?;
 

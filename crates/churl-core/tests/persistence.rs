@@ -14,8 +14,9 @@ use churl_core::persistence::{
     Collection, OpenWorkspace, PersistenceError, create_collection, create_endpoint,
     create_sequence, delete_collection, delete_endpoint, delete_sequence, load_collection_meta,
     load_endpoint, load_workspace_manifest, rename_collection, rename_endpoint,
-    save_collection_meta, save_endpoint, save_workspace_manifest,
+    save_collection_meta, save_endpoint, save_endpoint_checked, save_workspace_manifest,
 };
+use churl_core::secrets::SecretPolicy;
 
 /// Comment-bearing endpoint fixtures: (name, contents, every comment that must survive).
 const FIXTURES: &[(&str, &str, &[&str])] = &[
@@ -291,12 +292,14 @@ fn literal_secret_endpoint() -> Endpoint {
 fn save_endpoint_refuses_literal_secret_auth() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leaky.toml");
+    // A brand-new file has no baseline, so a name-anchored literal is NEW and
+    // refuses under the strict default.
     let err = save_endpoint(&path, &literal_secret_endpoint()).unwrap_err();
     match err {
-        PersistenceError::SecretsInAuth { names } => {
-            assert_eq!(names, vec!["auth.token".to_string()]);
+        PersistenceError::SecretsRefused { locations } => {
+            assert_eq!(locations, vec!["auth.token".to_string()]);
         }
-        other => panic!("expected SecretsInAuth, got {other:?}"),
+        other => panic!("expected SecretsRefused, got {other:?}"),
     }
     assert!(!path.exists(), "refused save must not write the file");
 }
@@ -363,12 +366,13 @@ fn workspace_manifest_refuses_literal_secrets() {
     ws.profiles[1]
         .vars
         .insert("api_token".into(), "sk-live-notatemplate".into());
+    // New manifest (no baseline): a name-anchored literal refuses under strict.
     let err = save_workspace_manifest(dir.path(), &ws).unwrap_err();
     match err {
-        PersistenceError::SecretsInManifest { names } => {
-            assert_eq!(names, vec!["prod.api_token".to_string()]);
+        PersistenceError::SecretsRefused { locations } => {
+            assert_eq!(locations, vec!["prod.api_token".to_string()]);
         }
-        other => panic!("expected SecretsInManifest, got {other:?}"),
+        other => panic!("expected SecretsRefused, got {other:?}"),
     }
     assert!(
         !dir.path().join("churl.toml").exists(),
@@ -585,7 +589,7 @@ fn workspace_vars_secret_literal_refused() {
     };
     let err = save_workspace_manifest(dir.path(), &ws).unwrap_err();
     assert!(
-        matches!(err, PersistenceError::SecretsInManifest { .. }),
+        matches!(err, PersistenceError::SecretsRefused { .. }),
         "{err}"
     );
     assert!(err.to_string().contains("vars.api_token"), "{err}");
@@ -841,7 +845,7 @@ fn collection_meta_secret_literal_refused() {
     };
     let err = save_collection_meta(dir.path(), &meta).unwrap_err();
     assert!(
-        matches!(err, PersistenceError::SecretsInCollection { .. }),
+        matches!(err, PersistenceError::SecretsRefused { .. }),
         "{err}"
     );
     assert!(!dir.path().join("folder.toml").exists());
@@ -930,9 +934,11 @@ fn rename_endpoint_updates_name_and_file() {
 }
 
 #[test]
-fn rename_endpoint_refuses_literal_secret_and_leaves_file() {
-    // A hand-written file may carry a literal secret; renaming it saves (which
-    // runs the secrets gate) and must fail before any move.
+fn rename_endpoint_grandfathers_pre_existing_literal_secret() {
+    // A hand-written file may already carry a literal secret. Renaming it does
+    // not *author* a new secret — the value is untouched — so under the strict
+    // baseline-aware gate the pre-existing secret is grandfathered and the rename
+    // succeeds, rather than refusing (the old hard block).
     let dir = tempfile::tempdir().unwrap();
     let coll = dir.path().join("c");
     fs::create_dir(&coll).unwrap();
@@ -946,13 +952,13 @@ fn rename_endpoint_refuses_literal_secret_and_leaves_file() {
         ),
     )
     .unwrap();
-    let err = rename_endpoint(&path, "New Name").unwrap_err();
-    assert!(
-        matches!(err, PersistenceError::SecretsInAuth { .. }),
-        "{err}"
-    );
-    assert!(path.exists(), "original file must survive a refused rename");
-    assert!(!coll.join("new-name.toml").exists());
+    let new_path = rename_endpoint(&path, "New Name").expect("grandfathered rename succeeds");
+    assert!(!path.exists(), "the old file is moved");
+    assert!(new_path.exists());
+    // The pre-existing secret is preserved verbatim (never scrubbed by churl).
+    let text = fs::read_to_string(&new_path).unwrap();
+    assert!(text.contains("ghp_literal_secret"), "{text}");
+    assert!(text.contains("New Name"), "{text}");
 }
 
 #[test]
@@ -1210,4 +1216,133 @@ fn rename_endpoint_same_slug_keeps_filename() {
     assert_eq!(new_path, path, "same slug must not move the file");
     assert!(!coll.join("get-users-2.toml").exists());
     assert_eq!(load_endpoint(&new_path).unwrap().name, "get users");
+}
+
+// ---- A3: widened save-gate coverage (headers / URL / body) + policy ----
+
+/// A GET endpoint at `url` with the given headers/params/body, no auth.
+fn endpoint_with(
+    url: &str,
+    headers: Vec<Header>,
+    params: Vec<Param>,
+    body: Option<Body>,
+) -> Endpoint {
+    Endpoint {
+        seq: 0,
+        name: "e".into(),
+        request: Request {
+            method: Method::Get,
+            url: url.into(),
+            headers,
+            params,
+            body,
+            auth: None,
+        },
+    }
+}
+
+#[test]
+fn new_secret_header_value_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.toml");
+    let ep = endpoint_with(
+        "https://api.example.com/",
+        vec![Header {
+            name: "Authorization".into(),
+            value: "Bearer sk-live-literal".into(),
+            enabled: true,
+        }],
+        Vec::new(),
+        None,
+    );
+    let err = save_endpoint(&path, &ep).unwrap_err();
+    assert!(
+        matches!(&err, PersistenceError::SecretsRefused { locations }
+            if locations == &["headers.Authorization".to_string()]),
+        "expected SecretsRefused on the header, got {err:?}"
+    );
+    assert!(!path.exists());
+    // A templated header value (`Bearer {{token}}`) saves cleanly.
+    let ep = endpoint_with(
+        "https://api.example.com/",
+        vec![Header {
+            name: "Authorization".into(),
+            value: "Bearer {{token}}".into(),
+            enabled: true,
+        }],
+        Vec::new(),
+        None,
+    );
+    save_endpoint(&path, &ep).expect("templated header saves");
+}
+
+#[test]
+fn new_url_query_key_and_userinfo_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("u.toml");
+    let ep = endpoint_with(
+        "https://user:s3cr3tpass@api.example.com/x?api_key=abcd1234",
+        Vec::new(),
+        Vec::new(),
+        None,
+    );
+    let err = save_endpoint(&path, &ep).unwrap_err();
+    let PersistenceError::SecretsRefused { locations } = &err else {
+        panic!("expected SecretsRefused, got {err:?}");
+    };
+    assert!(
+        locations.contains(&"url.userinfo".to_string()),
+        "{locations:?}"
+    );
+    assert!(
+        locations.contains(&"url.query.api_key".to_string()),
+        "{locations:?}"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn body_secret_shaped_value_warns_not_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("b.toml");
+    let ep = endpoint_with(
+        "https://api.example.com/",
+        Vec::new(),
+        Vec::new(),
+        Some(Body {
+            kind: BodyKind::Json,
+            content: r#"{"token": "ghp_0123456789abcdefABCDEF0123456789abcd"}"#.into(),
+        }),
+    );
+    // Value-only → warns, save proceeds even under strict.
+    let decision = save_endpoint_checked(&path, &ep, SecretPolicy::Strict)
+        .expect("body value-only finding must not block");
+    assert!(path.exists(), "the file is written");
+    assert_eq!(decision.warning_locations(), vec!["body".to_string()]);
+}
+
+#[test]
+fn warn_policy_never_blocks_new_name_anchored_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w.toml");
+    let ep = endpoint_with(
+        "https://api.example.com/",
+        vec![Header {
+            name: "X-Api-Key".into(),
+            value: "literal-value".into(),
+            enabled: true,
+        }],
+        Vec::new(),
+        None,
+    );
+    let decision =
+        save_endpoint_checked(&path, &ep, SecretPolicy::Warn).expect("warn policy blocks nothing");
+    assert!(path.exists());
+    assert!(
+        decision
+            .warning_locations()
+            .contains(&"headers.X-Api-Key".to_string()),
+        "{:?}",
+        decision.warning_locations()
+    );
 }
