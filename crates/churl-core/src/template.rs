@@ -185,9 +185,13 @@ fn collect_placeholder_names(input: &str, names: &mut Vec<String>) {
 }
 
 /// Returns `true` for the characters allowed in a placeholder name
-/// (`[A-Za-z0-9_.-]`).
+/// (`[A-Za-z0-9_.:-]`). The `:` allows namespaced references such as
+/// `{{env:FOO}}`, keeping this scanner in agreement with
+/// [`crate::config::is_template_placeholder`] on what counts as a placeholder
+/// name (they must never disagree, or the save-gate and the send-gate would
+/// classify the same token differently).
 fn is_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-')
 }
 
 /// Core delimiter scan: replaces each well-formed `{{name}}` in `input` with
@@ -506,6 +510,25 @@ mod tests {
             unresolved_placeholders(&req),
             vec!["good.name-1_2".to_string()]
         );
+    }
+
+    #[test]
+    fn colon_namespaced_placeholder_recognized() {
+        // `env:FOO` is a well-formed placeholder name (the `:` is allowed), so the
+        // template scanner, `contains_placeholder`, and `config::is_template_placeholder`
+        // agree it is a placeholder — a header like `Bearer {{env:TOKEN}}` is
+        // templated, not a literal secret.
+        assert!(contains_placeholder("Bearer {{env:TOKEN}}"));
+        assert!(contains_placeholder("{{env:FOO}}"));
+        assert!(crate::config::is_template_placeholder("{{env:FOO}}"));
+        // Unresolved by any scope → flagged by the send-time fail-loud gate
+        // (previously it was silently sent verbatim, an improvement).
+        let req = req_with_url("https://api/{{env:TOKEN}}");
+        assert_eq!(unresolved_placeholders(&req), vec!["env:TOKEN".to_string()]);
+        // The wire output is unchanged: an unresolved colon placeholder is still
+        // left verbatim by substitution (no scope defines it).
+        let resolver = Resolver::new(vec![]);
+        assert_eq!(resolver.substitute("{{env:FOO}}"), "{{env:FOO}}");
     }
 
     #[test]

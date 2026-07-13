@@ -419,37 +419,57 @@ impl EnvEditorState {
         let workspace = self.build_workspace(workspace_name);
         let collections = self.build_collection_metas();
 
-        // Scan the content being saved and the on-disk baseline with identical
-        // location strings so novelty compares correctly (a pre-existing literal
-        // grandfathers). Collection findings are prefixed by the collection dir
-        // name to disambiguate `vars.<x>` across collections.
-        let mut new_findings = scan_workspace(&workspace);
-        let mut baseline_findings = load_workspace_manifest(root)
-            .map(|ws| scan_workspace(&ws))
-            .unwrap_or_default();
+        // Decide each target against its OWN on-disk baseline, then merge — never
+        // compare novelty across scopes. Each file is a separate namespace; the
+        // workspace manifest and every `folder.toml` carry their own `vars.<x>`
+        // locations. Flattening them into one dotted namespace (`<dir>.<loc>`)
+        // would let one scope's pre-existing baseline falsely grandfather another
+        // scope's brand-new secret when the dotted strings collide (e.g. a profile
+        // `foo` with var `vars.api_token` vs a collection dir `foo` with
+        // `api_token`). Deciding per-scope makes this outer pre-check match the
+        // inner per-file `save_*_checked` gates exactly, so they can never
+        // disagree. Collection locations are prefixed with the dir name for
+        // display only, after novelty has already been resolved within the scope.
+        let ws_decision = decide(
+            &scan_workspace(&workspace),
+            &load_workspace_manifest(root)
+                .map(|ws| scan_workspace(&ws))
+                .unwrap_or_default(),
+            policy,
+        );
+        let mut refusals = ws_decision.refusal_locations();
+        let mut warnings = ws_decision.warning_locations();
         for (dir, meta) in &collections {
             let name = dir
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("<collection>");
-            for mut finding in scan_collection(meta) {
-                finding.location = format!("{name}.{}", finding.location);
-                new_findings.push(finding);
-            }
-            for mut finding in load_collection_meta(dir)
-                .map(|m| scan_collection(&m))
-                .unwrap_or_default()
-            {
-                finding.location = format!("{name}.{}", finding.location);
-                baseline_findings.push(finding);
-            }
+            let coll_decision = decide(
+                &scan_collection(meta),
+                &load_collection_meta(dir)
+                    .map(|m| scan_collection(&m))
+                    .unwrap_or_default(),
+                policy,
+            );
+            refusals.extend(
+                coll_decision
+                    .refusal_locations()
+                    .iter()
+                    .map(|l| format!("{name}.{l}")),
+            );
+            warnings.extend(
+                coll_decision
+                    .warning_locations()
+                    .iter()
+                    .map(|l| format!("{name}.{l}")),
+            );
         }
 
-        let decision = decide(&new_findings, &baseline_findings, policy);
-        if decision.is_refused() {
+        // All-or-nothing: decide everything before writing anything.
+        if !refusals.is_empty() {
             let msg = format!(
                 "not saved: new literal secret(s) ({}) — move them to env or use {{{{var}}}}",
-                decision.refusal_locations().join(", ")
+                refusals.join(", ")
             );
             self.message = Some(msg.clone());
             return EnvSaveResult::Refused(msg);
@@ -490,7 +510,7 @@ impl EnvEditorState {
         EnvSaveResult::Ok {
             workspace,
             active_profile: self.active_profile.clone(),
-            warnings: decision.warning_locations(),
+            warnings,
         }
     }
 

@@ -370,6 +370,75 @@ fn save_warn_policy_never_blocks_new_secret() {
 }
 
 #[test]
+fn save_does_not_grandfather_across_scope_location_collision() {
+    // Two scopes flatten to the SAME dotted location under the old combined scan:
+    // profile `foo` with a dotted var name `vars.api_token` scans to
+    // `foo.vars.api_token`, and collection dir `foo` with var `api_token` displays
+    // as `foo.vars.api_token`. The collection carries that literal pre-existing on
+    // disk; the user adds a BRAND-NEW literal secret to profile `foo` at the
+    // colliding location. The new profile secret must be refused — never
+    // grandfathered by the collection's pre-existing baseline finding.
+    let dir = tempfile::tempdir().unwrap();
+    // Workspace baseline: no profile `foo` secret on disk.
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    // Collection `foo` with a pre-existing literal secret on disk (its baseline).
+    let coll = dir.path().join("foo");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(coll.join("folder.toml"), "[vars]\napi_token = \"leaked\"\n").unwrap();
+
+    let mut s = EnvEditorState {
+        scopes: vec![
+            EnvScope {
+                kind: EnvScopeKind::Workspace,
+                label: "Workspace".into(),
+                vars: vec![("base_url".into(), "https://api".into())],
+            },
+            EnvScope {
+                kind: EnvScopeKind::Collection { dir: coll.clone() },
+                label: "foo".into(),
+                // Pre-existing collection secret, untouched (grandfathered in-scope).
+                vars: vec![("api_token".into(), "leaked".into())],
+            },
+            EnvScope {
+                kind: EnvScopeKind::Profile,
+                label: "foo".into(),
+                vars: Vec::new(),
+            },
+        ],
+        snapshot: vec![],
+        selected_scope: 0,
+        focus: EnvFocus::ScopeList,
+        selected_row: 0,
+        editing: None,
+        naming: None,
+        message: None,
+        reveal: None,
+        pending_close: false,
+        active_profile: None,
+        snapshot_active_profile: None,
+        cli_vars: BTreeMap::new(),
+    }
+    .with_snapshot();
+    // The NEW profile secret at the colliding flattened location
+    // (`foo` + `vars.api_token` == the collection's `foo.vars.api_token`).
+    s.scopes[2]
+        .vars
+        .push(("vars.api_token".into(), "brand-new-leak".into()));
+
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
+    let EnvSaveResult::Refused(msg) = &result else {
+        panic!("new profile secret must be refused, not grandfathered: {result:?}");
+    };
+    assert!(msg.contains("api_token"), "{msg}");
+    // All-or-nothing: nothing was written — the profile secret never landed.
+    let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("brand-new-leak"),
+        "refused save wrote nothing:\n{text}"
+    );
+}
+
+#[test]
 fn save_accepts_secret_named_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
