@@ -118,6 +118,14 @@ pub struct Config {
     /// which fails loudly on an unknown value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_policy: Option<String>,
+    /// Cross-origin redirect policy: `"strip"` (default) follows redirects but
+    /// drops auth-bearing headers when a hop crosses the origin (scheme + host +
+    /// port); `"strict"` follows same-origin hops only and surfaces a
+    /// cross-origin 3xx instead of following it; `"follow-all"` follows every
+    /// hop keeping all headers (a foot-gun that warns once). Resolved via
+    /// [`Config::redirect`], which fails loudly on an unknown value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
 }
 
 /// The `[load]` config table: optional per-field overrides of the load-run
@@ -148,6 +156,27 @@ pub enum UrlEditMode {
     Inline,
     /// Open the centered edtui vim popup.
     Popup,
+}
+
+/// How redirects are followed and what happens to auth-bearing headers when a
+/// hop crosses the origin. Origin is scheme + host + port: an `http`→`https`
+/// upgrade, a host change, or a port change all cross it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RedirectPolicy {
+    /// Follow same-origin redirects only. A cross-origin 3xx stops and the
+    /// redirect response (status + `Location`) is surfaced to the user rather
+    /// than followed silently.
+    Strict,
+    /// Follow redirects, but drop every auth-bearing header (`Authorization`,
+    /// `Cookie`, any secret-named header, and the churl-injected auth header)
+    /// before following a hop whose target origin differs — curl/browser
+    /// behaviour. Same-origin hops keep all headers.
+    #[default]
+    Strip,
+    /// Follow every hop keeping all headers across origins, up to the hop cap.
+    /// The foot-gun setting: a resolved secret can leak to a redirect target,
+    /// so its first use warns once.
+    FollowAll,
 }
 
 /// One entry in the raw `[keys]` TOML table: either a flat `combo = "action"`
@@ -283,6 +312,21 @@ impl Config {
                 key: "secret_policy".to_owned(),
                 value: other.to_owned(),
                 expected: "one of: strict, warn",
+            }),
+        }
+    }
+
+    /// The resolved cross-origin redirect policy. An unknown value is a hard
+    /// error (fail loud, like every other config knob).
+    pub fn redirect(&self) -> Result<RedirectPolicy, ConfigError> {
+        match self.redirect.as_deref() {
+            None | Some("strip") => Ok(RedirectPolicy::Strip),
+            Some("strict") => Ok(RedirectPolicy::Strict),
+            Some("follow-all") => Ok(RedirectPolicy::FollowAll),
+            Some(other) => Err(ConfigError::BadValue {
+                key: "redirect".to_owned(),
+                value: other.to_owned(),
+                expected: "one of: strict, strip, follow-all",
             }),
         }
     }
@@ -781,6 +825,40 @@ mod tests {
         let err = config.secret_policy().unwrap_err();
         assert!(err.to_string().contains("nope"), "{err}");
         assert!(err.to_string().contains("secret_policy"), "{err}");
+    }
+
+    #[test]
+    fn config_redirect_default_and_values() {
+        // Absent → strip (the safe default).
+        assert_eq!(Config::default().redirect().unwrap(), RedirectPolicy::Strip);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "redirect = \"strict\"\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().redirect().unwrap(),
+            RedirectPolicy::Strict
+        );
+        std::fs::write(&path, "redirect = \"strip\"\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().redirect().unwrap(),
+            RedirectPolicy::Strip
+        );
+        std::fs::write(&path, "redirect = \"follow-all\"\n").unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().redirect().unwrap(),
+            RedirectPolicy::FollowAll
+        );
+    }
+
+    #[test]
+    fn config_redirect_unknown_value_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "redirect = \"nope\"\n").unwrap();
+        let config = load_config(&path).unwrap();
+        let err = config.redirect().unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+        assert!(err.to_string().contains("redirect"), "{err}");
     }
 
     #[test]

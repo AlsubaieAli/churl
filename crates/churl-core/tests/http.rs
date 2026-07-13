@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use churl_core::http::{DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, execute};
+use churl_core::config::RedirectPolicy;
+use churl_core::http::{
+    DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, execute, follow_all_warned,
+};
 use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Header, Method, Param, Request};
 use wiremock::matchers::{body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -444,6 +447,7 @@ async fn body_over_cap_is_truncated_at_cap_boundary() {
     let client = build_client(DEFAULT_TIMEOUT).unwrap();
     let options = ExecuteOptions {
         max_body_bytes: 1024,
+        ..ExecuteOptions::default()
     };
     let response = execute(&client, &get(format!("{}/big", server.uri())), &options)
         .await
@@ -467,6 +471,7 @@ async fn body_exactly_at_cap_is_not_truncated() {
     let client = build_client(DEFAULT_TIMEOUT).unwrap();
     let options = ExecuteOptions {
         max_body_bytes: 1024,
+        ..ExecuteOptions::default()
     };
     let response = execute(&client, &get(format!("{}/exact", server.uri())), &options)
         .await
@@ -577,4 +582,389 @@ async fn literal_secret_still_sends_send_path_ungated() {
         .await
         .unwrap();
     assert_eq!(response.status, 200, "a literal secret must still send");
+}
+
+// --- Cross-origin redirect policy (R3 PR-B) ---------------------------------
+//
+// Two independent `MockServer`s bind distinct ports on 127.0.0.1, so A and B
+// differ in *port* — a genuine cross-origin boundary under the scheme+host+port
+// origin definition. B's mock always answers 200, and we inspect
+// `b.received_requests()` to assert exactly which headers actually reached B.
+
+/// Builds a GET to `url` carrying an `Authorization`, a `Cookie`, and a
+/// secret-named `X-Api-Key` header — the three auth-bearing headers the strip
+/// policy must drop on a cross-origin hop.
+fn get_with_auth_headers(url: String) -> Request {
+    let mut request = get(url);
+    request.headers = vec![
+        Header {
+            name: "Authorization".to_owned(),
+            value: "Bearer secret-token".to_owned(),
+            enabled: true,
+        },
+        Header {
+            name: "Cookie".to_owned(),
+            value: "session=abc".to_owned(),
+            enabled: true,
+        },
+        Header {
+            name: "X-Api-Key".to_owned(),
+            value: "sk-live-123".to_owned(),
+            enabled: true,
+        },
+    ];
+    request
+}
+
+/// Returns the single request B received (panics if none), for header assertions.
+async fn only_request(server: &MockServer) -> wiremock::Request {
+    let mut reqs = server
+        .received_requests()
+        .await
+        .expect("request recording is enabled");
+    assert_eq!(reqs.len(), 1, "B should have been hit exactly once");
+    reqs.pop().unwrap()
+}
+
+fn has_header(req: &wiremock::Request, name: &str) -> bool {
+    req.headers.contains_key(name)
+}
+
+#[tokio::test]
+async fn strip_default_drops_auth_headers_cross_origin() {
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    // Default options resolve to Strip.
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status, 200,
+        "the cross-origin redirect is followed"
+    );
+    assert_eq!(response.body, b"landed");
+
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        !has_header(&at_b, "authorization"),
+        "Authorization must be stripped cross-origin"
+    );
+    assert!(
+        !has_header(&at_b, "cookie"),
+        "Cookie must be stripped cross-origin"
+    );
+    assert!(
+        !has_header(&at_b, "x-api-key"),
+        "a secret-named header must be stripped cross-origin"
+    );
+}
+
+#[tokio::test]
+async fn strip_preserves_auth_headers_same_origin() {
+    let origin_a = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_a)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/dest"))
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    // Two requests hit A (/start then /dest); the followed one keeps all headers.
+    let reqs = origin_a.received_requests().await.unwrap();
+    let dest = reqs
+        .iter()
+        .find(|r| r.url.path() == "/dest")
+        .expect("the same-origin hop was followed to /dest");
+    assert!(
+        has_header(dest, "authorization")
+            && has_header(dest, "cookie")
+            && has_header(dest, "x-api-key"),
+        "same-origin redirects keep all headers"
+    );
+}
+
+#[tokio::test]
+async fn strict_stops_and_surfaces_cross_origin_redirect() {
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    // If churl (wrongly) follows to B, this records a hit we assert against.
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        redirect: RedirectPolicy::Strict,
+        ..ExecuteOptions::default()
+    };
+    let response = execute(&client, &request, &options).await.unwrap();
+
+    assert_eq!(
+        response.status, 302,
+        "strict surfaces the cross-origin 3xx instead of following it"
+    );
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("location")),
+        "the Location header is surfaced to the user"
+    );
+    assert!(
+        origin_b.received_requests().await.unwrap().is_empty(),
+        "strict must not hit the cross-origin target"
+    );
+}
+
+#[tokio::test]
+async fn strict_follows_same_origin_redirect() {
+    let origin_a = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&origin_a)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/dest"))
+        .mount(&origin_a)
+        .await;
+
+    let request = get(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        redirect: RedirectPolicy::Strict,
+        ..ExecuteOptions::default()
+    };
+    let response = execute(&client, &request, &options).await.unwrap();
+    assert_eq!(
+        response.status, 200,
+        "strict follows a same-origin redirect"
+    );
+    assert_eq!(response.body, b"ok");
+}
+
+#[tokio::test]
+async fn follow_all_keeps_auth_headers_cross_origin_and_warns_once() {
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        redirect: RedirectPolicy::FollowAll,
+        ..ExecuteOptions::default()
+    };
+    let response = execute(&client, &request, &options).await.unwrap();
+    assert_eq!(response.status, 200);
+
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        has_header(&at_b, "authorization")
+            && has_header(&at_b, "cookie")
+            && has_header(&at_b, "x-api-key"),
+        "follow-all keeps all headers across origins (the foot-gun)"
+    );
+    assert!(
+        follow_all_warned(),
+        "the one-time follow-all warning must have fired"
+    );
+}
+
+#[tokio::test]
+async fn strip_treats_port_change_as_cross_origin() {
+    // Same host (127.0.0.1), different port — a cross-origin hop under the
+    // scheme+host+port origin definition, so auth headers must be stripped.
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    // Sanity: A and B share a host and differ only by port.
+    let host_a = origin_a.uri();
+    let host_b = origin_b.uri();
+    assert!(
+        host_a.contains("127.0.0.1") && host_b.contains("127.0.0.1") && host_a != host_b,
+        "A and B differ only by port: {host_a} vs {host_b}"
+    );
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        !has_header(&at_b, "authorization") && !has_header(&at_b, "x-api-key"),
+        "a port change alone crosses the origin and strips auth headers"
+    );
+}
+
+#[tokio::test]
+async fn strip_same_origin_then_cross_origin_still_strips_on_the_cross_hop() {
+    // The subtle chain: A (auth) -> same-origin /hop (keeps auth) -> B
+    // (cross-origin). The cross-origin hop must still strip, even though the
+    // header check is per-hop against the immediate predecessor. Once dropped
+    // the credentials can never reappear.
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    // A same-origin hop that KEEPS all headers, then bounces cross-origin to B.
+    Mock::given(method("GET"))
+        .and(path("/hop"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/hop"))
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    // The same-origin /hop kept the auth headers...
+    let reqs_a = origin_a.received_requests().await.unwrap();
+    let hop = reqs_a
+        .iter()
+        .find(|r| r.url.path() == "/hop")
+        .expect("the same-origin hop was followed");
+    assert!(
+        has_header(hop, "authorization") && has_header(hop, "x-api-key"),
+        "the same-origin hop keeps auth headers"
+    );
+    // ...but B (cross-origin) received none of them.
+    let at_b = only_request(&origin_b).await;
+    assert!(
+        !has_header(&at_b, "authorization")
+            && !has_header(&at_b, "cookie")
+            && !has_header(&at_b, "x-api-key"),
+        "the cross-origin hop after a same-origin hop still strips auth headers"
+    );
+}
+
+#[tokio::test]
+async fn strip_307_preserves_body_but_strips_auth_cross_origin() {
+    // 307 preserves method + body across the hop; auth headers must still be
+    // stripped when it crosses the origin.
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let mut request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    request.method = Method::Post;
+    request.body = Some(Body {
+        kind: BodyKind::Json,
+        content: r#"{"k":"v"}"#.to_owned(),
+    });
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let response = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+
+    let at_b = only_request(&origin_b).await;
+    assert_eq!(at_b.method.as_str(), "POST", "307 preserves the method");
+    assert_eq!(at_b.body, br#"{"k":"v"}"#, "307 preserves the body");
+    assert!(
+        !has_header(&at_b, "authorization") && !has_header(&at_b, "x-api-key"),
+        "307 still strips auth headers on a cross-origin hop"
+    );
 }

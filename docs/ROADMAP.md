@@ -32,7 +32,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 ## In progress 🚧
 
 - **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
-- **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, grandfathered pre-existing secrets, request-wide save-gate coverage (headers/URL/body/params), `secret_policy = strict | warn`; cross-origin redirect policy still to come. (R)
+- **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, grandfathered pre-existing secrets, request-wide save-gate coverage (headers/URL/body/params), `secret_policy = strict | warn`, and a cross-origin `redirect = strict | strip | follow-all` policy (default `strip`: auth-bearing headers are dropped when a redirect crosses the scheme+host+port origin). (R)
 
 ## Planned ⏳
 
