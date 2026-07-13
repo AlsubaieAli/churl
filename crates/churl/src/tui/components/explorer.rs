@@ -574,17 +574,6 @@ impl ExplorerState {
         chain
     }
 
-    /// The collection-level template vars for the node at `collection`, loaded
-    /// lazily and cached. An unknown index yields an empty map. For a
-    /// sub-collection this is its `folder.toml` `[vars]`; for the root (node 0) it
-    /// is the manifest `[vars]` (pre-seeded).
-    pub fn collection_vars(&mut self, collection: usize) -> BTreeMap<String, String> {
-        self.collections
-            .get_mut(collection)
-            .map(|node| node.vars().clone())
-            .unwrap_or_default()
-    }
-
     /// The endpoint's ancestor **collection scope chain**, innermost → outermost:
     /// the leaf collection's vars first, then each parent, ending at the root
     /// collection (node 0). This is the resolver's inherit-and-override walk — a

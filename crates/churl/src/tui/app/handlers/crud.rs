@@ -348,7 +348,11 @@ impl App {
                 let Some(parent) = self.explorer.cursor_collection_dir() else {
                     return Ok(());
                 };
-                match persistence::create_collection(&parent, &text) {
+                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                    return Ok(());
+                };
+                // The reserved-`sequences` bump applies only at the root.
+                match persistence::create_collection(&parent, &text, &root) {
                     Ok(dir) => {
                         self.reload_explorer()?;
                         self.message = Some(Message::new(created_message(&text, &dir)));
@@ -432,7 +436,11 @@ impl App {
                 let Some(dir) = self.explorer.selected_collection_dir() else {
                     return Ok(());
                 };
-                match persistence::rename_collection(&dir, &new_name) {
+                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                    return Ok(());
+                };
+                // The reserved-`sequences` bump applies only for a root-level dir.
+                match persistence::rename_collection(&dir, &new_name, &root) {
                     Ok(new_dir) => {
                         // Repoint any buffer under the renamed dir into the new
                         // directory *before* the reload, or remap-by-path sees a

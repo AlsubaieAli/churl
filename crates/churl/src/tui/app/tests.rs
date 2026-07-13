@@ -1585,7 +1585,7 @@ fn reload_remaps_selected_collection_index_for_resolver() {
     // Create a collection that sorts *before* "bbb" and reload: name-sorted
     // top-level collections become [aaa=1, bbb=2], so "bbb" shifts to index 2;
     // the stale index 1 would read "aaa"'s (empty) vars.
-    churl_core::persistence::create_collection(dir.path(), "aaa").unwrap();
+    churl_core::persistence::create_collection(dir.path(), "aaa", dir.path()).unwrap();
     app.reload_explorer().unwrap();
     assert_eq!(
         app.selected().unwrap().collection,
@@ -5498,7 +5498,7 @@ fn reload_rereads_manifest_from_disk() {
     )
     .unwrap();
     // Add a collection on disk too, so the explorer rebuild is exercised.
-    churl_core::persistence::create_collection(dir.path(), "extra").unwrap();
+    churl_core::persistence::create_collection(dir.path(), "extra", dir.path()).unwrap();
 
     app.reload_workspace().unwrap();
 
@@ -5595,20 +5595,26 @@ fn load_file(app: &mut App, file: &std::path::Path) -> SelectedEndpoint {
 
 /// Var inheritance regression: a child collection's var OVERRIDES its parent's,
 /// which OVERRIDES the root collection's — a single inherit-and-override chain
-/// resolved by `build_resolver`. Same key `who` defined at all three levels; the
-/// deepest wins.
+/// resolved by `build_resolver`. `who` is defined at all three levels (deepest
+/// wins); `mid` ONLY on the parent and `from_root` ONLY on the root, and both must
+/// still resolve at the leaf — so a broken leaf-only resolver (that skipped the
+/// ancestor walk) would fail `mid`/`from_root`, not just `who`.
 #[test]
 fn m79_child_overrides_parent_overrides_root() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(
         root.join("churl.toml"),
-        "name = \"demo\"\n\n[vars]\nwho = \"root\"\n",
+        "name = \"demo\"\n\n[vars]\nwho = \"root\"\nfrom_root = \"R\"\n",
     )
     .unwrap();
     let parent = root.join("parent");
     std::fs::create_dir(&parent).unwrap();
-    std::fs::write(parent.join("folder.toml"), "[vars]\nwho = \"parent\"\n").unwrap();
+    std::fs::write(
+        parent.join("folder.toml"),
+        "[vars]\nwho = \"parent\"\nmid = \"M\"\n",
+    )
+    .unwrap();
     let child = parent.join("child");
     std::fs::create_dir(&child).unwrap();
     std::fs::write(child.join("folder.toml"), "[vars]\nwho = \"child\"\n").unwrap();
@@ -5627,6 +5633,16 @@ fn m79_child_overrides_parent_overrides_root() {
         resolver.substitute("{{who}}"),
         "child",
         "the deepest collection var must win over parent and root"
+    );
+    assert_eq!(
+        resolver.substitute("{{mid}}"),
+        "M",
+        "a parent-only var must resolve at the leaf (ancestor chain walked)"
+    );
+    assert_eq!(
+        resolver.substitute("{{from_root}}"),
+        "R",
+        "a root-only var must resolve at the leaf (chain reaches the root)"
     );
 }
 

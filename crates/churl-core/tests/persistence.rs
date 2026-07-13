@@ -985,7 +985,7 @@ fn delete_sequence_removes_file() {
 #[test]
 fn create_collection_makes_dir_without_folder_toml() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "My Orders").unwrap();
+    let coll = create_collection(dir.path(), "My Orders", dir.path()).unwrap();
     assert_eq!(coll.file_name().unwrap().to_str().unwrap(), "my-orders");
     assert!(coll.is_dir());
     assert!(
@@ -997,8 +997,8 @@ fn create_collection_makes_dir_without_folder_toml() {
 #[test]
 fn create_collection_refuses_existing() {
     let dir = tempfile::tempdir().unwrap();
-    create_collection(dir.path(), "orders").unwrap();
-    let err = create_collection(dir.path(), "orders").unwrap_err();
+    create_collection(dir.path(), "orders", dir.path()).unwrap();
+    let err = create_collection(dir.path(), "orders", dir.path()).unwrap_err();
     assert!(
         matches!(err, PersistenceError::AlreadyExists { .. }),
         "{err}"
@@ -1008,11 +1008,11 @@ fn create_collection_refuses_existing() {
 #[test]
 fn rename_collection_moves_dir_with_contents() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "old").unwrap();
+    let coll = create_collection(dir.path(), "old", dir.path()).unwrap();
     let ep = create_endpoint(&coll, "Ping").unwrap();
     assert!(ep.exists());
 
-    let new_coll = rename_collection(&coll, "New Coll").unwrap();
+    let new_coll = rename_collection(&coll, "New Coll", dir.path()).unwrap();
     assert_eq!(new_coll.file_name().unwrap().to_str().unwrap(), "new-coll");
     assert!(!coll.exists());
     assert!(new_coll.join("ping.toml").exists(), "contents moved along");
@@ -1021,7 +1021,7 @@ fn rename_collection_moves_dir_with_contents() {
 #[test]
 fn delete_collection_removes_dir_recursively() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "doomed").unwrap();
+    let coll = create_collection(dir.path(), "doomed", dir.path()).unwrap();
     create_endpoint(&coll, "Ping").unwrap();
     delete_collection(&coll).unwrap();
     assert!(!coll.exists());
@@ -1047,7 +1047,7 @@ fn create_endpoint_named_churl_never_overshadows_manifest() {
 
     // The collection dir doubles as a workspace-root-shaped dir for this test:
     // creating an endpoint named "churl" inside it must not write `churl.toml`.
-    let coll = create_collection(root.path(), "api").unwrap();
+    let coll = create_collection(root.path(), "api", root.path()).unwrap();
     // Plant a sibling manifest inside the collection so an overwrite is visible.
     save_workspace_manifest(&coll, &demo_workspace()).unwrap();
     let coll_manifest_before = fs::read(coll.join("churl.toml")).unwrap();
@@ -1081,7 +1081,7 @@ fn create_endpoint_named_churl_never_overshadows_manifest() {
 #[test]
 fn create_endpoint_reserved_variants_all_disambiguate() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     for name in ["Churl", "folder", "FOLDER"] {
         let path = create_endpoint(&coll, name).unwrap();
         let stem = path
@@ -1113,7 +1113,7 @@ fn create_endpoint_reserved_variants_all_disambiguate() {
 #[test]
 fn create_collection_named_sequences_never_shadows_sequences_dir() {
     let root = tempfile::tempdir().unwrap();
-    let coll = create_collection(root.path(), "sequences").unwrap();
+    let coll = create_collection(root.path(), "sequences", root.path()).unwrap();
     assert_ne!(
         coll.file_name().unwrap().to_str().unwrap(),
         "sequences",
@@ -1136,12 +1136,72 @@ fn create_collection_named_sequences_never_shadows_sequences_dir() {
     );
 }
 
+/// M7.9: `sequences` is reserved at the ROOT level ONLY. A sub-collection
+/// literally named `sequences` (created inside another collection) is written
+/// VERBATIM — never bumped to `sequences-2` — matching the loader, which treats a
+/// nested `sequences/` as an ordinary sub-collection.
+#[test]
+fn create_nested_collection_named_sequences_is_verbatim() {
+    let root = tempfile::tempdir().unwrap();
+    // A top-level collection to nest inside; root is the workspace root.
+    let api = create_collection(root.path(), "api", root.path()).unwrap();
+
+    // Now create a `sequences` sub-collection INSIDE `api` — parent != root, so
+    // the reservation must NOT apply.
+    let nested = create_collection(&api, "sequences", root.path()).unwrap();
+    assert_eq!(
+        nested.file_name().unwrap().to_str().unwrap(),
+        "sequences",
+        "a nested `sequences` collection is created verbatim (root-only reservation)"
+    );
+    assert_eq!(nested, api.join("sequences"));
+
+    // And the loader agrees: `api`'s sub-collections include the verbatim
+    // `sequences` (it is NOT excluded at a non-root level).
+    let api_col = Collection {
+        name: "api".into(),
+        path: api.clone(),
+    };
+    let subs = api_col.sub_collections().unwrap();
+    assert_eq!(
+        subs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["sequences"]
+    );
+}
+
+/// M7.9: renaming a SUB-collection to `sequences` keeps the verbatim name (the
+/// reserved bump is root-only), while renaming a ROOT-level collection to
+/// `sequences` still bumps to `sequences-2`.
+#[test]
+fn rename_collection_to_sequences_bumps_only_at_root() {
+    let root = tempfile::tempdir().unwrap();
+
+    // Root-level rename → bumped.
+    let top = create_collection(root.path(), "top", root.path()).unwrap();
+    let renamed_top = rename_collection(&top, "sequences", root.path()).unwrap();
+    assert_eq!(
+        renamed_top.file_name().unwrap().to_str().unwrap(),
+        "sequences-2",
+        "a root-level collection renamed to `sequences` is bumped"
+    );
+
+    // Nested rename → verbatim.
+    let api = create_collection(root.path(), "api", root.path()).unwrap();
+    let sub = create_collection(&api, "child", root.path()).unwrap();
+    let renamed_sub = rename_collection(&sub, "sequences", root.path()).unwrap();
+    assert_eq!(
+        renamed_sub.file_name().unwrap().to_str().unwrap(),
+        "sequences",
+        "a sub-collection renamed to `sequences` keeps the verbatim name"
+    );
+}
+
 /// Renaming an endpoint *into* a reserved name is the same hazard as creating
 /// one, and must disambiguate too.
 #[test]
 fn rename_endpoint_into_reserved_name_disambiguates() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     let path = create_endpoint(&coll, "Ping").unwrap();
 
     let new_path = rename_endpoint(&path, "churl").unwrap();
@@ -1160,7 +1220,7 @@ fn rename_endpoint_into_reserved_name_disambiguates() {
 #[test]
 fn no_name_yields_a_reserved_on_disk_stem() {
     let dir = tempfile::tempdir().unwrap();
-    let coll = create_collection(dir.path(), "c").unwrap();
+    let coll = create_collection(dir.path(), "c", dir.path()).unwrap();
     for name in [
         "churl",
         "Churl",
@@ -1189,7 +1249,7 @@ fn no_name_yields_a_reserved_on_disk_stem() {
         );
         // Collections.
         let root = tempfile::tempdir().unwrap();
-        let cdir = create_collection(root.path(), name).unwrap();
+        let cdir = create_collection(root.path(), name, root.path()).unwrap();
         let cstem = cdir
             .file_name()
             .unwrap()
@@ -1310,7 +1370,7 @@ fn create_collection_reserved_bump_advances_past_existing() {
     // `sequences` is reserved, so a create bumps to `-2`; pre-occupy `-2`.
     fs::create_dir(root.path().join("sequences-2")).unwrap();
 
-    let coll = create_collection(root.path(), "sequences").unwrap();
+    let coll = create_collection(root.path(), "sequences", root.path()).unwrap();
     assert_eq!(
         coll.file_name().unwrap().to_str().unwrap(),
         "sequences-3",

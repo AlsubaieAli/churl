@@ -67,7 +67,7 @@ pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("failed to write {}/churl.toml", root.display()))?;
 
     // --- collection directory ---
-    let coll_dir = create_collection(&root, "examples")
+    let coll_dir = create_collection(&root, "examples", &root)
         .with_context(|| "failed to create 'examples' collection")?;
 
     // Write a default (empty-vars) folder.toml.
