@@ -5544,3 +5544,35 @@ fn reload_while_dirty_defers_and_preserves_edit() {
         Some("unsaved changes — save before reloading from disk")
     );
 }
+
+#[test]
+fn reload_with_corrupt_manifest_keeps_old_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"before\"\n\n[vars]\nbase = \"old\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    assert_eq!(app.workspace.as_ref().unwrap().manifest().name, "before");
+
+    // Corrupt the manifest on disk out-of-band (unterminated table header).
+    std::fs::write(dir.path().join("churl.toml"), "name = \"before\"\n[vars\n").unwrap();
+
+    // A failed re-open must not panic, must leave the old workspace intact, and
+    // must surface the failure (fail loudly, never half-swap).
+    app.reload_workspace().unwrap();
+    assert_eq!(
+        app.workspace.as_ref().unwrap().manifest().name,
+        "before",
+        "a corrupt reload keeps the old in-memory workspace"
+    );
+    assert!(
+        app.message
+            .as_ref()
+            .is_some_and(|m| m.text.starts_with("failed to reload workspace")),
+        "the reload failure is surfaced: {:?}",
+        app.message.as_ref().map(|m| m.text.as_str())
+    );
+}

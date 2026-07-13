@@ -28,13 +28,14 @@ impl App {
     /// or a second churl instance) are picked up without a restart. Bound to
     /// `<leader>r`.
     ///
-    /// Dirty-guard: like [`App::guarded_load`], a dirty buffer must never lose
-    /// unsaved work. A reload with any dirty buffer is DEFERRED — it refuses and
-    /// tells the user to save first — rather than routing through the
-    /// discard-changes confirm (whose only resolution is to *destroy* buffers,
-    /// the wrong outcome for a refresh-from-disk). Re-reading the manifest and
-    /// remapping buffers can shift collection indices under an open editor, so
-    /// deferring while dirty is the safe default that preserves every edit.
+    /// Dirty-guard: reuses [`App::guarded_load`]'s dirty *predicate*
+    /// ([`App::any_buffer_dirty`]) but NOT its resolution. A workspace *switch*
+    /// with dirty buffers opens a discard-changes confirm whose only outcome is
+    /// to *destroy* those buffers — right when you're leaving a workspace, wrong
+    /// for a *refresh* of the current one. So a reload with any dirty buffer
+    /// refuses in place ("save first") and applies nothing, preserving every
+    /// edit. Re-reading the manifest and remapping buffers can shift collection
+    /// indices under an open editor, so refusing while dirty is the safe default.
     ///
     /// On a failed manifest re-open the current workspace is left intact and the
     /// error is surfaced (fail loudly, never half-swap).
@@ -43,7 +44,8 @@ impl App {
             self.notify("no workspace to reload");
             return Ok(());
         };
-        // Reuse the guarded-load dirty check: defer rather than discard.
+        // Refuse in place rather than discard: same dirty check as guarded_load,
+        // different resolution (a refresh must never destroy open buffers).
         if self.any_buffer_dirty() {
             self.notify("unsaved changes — save before reloading from disk");
             return Ok(());
