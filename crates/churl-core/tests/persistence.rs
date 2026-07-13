@@ -1218,6 +1218,106 @@ fn rename_endpoint_same_slug_keeps_filename() {
     assert_eq!(load_endpoint(&new_path).unwrap().name, "get users");
 }
 
+// ---- Concurrent-save clobber race (atomic path claim) --------------------
+
+/// True OS-thread concurrency: many threads race to create a new endpoint with
+/// the SAME name in the SAME collection. Each must land on its own file — no two
+/// share a filename, and every write survives (the atomic `create_new` claim
+/// makes the loser of any name race advance to the next `-N` instead of
+/// clobbering the winner).
+#[test]
+fn concurrent_create_endpoint_same_name_never_clobbers() {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+
+    let dir = tempfile::tempdir().unwrap();
+    let coll = Arc::new(dir.path().join("c"));
+    fs::create_dir(coll.as_path()).unwrap();
+
+    const THREADS: usize = 12;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let coll = Arc::clone(&coll);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                create_endpoint(&coll, "Ping").expect("create must not fail under contention")
+            })
+        })
+        .collect();
+
+    let paths: Vec<std::path::PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // Every returned path is distinct — no two threads claimed the same file.
+    let mut names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        THREADS,
+        "each concurrent create must claim a distinct filename: {names:?}"
+    );
+
+    // Every file is on disk and reads back as a `Ping` endpoint — no lost write.
+    for path in &paths {
+        assert!(path.exists(), "claimed file must persist: {path:?}");
+        assert_eq!(load_endpoint(path).unwrap().name, "Ping");
+    }
+
+    // The corpus convention held: `ping.toml` plus `ping-2..ping-12.toml`.
+    assert!(names.contains(&"ping.toml".to_owned()), "{names:?}");
+    assert!(names.contains(&"ping-2.toml".to_owned()), "{names:?}");
+}
+
+/// A file placed on disk OUT OF BAND (not via churl) must be respected by the
+/// next create: the atomic claim lands on `ping-2.toml` rather than trusting a
+/// stale existence probe and overwriting the pre-existing `ping.toml`.
+#[test]
+fn create_endpoint_claims_around_out_of_band_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let coll = dir.path().join("c");
+    fs::create_dir(&coll).unwrap();
+    // Drop a non-churl file at the bare slug path.
+    fs::write(
+        coll.join("ping.toml"),
+        b"# hand-placed, not a churl endpoint\n",
+    )
+    .unwrap();
+
+    let path = create_endpoint(&coll, "Ping").unwrap();
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "ping-2.toml",
+        "claim must skip the pre-existing file, not clobber it"
+    );
+    // The out-of-band file is untouched.
+    assert_eq!(
+        fs::read_to_string(coll.join("ping.toml")).unwrap(),
+        "# hand-placed, not a churl endpoint\n"
+    );
+}
+
+/// A reserved collection slug (`sequences`) whose bumped target already exists on
+/// disk out of band keeps advancing: with both `sequences-2` present, the claim
+/// lands on `sequences-3`.
+#[test]
+fn create_collection_reserved_bump_advances_past_existing() {
+    let root = tempfile::tempdir().unwrap();
+    // `sequences` is reserved, so a create bumps to `-2`; pre-occupy `-2`.
+    fs::create_dir(root.path().join("sequences-2")).unwrap();
+
+    let coll = create_collection(root.path(), "sequences").unwrap();
+    assert_eq!(
+        coll.file_name().unwrap().to_str().unwrap(),
+        "sequences-3",
+        "reserved bump must advance past an already-claimed `-2`"
+    );
+}
+
 // ---- A3: widened save-gate coverage (headers / URL / body) + policy ----
 
 /// A GET endpoint at `url` with the given headers/params/body, no auth.

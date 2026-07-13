@@ -116,7 +116,13 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
     if name.trim().is_empty() {
         return Err(PersistenceError::EmptyName);
     }
-    let path = unique_endpoint_path(dir, &slugify(name));
+    // Atomically claim a free `<slug>.toml` (a concurrent "new endpoint" save can
+    // never land on the same file), then fill the reserved placeholder in place.
+    let path =
+        claim_endpoint_path(dir, &slugify(name)).map_err(|source| PersistenceError::Write {
+            path: dir.to_owned(),
+            source,
+        })?;
     let endpoint = Endpoint {
         seq: next_seq(dir),
         name: name.trim().to_owned(),
@@ -154,12 +160,17 @@ pub fn rename_endpoint(path: &Path, new_name: &str) -> Result<PathBuf, Persisten
     let slug = slugify(new_name);
     // An unchanged, non-reserved slug keeps the file where it is — its own path
     // must not count as a collision. A reserved slug always falls through to
-    // `unique_endpoint_path` so it disambiguates even if the file already sat on
+    // `claim_endpoint_path` so it disambiguates even if the file already sat on
     // a reserved stem.
     if !is_reserved_file_slug(&slug) && dir.join(format!("{slug}.toml")) == path {
         return Ok(path.to_owned());
     }
-    let new_path = unique_endpoint_path(dir, &slug);
+    // Atomically claim the destination name before moving onto it, so a concurrent
+    // save can't slip a file into the same slot between choosing and renaming.
+    let new_path = claim_endpoint_path(dir, &slug).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })?;
     std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
         path: new_path.clone(),
         source,
@@ -191,15 +202,23 @@ pub fn create_collection(root: &Path, name: &str) -> Result<PathBuf, Persistence
     if name.trim().is_empty() {
         return Err(PersistenceError::EmptyName);
     }
-    let dir = collection_dir_name(root, &slugify(name));
-    if dir.exists() {
-        return Err(PersistenceError::AlreadyExists { path: dir });
-    }
-    std::fs::create_dir(&dir).map_err(|source| PersistenceError::Write {
-        path: dir.clone(),
-        source,
-    })?;
-    Ok(dir)
+    let slug = slugify(name);
+    // `create_dir` fails atomically if the target already exists, so the claim is
+    // the existence check: a non-reserved dir that is already there surfaces as
+    // `AlreadyExists` (import reuse relies on the returned path), while a reserved
+    // slug is bumped onto a freshly-created `<slug>-N` with no probe-then-create gap.
+    claim_collection_dir(root, &slug).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::AlreadyExists {
+            PersistenceError::AlreadyExists {
+                path: root.join(&slug),
+            }
+        } else {
+            PersistenceError::Write {
+                path: root.join(&slug),
+                source,
+            }
+        }
+    })
 }
 
 /// Renames the collection directory `dir` to a fresh slug of `new_name` in the

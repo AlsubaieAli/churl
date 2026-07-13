@@ -13,10 +13,11 @@ pub fn save_sequence(path: &Path, sequence: &Sequence) -> Result<(), Persistence
     save_value(path, sequence)
 }
 
-/// Picks an unused `<slug>.toml` path for a sequence inside `dir` (reuses the
-/// endpoint collision-suffix convention).
-fn unique_sequence_path(dir: &Path, slug: &str) -> PathBuf {
-    unique_endpoint_path(dir, slug)
+/// Atomically claims an unused `<slug>.toml` path for a sequence inside `dir`,
+/// leaving a placeholder on disk (reuses the endpoint collision-suffix + atomic
+/// create-new convention, so two concurrent saves never claim the same name).
+fn claim_sequence_path(dir: &Path, slug: &str) -> std::io::Result<PathBuf> {
+    claim_endpoint_path(dir, slug)
 }
 
 /// The next `seq` for a new sequence in `dir`: one past the maximum existing
@@ -53,7 +54,11 @@ pub fn create_sequence(root: &Path, name: &str) -> Result<PathBuf, PersistenceEr
         path: dir.clone(),
         source,
     })?;
-    let path = unique_sequence_path(&dir, &slugify(name));
+    let path =
+        claim_sequence_path(&dir, &slugify(name)).map_err(|source| PersistenceError::Write {
+            path: dir.clone(),
+            source,
+        })?;
     let sequence = Sequence {
         seq: next_sequence_seq(&dir),
         name: name.trim().to_owned(),
@@ -82,7 +87,12 @@ pub fn rename_sequence(path: &Path, new_name: &str) -> Result<PathBuf, Persisten
     if dir.join(format!("{slug}.toml")) == path {
         return Ok(path.to_owned());
     }
-    let new_path = unique_sequence_path(dir, &slug);
+    // Atomically claim the destination name before moving onto it (see
+    // `rename_endpoint`), so a concurrent save can't take the same slot first.
+    let new_path = claim_sequence_path(dir, &slug).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })?;
     std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
         path: new_path.clone(),
         source,

@@ -82,36 +82,64 @@ pub(super) fn slugify(name: &str) -> String {
     }
 }
 
-/// Picks an unused `<slug>.toml` path inside `dir`, appending `-2`, `-3`, … on
-/// collision (matching the corpus convention of plain suffixes).
+/// Atomically claims an unused `<slug>.toml` path inside `dir`, appending `-2`,
+/// `-3`, … on collision (matching the corpus convention of plain suffixes), and
+/// returns the claimed path with a zero-byte placeholder already on disk.
 ///
 /// A slug equal to a reserved file stem (see [`RESERVED_FILE_STEMS`]) is treated
 /// as already occupied so it disambiguates exactly like a filename clash (`churl`
 /// → `churl-2.toml`) instead of clobbering the manifest/folder file — the display
 /// `name` inside the file is untouched. Callers surface the final stem when it
 /// was bumped (fail-loud, no silent no-op).
-pub(super) fn unique_endpoint_path(dir: &Path, slug: &str) -> PathBuf {
-    let first = dir.join(format!("{slug}.toml"));
-    if !first.exists() && !is_reserved_file_slug(slug) {
-        return first;
+///
+/// The claim is the create step: each candidate is opened with `create_new` so it
+/// fails if a concurrent save already took that name; on that `AlreadyExists` the
+/// loop advances to the next `-N` candidate. The first successful create wins, so
+/// two simultaneous "new endpoint" saves land on distinct files instead of racing
+/// a stale existence probe and clobbering one another. Any other I/O error (a
+/// bad directory, permissions) surfaces to the caller.
+pub(super) fn claim_endpoint_path(dir: &Path, slug: &str) -> std::io::Result<PathBuf> {
+    let bare = dir.join(format!("{slug}.toml"));
+    if !is_reserved_file_slug(slug) {
+        match claim_new_file(&bare) {
+            Ok(()) => return Ok(bare),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
     }
     let mut n = 2;
     loop {
         let candidate = dir.join(format!("{slug}-{n}.toml"));
-        if !candidate.exists() {
-            return candidate;
+        match claim_new_file(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(err) => return Err(err),
         }
-        n += 1;
     }
 }
 
-/// Resolves the on-disk directory name for a collection `slug` under `parent`,
-/// bumping a **reserved** directory slug (see [`RESERVED_DIR_NAMES`] — i.e. a
-/// collection literally named `sequences`) to the first free `<slug>-N` so it can
-/// never overshadow the sequences directory. A non-reserved slug is returned
-/// verbatim — the caller still decides what to do if that directory already
-/// exists ([`create_collection`] errors `AlreadyExists`; import reuses it), so
-/// this helper does **not** disambiguate on plain existence.
+/// Creates `path` as a fresh, empty file, failing with `AlreadyExists` if a file
+/// (or a concurrent writer) already holds that name — the atomic name-claim
+/// primitive behind [`claim_endpoint_path`].
+fn claim_new_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+}
+
+/// Resolves the on-disk directory name for a collection `slug` under `parent`
+/// **without** creating anything, bumping a **reserved** directory slug (see
+/// [`RESERVED_DIR_NAMES`] — i.e. a collection literally named `sequences`) to the
+/// first free `<slug>-N` so it can never overshadow the sequences directory. A
+/// non-reserved slug is returned verbatim — the caller decides what happens if it
+/// already exists.
+///
+/// This is the name-only picker for [`rename_collection`], where the claim step is
+/// a directory *move* (`fs::rename`), not a create. The create path
+/// ([`create_collection`]) uses [`claim_collection_dir`] instead, which folds the
+/// atomic `create_dir` into the bump loop.
 pub(super) fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
     if !is_reserved_dir_slug(slug) {
         return parent.join(slug);
@@ -123,5 +151,32 @@ pub(super) fn collection_dir_name(parent: &Path, slug: &str) -> PathBuf {
             return candidate;
         }
         n += 1;
+    }
+}
+
+/// Atomically claims and creates the on-disk directory for a collection `slug`
+/// under `parent`, bumping a **reserved** directory slug (see [`RESERVED_DIR_NAMES`]
+/// — i.e. a collection literally named `sequences`) to the first free `<slug>-N`
+/// so it can never overshadow the sequences directory.
+///
+/// A non-reserved slug is created verbatim as `parent/slug`: `create_dir` fails
+/// atomically if that directory already exists, so the caller's contract is
+/// unchanged ([`create_collection`] maps that `AlreadyExists` to its error; import
+/// reuses the returned path). A reserved slug never lands on the bare name — its
+/// bump loop creates `<slug>-N` and advances past any concurrently-claimed one, so
+/// the reserved bump can no longer race a stale existence probe.
+pub(super) fn claim_collection_dir(parent: &Path, slug: &str) -> std::io::Result<PathBuf> {
+    if !is_reserved_dir_slug(slug) {
+        let dir = parent.join(slug);
+        return std::fs::create_dir(&dir).map(|()| dir);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = parent.join(format!("{slug}-{n}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(err) => return Err(err),
+        }
     }
 }

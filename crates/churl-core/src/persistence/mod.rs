@@ -33,7 +33,9 @@ mod workspace;
 // so its path is unchanged.
 use merge::merge_tables;
 pub use naming::slug_of;
-use naming::{collection_dir_name, is_reserved_file_slug, slugify, unique_endpoint_path};
+use naming::{
+    claim_collection_dir, claim_endpoint_path, collection_dir_name, is_reserved_file_slug, slugify,
+};
 
 // The atomic write/serialization internals live in `atomic` (a child module).
 // Their cross-module helpers are `pub(super)`, pulled into this module's

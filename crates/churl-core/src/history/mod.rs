@@ -207,6 +207,7 @@ impl HistoryStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         for (index, sql) in MIGRATIONS.iter().enumerate() {
+            // `index` walks a small fixed migration list, so it fits i64 trivially.
             let version = index as i64 + 1;
             if version <= current {
                 continue;
@@ -268,6 +269,17 @@ mod tests {
         assert_eq!(limited[0].id, id2);
         assert_eq!(limited[0].status, Some(200));
         assert_eq!(limited[0].duration_ms, Some(42));
+    }
+
+    #[test]
+    fn recent_limit_saturates_without_panicking() {
+        // `usize::MAX` can't fit in SQLite's i64 — the row cap saturates to
+        // i64::MAX (an effectively unbounded query) instead of wrapping/panicking.
+        let store = HistoryStore::in_memory().unwrap();
+        store.insert(&entry(1_000, "https://a.example")).unwrap();
+        store.insert(&entry(2_000, "https://b.example")).unwrap();
+        let all = store.recent(usize::MAX).unwrap();
+        assert_eq!(all.len(), 2, "an over-large cap returns every row");
     }
 
     #[test]

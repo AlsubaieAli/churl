@@ -226,6 +226,8 @@ fn percentile(sorted: &[Duration], p: f64) -> Option<Duration> {
     if sorted.is_empty() {
         return None;
     }
+    // `sorted.len()` is a real slice length, so it round-trips through f64 (well
+    // under 2^53) and the ceiled rank (0..=len) truncates back into usize exactly.
     let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
     let index = rank.saturating_sub(1).min(sorted.len() - 1);
     Some(sorted[index])
