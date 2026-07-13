@@ -924,6 +924,7 @@ impl App {
         self.client = Some(churl_core::http::build_client(config.timeout())?);
         self.execute_options = ExecuteOptions {
             max_body_bytes: config.max_body_bytes(),
+            redirect: config.redirect()?,
         };
         self.load_caps = config.load_caps();
         // A spawn failure degrades to plain rendering: `spawn` returns
