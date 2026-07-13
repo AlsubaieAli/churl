@@ -10,7 +10,10 @@ impl HistoryStore {
              ORDER BY executed_at_ms DESC, id DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], |row| {
+        // Saturate the row cap into SQLite's i64: a display limit never approaches
+        // i64::MAX, and an over-large one still means "no practical ceiling".
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map([limit], |row| {
             Ok(HistoryEntry {
                 id: row.get(0)?,
                 executed_at_ms: row.get(1)?,
@@ -52,7 +55,9 @@ impl HistoryStore {
         )?;
         let to_usize = |n: i64| usize::try_from(n).unwrap_or_default();
         let to_ms = |v: Option<i64>| v.map(|ms| u64::try_from(ms).unwrap_or_default());
-        let rows = stmt.query_map([limit as i64], |row| {
+        // Saturate the row cap into SQLite's i64 (see `recent`).
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map([limit], |row| {
             Ok(LoadBatchEntry {
                 id: row.get(0)?,
                 summary: LoadBatchSummary {
@@ -83,7 +88,9 @@ impl HistoryStore {
              ORDER BY last_opened_ms DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+        // Saturate the row cap into SQLite's i64 (see `recent`).
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map([limit], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }

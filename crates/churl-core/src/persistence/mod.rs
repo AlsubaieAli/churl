@@ -33,7 +33,10 @@ mod workspace;
 // so its path is unchanged.
 use merge::merge_tables;
 pub use naming::slug_of;
-use naming::{collection_dir_name, is_reserved_file_slug, slugify, unique_endpoint_path};
+use naming::{
+    ClaimGuard, claim_collection_dir, claim_endpoint_path, collection_dir_name,
+    is_reserved_file_slug, slugify,
+};
 
 // The atomic write/serialization internals live in `atomic` (a child module).
 // Their cross-module helpers are `pub(super)`, pulled into this module's
@@ -263,5 +266,77 @@ mod tests {
             .filter(|name| name.to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+    }
+
+    /// The claim guard removes its placeholder on drop when the caller never
+    /// commits (a post-claim failure), and leaves it alone once committed (the
+    /// success path). Proves the cleanup semantics without injecting an I/O error.
+    #[test]
+    fn claim_guard_removes_placeholder_unless_committed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Uncommitted claim: dropping the guard deletes the 0-byte placeholder.
+        let guard = claim_endpoint_path(dir.path(), "ping").unwrap();
+        let claimed = guard.path().to_owned();
+        assert!(claimed.exists(), "claim creates the placeholder");
+        drop(guard);
+        assert!(
+            !claimed.exists(),
+            "an uncommitted claim removes the placeholder on drop"
+        );
+
+        // Committed claim: the file survives, and `commit` hands back the path.
+        let guard = claim_endpoint_path(dir.path(), "ping").unwrap();
+        let path = guard.commit();
+        assert!(
+            path.exists(),
+            "a committed claim leaves the file in place: {path:?}"
+        );
+    }
+
+    /// Deterministic post-claim failure: with the collection dir made read-only
+    /// after the claim, the real save fails and the guard's drop removes the
+    /// placeholder — no 0-byte endpoint is left behind for the loader to choke on.
+    #[cfg(unix)]
+    #[test]
+    fn claim_placeholder_is_cleaned_up_when_save_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let coll = dir.path().join("c");
+        std::fs::create_dir(&coll).unwrap();
+
+        let claimed = {
+            let claim = claim_endpoint_path(&coll, "ping").unwrap();
+            let claimed = claim.path().to_owned();
+            assert!(claimed.exists(), "placeholder is on disk");
+
+            // Read-only dir: `atomic_write`'s temp create fails, so the save errors
+            // out *after* the claim — exactly the leak window the guard covers.
+            std::fs::set_permissions(&coll, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let ep = Endpoint {
+                seq: 0,
+                name: "Ping".into(),
+                request: Request {
+                    method: Method::Get,
+                    url: String::new(),
+                    headers: Vec::new(),
+                    params: Vec::new(),
+                    body: None,
+                    auth: None,
+                },
+            };
+            let result = save_endpoint(claim.path(), &ep);
+            // Restore writability so both the guard drop and tempdir cleanup work.
+            std::fs::set_permissions(&coll, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(result.is_err(), "save into a read-only dir must fail");
+            claimed
+            // `claim` drops here, armed (never committed) → placeholder removed.
+        };
+
+        assert!(
+            !claimed.exists(),
+            "a failed post-claim save leaves no stray placeholder"
+        );
     }
 }

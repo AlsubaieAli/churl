@@ -13,10 +13,12 @@ pub fn save_sequence(path: &Path, sequence: &Sequence) -> Result<(), Persistence
     save_value(path, sequence)
 }
 
-/// Picks an unused `<slug>.toml` path for a sequence inside `dir` (reuses the
-/// endpoint collision-suffix convention).
-fn unique_sequence_path(dir: &Path, slug: &str) -> PathBuf {
-    unique_endpoint_path(dir, slug)
+/// Atomically claims an unused `<slug>.toml` path for a sequence inside `dir`,
+/// returning the [`ClaimGuard`] over its zero-byte placeholder (reuses the endpoint
+/// collision-suffix + atomic create-new convention, so two concurrent saves never
+/// claim the same name and a failed post-claim write can't leave a stray file).
+fn claim_sequence_path(dir: &Path, slug: &str) -> std::io::Result<ClaimGuard> {
+    claim_endpoint_path(dir, slug)
 }
 
 /// The next `seq` for a new sequence in `dir`: one past the maximum existing
@@ -53,15 +55,21 @@ pub fn create_sequence(root: &Path, name: &str) -> Result<PathBuf, PersistenceEr
         path: dir.clone(),
         source,
     })?;
-    let path = unique_sequence_path(&dir, &slugify(name));
+    // The guard removes the placeholder if the save below fails, so a failed
+    // create never leaves a 0-byte sequence behind.
+    let claim =
+        claim_sequence_path(&dir, &slugify(name)).map_err(|source| PersistenceError::Write {
+            path: dir.clone(),
+            source,
+        })?;
     let sequence = Sequence {
         seq: next_sequence_seq(&dir),
         name: name.trim().to_owned(),
         on_error: OnError::Halt,
         steps: Vec::new(),
     };
-    save_sequence(&path, &sequence)?;
-    Ok(path)
+    save_sequence(claim.path(), &sequence)?;
+    Ok(claim.commit())
 }
 
 /// Renames the sequence at `path`: updates its `name` (via the format-preserving
@@ -82,12 +90,18 @@ pub fn rename_sequence(path: &Path, new_name: &str) -> Result<PathBuf, Persisten
     if dir.join(format!("{slug}.toml")) == path {
         return Ok(path.to_owned());
     }
-    let new_path = unique_sequence_path(dir, &slug);
-    std::fs::rename(path, &new_path).map_err(|source| PersistenceError::Write {
-        path: new_path.clone(),
+    // Atomically claim the destination name before moving onto it (see
+    // `rename_endpoint`), so a concurrent save can't take the same slot first. The
+    // guard removes the placeholder if the rename below fails.
+    let claim = claim_sequence_path(dir, &slug).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
         source,
     })?;
-    Ok(new_path)
+    std::fs::rename(path, claim.path()).map_err(|source| PersistenceError::Write {
+        path: claim.path().to_owned(),
+        source,
+    })?;
+    Ok(claim.commit())
 }
 
 /// Deletes the sequence file at `path`.
