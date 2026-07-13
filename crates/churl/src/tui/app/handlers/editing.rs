@@ -539,8 +539,9 @@ impl App {
     }
 
     /// `w`: save the live request to disk (format-preserving). Refreshes the
-    /// snapshot on success; a secrets refusal surfaces on the statusline and the
-    /// request stays dirty.
+    /// snapshot on success; a newly-authored secret refusal surfaces on the
+    /// statusline and the request stays dirty. Grandfathered/value-only findings
+    /// save with a `!` warning that names them.
     pub(in crate::tui::app) fn save_request(&mut self) {
         self.sync_body_into_selected();
         let Some(selected) = self.selected() else {
@@ -549,18 +550,27 @@ impl App {
         };
         let path = selected.file.clone();
         let endpoint = selected.endpoint.clone();
-        match persistence::save_endpoint(&path, &endpoint) {
-            Ok(()) => {
+        match persistence::save_endpoint_checked(&path, &endpoint, self.secret_policy) {
+            Ok(decision) => {
                 if let Some(b) = self.active_endpoint_buffer_mut() {
                     b.loaded_snapshot = endpoint.clone();
                 }
                 self.refresh_explorer_endpoint(&path, endpoint.clone());
-                self.message = Some(Message::new(format!("Saved {}", endpoint.name)));
+                let msg = if decision.warnings.is_empty() {
+                    format!("Saved {}", endpoint.name)
+                } else {
+                    format!(
+                        "Saved {} · ! secret(s) in {} — move to env/{{{{var}}}}",
+                        endpoint.name,
+                        decision.warning_locations().join(", ")
+                    )
+                };
+                self.message = Some(Message::new(msg));
             }
-            Err(PersistenceError::SecretsInAuth { names }) => {
+            Err(PersistenceError::SecretsRefused { locations }) => {
                 self.message = Some(Message::new(format!(
-                    "not saved: secret auth values ({}) — use {{{{var}}}}",
-                    names.join(", ")
+                    "not saved: new literal secret(s) ({}) — use {{{{var}}}}",
+                    locations.join(", ")
                 )));
             }
             Err(err) => {

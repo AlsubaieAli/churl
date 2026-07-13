@@ -51,7 +51,9 @@ crates/
                            #   warning; both skip folder.toml AND churl.toml);
                            #   CollectionMeta (folder.toml [vars]) load/save; CRUD seams:
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
-                           #   secrets refusal on every save path, reserved-name disambiguation);
+                           #   baseline-aware secret gate on every save path — save_*_checked(policy) return
+                           #   SecretDecision, plain save_* wrap them at Strict; SecretsRefused only on a
+                           #   newly-authored name-anchored literal, reserved-name disambiguation);
                            #   SEQUENCES_DIRNAME (excluded from collections()), OpenWorkspace::sequences() →
                            #   SequenceLoad (lenient), load/save/create/rename/delete_sequence
       sequence.rs          # run engine (UI-free): extract_value (status/header:/JSON-path subset, no
@@ -66,12 +68,21 @@ crates/
                            #   substitute / substitute_request; sequences prepend a highest-precedence
                            #   `extracted` scope — resolution never forked; unresolved_placeholders
                            #   fails loud: names any {{var}} still present after substitution
-                           #   (reuses parse_placeholder; no literal-brace escape) so the 3 send paths refuse
+                           #   (reuses parse_placeholder; no literal-brace escape) so the 3 send paths refuse;
+                           #   contains_placeholder: does a value embed any {{token}} (used by the save-gate for
+                           #   header/url/param values like `Bearer {{token}}`, vs config's whole-value check)
       config.rs            # global config.toml loading (incl. [keys] overrides, theme + [theme_colors],
-                           #   timeout_secs, max_body_bytes, the [load] guardrail caps → Config::load_caps())
-                           #   + secrets heuristics (looks_like_secret_name,
-                           #   is_template_placeholder, secret_violations incl. workspace [vars],
-                           #   collection_secret_violations, auth_secret_violations)
+                           #   timeout_secs, max_body_bytes, the [load] guardrail caps → Config::load_caps(),
+                           #   secret_policy → Config::secret_policy() = Strict|Warn fail-loud)
+                           #   + secret-name/placeholder primitives (looks_like_secret_name,
+                           #   is_template_placeholder tightened to a single well-formed {{token}},
+                           #   secret_violations incl. workspace [vars], collection_secret_violations,
+                           #   auth_secret_violations)
+      secrets.rs           # save-time secret engine: Severity{Block,Warn}, SecretFinding, SecretPolicy,
+                           #   scan_endpoint/scan_workspace/scan_collection (auth + header/url/param/body +
+                           #   env-var names AND secret-shaped values via looks_like_secret_value), and
+                           #   decide(new, baseline, policy) → SecretDecision{refusals, warnings}
+                           #   (novelty by location → grandfather pre-existing, block new name-anchored)
       history.rs           # rusqlite HistoryStore, user_version migrations (append-only); WAL + busy_timeout +
                            #   BEGIN IMMEDIATE migration lock; a SEPARATE load_batches table (LoadBatchSummary) —
                            #   load runs write one summary row there, never to history (structural non-flooding);

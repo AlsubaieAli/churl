@@ -1,5 +1,6 @@
 use super::*;
 use crate::tui::theme::Theme;
+use churl_core::secrets::SecretPolicy;
 use crossterm::event::KeyModifiers;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -271,25 +272,23 @@ fn clean_close_is_immediate() {
 }
 
 #[test]
-fn save_refuses_literal_secret() {
+fn save_refuses_new_literal_secret() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
     let mut s = fixture();
-    // Add a secret-named literal to the workspace.
+    // Add a secret-named literal absent from the on-disk baseline → NEW under strict.
     s.scopes[0].vars.push(("api_token".into(), "leaked".into()));
-    let result = s.save(dir.path(), "demo");
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
     let EnvSaveResult::Refused(msg) = &result else {
         panic!("expected Refused, got {result:?}");
     };
-    // The message names the offending var and signals it's
-    // pre-existing (the full grandfather+warn behavior is not yet implemented).
     assert!(
         msg.contains("api_token"),
         "refusal names the offending var: {msg}"
     );
     assert!(
-        msg.contains("pre-existing"),
-        "refusal signals the value is pre-existing: {msg}"
+        msg.contains("new"),
+        "refusal signals it is newly authored: {msg}"
     );
     // The same message is surfaced to the user via `self.message`.
     assert_eq!(s.message.as_deref(), Some(msg.as_str()));
@@ -302,6 +301,144 @@ fn save_refuses_literal_secret() {
 }
 
 #[test]
+fn save_grandfathers_pre_existing_secret_with_warning() {
+    // A secret literal already on disk is grandfathered: an unrelated edit saves
+    // (with a warning naming it), rather than refusing the whole write.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        "name = \"demo\"\n[vars]\napi_token = \"leaked\"\nbase_url = \"https://old\"\n",
+    )
+    .unwrap();
+    let mut s = EnvEditorState {
+        scopes: vec![EnvScope {
+            kind: EnvScopeKind::Workspace,
+            label: "Workspace".into(),
+            vars: vec![
+                ("api_token".into(), "leaked".into()), // pre-existing secret, untouched
+                ("base_url".into(), "https://old".into()), // matches disk, edited below
+            ],
+        }],
+        snapshot: vec![],
+        selected_scope: 0,
+        focus: EnvFocus::ScopeList,
+        selected_row: 0,
+        editing: None,
+        naming: None,
+        message: None,
+        reveal: None,
+        pending_close: false,
+        active_profile: None,
+        snapshot_active_profile: None,
+        cli_vars: BTreeMap::new(),
+    }
+    .with_snapshot();
+    // Edit an unrelated var so the manifest is dirty and a write happens; the
+    // secret var is left exactly as it sits on disk (grandfathered).
+    s.scopes[0].vars[1].1 = "https://new".into();
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
+    let EnvSaveResult::Ok { warnings, .. } = &result else {
+        panic!("expected Ok with warnings, got {result:?}");
+    };
+    assert!(
+        warnings.iter().any(|w| w.contains("api_token")),
+        "grandfathered secret is warned: {warnings:?}"
+    );
+    let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(text.contains("https://new"), "edit landed:\n{text}");
+}
+
+#[test]
+fn save_warn_policy_never_blocks_new_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let mut s = fixture();
+    s.scopes[0].vars.push(("api_token".into(), "leaked".into()));
+    let result = s.save(dir.path(), "demo", SecretPolicy::Warn);
+    let EnvSaveResult::Ok { warnings, .. } = &result else {
+        panic!("expected Ok under warn policy, got {result:?}");
+    };
+    assert!(
+        warnings.iter().any(|w| w.contains("api_token")),
+        "{warnings:?}"
+    );
+    let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        text.contains("api_token"),
+        "warn policy wrote the value:\n{text}"
+    );
+}
+
+#[test]
+fn save_does_not_grandfather_across_scope_location_collision() {
+    // Two scopes flatten to the SAME dotted location under the old combined scan:
+    // profile `foo` with a dotted var name `vars.api_token` scans to
+    // `foo.vars.api_token`, and collection dir `foo` with var `api_token` displays
+    // as `foo.vars.api_token`. The collection carries that literal pre-existing on
+    // disk; the user adds a BRAND-NEW literal secret to profile `foo` at the
+    // colliding location. The new profile secret must be refused — never
+    // grandfathered by the collection's pre-existing baseline finding.
+    let dir = tempfile::tempdir().unwrap();
+    // Workspace baseline: no profile `foo` secret on disk.
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    // Collection `foo` with a pre-existing literal secret on disk (its baseline).
+    let coll = dir.path().join("foo");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(coll.join("folder.toml"), "[vars]\napi_token = \"leaked\"\n").unwrap();
+
+    let mut s = EnvEditorState {
+        scopes: vec![
+            EnvScope {
+                kind: EnvScopeKind::Workspace,
+                label: "Workspace".into(),
+                vars: vec![("base_url".into(), "https://api".into())],
+            },
+            EnvScope {
+                kind: EnvScopeKind::Collection { dir: coll.clone() },
+                label: "foo".into(),
+                // Pre-existing collection secret, untouched (grandfathered in-scope).
+                vars: vec![("api_token".into(), "leaked".into())],
+            },
+            EnvScope {
+                kind: EnvScopeKind::Profile,
+                label: "foo".into(),
+                vars: Vec::new(),
+            },
+        ],
+        snapshot: vec![],
+        selected_scope: 0,
+        focus: EnvFocus::ScopeList,
+        selected_row: 0,
+        editing: None,
+        naming: None,
+        message: None,
+        reveal: None,
+        pending_close: false,
+        active_profile: None,
+        snapshot_active_profile: None,
+        cli_vars: BTreeMap::new(),
+    }
+    .with_snapshot();
+    // The NEW profile secret at the colliding flattened location
+    // (`foo` + `vars.api_token` == the collection's `foo.vars.api_token`).
+    s.scopes[2]
+        .vars
+        .push(("vars.api_token".into(), "brand-new-leak".into()));
+
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
+    let EnvSaveResult::Refused(msg) = &result else {
+        panic!("new profile secret must be refused, not grandfathered: {result:?}");
+    };
+    assert!(msg.contains("api_token"), "{msg}");
+    // All-or-nothing: nothing was written — the profile secret never landed.
+    let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(
+        !text.contains("brand-new-leak"),
+        "refused save wrote nothing:\n{text}"
+    );
+}
+
+#[test]
 fn save_accepts_secret_named_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
@@ -309,7 +446,7 @@ fn save_accepts_secret_named_placeholder() {
     s.scopes[0]
         .vars
         .push(("api_token".into(), "{{api_token}}".into()));
-    let result = s.save(dir.path(), "demo");
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
     assert!(matches!(result, EnvSaveResult::Ok { .. }));
     let text = std::fs::read_to_string(dir.path().join("churl.toml")).unwrap();
     assert!(text.contains("api_token"));
@@ -359,7 +496,7 @@ fn save_writes_all_three_scopes_and_reloads() {
     s.scopes[1].vars[0].1 = "100".into();
     s.scopes[2].vars[0].1 = "dev2.example".into();
 
-    let result = s.save(dir.path(), "demo");
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
     let EnvSaveResult::Ok { workspace, .. } = result else {
         panic!("expected Ok");
     };
@@ -575,7 +712,7 @@ fn save_refuses_duplicate_var_names() {
     s.scopes[0]
         .vars
         .push(("base_url".into(), "https://dup".into()));
-    let result = s.save(dir.path(), "demo");
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
     match result {
         EnvSaveResult::Refused(msg) => {
             assert!(msg.contains("duplicate var name"), "{msg}");
@@ -613,7 +750,7 @@ fn activating_profile_is_dirty_discard_reverts_save_commits() {
     s.pending_close = false;
     s.set_active_profile();
     assert!(s.is_dirty());
-    let result = s.save(dir.path(), "demo");
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
     assert!(matches!(result, EnvSaveResult::Ok { .. }));
     assert!(!s.is_dirty(), "save commits the active-profile change");
 }

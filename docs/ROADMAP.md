@@ -32,10 +32,10 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 ## In progress 🚧
 
 - **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
+- **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, grandfathered pre-existing secrets, request-wide save-gate coverage (headers/URL/body/params), `secret_policy = strict | warn`; cross-origin redirect policy still to come. (R)
 
 ## Planned ⏳
 
-- **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, cross-origin redirect policy. (R)
 - **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence. (F)
 - **Cookies + proxy** — cookie-jar persistence and HTTP(S) proxy support. (F)
 

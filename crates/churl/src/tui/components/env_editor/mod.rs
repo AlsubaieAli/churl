@@ -17,15 +17,13 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use churl_core::config::{
-    collection_secret_violations, is_template_placeholder, looks_like_secret_name,
-    secret_violations,
-};
+use churl_core::config::{is_template_placeholder, looks_like_secret_name};
 use churl_core::model::{CollectionMeta, Profile, Workspace};
 use churl_core::persistence::{
-    OpenWorkspace, PersistenceError, load_collection_meta, save_collection_meta,
-    save_workspace_manifest,
+    OpenWorkspace, PersistenceError, load_collection_meta, load_workspace_manifest,
+    save_collection_meta_checked, save_workspace_manifest_checked,
 };
+use churl_core::secrets::{SecretPolicy, decide, scan_collection, scan_workspace};
 
 use super::line_editor::LineEditor;
 
@@ -397,11 +395,18 @@ impl EnvEditorState {
     // --- Save ---
 
     /// Reconciles the working scopes into a [`Workspace`] + collection metas,
-    /// validates secrets, and writes the changed targets (format-preserving,
-    /// deletion-pruning). Refuses (writes nothing) on any secret violation. On
-    /// success, refreshes the dirty snapshot and returns the new manifest for the
-    /// app to apply live.
-    pub fn save(&mut self, root: &Path, workspace_name: &str) -> EnvSaveResult {
+    /// classifies secret findings against the on-disk baseline under `policy`, and
+    /// writes the changed targets (format-preserving, deletion-pruning). Refuses
+    /// (writes nothing) only when the save would *newly author* a name-anchored
+    /// literal secret under strict; pre-existing (grandfathered) and value-only
+    /// findings save with a warning. On success, refreshes the dirty snapshot and
+    /// returns the new manifest for the app to apply live.
+    pub fn save(
+        &mut self,
+        root: &Path,
+        workspace_name: &str,
+        policy: SecretPolicy,
+    ) -> EnvSaveResult {
         // Refuse duplicate var names before anything else: on save the rows
         // collapse to a `BTreeMap` (last wins), which would silently drop a
         // visible row. Name the scope + var and write nothing.
@@ -414,24 +419,57 @@ impl EnvEditorState {
         let workspace = self.build_workspace(workspace_name);
         let collections = self.build_collection_metas();
 
-        // Validate ALL secrets before writing anything.
-        let mut violations = secret_violations(&workspace);
+        // Decide each target against its OWN on-disk baseline, then merge — never
+        // compare novelty across scopes. Each file is a separate namespace; the
+        // workspace manifest and every `folder.toml` carry their own `vars.<x>`
+        // locations. Flattening them into one dotted namespace (`<dir>.<loc>`)
+        // would let one scope's pre-existing baseline falsely grandfather another
+        // scope's brand-new secret when the dotted strings collide (e.g. a profile
+        // `foo` with var `vars.api_token` vs a collection dir `foo` with
+        // `api_token`). Deciding per-scope makes this outer pre-check match the
+        // inner per-file `save_*_checked` gates exactly, so they can never
+        // disagree. Collection locations are prefixed with the dir name for
+        // display only, after novelty has already been resolved within the scope.
+        let ws_decision = decide(
+            &scan_workspace(&workspace),
+            &load_workspace_manifest(root)
+                .map(|ws| scan_workspace(&ws))
+                .unwrap_or_default(),
+            policy,
+        );
+        let mut refusals = ws_decision.refusal_locations();
+        let mut warnings = ws_decision.warning_locations();
         for (dir, meta) in &collections {
             let name = dir
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("<collection>");
-            for v in collection_secret_violations(meta) {
-                violations.push(format!("{name}.{v}"));
-            }
+            let coll_decision = decide(
+                &scan_collection(meta),
+                &load_collection_meta(dir)
+                    .map(|m| scan_collection(&m))
+                    .unwrap_or_default(),
+                policy,
+            );
+            refusals.extend(
+                coll_decision
+                    .refusal_locations()
+                    .iter()
+                    .map(|l| format!("{name}.{l}")),
+            );
+            warnings.extend(
+                coll_decision
+                    .warning_locations()
+                    .iter()
+                    .map(|l| format!("{name}.{l}")),
+            );
         }
-        if !violations.is_empty() {
-            // Name the offending var(s) and signal they're
-            // pre-existing so the refusal doesn't read as a silent dead-end. The
-            // actual grandfather+warn / save-anyway behavior is not yet implemented.
+
+        // All-or-nothing: decide everything before writing anything.
+        if !refusals.is_empty() {
             let msg = format!(
-                "pre-existing secret-named var(s) with literal values not saved: {} — move them to env (grandfathering coming soon)",
-                violations.join(", ")
+                "not saved: new literal secret(s) ({}) — move them to env or use {{{{var}}}}",
+                refusals.join(", ")
             );
             self.message = Some(msg.clone());
             return EnvSaveResult::Refused(msg);
@@ -439,7 +477,9 @@ impl EnvEditorState {
 
         // Write the manifest only when workspace/profile scopes changed.
         let manifest_changed = self.manifest_scopes_changed();
-        if manifest_changed && let Err(err) = save_workspace_manifest(root, &workspace) {
+        if manifest_changed
+            && let Err(err) = save_workspace_manifest_checked(root, &workspace, policy)
+        {
             let msg = format!("save failed (churl.toml): {err}");
             self.message = Some(msg.clone());
             return EnvSaveResult::Failed(msg);
@@ -452,7 +492,7 @@ impl EnvEditorState {
             if !self.collection_scope_changed(dir) {
                 continue;
             }
-            if let Err(err) = save_collection_meta(dir, meta) {
+            if let Err(err) = save_collection_meta_checked(dir, meta, policy) {
                 let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                 let msg = format!(
                     "save partially failed: wrote {}, then {name}/folder.toml: {err}",
@@ -470,6 +510,7 @@ impl EnvEditorState {
         EnvSaveResult::Ok {
             workspace,
             active_profile: self.active_profile.clone(),
+            warnings,
         }
     }
 
@@ -715,13 +756,17 @@ impl EnvEditorState {
 #[derive(Debug, Clone)]
 pub enum EnvSaveResult {
     /// Wrote everything (or nothing needed writing); the new manifest to apply.
+    /// `warnings` is non-empty when the save proceeded but carried grandfathered
+    /// or value-only secret findings (drives the `!` marker / warning text).
     Ok {
         /// The rebuilt workspace manifest (for live-refresh of `app.workspace`).
         workspace: Workspace,
         /// The active profile the editor settled on (apply to the app).
         active_profile: Option<String>,
+        /// Secret warning locations (grandfathered / value-only). Empty = clean.
+        warnings: Vec<String>,
     },
-    /// Refused on a secret violation; nothing was written.
+    /// Refused on a newly-authored name-anchored secret; nothing was written.
     Refused(String),
     /// An IO error mid-save; the message names what was/wasn't written.
     Failed(String),

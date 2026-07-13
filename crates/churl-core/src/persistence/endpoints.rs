@@ -1,13 +1,20 @@
 use super::*;
 
-/// Gate on [`crate::config::auth_secret_violations`] shared by every
-/// churl-initiated endpoint serialization.
+/// Auth-only secret gate for the baseline-free `endpoint_to_toml` stdout path.
+/// A redirected stdout is a workspace file too, but there is no on-disk baseline
+/// to grandfather against, so this stays a hard block on literal secret *auth*
+/// values (`auth.password` / `auth.token` / secret-named `auth.value`) exactly as
+/// before — matching import's placeholder-ization contract on the export side.
 fn check_auth_secrets(ep: &Endpoint) -> Result<(), PersistenceError> {
-    let violations = auth_secret_violations(ep);
-    if violations.is_empty() {
+    let names: Vec<String> = scan_endpoint(ep)
+        .into_iter()
+        .filter(|f| f.location.starts_with("auth."))
+        .map(|f| f.location)
+        .collect();
+    if names.is_empty() {
         Ok(())
     } else {
-        Err(PersistenceError::SecretsInAuth { names: violations })
+        Err(PersistenceError::SecretsInAuth { names })
     }
 }
 
@@ -16,14 +23,45 @@ pub fn load_endpoint(path: &Path) -> Result<Endpoint, PersistenceError> {
     load_value(path)
 }
 
-/// Saves an [`Endpoint`] to `path`, preserving comments and formatting of an
-/// existing file (see [module docs](self)).
+/// Saves an [`Endpoint`] to `path` under the strict secret policy, preserving
+/// comments and formatting of an existing file (see [module docs](self)).
 ///
-/// Refuses with [`PersistenceError::SecretsInAuth`] when the endpoint's auth
-/// carries literal secret values instead of `{{var}}` placeholders.
+/// A newly-authored name-anchored literal secret refuses the write with
+/// [`PersistenceError::SecretsRefused`]; a pre-existing one (already present in
+/// the on-disk baseline at `path`) is grandfathered and the save proceeds. Any
+/// warnings (grandfathered / value-only findings) are discarded — callers that
+/// need to surface them use [`save_endpoint_checked`].
 pub fn save_endpoint(path: &Path, ep: &Endpoint) -> Result<(), PersistenceError> {
-    check_auth_secrets(ep)?;
-    save_value(path, ep)
+    save_endpoint_checked(path, ep, SecretPolicy::Strict).map(|_| ())
+}
+
+/// Saves an [`Endpoint`] to `path` under `policy`, returning the secret
+/// [`SecretDecision`] (its warnings) on success. The on-disk endpoint at `path`
+/// (when it parses) is the baseline: a violation whose location was already a
+/// violation there is grandfathered; a location clean or absent in the baseline
+/// is new. A brand-new/unparseable file has an empty baseline, so every violation
+/// is new.
+///
+/// Refuses with [`PersistenceError::SecretsRefused`] iff the decision has
+/// refusals (new + name-anchored under [`SecretPolicy::Strict`]); otherwise
+/// writes the file and returns the (possibly non-empty) warnings for the caller
+/// to surface as a `!` marker.
+pub fn save_endpoint_checked(
+    path: &Path,
+    ep: &Endpoint,
+    policy: SecretPolicy,
+) -> Result<SecretDecision, PersistenceError> {
+    let baseline = load_endpoint(path)
+        .map(|old| scan_endpoint(&old))
+        .unwrap_or_default();
+    let decision = crate::secrets::decide(&scan_endpoint(ep), &baseline, policy);
+    if decision.is_refused() {
+        return Err(PersistenceError::SecretsRefused {
+            locations: decision.refusal_locations(),
+        });
+    }
+    save_value(path, ep)?;
+    Ok(decision)
 }
 
 /// Serializes an [`Endpoint`] to its on-disk TOML shape (identical to a fresh

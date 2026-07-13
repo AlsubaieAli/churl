@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use churl_core::config::UrlEditMode;
+use churl_core::secrets::SecretPolicy;
 
 use super::clipboard;
 use super::components::env_editor::{EnvEditorState, EnvKeyOutcome, EnvSaveResult};
@@ -204,6 +205,10 @@ pub struct App {
     help_search_input: bool,
     /// What `i`/`Enter` on the URL bar opens (inline vs popup); `e` always popup.
     url_edit_mode: UrlEditMode,
+    /// The save-time secret policy (strict blocks newly-authored name-anchored
+    /// literals; warn never blocks). Resolved from config at startup; defaults to
+    /// strict under snapshot-test construction.
+    secret_policy: SecretPolicy,
     /// Abort handle for the in-flight sequence step, so a cancel/re-run aborts it.
     ///
     /// The unified sequence surface's run-face state, edit-face state, and
@@ -436,6 +441,7 @@ impl App {
             help_search_editor: LineEditor::default(),
             help_search_input: false,
             url_edit_mode: UrlEditMode::Inline,
+            secret_policy: SecretPolicy::Strict,
             sequence_abort: None,
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
@@ -900,6 +906,12 @@ impl App {
     /// Sets what `i`/`Enter` on the URL bar opens (inline vs popup).
     pub fn set_url_edit_mode(&mut self, mode: UrlEditMode) {
         self.url_edit_mode = mode;
+    }
+
+    /// Sets the save-time secret policy (resolved from config; see
+    /// [`churl_core::config::Config::secret_policy`]).
+    pub fn set_secret_policy(&mut self, policy: SecretPolicy) {
+        self.secret_policy = policy;
     }
 
     /// Installs the runtime-dependent pieces: the HTTP client (with the

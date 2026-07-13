@@ -5,17 +5,41 @@ pub fn load_workspace_manifest(root: &Path) -> Result<Workspace, PersistenceErro
     load_value(&root.join(MANIFEST_FILENAME))
 }
 
-/// Saves the workspace manifest (`churl.toml`) into the workspace root directory,
-/// preserving comments and formatting of an existing file.
+/// Saves the workspace manifest (`churl.toml`) into the workspace root directory
+/// under the strict secret policy, preserving comments and formatting of an
+/// existing file.
 ///
-/// Refuses with [`PersistenceError::SecretsInManifest`] when any profile variable
-/// looks like a literal secret (see [`crate::config::secret_violations`]).
+/// A newly-authored name-anchored literal secret refuses with
+/// [`PersistenceError::SecretsRefused`]; a pre-existing one (already in the
+/// on-disk `churl.toml` baseline) is grandfathered and the save proceeds. Any
+/// warnings are discarded — callers surfacing them use
+/// [`save_workspace_manifest_checked`].
 pub fn save_workspace_manifest(root: &Path, ws: &Workspace) -> Result<(), PersistenceError> {
-    let violations = secret_violations(ws);
-    if !violations.is_empty() {
-        return Err(PersistenceError::SecretsInManifest { names: violations });
+    save_workspace_manifest_checked(root, ws, SecretPolicy::Strict).map(|_| ())
+}
+
+/// Saves the workspace manifest under `policy`, returning the secret
+/// [`SecretDecision`] (its warnings) on success. The on-disk `churl.toml` at
+/// `root` (when it parses) is the baseline for novelty: an already-present
+/// violating var is grandfathered; a new one under [`SecretPolicy::Strict`] with
+/// a name anchor refuses with [`PersistenceError::SecretsRefused`].
+pub fn save_workspace_manifest_checked(
+    root: &Path,
+    ws: &Workspace,
+    policy: SecretPolicy,
+) -> Result<SecretDecision, PersistenceError> {
+    let path = root.join(MANIFEST_FILENAME);
+    let baseline = load_workspace_manifest(root)
+        .map(|old| scan_workspace(&old))
+        .unwrap_or_default();
+    let decision = crate::secrets::decide(&scan_workspace(ws), &baseline, policy);
+    if decision.is_refused() {
+        return Err(PersistenceError::SecretsRefused {
+            locations: decision.refusal_locations(),
+        });
     }
-    save_value(&root.join(MANIFEST_FILENAME), ws)
+    save_value(&path, ws)?;
+    Ok(decision)
 }
 
 /// Loads a collection's [`CollectionMeta`] from its `folder.toml`. A missing file
@@ -30,18 +54,39 @@ pub fn load_collection_meta(dir: &Path) -> Result<CollectionMeta, PersistenceErr
     }
 }
 
-/// Saves a collection's [`CollectionMeta`] to its `folder.toml`, preserving
-/// comments and formatting of an existing file (same merge machinery as
-/// [`save_workspace_manifest`]).
+/// Saves a collection's [`CollectionMeta`] to its `folder.toml` under the strict
+/// secret policy, preserving comments and formatting of an existing file (same
+/// merge machinery as [`save_workspace_manifest`]).
 ///
-/// Refuses with [`PersistenceError::SecretsInCollection`] when any variable looks
-/// like a literal secret (see [`crate::config::collection_secret_violations`]).
+/// A newly-authored name-anchored literal secret refuses with
+/// [`PersistenceError::SecretsRefused`]; a pre-existing one (already in the
+/// on-disk `folder.toml` baseline) is grandfathered. Warnings are discarded —
+/// callers surfacing them use [`save_collection_meta_checked`].
 pub fn save_collection_meta(dir: &Path, meta: &CollectionMeta) -> Result<(), PersistenceError> {
-    let violations = collection_secret_violations(meta);
-    if !violations.is_empty() {
-        return Err(PersistenceError::SecretsInCollection { names: violations });
+    save_collection_meta_checked(dir, meta, SecretPolicy::Strict).map(|_| ())
+}
+
+/// Saves a collection's `folder.toml` under `policy`, returning the secret
+/// [`SecretDecision`] (its warnings) on success. The on-disk `folder.toml` in
+/// `dir` (when present) is the novelty baseline; a new name-anchored literal
+/// under [`SecretPolicy::Strict`] refuses with
+/// [`PersistenceError::SecretsRefused`].
+pub fn save_collection_meta_checked(
+    dir: &Path,
+    meta: &CollectionMeta,
+    policy: SecretPolicy,
+) -> Result<SecretDecision, PersistenceError> {
+    let baseline = load_collection_meta(dir)
+        .map(|old| scan_collection(&old))
+        .unwrap_or_default();
+    let decision = crate::secrets::decide(&scan_collection(meta), &baseline, policy);
+    if decision.is_refused() {
+        return Err(PersistenceError::SecretsRefused {
+            locations: decision.refusal_locations(),
+        });
     }
-    save_value(&dir.join(FOLDER_FILENAME), meta)
+    save_value(&dir.join(FOLDER_FILENAME), meta)?;
+    Ok(decision)
 }
 
 /// A workspace opened lazily: only `churl.toml` has been parsed.
