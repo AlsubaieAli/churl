@@ -184,6 +184,7 @@ fn workspace_secret_named_literal_blocks() {
                 m
             },
         }],
+        ..Default::default()
     };
     let f = scan_workspace(&ws);
     let locs = locations(&f);
@@ -203,6 +204,7 @@ fn workspace_innocent_shaped_value_warns() {
         name: "w".to_owned(),
         vars,
         profiles: Vec::new(),
+        ..Default::default()
     };
     let f = scan_workspace(&ws);
     assert_eq!(locations(&f), vec!["vars.trace"]);

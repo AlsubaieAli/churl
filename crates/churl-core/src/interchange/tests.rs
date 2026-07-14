@@ -526,6 +526,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
             name: "Source WS".into(),
             vars: std::collections::BTreeMap::new(),
             profiles: Vec::new(),
+            ..Default::default()
         },
     )
     .unwrap();

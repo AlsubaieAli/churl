@@ -81,6 +81,20 @@ impl HistoryStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Returns the stored cookie-jar JSON blob for the workspace at `workspace`
+    /// (a canonicalized root path), or `None` when none is stored yet. The blob
+    /// is fed to [`crate::cookies::ChurlCookieJar::load_json`] on workspace open.
+    pub fn cookie_jar(&self, workspace: &str) -> Result<Option<String>, HistoryError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT jar_json FROM cookies WHERE workspace = ?1")?;
+        let mut rows = stmt.query([workspace])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Returns up to `limit` workspace paths, most-recently-opened first.
     pub fn recent_workspaces(&self, limit: usize) -> Result<Vec<String>, HistoryError> {
         let mut stmt = self.conn.prepare(

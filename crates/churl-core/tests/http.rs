@@ -1,10 +1,13 @@
 //! HTTP execution tests against an in-process `wiremock` server (no real network).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use churl_core::config::RedirectPolicy;
+use churl_core::cookies::ChurlCookieJar;
 use churl_core::http::{
-    DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, execute, follow_all_warned,
+    ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, build_client_with,
+    execute, follow_all_warned,
 };
 use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Header, Method, Param, Request};
 use wiremock::matchers::{body_string, header, method, path, query_param};
@@ -1095,5 +1098,119 @@ async fn strip_does_not_over_strip_innocent_header_cross_origin() {
     assert!(
         has_header(&at_b, "x-request-id"),
         "a plain non-secret header must survive a cross-origin hop"
+    );
+}
+
+// ---- proxy + cookies (M8) --------------------------------------------
+
+#[test]
+fn build_client_with_bad_proxy_fails_loud() {
+    // A malformed proxy URL must fail the build, never silently fall back to a
+    // direct (unproxied) connection.
+    let result = build_client_with(&ClientConfig {
+        proxy: Some("::: not a url :::".to_owned()),
+        ..Default::default()
+    });
+    assert!(result.is_err(), "a malformed proxy must fail the build");
+}
+
+#[test]
+fn build_client_with_valid_proxy_and_no_proxy_both_build() {
+    assert!(
+        build_client_with(&ClientConfig {
+            proxy: Some("http://proxy.local:3128".to_owned()),
+            ..Default::default()
+        })
+        .is_ok()
+    );
+    // No proxy set → still builds (reqwest then honors the env proxy).
+    assert!(build_client_with(&ClientConfig::default()).is_ok());
+}
+
+#[tokio::test]
+async fn cookie_jar_stores_set_cookie_and_sends_it_same_origin() {
+    let server = MockServer::start().await;
+    // First hop hands out a Set-Cookie.
+    Mock::given(method("GET"))
+        .and(path("/login"))
+        .respond_with(ResponseTemplate::new(200).insert_header("set-cookie", "sid=abc123; Path=/"))
+        .mount(&server)
+        .await;
+    // Second hop must carry the cookie back.
+    Mock::given(method("GET"))
+        .and(path("/whoami"))
+        .and(header("cookie", "sid=abc123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+
+    let jar = Arc::new(ChurlCookieJar::new());
+    let client = build_client_with(&ClientConfig {
+        timeout: DEFAULT_TIMEOUT,
+        cookies: Some(jar.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let first = execute(
+        &client,
+        &get(format!("{}/login", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.status, 200);
+
+    let second = execute(
+        &client,
+        &get(format!("{}/whoami", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.status, 200, "the jar must send the stored cookie");
+    assert_eq!(second.body, b"ok");
+}
+
+#[tokio::test]
+async fn cookie_survives_same_origin_redirect() {
+    let server = MockServer::start().await;
+    // /start sets a cookie AND redirects (same origin) to /land.
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("set-cookie", "sid=hop; Path=/")
+                .insert_header("location", "/land"),
+        )
+        .mount(&server)
+        .await;
+    // /land must receive the cookie set on the previous same-origin hop.
+    Mock::given(method("GET"))
+        .and(path("/land"))
+        .and(header("cookie", "sid=hop"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&server)
+        .await;
+
+    let jar = Arc::new(ChurlCookieJar::new());
+    let client = build_client_with(&ClientConfig {
+        timeout: DEFAULT_TIMEOUT,
+        cookies: Some(jar.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let response = execute(
+        &client,
+        &get(format!("{}/start", server.uri())),
+        &ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body, b"landed",
+        "cookie must cross the same-origin hop"
     );
 }

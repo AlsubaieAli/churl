@@ -48,4 +48,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // branch — skips migration 3 forever, so the column must arrive via its own
     // migration to land on both fresh (v2→v3→v4) and already-v3 (→v4) databases.
     "ALTER TABLE load_batches ADD COLUMN mean_ms INTEGER;",
+    // 5: per-workspace persistent cookie jars. One row per workspace (keyed by
+    // its canonicalized root path); `jar_json` is the persistent-cookies-only
+    // blob serialized by `ChurlCookieJar::to_json`. Local-only state, never in
+    // the synced workspace files — parity with history.
+    "CREATE TABLE cookies (
+        workspace TEXT PRIMARY KEY,
+        jar_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );",
 ];

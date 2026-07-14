@@ -32,6 +32,11 @@ impl Parser {
                 Ok(())
             }
             "url" => self.set_url(value(args)?),
+            "proxy" => {
+                let proxy = value(args)?;
+                self.note_proxy(&proxy);
+                Ok(())
+            }
             "output" => {
                 let file = value(args)?;
                 self.warnings
@@ -48,8 +53,7 @@ impl Parser {
                 Ok(())
             }
             "insecure" => {
-                self.warnings
-                    .push("ignored: TLS verification is always on".to_owned());
+                self.note_insecure();
                 Ok(())
             }
             _ => Err(ImportError::UnknownFlag(format!("--{name}"))),
@@ -71,10 +75,10 @@ impl Parser {
                 // Value-less flags: -L follows-redirects (already client default),
                 // -s/-v/-S are output/verbosity noise.
                 'L' | 's' | 'v' | 'S' => {}
-                'k' => self
-                    .warnings
-                    .push("ignored: TLS verification is always on".to_owned()),
-                'X' | 'H' | 'd' | 'u' | 'o' | 'F' => {
+                'k' => self.note_insecure(),
+                // `-x` (proxy) joins the value-taking cluster: it consumes the
+                // rest of the token or the next argument, like `-X`/`-H`/`-d`.
+                'X' | 'H' | 'd' | 'u' | 'o' | 'F' | 'x' => {
                     let rest: String = chars[index + 1..].iter().collect();
                     let value = if rest.is_empty() {
                         args.next()
@@ -93,6 +97,10 @@ impl Parser {
                             self.add_basic_auth(&value);
                             Ok(())
                         }
+                        'x' => {
+                            self.note_proxy(&value);
+                            Ok(())
+                        }
                         'o' => {
                             self.warnings
                                 .push(format!("ignored: -o output file {value:?} discarded"));
@@ -108,6 +116,23 @@ impl Parser {
             }
         }
         Ok(())
+    }
+
+    /// Records a `-x`/`--proxy` import note. Proxy is not a per-endpoint property,
+    /// so it is never persisted onto the imported endpoint — the note points the
+    /// user at where it *is* set (session-scoped).
+    fn note_proxy(&mut self, proxy: &str) {
+        self.warnings.push(format!(
+            "proxy {proxy:?} — not stored per-endpoint; set it via --proxy or the Options overlay"
+        ));
+    }
+
+    /// Records a `-k`/`--insecure` import note. Insecure-TLS is session-scoped, so
+    /// it is not baked into the endpoint — the note names how to turn it on.
+    fn note_insecure(&mut self) {
+        self.warnings.push(
+            "imported with -k; enable insecure via -k or <leader>k (session-scoped)".to_owned(),
+        );
     }
 
     fn set_method(&mut self, value: &str) -> Result<(), ImportError> {

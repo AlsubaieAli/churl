@@ -51,6 +51,7 @@ fn write_manifest(root: &Path, vars: &[(&str, &str)]) {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         profiles: Vec::new(),
+        ..Default::default()
     };
     save_workspace_manifest(root, &ws).unwrap();
 }

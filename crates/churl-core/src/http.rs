@@ -13,11 +13,13 @@
 //! (skipped when an enabled user header with the same name exists; the user's
 //! header always wins) or a query pair appended after enabled params.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::auth::{AuthWire, apply_auth};
 use crate::config::RedirectPolicy;
+use crate::cookies::ChurlCookieJar;
 use crate::model::{BodyKind, Header, Method, Request, Response, Timing};
 
 /// Default per-request timeout applied to the shared client; the config knob is
@@ -92,7 +94,52 @@ pub enum HttpError {
 /// followed manually in [`execute`] via [`follow_redirects`], so churl controls
 /// exactly which headers survive a cross-origin hop.
 pub fn build_client(timeout: Duration) -> Result<reqwest::Client, HttpError> {
-    reqwest::Client::builder()
+    build_client_with(&ClientConfig {
+        timeout,
+        ..ClientConfig::default()
+    })
+}
+
+/// The session-scoped knobs that shape the shared client: timeout plus the three
+/// M8 request controls (proxy, insecure-TLS, cookie jar). Every live change to any
+/// of these takes effect by rebuilding the single client through
+/// [`build_client_with`] — there is never more than one client, and it always
+/// reflects current session state.
+#[derive(Clone, Default)]
+pub struct ClientConfig {
+    /// Per-request timeout ([`DEFAULT_TIMEOUT`] when the field is left at its
+    /// `Duration::ZERO` default → treated as "use the default").
+    pub timeout: Duration,
+    /// HTTP/HTTPS proxy URL. `Some` routes every request through
+    /// `reqwest::Proxy::all`; `None` calls no `.proxy()` at all, so reqwest honors
+    /// the `HTTP(S)_PROXY`/`NO_PROXY` environment for free.
+    pub proxy: Option<String>,
+    /// When `true`, disables TLS verification via
+    /// `danger_accept_invalid_certs(true)` — with the rustls backend this also
+    /// accepts hostname mismatches, so no separate hostname knob is needed (nor
+    /// exists) here.
+    pub insecure: bool,
+    /// When `Some`, installs the jar as the client's cookie provider so cookies
+    /// are stored/sent per hop with RFC 6265 origin scoping. The `Arc` is held on
+    /// `App` and survives client rebuilds, so toggling off→on keeps the jar.
+    pub cookies: Option<Arc<ChurlCookieJar>>,
+}
+
+/// Builds the shared client from a full [`ClientConfig`] — the single seam every
+/// live proxy/insecure/cookies change routes through. `build_client` is the
+/// timeout-only shortcut that leaves the three controls at their safe defaults
+/// (no proxy, verify TLS, no jar).
+///
+/// Security predicates: `insecure = true` turns OFF certificate *and* hostname
+/// verification (a loud RED indicator surfaces this in the UI); a `None` proxy
+/// leaves env-proxy handling to reqwest rather than blanking it.
+pub fn build_client_with(cfg: &ClientConfig) -> Result<reqwest::Client, HttpError> {
+    let timeout = if cfg.timeout.is_zero() {
+        DEFAULT_TIMEOUT
+    } else {
+        cfg.timeout
+    };
+    let mut builder = reqwest::Client::builder()
         .tls_backend_rustls()
         .user_agent(concat!("churl/", env!("CARGO_PKG_VERSION")))
         .timeout(timeout)
@@ -101,9 +148,29 @@ pub fn build_client(timeout: Duration) -> Result<reqwest::Client, HttpError> {
         // reqwest's built-in cross-origin stripping only covers a fixed five
         // headers and would miss a secret-named custom header. `none` hands us
         // every 3xx untouched.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(HttpError::Request)
+        .redirect(reqwest::redirect::Policy::none());
+
+    if let Some(proxy) = &cfg.proxy {
+        // `Proxy::all` covers both HTTP and HTTPS targets. A malformed proxy URL
+        // fails the build loudly rather than silently falling back to a direct
+        // (unproxied) connection.
+        builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(HttpError::Request)?);
+    }
+    // NB: when `cfg.proxy` is None we deliberately do NOT call `.proxy()`, so
+    // reqwest keeps honoring `HTTP(S)_PROXY`/`NO_PROXY` from the environment.
+
+    if cfg.insecure {
+        // rustls: this single flag disables BOTH invalid-cert and hostname-mismatch
+        // rejection, so `danger_accept_invalid_hostnames` (native-tls-oriented) is
+        // neither added nor needed.
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    if let Some(jar) = &cfg.cookies {
+        builder = builder.cookie_provider(jar.clone());
+    }
+
+    builder.build().map_err(HttpError::Request)
 }
 
 /// Executes `request` on `client`, following redirects per

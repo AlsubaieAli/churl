@@ -29,6 +29,17 @@ pub fn save_workspace_manifest_checked(
     policy: SecretPolicy,
 ) -> Result<SecretDecision, PersistenceError> {
     let path = root.join(MANIFEST_FILENAME);
+    // Security gate: a persisted proxy must be credential-free. Refuse loudly
+    // rather than silently stripping `user:pass@` (which would surprise the user
+    // into thinking the credentials were saved). A credentialed proxy is still
+    // usable at runtime via `--proxy`/env/the Options overlay (session-scoped).
+    if let Some(proxy) = &ws.proxy
+        && crate::config::proxy_has_credentials(proxy)
+    {
+        return Err(PersistenceError::ProxyCredentialsRefused {
+            proxy: proxy.clone(),
+        });
+    }
     let baseline = load_workspace_manifest(root)
         .map(|old| scan_workspace(&old))
         .unwrap_or_default();

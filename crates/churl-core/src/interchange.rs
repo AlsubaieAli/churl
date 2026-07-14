@@ -622,6 +622,7 @@ pub fn write_import(
                 name,
                 vars: BTreeMap::new(),
                 profiles: Vec::new(),
+                ..Default::default()
             },
         )?;
     }

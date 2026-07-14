@@ -594,14 +594,72 @@ mod tests {
     #[test]
     fn insecure_and_compressed_warn() {
         let result = import("curl -k --compressed https://e.com/x");
-        assert!(result.warnings.iter().any(|w| w.contains("TLS")));
+        // `-k` is now an actionable note (how to enable session-scoped insecure),
+        // not an "ignored" warning.
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("<leader>k") && w.contains("insecure")),
+            "warnings: {:?}",
+            result.warnings
+        );
         assert!(result.warnings.iter().any(|w| w.contains("compression")));
     }
 
     #[test]
     fn insecure_inside_cluster_warns() {
         let result = import("curl -sk https://e.com/x");
-        assert!(result.warnings.iter().any(|w| w.contains("TLS")));
+        assert!(
+            result.warnings.iter().any(|w| w.contains("<leader>k")),
+            "warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn insecure_long_flag_notes() {
+        let result = import("curl --insecure https://e.com/x");
+        assert!(
+            result.warnings.iter().any(|w| w.contains("<leader>k")),
+            "warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn proxy_short_and_long_flag_noted_not_persisted() {
+        for command in [
+            "curl -x http://proxy.local:3128 https://e.com/x",
+            "curl --proxy http://proxy.local:3128 https://e.com/x",
+            "curl -xhttp://proxy.local:3128 https://e.com/x",
+        ] {
+            let result = import(command);
+            // The proxy is surfaced as a note...
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("proxy") && w.contains("Options overlay")),
+                "warnings for {command:?}: {:?}",
+                result.warnings
+            );
+            // ...and never baked into the endpoint (no per-endpoint proxy field).
+            assert_eq!(result.endpoint.request.url, "https://e.com/x");
+            assert!(result.endpoint.request.headers.is_empty());
+        }
+    }
+
+    #[test]
+    fn proxy_missing_value_errors() {
+        assert!(matches!(
+            import_curl("curl https://e.com/ -x"),
+            Err(ImportError::MissingValue(f)) if f == "-x"
+        ));
+        assert!(matches!(
+            import_curl("curl https://e.com/ --proxy"),
+            Err(ImportError::MissingValue(f)) if f == "--proxy"
+        ));
     }
 
     #[test]
