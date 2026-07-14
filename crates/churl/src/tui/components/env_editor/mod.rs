@@ -555,17 +555,24 @@ impl EnvEditorState {
         }
     }
 
-    /// Builds `(dir, CollectionMeta)` for every collection scope.
+    /// Builds `(dir, CollectionMeta)` for every collection scope. The editor never
+    /// touches a collection's ordering `seq`, so it is carried through verbatim
+    /// from the on-disk `folder.toml` (absent/malformed → `0`) — a var-only save
+    /// must not clobber the reorder key the explorer owns.
     fn build_collection_metas(&self) -> Vec<(PathBuf, CollectionMeta)> {
         self.scopes
             .iter()
             .filter_map(|scope| match &scope.kind {
-                EnvScopeKind::Collection { dir } => Some((
-                    dir.clone(),
-                    CollectionMeta {
-                        vars: rows_to_map(&scope.vars),
-                    },
-                )),
+                EnvScopeKind::Collection { dir } => {
+                    let seq = load_collection_meta(dir).map(|m| m.seq).unwrap_or(0);
+                    Some((
+                        dir.clone(),
+                        CollectionMeta {
+                            seq,
+                            vars: rows_to_map(&scope.vars),
+                        },
+                    ))
+                }
                 _ => None,
             })
             .collect()

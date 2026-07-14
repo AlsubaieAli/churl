@@ -842,6 +842,7 @@ fn collection_meta_secret_literal_refused() {
     let dir = tempfile::tempdir().unwrap();
     let meta = CollectionMeta {
         vars: BTreeMap::from([("secret_key".to_string(), "abc".to_string())]),
+        ..Default::default()
     };
     let err = save_collection_meta(dir.path(), &meta).unwrap_err();
     assert!(

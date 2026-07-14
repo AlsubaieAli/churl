@@ -111,3 +111,25 @@ pub fn delete_sequence(path: &Path) -> Result<(), PersistenceError> {
         source,
     })
 }
+
+/// Duplicates the sequence at `path` in place: same `sequences/` dir, a fresh
+/// collision-suffixed `<slug>-N.toml`, `seq` appended past the current maximum.
+/// The name and steps are copied verbatim (a duplicate never rewrites step
+/// references — the original stays valid and the copy is new/unreferenced).
+/// Returns the created file's path.
+pub fn duplicate_sequence(path: &Path) -> Result<PathBuf, PersistenceError> {
+    let mut sequence = load_sequence(path)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let slug = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| slugify(&sequence.name));
+    let claim = claim_sequence_path(dir, &slug).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })?;
+    sequence.seq = next_sequence_seq(dir);
+    save_sequence(claim.path(), &sequence)?;
+    Ok(claim.commit())
+}

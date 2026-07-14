@@ -23,6 +23,9 @@ mod atomic;
 mod endpoints;
 mod merge;
 mod naming;
+mod refs;
+mod relocate;
+mod reorder;
 mod sequences;
 mod workspace;
 
@@ -31,11 +34,12 @@ mod workspace;
 // the inline `tests` module — resolve them unqualified, exactly as before the
 // split. `slug_of` is the public API (`persistence::slug_of`), re-exported `pub`
 // so its path is unchanged.
+use endpoints::next_seq;
 use merge::merge_tables;
 pub use naming::slug_of;
 use naming::{
-    ClaimGuard, claim_collection_dir, claim_endpoint_path, collection_dir_name,
-    is_reserved_file_slug, slugify,
+    ClaimGuard, claim_collection_dir, claim_endpoint_path, claim_unused_collection_dir,
+    collection_dir_name, is_reserved_file_slug, slugify,
 };
 
 // The atomic write/serialization internals live in `atomic` (a child module).
@@ -51,8 +55,17 @@ pub use endpoints::{
     create_collection, create_endpoint, delete_collection, delete_endpoint, endpoint_to_toml,
     load_endpoint, rename_collection, rename_endpoint, save_endpoint, save_endpoint_checked,
 };
+pub use refs::retarget_sequence_steps;
+pub use relocate::{
+    copy_collection, copy_endpoint, duplicate_collection, duplicate_endpoint, move_collection,
+    move_endpoint,
+};
+pub use reorder::{
+    ReorderDir, ReorderOutcome, reorder_collection, reorder_endpoint, reorder_sequence,
+};
 pub use sequences::{
-    create_sequence, delete_sequence, load_sequence, rename_sequence, save_sequence,
+    create_sequence, delete_sequence, duplicate_sequence, load_sequence, rename_sequence,
+    save_sequence,
 };
 pub use workspace::{
     Collection, CollectionLoad, OpenWorkspace, SequenceLoad, load_collection_meta,
@@ -159,6 +172,13 @@ pub enum PersistenceError {
     AlreadyExists {
         /// The path that already exists.
         path: PathBuf,
+    },
+    /// A move/copy destination is invalid — e.g. relocating a collection into
+    /// itself or one of its own descendants (which would loop the filesystem).
+    #[error("invalid destination: {reason}")]
+    InvalidDestination {
+        /// Human-readable reason the destination was rejected.
+        reason: String,
     },
 }
 

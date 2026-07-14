@@ -1110,6 +1110,7 @@ mod tests {
                 ("token".to_string(), "{{TOKEN}}".to_string()),
                 ("base_path".to_string(), "/v1".to_string()),
             ]),
+            ..Default::default()
         };
         assert_eq!(
             collection_secret_violations(&meta),

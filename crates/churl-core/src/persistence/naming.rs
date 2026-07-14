@@ -243,3 +243,30 @@ pub(super) fn claim_collection_dir(
         }
     }
 }
+
+/// Atomically creates a fresh, unused collection directory for `slug` under
+/// `parent`, appending `-2`, `-3`, … on collision (the corpus suffix convention).
+/// Unlike [`claim_collection_dir`], the bare `slug` is a candidate too and every
+/// collision — reserved or not — advances to the next `-N`, so this never fails
+/// with `AlreadyExists`. It is the create primitive behind copy/duplicate of a
+/// collection subtree, where landing on an existing sibling must suffix rather
+/// than abort. Returns the created directory path.
+pub(super) fn claim_unused_collection_dir(parent: &Path, slug: &str) -> std::io::Result<PathBuf> {
+    let bare = parent.join(slug);
+    if !is_reserved_dir_slug(slug) {
+        match std::fs::create_dir(&bare) {
+            Ok(()) => return Ok(bare),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+    }
+    let mut n = 2;
+    loop {
+        let candidate = parent.join(format!("{slug}-{n}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(err) => return Err(err),
+        }
+    }
+}
