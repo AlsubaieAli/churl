@@ -484,6 +484,13 @@ impl App {
                 };
                 match persistence::rename_endpoint(&path, &new_name) {
                     Ok(new_path) => {
+                        // Repoint sequence steps that referenced the old path (also
+                        // closes the latent rename-breaks-sequences bug).
+                        let repointed = self.rewrite_step_refs(&path, &new_path);
+                        let mut msg = renamed_message(&new_name, &new_path);
+                        if repointed > 0 {
+                            msg.push_str(&format!(" · {repointed} step(s) repointed"));
+                        }
                         let renamed_idx = self.buffer_index_for_path(&path);
                         if let Some(idx) = renamed_idx {
                             // Renaming the *loaded* endpoint: update file path +
@@ -500,12 +507,10 @@ impl App {
                             // Move the cursor onto the renamed row without
                             // touching the request pane.
                             self.explorer.select_file(&new_path)?;
-                            self.message =
-                                Some(Message::new(renamed_message(&new_name, &new_path)));
+                            self.message = Some(Message::new(msg));
                         } else {
                             self.reload_explorer()?;
-                            self.message =
-                                Some(Message::new(renamed_message(&new_name, &new_path)));
+                            self.message = Some(Message::new(msg));
                             // Guarded: selecting the renamed endpoint must not
                             // silently discard dirty edits on the loaded one.
                             self.guarded_load(PendingLoad::File(new_path))?;
@@ -524,6 +529,9 @@ impl App {
                 // The reserved-`sequences` bump applies only for a root-level dir.
                 match persistence::rename_collection(&dir, &new_name, &root) {
                     Ok(new_dir) => {
+                        // Repoint sequence steps under the old dir prefix (closes the
+                        // latent rename-breaks-sequences bug for collections too).
+                        let repointed = self.rewrite_step_refs(&dir, &new_dir);
                         // Repoint any buffer under the renamed dir into the new
                         // directory *before* the reload, or remap-by-path sees a
                         // vanished file (and the next save fails NotFound).
@@ -535,7 +543,11 @@ impl App {
                             }
                         }
                         self.reload_explorer()?;
-                        self.message = Some(Message::new(renamed_message(&new_name, &new_dir)));
+                        let mut msg = renamed_message(&new_name, &new_dir);
+                        if repointed > 0 {
+                            msg.push_str(&format!(" · {repointed} step(s) repointed"));
+                        }
+                        self.message = Some(Message::new(msg));
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -718,6 +730,20 @@ impl App {
     /// Surfaces a CRUD [`PersistenceError`] on the statusline (fail-loud).
     pub(in crate::tui::app) fn crud_error(&mut self, err: PersistenceError) {
         self.message = Some(Message::new(format!("error: {err}")));
+    }
+
+    /// Rewrites the sequence steps that referenced `old` (now at `new`) after a
+    /// rename/move, returning the count rewritten (0 with no workspace, when the
+    /// paths fall outside the root, or on a helper error). Shared by rename and
+    /// relocate so a path change never silently strands a referencing sequence.
+    fn rewrite_step_refs(&mut self, old: &Path, new: &Path) -> usize {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return 0;
+        };
+        let (Ok(old_rel), Ok(new_rel)) = (old.strip_prefix(&root), new.strip_prefix(&root)) else {
+            return 0;
+        };
+        persistence::retarget_sequence_steps(&root, old_rel, new_rel).unwrap_or(0)
     }
 
     /// Whether the live prompt buffer currently reads as a pasted curl — drives

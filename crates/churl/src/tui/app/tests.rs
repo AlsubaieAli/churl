@@ -6080,3 +6080,28 @@ fn session_var_never_touches_persistence() {
         "the value is held in the in-memory store"
     );
 }
+
+/// Renaming an endpoint rewrites the sequence steps that referenced it (closing
+/// the latent rename-breaks-sequences bug).
+#[test]
+fn rename_endpoint_rewrites_referencing_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    // Select the endpoint under `users`, then rename it.
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1;
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.commit_rename("fetched".to_owned()).unwrap();
+    let seq = persistence::load_sequence(&root.join("sequences/flow.toml")).unwrap();
+    assert_eq!(
+        seq.steps[0].endpoint, "users/fetched.toml",
+        "referencing step repointed by the rename"
+    );
+}
