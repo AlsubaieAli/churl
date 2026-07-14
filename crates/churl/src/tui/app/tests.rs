@@ -6056,28 +6056,111 @@ fn delete_session_var_removes_it() {
     );
 }
 
+/// Every regular file under `dir`, recursively.
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_files(&p));
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn session_var_never_touches_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
-    let manifest = dir.path().join("churl.toml");
-    let before = std::fs::read_to_string(&manifest).unwrap();
+    let root = dir.path();
     app.open_env_editor();
-    set_session_var(&mut app, "secret_token", "s3cr3t");
-    // The value lives only in RAM: no TOML on disk mentions it.
-    let after = std::fs::read_to_string(&manifest).unwrap();
-    assert_eq!(
-        before, after,
-        "churl.toml is byte-identical — nothing persisted"
-    );
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    // Edit a REAL workspace var so the forced save below actually writes churl.toml
+    // (a no-change save would write nothing and prove nothing).
+    app.handle_key(k('l')).unwrap(); // ScopeList → VarRows on the Workspace scope
+    app.handle_key(k('a')).unwrap(); // add row → name edit
+    for c in "wsvar".chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit name → value edit
+    for c in "wsval".chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit value
+    app.handle_key(k('h')).unwrap(); // back to ScopeList
+    // Stash a session secret, then force a full save (`w`).
+    set_session_var(&mut app, "sekret_token", "s3cr3tV4LUE");
+    app.handle_key(k('w')).unwrap();
+    // (a) the workspace var was saved; the session name/value never reach churl.toml.
+    let manifest = std::fs::read_to_string(root.join("churl.toml")).unwrap();
+    assert!(manifest.contains("wsvar"), "the workspace var was saved");
     assert!(
-        !dir.path().join("users").join("folder.toml").exists(),
-        "no folder.toml materialized for a session var"
+        !manifest.contains("sekret_token") && !manifest.contains("s3cr3tV4LUE"),
+        "no session name/value in churl.toml: {manifest}"
     );
+    // (b) the session name AND value appear in NO file anywhere in the workspace.
+    for path in walk_files(root) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            assert!(
+                !text.contains("sekret_token"),
+                "session var NAME leaked into {path:?}"
+            );
+            assert!(
+                !text.contains("s3cr3tV4LUE"),
+                "session var VALUE leaked into {path:?}"
+            );
+        }
+    }
     assert_eq!(
-        app.session_vars().get("secret_token").map(String::as_str),
-        Some("s3cr3t"),
-        "the value is held in the in-memory store"
+        app.session_vars().get("sekret_token").map(String::as_str),
+        Some("s3cr3tV4LUE"),
+        "the value is held only in the in-memory store"
+    );
+}
+
+/// A rename whose sequence-step rewrite fails surfaces the error (fail-loud) —
+/// not a false "renamed" success with a stranded sequence.
+#[cfg(unix)]
+#[test]
+fn rename_surfaces_sequence_rewrite_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    // sequences/ read-only: the rename lands, but the step rewrite's save fails.
+    std::fs::set_permissions(
+        root.join("sequences"),
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1;
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.commit_rename("fetched".to_owned()).unwrap();
+    std::fs::set_permissions(
+        root.join("sequences"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let msg = app
+        .message
+        .as_ref()
+        .map(|m| m.text.as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.starts_with("error:"),
+        "the rename surfaces the rewrite error rather than a false success: {msg:?}"
     );
 }
 

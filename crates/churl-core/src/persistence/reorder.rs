@@ -50,6 +50,13 @@ fn plan_dense_swap(n: usize, idx: usize, dir: ReorderDir) -> Option<Vec<u32>> {
 /// Shared driver: builds the `(path, seq)` group, sorts it in the same
 /// `(seq, filename)` order the loader uses, plans the dense swap for `target`,
 /// and persists every item whose seq changed via `save_seq`.
+///
+/// **Non-atomic across files:** each changed sibling is saved independently, so a
+/// mid-loop IO failure can leave two siblings sharing a dense `seq` — transiently
+/// scrambled order — until the next reorder re-densifies the group. This is the
+/// same known shape as the sequence-editor's multi-file step swap; the corpus is
+/// machine-local and self-heals on the next reorder, so it is accepted rather than
+/// wrapped in a cross-file transaction.
 fn reorder_group<F, S>(
     items: Vec<PathBuf>,
     target: &Path,

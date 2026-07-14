@@ -485,12 +485,10 @@ impl App {
                 match persistence::rename_endpoint(&path, &new_name) {
                     Ok(new_path) => {
                         // Repoint sequence steps that referenced the old path (also
-                        // closes the latent rename-breaks-sequences bug).
-                        let repointed = self.rewrite_step_refs(&path, &new_path);
-                        let mut msg = renamed_message(&new_name, &new_path);
-                        if repointed > 0 {
-                            msg.push_str(&format!(" · {repointed} step(s) repointed"));
-                        }
+                        // closes the latent rename-breaks-sequences bug). The rename
+                        // already landed on disk; a rewrite error is surfaced by
+                        // `set_rename_message` rather than swallowed.
+                        let refs = self.rewrite_step_refs(&path, &new_path);
                         let renamed_idx = self.buffer_index_for_path(&path);
                         if let Some(idx) = renamed_idx {
                             // Renaming the *loaded* endpoint: update file path +
@@ -507,10 +505,10 @@ impl App {
                             // Move the cursor onto the renamed row without
                             // touching the request pane.
                             self.explorer.select_file(&new_path)?;
-                            self.message = Some(Message::new(msg));
+                            self.set_rename_message(&new_name, &new_path, refs);
                         } else {
                             self.reload_explorer()?;
-                            self.message = Some(Message::new(msg));
+                            self.set_rename_message(&new_name, &new_path, refs);
                             // Guarded: selecting the renamed endpoint must not
                             // silently discard dirty edits on the loaded one.
                             self.guarded_load(PendingLoad::File(new_path))?;
@@ -530,8 +528,9 @@ impl App {
                 match persistence::rename_collection(&dir, &new_name, &root) {
                     Ok(new_dir) => {
                         // Repoint sequence steps under the old dir prefix (closes the
-                        // latent rename-breaks-sequences bug for collections too).
-                        let repointed = self.rewrite_step_refs(&dir, &new_dir);
+                        // latent rename-breaks-sequences bug for collections too); a
+                        // rewrite error surfaces via `set_rename_message`.
+                        let refs = self.rewrite_step_refs(&dir, &new_dir);
                         // Repoint any buffer under the renamed dir into the new
                         // directory *before* the reload, or remap-by-path sees a
                         // vanished file (and the next save fails NotFound).
@@ -543,11 +542,7 @@ impl App {
                             }
                         }
                         self.reload_explorer()?;
-                        let mut msg = renamed_message(&new_name, &new_dir);
-                        if repointed > 0 {
-                            msg.push_str(&format!(" · {repointed} step(s) repointed"));
-                        }
-                        self.message = Some(Message::new(msg));
+                        self.set_rename_message(&new_name, &new_dir, refs);
                     }
                     Err(err) => self.crud_error(err),
                 }
@@ -733,17 +728,40 @@ impl App {
     }
 
     /// Rewrites the sequence steps that referenced `old` (now at `new`) after a
-    /// rename/move, returning the count rewritten (0 with no workspace, when the
-    /// paths fall outside the root, or on a helper error). Shared by rename and
-    /// relocate so a path change never silently strands a referencing sequence.
-    fn rewrite_step_refs(&mut self, old: &Path, new: &Path) -> usize {
+    /// rename, returning the count rewritten — or the helper's error, so a failed
+    /// rewrite is surfaced loudly (fail-loud, symmetric with the relocate path)
+    /// rather than reported as a clean rename with a stranded sequence. `Ok(0)`
+    /// only when there is no workspace or the paths fall outside the root.
+    fn rewrite_step_refs(&mut self, old: &Path, new: &Path) -> Result<usize, PersistenceError> {
         let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
-            return 0;
+            return Ok(0);
         };
         let (Ok(old_rel), Ok(new_rel)) = (old.strip_prefix(&root), new.strip_prefix(&root)) else {
-            return 0;
+            return Ok(0);
         };
-        persistence::retarget_sequence_steps(&root, old_rel, new_rel).unwrap_or(0)
+        persistence::retarget_sequence_steps(&root, old_rel, new_rel)
+    }
+
+    /// Sets the rename status line: the "renamed" message (with a
+    /// `· N step(s) repointed` suffix) on a clean rewrite, or the rewrite error on
+    /// failure (the rename itself already landed on disk, so this reports the
+    /// stranded-step failure loudly instead of a false success).
+    fn set_rename_message(
+        &mut self,
+        name: &str,
+        path: &Path,
+        refs: Result<usize, PersistenceError>,
+    ) {
+        match refs {
+            Ok(repointed) => {
+                let mut msg = renamed_message(name, path);
+                if repointed > 0 {
+                    msg.push_str(&format!(" · {repointed} step(s) repointed"));
+                }
+                self.message = Some(Message::new(msg));
+            }
+            Err(err) => self.crud_error(err),
+        }
     }
 
     /// Whether the live prompt buffer currently reads as a pasted curl — drives

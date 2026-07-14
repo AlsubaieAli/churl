@@ -88,6 +88,10 @@ pub fn duplicate_endpoint(src: &Path) -> Result<PathBuf, PersistenceError> {
 /// siblings (`next_collection_seq(dest_parent)`); inner contents keep their
 /// order. `workspace_root` scopes the reserved `sequences/` skip when appending.
 /// Returns the created directory path.
+///
+/// Mirrors the endpoint path's [`ClaimGuard`] cleanup: the claim creates the dest
+/// directory up front, so a failure while populating it removes the partial dir
+/// rather than leaving an incomplete collection for the lenient loader to render.
 pub fn copy_collection(
     src: &Path,
     dest_parent: &Path,
@@ -105,10 +109,21 @@ pub fn copy_collection(
             source,
         }
     })?;
-    copy_dir_recursive(src, &new_dir)?;
-    let seq = next_collection_seq(dest_parent, workspace_root);
-    if seq != 0 {
-        set_collection_seq(&new_dir, seq)?;
+    // `next_collection_seq` counts the just-created dir, so copying into an all-`0`
+    // (sparse) parent yields `seq = 1` — non-minimal but still correctly last.
+    let populate = (|| -> Result<(), PersistenceError> {
+        copy_dir_recursive(src, &new_dir)?;
+        let seq = next_collection_seq(dest_parent, workspace_root);
+        if seq != 0 {
+            set_collection_seq(&new_dir, seq)?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = populate {
+        // Best-effort cleanup; the source is untouched (a move deletes it only
+        // after a successful copy), so a failed copy leaves the tree clean.
+        let _ = std::fs::remove_dir_all(&new_dir);
+        return Err(err);
     }
     Ok(new_dir)
 }

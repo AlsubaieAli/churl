@@ -501,3 +501,61 @@ fn native_export_round_trips_collection_seq() {
         "collection order survives a native export/import round-trip"
     );
 }
+
+// --- failure paths: fail-loud + no orphaned partials ---
+
+/// A failed step-rewrite surfaces the error (never a silent `Ok(0)`), so a rename
+/// that can't repoint its sequences is reported as a failure, not a clean rename.
+#[cfg(unix)]
+#[test]
+fn retarget_errors_when_sequence_save_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = workspace("w");
+    let root = ws.path();
+    create_collection(root, "auth", root).unwrap();
+    write_sequence(root, "flow", &["auth/login.toml"]);
+    let seq_dir = root.join("sequences");
+    // Read+exec but not writable: the rewrite reads flow.toml fine, but its
+    // format-preserving save (temp file in the dir) fails.
+    std::fs::set_permissions(&seq_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = retarget_sequence_steps(
+        root,
+        Path::new("auth/login.toml"),
+        Path::new("auth/signin.toml"),
+    );
+    std::fs::set_permissions(&seq_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        result.is_err(),
+        "a failed step rewrite must surface an error, not Ok(0)"
+    );
+}
+
+/// A mid-copy failure leaves no partially-populated `-N` directory behind (the
+/// claim-cleanup discipline the module's header promises for collections too).
+#[cfg(unix)]
+#[test]
+fn copy_collection_cleans_up_partial_dir_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = workspace("w");
+    let root = ws.path();
+    let src = create_collection(root, "auth", root).unwrap();
+    create_endpoint(&src, "login").unwrap();
+    let sub = create_collection(&src, "nested", root).unwrap();
+    create_endpoint(&sub, "deep").unwrap();
+    let dst = create_collection(root, "target", root).unwrap();
+    // Make the nested source dir unreadable so the recursive copy fails partway
+    // (after the top-level file + the empty nested dir have been created at dest).
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = copy_collection(&src, &dst, root);
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err(), "mid-copy failure surfaces an error");
+    let leftovers: Vec<_> = std::fs::read_dir(&dst)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the partial copy dir was cleaned up: {leftovers:?}"
+    );
+}

@@ -19,6 +19,11 @@ use super::*;
 ///   [`merge_arrays_of_tables`]) — survivors keep their decor even when the array
 ///   grows or shrinks; only added/removed tables change.
 pub(super) fn merge_tables(old: &mut Table, new: &Table) {
+    // Note: pruning a key drops that key's decor, including any *leading* comment
+    // toml_edit attached to it. So a reorder that renumbers a collection to the
+    // front (its `seq` becomes `0`, which is skip-serialized → pruned here) can
+    // drop a leading `# comment` that sat above `seq` in `folder.toml`. This is a
+    // pre-existing property of any key-pruning save, accepted as cosmetic.
     let stale: Vec<String> = old
         .iter()
         .map(|(key, _)| key.to_owned())
