@@ -12,12 +12,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender as JobSender;
 use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
+use churl_core::cookies::ChurlCookieJar;
 use churl_core::history::{HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path};
-use churl_core::http::ExecuteOptions;
+use churl_core::http::{ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, build_client_with};
 use churl_core::interchange::{self, JsonDialect};
 use churl_core::load::{LoadCheck, LoadConfig, ReqOutcome};
 use churl_core::model::{
@@ -47,6 +49,7 @@ use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
 use super::components::message::Message;
+use super::components::options::{OptionsOutcome, OptionsState};
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{
     ResponseGeometry, ResponseMeta, ResponseState, ResponseView, ViewMode,
@@ -57,8 +60,8 @@ use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, load_runner, message, method_menu, palette, picker, prompt,
-    request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
+    env_editor, explorer, help, load_runner, message, method_menu, options, palette, picker,
+    prompt, request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -237,6 +240,27 @@ pub struct App {
     /// standalone-send resolution. **Never** written to disk (a security feature —
     /// captured tokens stay in RAM and evaporate on exit); there is no load/save.
     session_vars: HashMap<PathBuf, BTreeMap<String, String>>,
+    /// Resolved per-request timeout, kept so a live proxy/insecure/cookies change
+    /// can rebuild the client without re-reading config.
+    client_timeout: Duration,
+    /// The active proxy URL (session state; masked in any UI display). Resolved at
+    /// launch (CLI `--proxy` > workspace `churl.toml` > global config > env → the
+    /// env case is `None` here, reqwest honors it); editable live in the Options
+    /// overlay. Every change rebuilds the client via [`App::rebuild_client`].
+    session_proxy: Option<String>,
+    /// Whether TLS verification is OFF for this session (accepts invalid/self-signed
+    /// certs and hostname mismatches). A loud RED indicator surfaces it in the
+    /// statusline. Toggled live by `<leader>k` / the Options overlay.
+    session_insecure: bool,
+    /// Whether the per-workspace persistent cookie jar is active this session.
+    /// The jar itself ([`Self::cookie_jar`]) always exists and survives toggles;
+    /// only whether it is wired into the client changes.
+    cookies_enabled: bool,
+    /// The workspace's cookie jar, shared (as `Arc`) with the client when
+    /// [`Self::cookies_enabled`]. Held on `App` so toggling off→on keeps the
+    /// accumulated cookies; persisted to `state.sqlite` on mutating sends, toggle
+    /// off, clear, and exit.
+    cookie_jar: Arc<ChurlCookieJar>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -453,6 +477,11 @@ impl App {
             load_caps: churl_core::load::LoadCaps::default(),
             load_request: None,
             session_vars: HashMap::new(),
+            client_timeout: DEFAULT_TIMEOUT,
+            session_proxy: None,
+            session_insecure: false,
+            cookies_enabled: false,
+            cookie_jar: Arc::new(ChurlCookieJar::new()),
         })
     }
 
@@ -926,8 +955,12 @@ impl App {
     /// [`super::run`] after [`App::new`]; snapshot tests skip it so they stay
     /// runtime-free. A failed history open is non-fatal — it disables history
     /// and warns on the statusline.
-    pub fn install_runtime(&mut self, config: &Config) -> Result<()> {
-        self.client = Some(churl_core::http::build_client(config.timeout())?);
+    pub fn install_runtime(
+        &mut self,
+        config: &Config,
+        cli_proxy: Option<String>,
+        cli_insecure: bool,
+    ) -> Result<()> {
         self.execute_options = ExecuteOptions {
             max_body_bytes: config.max_body_bytes(),
             redirect: config.redirect()?,
@@ -955,7 +988,112 @@ impl App {
             let canonical = canonical_path(ws.root());
             let _ = store.touch_workspace(&canonical.to_string_lossy(), now_ms());
         }
+
+        // Resolve the M8 session controls, then build the client from them.
+        self.client_timeout = config.timeout();
+        let ws_proxy = self
+            .workspace
+            .as_ref()
+            .and_then(|ws| ws.manifest().proxy.clone());
+        // Precedence: CLI > workspace churl.toml > global config; a `None` result
+        // means "no explicit proxy", so reqwest honors the env proxy for free.
+        self.session_proxy = pure::resolve_proxy(cli_proxy, ws_proxy, config.proxy());
+        // `-k` forces insecure on; otherwise the global default applies (there is
+        // no CLI "force secure" — the safe default is already secure).
+        self.session_insecure = cli_insecure || config.insecure();
+        // Cookie jar opt-in: per-workspace `churl.toml cookies = true` OR the
+        // global default turns it on.
+        let ws_cookies = self
+            .workspace
+            .as_ref()
+            .is_some_and(|ws| ws.manifest().cookies);
+        self.cookies_enabled = ws_cookies || config.cookies();
+        // Load any persisted jar for this workspace, so cookies survive a restart.
+        self.cookie_jar = Arc::new(self.load_cookie_jar());
+
+        self.rebuild_client()?;
         Ok(())
+    }
+
+    /// Loads the persisted cookie jar for the current workspace from `state.sqlite`
+    /// (keyed by canonicalized root path), or an empty jar when there is no
+    /// workspace / history store / stored blob. A corrupt blob degrades to an
+    /// empty jar with a status note rather than aborting launch.
+    fn load_cookie_jar(&mut self) -> ChurlCookieJar {
+        let Some(key) = self.cookie_workspace_key() else {
+            return ChurlCookieJar::new();
+        };
+        let Some(store) = self.history.as_ref() else {
+            return ChurlCookieJar::new();
+        };
+        match store.cookie_jar(&key) {
+            Ok(Some(json)) => match ChurlCookieJar::load_json(&json) {
+                Ok(jar) => jar,
+                Err(err) => {
+                    self.message = Some(Message::new(format!("cookie jar reset (corrupt): {err}")));
+                    ChurlCookieJar::new()
+                }
+            },
+            Ok(None) => ChurlCookieJar::new(),
+            Err(err) => {
+                self.message = Some(Message::new(format!("cookies not loaded: {err}")));
+                ChurlCookieJar::new()
+            }
+        }
+    }
+
+    /// The canonicalized workspace-root string used to key the cookie jar in
+    /// `state.sqlite`, or `None` when no workspace is open.
+    fn cookie_workspace_key(&self) -> Option<String> {
+        self.workspace
+            .as_ref()
+            .map(|ws| canonical_path(ws.root()).to_string_lossy().into_owned())
+    }
+
+    /// Rebuilds the single shared client from the current session controls. This
+    /// is the ONE seam every live proxy/insecure/cookies change routes through —
+    /// there is never more than one client, and it always reflects current state.
+    /// The cookie jar is wired in only when enabled; the `Arc` outlives the client,
+    /// so toggling cookies off→on keeps the accumulated cookies.
+    pub(in crate::tui::app) fn rebuild_client(&mut self) -> Result<()> {
+        let cfg = ClientConfig {
+            timeout: self.client_timeout,
+            proxy: self.session_proxy.clone(),
+            insecure: self.session_insecure,
+            cookies: self.cookies_enabled.then(|| self.cookie_jar.clone()),
+        };
+        self.client = Some(build_client_with(&cfg)?);
+        Ok(())
+    }
+
+    /// Persists the current cookie jar for this workspace. Called after a send
+    /// that may have mutated the jar, on toggle-off / clear, and on exit. The jar
+    /// still works in memory regardless, but a failure is surfaced loudly (never
+    /// swallowed) and — critically — the write is SKIPPED on a serialize failure
+    /// so a transient error can never clobber the good on-disk blob with `""`
+    /// (which `ON CONFLICT DO UPDATE` would persist as an empty jar = silent
+    /// permanent cookie loss).
+    pub(in crate::tui::app) fn persist_cookie_jar(&mut self) {
+        let Some(key) = self.cookie_workspace_key() else {
+            return;
+        };
+        let json = match self.cookie_jar.to_json() {
+            Ok(json) => json,
+            Err(err) => {
+                // Do NOT write — persisting an empty/partial blob would wipe a
+                // good jar. Fail loud instead.
+                self.message = Some(Message::new(format!(
+                    "cookie save failed (serialize): {err}"
+                )));
+                return;
+            }
+        };
+        let Some(store) = self.history.as_ref() else {
+            return;
+        };
+        if let Err(err) = store.save_cookie_jar(&key, &json, now_ms()) {
+            self.message = Some(Message::new(format!("cookie save failed: {err}")));
+        }
     }
 
     /// Runs the event loop: `tokio::select!` over the crossterm event stream, a
@@ -1021,6 +1159,12 @@ impl App {
         // `AppMsg::Response` would otherwise never land and the request — possibly
         // already completed on the wire — would vanish from history with no trace.
         self.record_inflight_on_quit();
+        // Flush the cookie jar on exit so a session's persistent cookies survive
+        // to the next launch (best-effort; a no-op when cookies are disabled or no
+        // workspace is open).
+        if self.cookies_enabled {
+            self.persist_cookie_jar();
+        }
         Ok(())
     }
 
@@ -1083,6 +1227,7 @@ impl App {
                 self.handle_confirm_key(key, purpose)
             }
             Mode::EnvEditor(_) => self.handle_env_editor_key(key),
+            Mode::Options(_) => self.handle_options_key(key),
             Mode::Sequence { .. } => self.handle_sequence_key(key),
             Mode::LoadRunner(_) => self.handle_load_runner_key(key),
             Mode::Normal => self.handle_normal_key(key),
@@ -1287,6 +1432,8 @@ impl App {
             Action::Jump => self.open_jump(),
             Action::SwitchProfile => self.open_profile_picker(),
             Action::OpenEnvEditor => self.open_env_editor(),
+            Action::OpenOptions => self.open_options(),
+            Action::ToggleInsecure => self.toggle_insecure(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

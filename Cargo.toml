@@ -31,7 +31,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 futures = "0.3"
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies"] }
+# Owned cookie jar we can serialize to JSON (the store behind reqwest's own
+# `Jar`); declared explicitly so `ChurlCookieJar` can hold + persist it. Pinned
+# to the exact version reqwest's `cookies` feature resolves (see Cargo.lock).
+cookie_store = "0.22"
 
 # curl import/export
 shlex = "1"
@@ -85,3 +89,8 @@ insta = { version = "1", features = ["filters"] }
 proptest = "1"
 tempfile = "3"
 wiremock = "0.6"
+# Self-signed TLS test harness (churl-core dev only): prove the insecure client
+# accepts a self-signed / wrong-host cert while the secure client rejects it.
+# rustls/tokio-rustls are already in the tree via reqwest's rustls backend.
+rcgen = "0.13"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

@@ -561,6 +561,86 @@ mod tests {
         );
     }
 
+    // ---- cookie jar (migration 5) ---------------------------------
+
+    #[test]
+    fn cookie_jar_save_load_round_trip_and_upsert() {
+        let store = HistoryStore::in_memory().unwrap();
+        // Absent → None (the "no cookies stored yet" case).
+        assert_eq!(store.cookie_jar("/ws/a").unwrap(), None);
+
+        store
+            .save_cookie_jar("/ws/a", "{\"cookies\":[]}", 1_000)
+            .unwrap();
+        assert_eq!(
+            store.cookie_jar("/ws/a").unwrap().as_deref(),
+            Some("{\"cookies\":[]}")
+        );
+        // Keyed per workspace — a different root has its own (absent) blob.
+        assert_eq!(store.cookie_jar("/ws/b").unwrap(), None);
+
+        // Re-saving upserts in place (one row per workspace, PRIMARY KEY).
+        store.save_cookie_jar("/ws/a", "{\"v\":2}", 2_000).unwrap();
+        assert_eq!(
+            store.cookie_jar("/ws/a").unwrap().as_deref(),
+            Some("{\"v\":2}")
+        );
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cookies WHERE workspace = '/ws/a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "upsert must not duplicate the row");
+    }
+
+    #[test]
+    fn migration_5_applies_from_a_v4_db() {
+        // A DB already at user_version = 4 (history + workspaces + load_batches
+        // with mean_ms, but NO cookies table) must gain the cookies table via
+        // migration 5 without disturbing existing data — mirrors the migration-4
+        // upgrade tests. Editing an applied migration would NOT reach a v4 DB.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for m in &MIGRATIONS[..4] {
+                conn.execute_batch(m).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4i64).unwrap();
+            conn.execute(
+                "INSERT INTO history (executed_at_ms, method, url) VALUES (1, 'GET', 'https://old.example')",
+                [],
+            )
+            .unwrap();
+            // Confirm the starting DB genuinely lacks the cookies table.
+            let has_cookies: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cookies'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                has_cookies, 0,
+                "the v4 DB must not have the cookies table yet"
+            );
+        }
+
+        let store = HistoryStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        // Pre-existing history survived the upgrade.
+        assert_eq!(store.recent(10).unwrap().len(), 1);
+        // The new cookies table works.
+        store.save_cookie_jar("/ws/a", "{\"jar\":true}", 9).unwrap();
+        assert_eq!(
+            store.cookie_jar("/ws/a").unwrap().as_deref(),
+            Some("{\"jar\":true}")
+        );
+    }
+
     // ---- history pruning ------------------------------------------
 
     /// Counts rows in a table on the store's connection.

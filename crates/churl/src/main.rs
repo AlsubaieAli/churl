@@ -23,6 +23,16 @@ struct Cli {
     /// launching the TUI (endpoints land as normal file-per-endpoint TOML).
     #[arg(long = "import-collection", value_name = "FILE", global = true)]
     import_collection: Option<PathBuf>,
+    /// Route every request through this HTTP/HTTPS proxy for the session (highest
+    /// precedence, above `churl.toml`/config/env). A `user:pass@` proxy is
+    /// accepted here but never persisted. Also settable live in the Options overlay.
+    #[arg(long = "proxy", value_name = "URL", global = true)]
+    proxy: Option<String>,
+    /// Disable TLS certificate verification for the session (accepts self-signed
+    /// and hostname-mismatched certs). Session-scoped; also toggled with
+    /// `<leader>k`. Use with care.
+    #[arg(short = 'k', long = "insecure", global = true)]
+    insecure: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -42,6 +52,11 @@ enum Command {
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
+    /// Inspect or clear the current workspace's persistent cookie jar (headless)
+    Cookies {
+        #[command(subcommand)]
+        action: CookiesAction,
+    },
     /// Scaffold a demo workspace to get started quickly
     Tutorial {
         /// Directory to scaffold (default: ./churl-tutorial)
@@ -68,6 +83,15 @@ enum Command {
     },
 }
 
+/// `churl cookies …`: headless inspection/clearing of the persistent jar.
+#[derive(Debug, Subcommand)]
+enum CookiesAction {
+    /// Print the stored cookies for the current workspace (domain · name · value)
+    List,
+    /// Clear the stored cookies for the current workspace
+    Clear,
+}
+
 /// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
 fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
     let mut vars = BTreeMap::new();
@@ -90,6 +114,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Keymaps) => {
             run_keymaps()?;
+        }
+        Some(Command::Cookies { action }) => {
+            run_cookies(action)?;
         }
         Some(Command::Tutorial { dir }) => {
             tutorial::run_tutorial(dir)?;
@@ -123,7 +150,7 @@ async fn main() -> Result<()> {
                 }
             }
             install_hooks()?;
-            churl::tui::run(vars, cli.profile).await?;
+            churl::tui::run(vars, cli.profile, cli.proxy, cli.insecure).await?;
         }
     }
 
@@ -253,6 +280,55 @@ fn run_keymaps() -> Result<()> {
     Ok(())
 }
 
+/// `churl cookies list|clear`: headless inspection/clearing of the current
+/// workspace's persistent cookie jar in `state.sqlite` (keyed by the
+/// canonicalized workspace root). Cookie values are printed verbatim by `list`
+/// (this is an explicit, user-invoked dump — no masking) so the output is
+/// scriptable; `clear` wipes the stored blob.
+fn run_cookies(action: CookiesAction) -> Result<()> {
+    use churl_core::cookies::ChurlCookieJar;
+    use churl_core::history::{HistoryStore, default_state_path};
+
+    let path = default_state_path().ok_or_else(|| eyre!("no data directory for cookie store"))?;
+    let store = HistoryStore::open(&path)?;
+    let cwd = std::env::current_dir()?;
+    let key = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| cwd.clone())
+        .to_string_lossy()
+        .into_owned();
+
+    match action {
+        CookiesAction::List => {
+            let jar = match store.cookie_jar(&key)? {
+                Some(json) => ChurlCookieJar::load_json(&json)?,
+                None => ChurlCookieJar::new(),
+            };
+            let cookies = jar.list();
+            if cookies.is_empty() {
+                eprintln!("no cookies stored for {}", cwd.display());
+            } else {
+                for c in cookies {
+                    println!("{}\t{}\t{}", c.domain, c.name, c.value);
+                }
+            }
+        }
+        CookiesAction::Clear => {
+            store.save_cookie_jar(&key, "", now_ms())?;
+            eprintln!("cleared cookies for {}", cwd.display());
+        }
+    }
+    Ok(())
+}
+
+/// Unix-milliseconds now (for the cookie-jar `updated_at` column).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// `churl import`: parse the curl command, print the endpoint's TOML to stdout
 /// (warnings on stderr), or write it through the persistence save with `--out`.
 /// A parse failure prints the error on stderr and exits non-zero.
@@ -317,6 +393,40 @@ mod tests {
             ] }
         ]
     }"#;
+
+    #[test]
+    fn cli_parses_proxy_and_insecure_flags() {
+        let cli =
+            Cli::try_parse_from(["churl", "--proxy", "http://proxy.local:3128", "-k"]).unwrap();
+        assert_eq!(cli.proxy.as_deref(), Some("http://proxy.local:3128"));
+        assert!(cli.insecure);
+        assert!(cli.command.is_none());
+
+        // Defaults: no proxy, verify on.
+        let bare = Cli::try_parse_from(["churl"]).unwrap();
+        assert!(bare.proxy.is_none());
+        assert!(!bare.insecure);
+    }
+
+    #[test]
+    fn cli_parses_cookies_subcommands() {
+        assert!(matches!(
+            Cli::try_parse_from(["churl", "cookies", "list"])
+                .unwrap()
+                .command,
+            Some(Command::Cookies {
+                action: CookiesAction::List
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["churl", "cookies", "clear"])
+                .unwrap()
+                .command,
+            Some(Command::Cookies {
+                action: CookiesAction::Clear
+            })
+        ));
+    }
 
     #[test]
     fn cli_parses_global_import_collection_flag() {

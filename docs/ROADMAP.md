@@ -38,7 +38,18 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 ## Planned ⏳
 
 - **Nested collections & root-level endpoints** — the workspace becomes one recursive collection tree (the root *is* a collection): collections nest to arbitrary depth and endpoints can live directly at the root (today the tree is one level deep and every endpoint lives inside a collection). Variables inherit down the tree (child overrides parent); existing workspaces keep working unchanged. (F)
-- **Cookies + proxy** — cookie-jar persistence and HTTP(S) proxy support. (F)
+- **Cookies + proxy + insecure-TLS** — a persistent per-workspace cookie jar (opt-in, origin-scoped, stored in `state.sqlite`), an HTTP(S) proxy (CLI `--proxy` > workspace `churl.toml` > global config > env; credentials never persisted), and a session insecure-TLS opt-in (`-k`/`<leader>k`, loud RED statusline flag). All three are session state applied by rebuilding the single client, configurable at launch (CLI + config) and live from an in-TUI **Options overlay** (`<leader>o`). Headless: `churl cookies list|clear`. (F)
+
+### Deferred to M8.1 ⏳
+- Per-endpoint / per-workspace **insecure-TLS persistence** (a disk-level TLS downgrade — needs an explicit owner call).
+- **Adding/editing** a cookie in the Options overlay (M8 ships view + delete only).
+- curl-import remap of the cookie flags `-b`/`--cookie`, `-c`/`--cookie-jar` (M8 remaps `-x`/`--proxy` and re-notes `-k`).
+- "Save current session settings as a workspace/global default" from the overlay.
+- **SOCKS** proxy (`socks` feature), per-scheme distinct proxies, PAC.
+- SameSite / third-party cookie policy knobs (rely on crate defaults); cookie-jar encryption at rest (parity with the unencrypted, local-only `state.sqlite`).
+- **Async cookie-jar persistence** — the jar is currently written synchronously on the UI thread (after a mutating send / toggle-off / clear / exit); under cross-process WAL-lock contention that can stall the UI up to the ~5 s `busy_timeout`. Move the write off-thread.
+- **Cookie-jar `RwLock` poison recovery** — `ChurlCookieJar` methods `.expect("lock poisoned")`, so a prior panic while holding the lock would crash the next jar access. Recover from a poisoned lock instead.
+- **Proper masked-secret proxy input** — the Options overlay's inline proxy edit masks the password of a complete `user:pass@` value, but a password typed *before* the `@` is entered still renders in plaintext for that moment (a single-line editor limitation). A dedicated masked-secret input widget closes the pre-`@` gap.
 
 ## Exploring 🔭
 

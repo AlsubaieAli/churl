@@ -347,7 +347,45 @@ fn demo_workspace() -> Workspace {
                 ]),
             },
         ],
+        ..Default::default()
     }
+}
+
+#[test]
+fn workspace_proxy_round_trips_when_credential_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        proxy: Some("http://proxy.local:3128".into()),
+        cookies: true,
+        ..Default::default()
+    };
+    save_workspace_manifest(dir.path(), &ws).unwrap();
+    let loaded = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(loaded.proxy.as_deref(), Some("http://proxy.local:3128"));
+    assert!(loaded.cookies);
+    let toml = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
+    assert!(toml.contains("proxy ="), "{toml}");
+    assert!(toml.contains("cookies = true"), "{toml}");
+}
+
+#[test]
+fn workspace_credentialed_proxy_is_refused_on_save() {
+    // The security gate: a proxy with embedded credentials must never reach a
+    // synced file — the save is refused loudly, not silently stripped.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace {
+        name: "demo".into(),
+        proxy: Some("http://user:pass@proxy.local:3128".into()),
+        ..Default::default()
+    };
+    let err = save_workspace_manifest(dir.path(), &ws).unwrap_err();
+    assert!(
+        matches!(err, PersistenceError::ProxyCredentialsRefused { .. }),
+        "expected ProxyCredentialsRefused, got {err:?}"
+    );
+    // Nothing was written.
+    assert!(!dir.path().join("churl.toml").exists());
 }
 
 #[test]
@@ -567,6 +605,7 @@ fn workspace_vars_round_trip() {
             ("api_version".to_string(), "v2".to_string()),
         ]),
         profiles: Vec::new(),
+        ..Default::default()
     };
     save_workspace_manifest(dir.path(), &ws).unwrap();
     let text = fs::read_to_string(dir.path().join("churl.toml")).unwrap();
@@ -586,6 +625,7 @@ fn workspace_vars_secret_literal_refused() {
         name: "demo".into(),
         vars: BTreeMap::from([("api_token".to_string(), "leaked".to_string())]),
         profiles: Vec::new(),
+        ..Default::default()
     };
     let err = save_workspace_manifest(dir.path(), &ws).unwrap_err();
     assert!(
@@ -662,6 +702,7 @@ fn deleting_a_profile_removes_its_table_from_disk() {
                 vars: BTreeMap::from([("host".to_string(), "prod.example.com".to_string())]),
             },
         ],
+        ..Default::default()
     };
     save_workspace_manifest(dir.path(), &ws).unwrap();
 
@@ -691,6 +732,7 @@ fn renaming_a_profile_leaves_no_old_name_on_disk() {
             name: "staging".into(),
             vars: BTreeMap::from([("host".to_string(), "stg.example.com".to_string())]),
         }],
+        ..Default::default()
     };
     save_workspace_manifest(dir.path(), &ws).unwrap();
 

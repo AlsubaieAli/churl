@@ -252,3 +252,56 @@ pub(super) fn lexical_normalize(path: &Path) -> PathBuf {
     }
     out
 }
+
+/// Resolves the session proxy from the M8 precedence chain: CLI `--proxy` >
+/// per-workspace `churl.toml` > global config `proxy`. A `None` result means no
+/// explicit proxy — the caller then calls no `.proxy()` at all, so reqwest honors
+/// the `HTTP(S)_PROXY`/`NO_PROXY` environment. Pure so the precedence is testable
+/// without the `install_runtime` side effects (state DB, workspace recency).
+pub(super) fn resolve_proxy(
+    cli: Option<String>,
+    workspace: Option<String>,
+    config_proxy: Option<&str>,
+) -> Option<String> {
+    cli.or(workspace)
+        .or_else(|| config_proxy.map(str::to_owned))
+}
+
+#[cfg(test)]
+mod proxy_precedence_tests {
+    use super::resolve_proxy;
+
+    #[test]
+    fn cli_wins_over_workspace_and_config() {
+        assert_eq!(
+            resolve_proxy(
+                Some("http://cli".into()),
+                Some("http://ws".into()),
+                Some("http://cfg"),
+            ),
+            Some("http://cli".into())
+        );
+    }
+
+    #[test]
+    fn workspace_wins_over_config_when_no_cli() {
+        assert_eq!(
+            resolve_proxy(None, Some("http://ws".into()), Some("http://cfg")),
+            Some("http://ws".into())
+        );
+    }
+
+    #[test]
+    fn config_used_when_no_cli_or_workspace() {
+        assert_eq!(
+            resolve_proxy(None, None, Some("http://cfg")),
+            Some("http://cfg".into())
+        );
+    }
+
+    #[test]
+    fn all_unset_is_none_env_fallback() {
+        // None ⇒ reqwest honors the env proxy (no explicit `.proxy()`).
+        assert_eq!(resolve_proxy(None, None, None), None);
+    }
+}

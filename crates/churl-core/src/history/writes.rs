@@ -52,6 +52,28 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Upserts the cookie-jar JSON blob for the workspace at `workspace` (a
+    /// canonicalized root path) with `updated_at` (Unix ms). One row per
+    /// workspace (keyed on the PRIMARY KEY); re-saving overwrites in place. The
+    /// blob comes from [`crate::cookies::ChurlCookieJar::to_json`] (persistent
+    /// cookies only). Never pruned — one row per workspace is naturally bounded.
+    pub fn save_cookie_jar(
+        &self,
+        workspace: &str,
+        jar_json: &str,
+        updated_at: i64,
+    ) -> Result<(), HistoryError> {
+        self.conn.execute(
+            "INSERT INTO cookies (workspace, jar_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace) DO UPDATE SET
+                 jar_json = excluded.jar_json,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![workspace, jar_json, updated_at],
+        )?;
+        Ok(())
+    }
+
     /// Inserts one load-run summary into the SEPARATE `load_batches` table
     /// (never `history`) and returns its rowid. Saturates each count to `i64`.
     pub fn insert_load_batch(&self, summary: &LoadBatchSummary) -> Result<i64, HistoryError> {

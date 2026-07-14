@@ -289,6 +289,11 @@ impl Default for KeyMap {
         root_bind(key!(p), LeaderEntry::Act(Action::SwitchProfile));
         // `<leader>v` opens the environments & variables editor (`v` is free).
         root_bind(key!(v), LeaderEntry::Act(Action::OpenEnvEditor));
+        // `<leader>o` opens the session Options overlay (proxy / TLS / cookies);
+        // `<leader>k` toggles insecure-TLS from anywhere. Both letters were
+        // verified free at the leader root (mnemonics: o=options, k=insecure).
+        root_bind(key!(o), LeaderEntry::Act(Action::OpenOptions));
+        root_bind(key!(k), LeaderEntry::Act(Action::ToggleInsecure));
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
         // `<leader><leader>` (Space as its own continuation) opens the
         // endpoint/request picker — owner drive-test 2026-07-10 moved it off `f`,

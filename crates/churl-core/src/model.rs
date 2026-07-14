@@ -258,7 +258,7 @@ pub struct Profile {
 /// name, its `[vars]` (the lowest collection scope), and the global `[[profiles]]`
 /// (a root-only role, like the `sequences/` store). Sub-collections carry only a
 /// `folder.toml` ([`CollectionMeta`], vars only — no name, no profiles).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     /// Root-collection name.
     pub name: String,
@@ -273,6 +273,18 @@ pub struct Workspace {
     /// are out of scope). Omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<Profile>,
+    /// Optional per-workspace HTTP/HTTPS proxy URL, applied to every request in
+    /// this workspace (overrides the global config proxy; overridden by CLI
+    /// `--proxy`). Persisted, so it **must** be credential-free — the save path
+    /// refuses a `user:pass@` proxy rather than silently stripping it (see
+    /// [`crate::config::proxy_has_credentials`]). Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Whether this workspace opts into the persistent cookie jar (default off).
+    /// Seeds the session cookie toggle at open; overrides the global default
+    /// upward. Omitted from serialized output when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cookies: bool,
 }
 
 /// Optional per-collection metadata: the parsed form of a **sub-collection's**

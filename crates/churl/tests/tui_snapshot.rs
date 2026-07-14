@@ -1527,6 +1527,69 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
+/// The session Options overlay (`<leader>o`): the three control rows (proxy /
+/// TLS / cookies) plus the (empty) cookie list.
+#[test]
+fn options_overlay_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('o'));
+    assert!(matches!(app.mode, Mode::Options(_)));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// A malformed proxy typed in the Options overlay must NOT crash the session:
+/// the rebuild error is caught, the change rolled back, and an inline error
+/// shown. (Regression: `rebuild_client()?` used to propagate out of `handle_key`
+/// and tear down the run loop.)
+#[test]
+fn options_malformed_proxy_does_not_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('o'));
+    // Proxy row is selected first; Enter opens the inline editor.
+    press(&mut app, KeyCode::Enter);
+    type_str(&mut app, "::: not a url :::");
+    // Enter applies — this must return Ok (no crash) despite the bad proxy.
+    press(&mut app, KeyCode::Enter);
+    // Session survives: still in the Options overlay, not torn down.
+    assert!(
+        matches!(app.mode, Mode::Options(_)),
+        "the overlay must stay open after a rejected proxy"
+    );
+    let snap = snapshot(&mut app);
+    // The rejection is shown inline, and the proxy row reverted to "none".
+    assert!(
+        snap.contains("invalid proxy"),
+        "expected inline error:\n{snap}"
+    );
+    assert!(
+        snap.contains("uses HTTP(S)_PROXY env"),
+        "proxy must have rolled back to none:\n{snap}"
+    );
+}
+
+/// Toggling TLS verification in the Options overlay: move to the TLS row and
+/// activate it, then the row renders the loud "OFF" state. Exercises the full
+/// toggle path (including the client rebuild) end-to-end.
+#[test]
+fn options_overlay_toggle_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('j')); // move to TLS row
+    press(&mut app, KeyCode::Enter); // toggle insecure on
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("NOT verified"),
+        "TLS row must show the loud OFF state:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
 /// The sequences submenu popup: `Space s` shows add (`a`) / open (`space`) /
 /// run (`r`). The single sequence finder is `<leader>s <leader>`, mirroring
 /// `<leader><leader>` for endpoints (owner drive-test 2026-07-10 — the former

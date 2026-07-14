@@ -180,6 +180,16 @@ pub enum PersistenceError {
         /// Human-readable reason the destination was rejected.
         reason: String,
     },
+    /// The manifest carries a proxy URL with embedded credentials
+    /// (`user:pass@host`). Credentials in a synced workspace file are a leak, so
+    /// the save is refused rather than silently stripping them — set a
+    /// credentialed proxy from `--proxy`/env/the Options overlay (session-scoped)
+    /// instead.
+    #[error("refusing to save churl.toml with a credentialed proxy URL: {proxy}")]
+    ProxyCredentialsRefused {
+        /// The offending proxy string (as authored; the caller may mask it).
+        proxy: String,
+    },
 }
 
 #[cfg(test)]

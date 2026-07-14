@@ -25,6 +25,7 @@ fn workspace(name: &str) -> tempfile::TempDir {
             name: name.to_owned(),
             vars: BTreeMap::new(),
             profiles: Vec::new(),
+            ..Default::default()
         },
     )
     .unwrap();

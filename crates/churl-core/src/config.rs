@@ -126,6 +126,26 @@ pub struct Config {
     /// [`Config::redirect`], which fails loudly on an unknown value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<String>,
+    /// Global HTTP/HTTPS proxy URL applied to every request; `None` disables the
+    /// explicit proxy so reqwest honors the `HTTP(S)_PROXY`/`NO_PROXY`
+    /// environment instead. Lowest of the explicit-precedence sources (CLI
+    /// `--proxy` > per-workspace `churl.toml` > this > env). A persisted proxy
+    /// must be credential-free ([`proxy_has_credentials`]). Resolved via
+    /// [`Config::proxy`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Whether to disable TLS certificate verification by default (accept
+    /// invalid/self-signed certs *and* hostname mismatches — the rustls verifier
+    /// ignores both). `false` (verify) unless set. A session-scoped launch
+    /// default only; there is no per-endpoint/per-workspace TLS downgrade.
+    /// Resolved via [`Config::insecure`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
+    /// Whether to enable the persistent per-workspace cookie jar by default.
+    /// `false` (off) unless set; a per-workspace `churl.toml cookies = true`
+    /// overrides it upward. Resolved via [`Config::cookies`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cookies: bool,
 }
 
 /// The `[load]` config table: optional per-field overrides of the load-run
@@ -329,6 +349,60 @@ impl Config {
                 expected: "one of: strict, strip, follow-all",
             }),
         }
+    }
+
+    /// The resolved global proxy URL (verbatim). Cross-source precedence
+    /// (CLI > workspace > global > env) is the caller's job — see the binary's
+    /// `install_runtime`.
+    pub fn proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
+    }
+
+    /// The resolved insecure-TLS launch default.
+    pub fn insecure(&self) -> bool {
+        self.insecure
+    }
+
+    /// The resolved cookie-jar launch default.
+    pub fn cookies(&self) -> bool {
+        self.cookies
+    }
+}
+
+/// Whether a proxy URL string carries userinfo (`user:pass@host` or `user@host`).
+///
+/// Security predicate: a proxy with embedded credentials is allowed at runtime
+/// from CLI/env/the Options overlay (masked in any UI display), but must **never**
+/// be written to a synced workspace/config file — see
+/// [`crate::persistence::save_workspace_manifest_checked`], which refuses rather
+/// than silently stripping the credentials. Scheme-less proxies (`user:pass@host:3128`,
+/// curl's `-x` form) are normalised with an `http://` prefix before parsing; an
+/// unparseable candidate falls back to a literal `@` check so the refusal fails
+/// safe (a suspicious string is treated as credential-bearing).
+pub fn proxy_has_credentials(proxy: &str) -> bool {
+    let candidate = if proxy.contains("://") {
+        proxy.to_owned()
+    } else {
+        format!("http://{proxy}")
+    };
+    match reqwest::Url::parse(&candidate) {
+        Ok(url) => !url.username().is_empty() || url.password().is_some(),
+        Err(_) => proxy.contains('@'),
+    }
+}
+
+/// Masks any userinfo (`user:pass@`) in a proxy URL for display, so a proxy that
+/// carries credentials at runtime never shows them on screen, in a log, or in an
+/// error/import note. Returns the input unchanged when there is no userinfo. Only
+/// the authority's userinfo is touched (the scheme + host + port survive).
+pub fn mask_proxy(proxy: &str) -> String {
+    let (scheme, rest) = match proxy.split_once("://") {
+        Some((s, r)) => (format!("{s}://"), r),
+        None => (String::new(), proxy),
+    };
+    match rest.split_once('@') {
+        Some((_creds, host)) => format!("{scheme}***@{host}"),
+        None => proxy.to_owned(),
     }
 }
 
@@ -862,6 +936,53 @@ mod tests {
     }
 
     #[test]
+    fn config_parses_proxy_insecure_cookies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "proxy = \"http://proxy.local:3128\"\ninsecure = true\ncookies = true\n",
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.proxy(), Some("http://proxy.local:3128"));
+        assert!(config.insecure());
+        assert!(config.cookies());
+    }
+
+    #[test]
+    fn config_proxy_insecure_cookies_defaults() {
+        let config = Config::default();
+        assert_eq!(config.proxy(), None);
+        assert!(!config.insecure());
+        assert!(!config.cookies());
+    }
+
+    #[test]
+    fn proxy_credential_detection() {
+        // Credentialed proxies (with or without scheme) are detected.
+        for creds in [
+            "http://user:pass@proxy.local:3128",
+            "https://user:pass@proxy.local",
+            "user:pass@proxy.local:3128", // scheme-less (curl -x form)
+            "http://user@proxy.local",    // username only
+        ] {
+            assert!(
+                proxy_has_credentials(creds),
+                "{creds} should be credentialed"
+            );
+        }
+        // Credential-free proxies are allowed to persist.
+        for clean in [
+            "http://proxy.local:3128",
+            "https://proxy.example.com",
+            "proxy.local:3128",
+        ] {
+            assert!(!proxy_has_credentials(clean), "{clean} should be clean");
+        }
+    }
+
+    #[test]
     fn config_load_caps_default_when_absent() {
         let config = Config::default();
         assert_eq!(config.load_caps(), crate::load::LoadCaps::default());
@@ -1091,6 +1212,7 @@ mod tests {
                     ("base_url".to_string(), "https://example.com".to_string()),
                 ]),
             }],
+            ..Default::default()
         };
         assert_eq!(
             secret_violations(&ws),
