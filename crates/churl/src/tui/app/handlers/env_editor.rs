@@ -54,16 +54,39 @@ impl App {
             EnvKeyOutcome::Close => self.close_env_editor(),
             EnvKeyOutcome::ClearSession => {
                 // Empty the current workspace's in-memory Session store, then
-                // rebuild the editor's read-only Session group so it reflects it.
+                // rebuild the editor's Session group so it reflects it.
                 let cleared = self.clear_session_vars();
                 let session = self.session_vars();
                 if let Mode::EnvEditor(editor) = &mut self.mode {
                     editor.set_session_vars(&session);
                 }
                 self.notify(if cleared {
-                    "session captures cleared"
+                    "session vars cleared"
                 } else {
-                    "no session captures to clear"
+                    "no session vars to clear"
+                });
+            }
+            EnvKeyOutcome::SetSessionVar { name, value } => {
+                // App-level write into the same in-memory session map the
+                // extraction path feeds (last-write-wins); never persisted. Then
+                // refresh the editor's Session rows from the store.
+                self.write_session_var(name.clone(), value);
+                let session = self.session_vars();
+                if let Mode::EnvEditor(editor) = &mut self.mode {
+                    editor.set_session_vars(&session);
+                }
+                self.notify(format!("session var {name} set"));
+            }
+            EnvKeyOutcome::DeleteSessionVar { name } => {
+                let removed = self.delete_session_var(&name);
+                let session = self.session_vars();
+                if let Mode::EnvEditor(editor) = &mut self.mode {
+                    editor.set_session_vars(&session);
+                }
+                self.notify(if removed {
+                    format!("session var {name} deleted")
+                } else {
+                    format!("no session var {name}")
                 });
             }
             EnvKeyOutcome::RevealRow => {

@@ -117,8 +117,31 @@ pub struct ProfileNameEdit {
     pub target: ProfileNameTarget,
 }
 
-/// What the app should do after the editor handled a key.
+/// Which field an "add/set session var" prompt is collecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    /// The var name (typed visibly).
+    Name,
+    /// The var value (masked as typed — a session var is treated as a secret).
+    Value,
+}
+
+/// An open "add/set a session var" prompt: a two-step name→value input inside the
+/// env editor's Session group. The store lives on the app (in-memory, never on
+/// disk), so on commit the editor emits [`EnvKeyOutcome::SetSessionVar`] and the
+/// app writes it — the editor never mutates the Session rows itself.
+#[derive(Debug, Clone)]
+pub struct SessionVarInput {
+    /// The committed var name (empty during the name phase).
+    pub name: String,
+    /// The line editor for the current field.
+    pub editor: LineEditor,
+    /// Which field is being collected.
+    pub phase: SessionPhase,
+}
+
+/// What the app should do after the editor handled a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvKeyOutcome {
     /// Fully handled inside the editor; nothing for the app to do.
     Consumed,
@@ -131,6 +154,19 @@ pub enum EnvKeyOutcome {
     /// Clear the current workspace's in-memory Session captures. The app
     /// empties its store, then the editor rebuilds the Session group's rows.
     ClearSession,
+    /// Set (create or overwrite, last-write-wins) a session var in the app's
+    /// in-memory store. The app writes it, then refreshes the Session rows.
+    SetSessionVar {
+        /// The var name (non-empty; the editor rejects an empty name).
+        name: String,
+        /// The var value (may be empty — an explicit blank is allowed).
+        value: String,
+    },
+    /// Delete a session var by name from the app's in-memory store.
+    DeleteSessionVar {
+        /// The var name to remove.
+        name: String,
+    },
     /// Ephemeral peek: the user pressed the reveal key on a
     /// masked row. The editor cannot resolve values itself (it is UI-only), so it
     /// asks the app to resolve the selected row's value through the normal
@@ -189,6 +225,8 @@ pub struct EnvEditorState {
     pub editing: Option<EnvFieldEdit>,
     /// In-progress profile-name prompt, if any.
     pub naming: Option<ProfileNameEdit>,
+    /// In-progress "add/set session var" prompt (Session group only), if any.
+    pub session_input: Option<SessionVarInput>,
     /// Inline status/error message shown in the editor footer.
     pub message: Option<String>,
     /// The active ephemeral secret peek, if any. At most one
@@ -262,6 +300,7 @@ impl EnvEditorState {
             selected_row: 0,
             editing: None,
             naming: None,
+            session_input: None,
             message: None,
             reveal: None,
             pending_close: false,
@@ -297,9 +336,21 @@ impl EnvEditorState {
         &self.scopes[self.selected_scope]
     }
 
-    /// Whether the selected scope is the read-only Session group.
+    /// Whether the selected scope is the (writable) Session group.
     fn selected_is_session(&self) -> bool {
         matches!(self.scope().kind, EnvScopeKind::Session)
+    }
+
+    /// The name of the currently-selected Session row (for a delete), or `None`
+    /// when the Session group is not selected or has no row under the cursor.
+    fn selected_session_var_name(&self) -> Option<String> {
+        if !self.selected_is_session() {
+            return None;
+        }
+        self.scope()
+            .vars
+            .get(self.selected_row)
+            .map(|(name, _)| name.clone())
     }
 
     /// Whether the row at `(selected_scope, row)` renders masked — i.e. the peek
@@ -727,7 +778,7 @@ impl EnvEditorState {
         }
         if self.selected_is_session() {
             return Some(format!(
-                "{name}: in-memory Session capture — resolves standalone; c clears"
+                "{name}: in-memory Session var — resolves standalone; a set · d delete · c clear"
             ));
         }
         if self.selected_is_inactive_profile() {

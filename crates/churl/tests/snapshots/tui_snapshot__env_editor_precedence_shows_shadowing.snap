@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 2211
 expression: rendered
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -14,7 +15,7 @@ expression: rendered
 │   ┃│PROFILES                  ││                                        │┃   │
 │   ┃│● dev                     ││                                        │┃   │
 │   ┃│                          ││                                        │┃   │
-│   ┃│SESSION (read-only)       ││                                        │┃───┘
+│   ┃│SESSION                   ││                                        │┃───┘
 │   ┃│  Session                 ││                                        │┃───┐
 │   ┃│                          ││                                        │┃   │
 │   ┃│                          ││                                        │┃   │

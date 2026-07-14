@@ -30,6 +30,9 @@ impl EnvEditorState {
         if self.pending_close {
             return self.handle_confirm_key(key);
         }
+        if self.session_input.is_some() {
+            return self.handle_session_input_key(key);
+        }
         if self.naming.is_some() {
             return self.handle_naming_key(key);
         }
@@ -92,16 +95,19 @@ impl EnvEditorState {
                 self.clamp_row();
                 EnvKeyOutcome::Consumed
             }
-            // Clear the read-only Session group's captures. Only meaningful while
-            // the Session scope is selected.
+            // The writable Session group: `a` set · `d` delete · `c` clear-all.
+            KeyCode::Char('a') if self.selected_is_session() => {
+                self.start_session_var_input();
+                EnvKeyOutcome::Consumed
+            }
+            KeyCode::Char('d') if self.selected_is_session() => self.delete_selected_session_var(),
             KeyCode::Char('c') if self.selected_is_session() => EnvKeyOutcome::ClearSession,
-            // The Session group is read-only: swallow new/rename/delete/activate
-            // with a message (navigation, save, and close still fall through).
-            KeyCode::Char('n') | KeyCode::Char('r') | KeyCode::Char('d') | KeyCode::Char('x')
+            // Profile-only keys don't apply to Session (a flat machine-local store,
+            // not a filesystem scope) — swallow with a hint.
+            KeyCode::Char('n') | KeyCode::Char('r') | KeyCode::Char('x')
                 if self.selected_is_session() =>
             {
-                self.message =
-                    Some("Session vars are read-only (run-populated) — c to clear".to_owned());
+                self.message = Some("Session: a set · d delete · c clear".to_owned());
                 EnvKeyOutcome::Consumed
             }
             KeyCode::Char('n') => {
@@ -164,20 +170,19 @@ impl EnvEditorState {
                 self.focus = EnvFocus::ScopeList;
                 EnvKeyOutcome::Consumed
             }
-            // The Session group's rows are read-only (run-populated, masked). Block
-            // add/delete/edit with a message; navigation + close still work.
-            KeyCode::Char('a')
-            | KeyCode::Char('n')
-            | KeyCode::Char('d')
-            | KeyCode::Enter
-            | KeyCode::Char('i')
-            | KeyCode::Char('r')
+            // The writable Session group: `a` set · `d` delete · `c` clear-all.
+            // The TOML-row editors (n / Enter / i / r) don't apply — swallow with a
+            // hint. `p` peek / `y` copy still fall through below.
+            KeyCode::Char('a') if self.selected_is_session() => {
+                self.start_session_var_input();
+                EnvKeyOutcome::Consumed
+            }
+            KeyCode::Char('d') if self.selected_is_session() => self.delete_selected_session_var(),
+            KeyCode::Char('c') if self.selected_is_session() => EnvKeyOutcome::ClearSession,
+            KeyCode::Char('n') | KeyCode::Enter | KeyCode::Char('i') | KeyCode::Char('r')
                 if self.selected_is_session() =>
             {
-                self.message = Some(
-                    "Session vars are read-only (run-populated) — h to scopes, c to clear"
-                        .to_owned(),
-                );
+                self.message = Some("Session: a set · d delete · c clear · p peek".to_owned());
                 EnvKeyOutcome::Consumed
             }
             KeyCode::Char('a') | KeyCode::Char('n') => {
@@ -282,6 +287,74 @@ impl EnvEditorState {
             KeyCode::Esc => {
                 self.naming = None;
                 EnvKeyOutcome::Consumed
+            }
+            _ => EnvKeyOutcome::Consumed,
+        }
+    }
+
+    /// Opens the two-step "add/set a session var" prompt (name → masked value).
+    fn start_session_var_input(&mut self) {
+        self.session_input = Some(SessionVarInput {
+            name: String::new(),
+            editor: LineEditor::new(""),
+            phase: SessionPhase::Name,
+        });
+    }
+
+    /// Emits a delete for the selected Session row, or a hint when none is under
+    /// the cursor.
+    fn delete_selected_session_var(&mut self) -> EnvKeyOutcome {
+        match self.selected_session_var_name() {
+            Some(name) => EnvKeyOutcome::DeleteSessionVar { name },
+            None => {
+                self.message = Some("no session var selected".to_owned());
+                EnvKeyOutcome::Consumed
+            }
+        }
+    }
+
+    /// Keys while the session-var prompt is open. Name phase → Enter advances to
+    /// the value phase (empty name is rejected, prompt stays open); value phase →
+    /// Enter emits [`EnvKeyOutcome::SetSessionVar`] (empty value allowed). Esc
+    /// cancels. The value is masked as typed by the renderer.
+    fn handle_session_input_key(&mut self, key: KeyEvent) -> EnvKeyOutcome {
+        let Some(input) = self.session_input.as_mut() else {
+            return EnvKeyOutcome::Consumed;
+        };
+        if input.editor.handle_key(key) {
+            return EnvKeyOutcome::Consumed;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.session_input = None;
+                EnvKeyOutcome::Consumed
+            }
+            KeyCode::Enter => {
+                let input = self
+                    .session_input
+                    .as_mut()
+                    .expect("session_input is Some in this handler");
+                match input.phase {
+                    SessionPhase::Name => {
+                        let name = input.editor.text().trim().to_owned();
+                        if name.is_empty() {
+                            // Fail loud: reject an empty name, keep the prompt open.
+                            self.message = Some("session var name must not be empty".to_owned());
+                            return EnvKeyOutcome::Consumed;
+                        }
+                        input.name = name;
+                        input.phase = SessionPhase::Value;
+                        input.editor = LineEditor::new("");
+                        EnvKeyOutcome::Consumed
+                    }
+                    SessionPhase::Value => {
+                        // Empty value is allowed (an explicit blank).
+                        let value = input.editor.text();
+                        let name = input.name.clone();
+                        self.session_input = None;
+                        EnvKeyOutcome::SetSessionVar { name, value }
+                    }
+                }
             }
             _ => EnvKeyOutcome::Consumed,
         }

@@ -9,7 +9,10 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use super::{EnvEditorState, EnvField, EnvFieldEdit, EnvFocus, EnvScopeKind, ProfileNameTarget};
+use super::{
+    EnvEditorState, EnvField, EnvFieldEdit, EnvFocus, EnvScopeKind, ProfileNameTarget,
+    SessionPhase, SessionVarInput,
+};
 use crate::tui::components::prompt;
 use crate::tui::theme::Theme;
 
@@ -48,8 +51,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &The
     render_var_rows(frame, right, state, theme);
     render_footer(frame, footer, state, theme);
 
-    // A profile-name prompt or the discard confirm sit on top.
-    if let Some(naming) = &state.naming {
+    // A session-var prompt, profile-name prompt, or the discard confirm sit on top.
+    if let Some(input) = &state.session_input {
+        render_session_input(frame, modal, input, theme);
+    } else if let Some(naming) = &state.naming {
         let title = match naming.target {
             ProfileNameTarget::New => "New profile",
             ProfileNameTarget::Rename(_) => "Rename profile",
@@ -92,7 +97,7 @@ fn render_scope_list(frame: &mut Frame, area: Rect, state: &EnvEditorState, them
             EnvScopeKind::Workspace => "WORKSPACE",
             EnvScopeKind::Collection { .. } => "COLLECTIONS",
             EnvScopeKind::Profile => "PROFILES",
-            EnvScopeKind::Session => "SESSION (read-only)",
+            EnvScopeKind::Session => "SESSION",
         };
         if last_group != Some(group) {
             if last_group.is_some() {
@@ -141,7 +146,7 @@ fn render_var_rows(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme:
 
     if scope.vars.is_empty() {
         let empty = if matches!(scope.kind, EnvScopeKind::Session) {
-            "(no session captures yet — run a sequence with a Session-target rule)"
+            "(no session vars — press a to add, or run a Session-target rule)"
         } else {
             "(no variables — press a to add)"
         };
@@ -270,6 +275,56 @@ fn field_with_cursor(edit: &EnvFieldEdit) -> String {
     out
 }
 
+/// Renders the two-step "add/set a session var" prompt over the modal: the name
+/// field (visible) then the value field (masked as typed — a session var is
+/// treated as a secret).
+fn render_session_input(frame: &mut Frame, area: Rect, input: &SessionVarInput, theme: &Theme) {
+    let (title, hint, masked) = match input.phase {
+        SessionPhase::Name => (" Session var · name ", "enter → value · esc cancel", false),
+        SessionPhase::Value => (
+            " Session var · value ",
+            "masked · empty allowed · enter save · esc cancel",
+            true,
+        ),
+    };
+    let [modal] = Layout::horizontal([Constraint::Length(50)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [modal] = Layout::vertical([Constraint::Length(5)])
+        .flex(Flex::Center)
+        .areas(modal);
+
+    frame.render_widget(Clear, modal);
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(theme.border_focused)
+        .title(title.to_owned())
+        .title_style(theme.title);
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let text = input.editor.text();
+    let cursor = input.editor.cursor();
+    let chars: Vec<char> = text.chars().collect();
+    let mut line = String::from("> ");
+    for (i, c) in chars.iter().enumerate() {
+        if i == cursor {
+            line.push('█');
+        }
+        line.push(if masked { '•' } else { *c });
+    }
+    if cursor >= chars.len() {
+        line.push('█');
+    }
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(line),
+            Line::styled(hint.to_owned(), theme.auth_mask),
+        ]),
+        inner,
+    );
+}
+
 /// Right-pads `text` to at least `width` display columns (char-count based;
 /// good enough for the ASCII-ish var names this aligns).
 fn pad(text: &str, width: usize) -> String {
@@ -311,22 +366,20 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &EnvEditorState, theme: &
     };
     let hints = if state.pending_close {
         "s save · d discard · esc stay".to_owned()
+    } else if state.session_input.is_some() {
+        "enter next/save · esc cancel".to_owned()
     } else if state.naming.is_some() {
         "enter commit · esc cancel".to_owned()
     } else if state.editing.is_some() {
         "enter commit · tab name/value · esc cancel".to_owned()
     } else if state.selected_is_session() {
-        // Read-only Session group: only view / clear / navigate.
+        // Writable Session group (in-memory, masked, never persisted).
         match state.focus {
             EnvFocus::ScopeList => {
-                format!(
-                    "{dirty}j/k move · l/enter view (read-only) · c clear session · w save · q close"
-                )
+                "j/k move · l/enter view · a set · d delete · c clear · q close".to_owned()
             }
             EnvFocus::VarRows => {
-                format!(
-                    "{dirty}j/k move · p peek · read-only (run-populated, masked) · h scopes · q close"
-                )
+                "j/k move · a set · d delete · c clear · p peek · h scopes · q close".to_owned()
             }
         }
     } else {

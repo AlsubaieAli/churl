@@ -5966,3 +5966,117 @@ fn duplicate_selected_endpoint_creates_sibling() {
     let n = count_toml(&dir.path().join("users"));
     assert_eq!(n, 2, "duplicate created a second endpoint file");
 }
+
+// --- M7.12 interactive set-session-var (env editor) ---
+
+/// Drives the env editor to the Session group and sets a var `name=value`
+/// through the real key seam (`G` to the Session scope, `a`, name, Enter, value,
+/// Enter).
+fn set_session_var(app: &mut App, name: &str, value: &str) {
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(k('G')).unwrap(); // jump to the last scope (Session)
+    app.handle_key(k('a')).unwrap(); // open the name prompt
+    for c in name.chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit name → value phase
+    for c in value.chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit value → SetSessionVar
+}
+
+#[test]
+fn set_session_var_resolves_standalone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    assert!(matches!(app.mode, Mode::EnvEditor(_)));
+    set_session_var(&mut app, "token", "abc123");
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("abc123")
+    );
+    // A standalone `{{token}}` resolves from the in-memory session store.
+    assert_eq!(app.build_env_resolver().substitute("{{token}}"), "abc123");
+}
+
+#[test]
+fn set_session_var_overwrite_is_last_write_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    set_session_var(&mut app, "token", "first");
+    set_session_var(&mut app, "token", "second");
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("second"),
+        "setting an existing name replaces it"
+    );
+}
+
+#[test]
+fn set_session_var_empty_name_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    app.handle_key(k('G')).unwrap();
+    app.handle_key(k('a')).unwrap();
+    // Enter with an empty name is fail-loud: nothing written, prompt stays open.
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.session_vars().is_empty(),
+        "no var created on empty name"
+    );
+    match &app.mode {
+        Mode::EnvEditor(ed) => assert!(
+            ed.session_input.is_some(),
+            "the name prompt stays open after an empty-name reject"
+        ),
+        _ => panic!("still in the env editor"),
+    }
+}
+
+#[test]
+fn delete_session_var_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    set_session_var(&mut app, "token", "abc");
+    assert!(!app.session_vars().is_empty());
+    // Back on the Session scope, `d` deletes the selected (only) session var.
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.session_vars().is_empty(),
+        "delete removed the session var"
+    );
+}
+
+#[test]
+fn session_var_never_touches_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let manifest = dir.path().join("churl.toml");
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    app.open_env_editor();
+    set_session_var(&mut app, "secret_token", "s3cr3t");
+    // The value lives only in RAM: no TOML on disk mentions it.
+    let after = std::fs::read_to_string(&manifest).unwrap();
+    assert_eq!(
+        before, after,
+        "churl.toml is byte-identical — nothing persisted"
+    );
+    assert!(
+        !dir.path().join("users").join("folder.toml").exists(),
+        "no folder.toml materialized for a session var"
+    );
+    assert_eq!(
+        app.session_vars().get("secret_token").map(String::as_str),
+        Some("s3cr3t"),
+        "the value is held in the in-memory store"
+    );
+}
