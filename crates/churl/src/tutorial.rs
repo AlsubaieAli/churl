@@ -62,6 +62,7 @@ pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
             name: "dev".to_owned(),
             vars: dev_vars,
         }],
+        ..Default::default()
     };
     save_workspace_manifest(&root, &ws)
         .with_context(|| format!("failed to write {}/churl.toml", root.display()))?;

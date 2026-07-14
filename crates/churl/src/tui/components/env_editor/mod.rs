@@ -243,6 +243,12 @@ pub struct EnvEditorState {
     snapshot_active_profile: Option<String>,
     /// CLI `--var` overrides (highest-precedence scope), for precedence display.
     cli_vars: BTreeMap<String, String>,
+    /// The manifest's proxy/cookies settings, carried through verbatim so a
+    /// var-only save never drops them (the editor doesn't touch these — they are
+    /// owned by the Options overlay — but `build_workspace` must round-trip them,
+    /// or the format-preserving merge would prune the on-disk keys).
+    ws_proxy: Option<String>,
+    ws_cookies: bool,
 }
 
 impl EnvEditorState {
@@ -307,6 +313,8 @@ impl EnvEditorState {
             snapshot_active_profile: active_profile.clone(),
             active_profile,
             cli_vars,
+            ws_proxy: manifest.proxy.clone(),
+            ws_cookies: manifest.cookies,
         })
     }
 
@@ -603,6 +611,10 @@ impl EnvEditorState {
             name: name.to_owned(),
             vars,
             profiles,
+            // Carried through verbatim — the env editor never edits these (the
+            // Options overlay owns them), but they must survive a var-only save.
+            proxy: self.ws_proxy.clone(),
+            cookies: self.ws_cookies,
         }
     }
 

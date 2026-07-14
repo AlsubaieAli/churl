@@ -375,6 +375,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             profile: app.active_profile.as_deref(),
             dirty,
             in_flight,
+            insecure: app.insecure_active(),
             history_failing: app.history_failing(),
             tick_count: app.tick_count,
             theme: &theme,
@@ -409,6 +410,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Prompt(PromptPurpose),
         Confirm(ConfirmPurpose),
         EnvEditor,
+        Options,
         SequenceEdit,
         SequenceRun,
         LoadRunner,
@@ -425,6 +427,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Prompt(purpose) => Overlay::Prompt(*purpose),
         Mode::Confirm(purpose) => Overlay::Confirm(*purpose),
         Mode::EnvEditor(_) => Overlay::EnvEditor,
+        Mode::Options(_) => Overlay::Options,
         // The active face lives in the (effective) `Mode::Sequence`
         // payload. While body-search is open over the Run-face Response region the
         // sequence mode is parked in `body_search_return` (= `effective_mode`), so
@@ -462,6 +465,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             // body-search, so it is always `app.mode`, never the parked one.
             if let Mode::EnvEditor(editor) = &app.mode {
                 env_editor::render(frame, main, editor, &theme);
+            }
+        }
+        Overlay::Options => {
+            if let Mode::Options(options) = &app.mode {
+                options::render(frame, main, options, &theme);
             }
         }
         Overlay::SequenceEdit => {

@@ -192,6 +192,11 @@ impl App {
                 b.response = ResponseState::Failed { error, meta };
             }
         }
+        // A send may have stored `Set-Cookie`s in the jar; persist it so cookies
+        // survive a restart. Best-effort and cheap (a tiny blob, one row).
+        if self.cookies_enabled {
+            self.persist_cookie_jar();
+        }
     }
 
     /// Stores highlighted viewport lines in the active buffer's cache, capping it

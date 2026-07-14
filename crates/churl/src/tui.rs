@@ -30,7 +30,12 @@ pub fn restore() {
 /// Builds the [`App`] (workspace from cwd, keymap + theme from global config,
 /// CLI `--var`/`--profile` overrides) and runs it until quit. Config, theme, and
 /// unknown-profile errors all surface before the alternate screen is entered.
-pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) -> Result<()> {
+pub async fn run(
+    cli_vars: BTreeMap<String, String>,
+    profile: Option<String>,
+    proxy: Option<String>,
+    insecure: bool,
+) -> Result<()> {
     let config = churl_core::config::load_global_config()?;
     let mut keymap = KeyMap::with_all_overrides(&config.keys, &config.key_overlays)?;
     if let Some(leader) = config.leader_key.as_deref() {
@@ -56,7 +61,7 @@ pub async fn run(cli_vars: BTreeMap<String, String>, profile: Option<String>) ->
     app.set_url_edit_mode(url_edit);
     app.set_secret_policy(secret_policy);
     app.set_keymap_warnings(keymap_warnings);
-    app.install_runtime(&config)?;
+    app.install_runtime(&config, proxy, insecure)?;
 
     let mut terminal = init();
     let result = app.run(&mut terminal).await;

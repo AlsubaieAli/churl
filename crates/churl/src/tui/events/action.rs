@@ -53,6 +53,10 @@ pub enum Action {
     SwitchProfile,
     /// Open the environments & variables editor (workspace/collection/profile vars).
     OpenEnvEditor,
+    /// Open the session Options overlay (proxy / TLS / cookies).
+    OpenOptions,
+    /// Toggle insecure-TLS (certificate verification off/on) for the session.
+    ToggleInsecure,
     /// Run the selected request sequence (opens the sequence surface, Run face).
     RunSequence,
     /// Edit the selected sequence, or create a new one (opens the sequence surface).
@@ -266,6 +270,16 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::Jump, "jump", "jump to pane"),
     (Action::SwitchProfile, "switch-profile", "switch profile"),
     (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
+    (
+        Action::OpenOptions,
+        "options",
+        "Options (proxy · TLS · cookies)",
+    ),
+    (
+        Action::ToggleInsecure,
+        "toggle-insecure",
+        "toggle insecure TLS (verify off/on)",
+    ),
     (Action::RunSequence, "run-sequence", "run sequence"),
     (Action::EditSequence, "edit-sequence", "add sequence"),
     (

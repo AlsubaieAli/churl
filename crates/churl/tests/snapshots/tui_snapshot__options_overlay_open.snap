@@ -1,0 +1,29 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1539
+expression: snapshot(&mut app)
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ users                   │└────────────────────────────────────────────────┘
+│           ┏ Options ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
+│           ┃▸ Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
+│           ┃  TLS verification  on                                ┃           │
+│           ┃  Cookies           off                               ┃           │
+│           ┃                                                      ┃           │
+│           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
+│           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃───────────┘
+│           ┃│                                                    │┃───────────┐
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃           │
+│           ┃└────────────────────────────────────────────────────┘┃           │
+│           ┃                                                      ┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · q close   ┃           │
+└───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

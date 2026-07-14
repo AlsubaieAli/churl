@@ -12,6 +12,7 @@ mod editing;
 mod env_editor;
 mod help;
 mod load_runner;
+mod options;
 mod response;
 mod send;
 mod sequence;

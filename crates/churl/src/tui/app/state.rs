@@ -125,6 +125,10 @@ pub enum Mode {
     /// selected endpoint with live results + latency stats. Owns its
     /// [`LoadRunnerState`] — the runner cannot exist without its data.
     LoadRunner(LoadRunnerState),
+    /// The session Options overlay: proxy / TLS-verification / cookie-jar
+    /// controls. Owns its [`OptionsState`] — the overlay cannot exist without its
+    /// data, so no parallel `Option` field is needed.
+    Options(OptionsState),
 }
 
 /// The state of the ONE open fuzzy-picker overlay, when `mode` is one of the

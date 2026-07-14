@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1521
+assertion_line: 1527
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -8,14 +8,14 @@ expression: snapshot(&mut app)
 ┃  ▸ users                   ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Request ───────────────────────────────────────┐
 ┃                            ┃│                                                │
-┃                            ┃│no endpoint selected                            │
-┃                            ┃│                                                │
-┃                            ┃│     ┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│no en┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃                            ┃│     ┃ Shift-n  new collection (choose location)┃
 ┃                            ┃│     ┃ Space  request picker                    ┃
 ┃                            ┃│     ┃ c  cancel request                        ┃
 ┃                            ┃│     ┃ e  toggle explorer sidebar               ┃
-┃                            ┃└─────┃ n  new endpoint (choose location)        ┃
+┃                            ┃│     ┃ k  toggle insecure TLS (verify off/on)   ┃
+┃                            ┃│     ┃ n  new endpoint (choose location)        ┃
+┃                            ┃└─────┃ o  Options (proxy · TLS · cookies)       ┃
 ┃                            ┃┌ Resp┃ p  switch profile                        ┃
 ┃                            ┃│no re┃ q  quit                                  ┃
 ┃                            ┃│     ┃ r  reload workspace from disk            ┃

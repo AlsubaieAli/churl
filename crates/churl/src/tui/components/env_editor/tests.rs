@@ -53,6 +53,8 @@ fn fixture() -> EnvEditorState {
         active_profile: None,
         snapshot_active_profile: None,
         cli_vars: BTreeMap::new(),
+        ws_proxy: None,
+        ws_cookies: false,
     }
     .with_snapshot()
 }
@@ -134,6 +136,8 @@ fn g_and_shift_g_jump_var_rows_top_and_bottom() {
         active_profile: None,
         snapshot_active_profile: None,
         cli_vars: BTreeMap::new(),
+        ws_proxy: None,
+        ws_cookies: false,
         reveal: None,
     }
     .with_snapshot();
@@ -334,6 +338,8 @@ fn save_grandfathers_pre_existing_secret_with_warning() {
         active_profile: None,
         snapshot_active_profile: None,
         cli_vars: BTreeMap::new(),
+        ws_proxy: None,
+        ws_cookies: false,
     }
     .with_snapshot();
     // Edit an unrelated var so the manifest is dirty and a write happens; the
@@ -421,6 +427,8 @@ fn save_does_not_grandfather_across_scope_location_collision() {
         active_profile: None,
         snapshot_active_profile: None,
         cli_vars: BTreeMap::new(),
+        ws_proxy: None,
+        ws_cookies: false,
     }
     .with_snapshot();
     // The NEW profile secret at the colliding flattened location
@@ -494,6 +502,8 @@ fn save_writes_all_three_scopes_and_reloads() {
         active_profile: None,
         snapshot_active_profile: None,
         cli_vars: BTreeMap::new(),
+        ws_proxy: None,
+        ws_cookies: false,
     }
     .with_snapshot();
     // Mutate one var in each scope.

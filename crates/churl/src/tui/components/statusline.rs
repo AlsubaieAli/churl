@@ -25,6 +25,10 @@ pub struct StatusCtx<'a> {
     pub dirty: bool,
     /// Whether a request is in flight (drives the spinner).
     pub in_flight: bool,
+    /// Whether TLS verification is OFF this session: draws a loud, error-styled
+    /// "⚠ TLS OFF" flag so an insecure session can never be mistaken for a secure
+    /// one — non-negotiable (R3 spirit, verify-off is a security downgrade).
+    pub insecure: bool,
     /// Whether history writes are currently failing: draws a sticky,
     /// error-styled "⚠ history not recording" flag that persists until a write
     /// succeeds — unlike the auto-expiring message row, so a persistent SQLite
@@ -65,6 +69,11 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
             ctx.theme.status_error,
         ));
     }
+    // Loud insecure-TLS indicator: steady error-styled flag whenever certificate
+    // verification is off for the session.
+    if ctx.insecure {
+        spans.push(Span::styled(" · ⚠ TLS OFF", ctx.theme.status_error));
+    }
     spans.push(Span::raw(tail));
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(ctx.theme.statusline),
@@ -93,6 +102,7 @@ mod tests {
                         profile: None,
                         dirty: false,
                         in_flight: false,
+                        insecure: false,
                         history_failing,
                         tick_count: 0,
                         theme: &theme,
