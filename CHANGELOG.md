@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/AlsubaieAli/churl/compare/v0.2.0...v0.3.0) - 2026-07-14
+
+### Added
+
+- unified creation, tree CRUD, and writable session vars (M7.12) ([#87](https://github.com/AlsubaieAli/churl/pull/87))
+- hierarchy model — nested collections + root-level endpoints (M7.9) ([#86](https://github.com/AlsubaieAli/churl/pull/86))
+- *(tui)* <leader>r reloads the workspace from disk ([#85](https://github.com/AlsubaieAli/churl/pull/85))
+- *(http)* cross-origin redirect policy that strips auth headers by default ([#83](https://github.com/AlsubaieAli/churl/pull/83))
+- *(secrets)* baseline-aware save-gate with grandfathering, request-wide coverage, and secret_policy ([#82](https://github.com/AlsubaieAli/churl/pull/82))
+- lifecycle & distribution — self-update, uninstall, version pinning ([#81](https://github.com/AlsubaieAli/churl/pull/81))
+- Windows installer + native Wayland clipboard, proven on a cross-platform CI matrix ([#80](https://github.com/AlsubaieAli/churl/pull/80))
+- *(import)* churl-native JSON import with auto-detect dispatch ([#79](https://github.com/AlsubaieAli/churl/pull/79))
+
+### Fixed
+
+- *(tui)* reliability nits — in-flight-on-quit history, sticky history-fail indicator, highlight-spawn degrade (R1.5 B) ([#72](https://github.com/AlsubaieAli/churl/pull/72))
+
+### Other
+
+- strip milestone/PR archaeology from code comments ([#78](https://github.com/AlsubaieAli/churl/pull/78))
+- *(tui)* extract response viewer state + geometry into child modules ([#77](https://github.com/AlsubaieAli/churl/pull/77))
+- restructure project docs for public release ([#73](https://github.com/AlsubaieAli/churl/pull/73))
+- *(tui)* cache response-view geometry to stop per-frame full-body recompute (R1.5 A3) ([#71](https://github.com/AlsubaieAli/churl/pull/71))
+- *(tui)* consolidate picker into a data-carrying Picker enum (R1.5 A2/H3) ([#70](https://github.com/AlsubaieAli/churl/pull/70))
+- *(tui)* fold sequence state into Mode::Sequence variant (R1.5 A2) ([#69](https://github.com/AlsubaieAli/churl/pull/69))
+- *(tui)* fold env_editor + load_runner state into Mode variants (R1.5 A2) ([#68](https://github.com/AlsubaieAli/churl/pull/68))
+- *(core,tui)* final module trim — app state/vars/workspace, env_editor edit, persistence merge/naming (M7.11) ([#66](https://github.com/AlsubaieAli/churl/pull/66))
+- *(tui)* split response/env_editor/events into child modules (M7.11) ([#65](https://github.com/AlsubaieAli/churl/pull/65))
+- *(tui)* extract send/sequence/editing/crud handlers to app/handlers/ (M7.11) ([#64](https://github.com/AlsubaieAli/churl/pull/64))
+- *(tui)* extract buffers/help/env_editor/load_runner/response handlers to app/handlers/ (M7.11) ([#63](https://github.com/AlsubaieAli/churl/pull/63))
+- *(tui)* split app.rs foundation — app/mod.rs + app/pure.rs + app/render.rs (M7.11) ([#62](https://github.com/AlsubaieAli/churl/pull/62))
+- *(tests)* extract inline test modules to sibling files (M7.11 Phase 0) ([#60](https://github.com/AlsubaieAli/churl/pull/60))
+
 ### Added
 
 - `churl update` — verified, reversible in-place self-update from the latest GitHub release
