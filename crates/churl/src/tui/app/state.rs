@@ -188,6 +188,36 @@ pub enum Picker {
     /// None / Basic / Bearer / ApiKey, addressed by the accepted item index
     /// directly (no side `Vec`).
     Auth { state: picker::PickerState },
+    /// The destination picker ([`Mode::Palette`]): a fuzzy list over every
+    /// collection node **including the root** (root first). `dirs[i]` is the target
+    /// directory for item `i` (the workspace root for the root entry); `purpose`
+    /// says what to do with the chosen destination (create here / move-to /
+    /// copy-to); `source` is the node being relocated (the endpoint file or
+    /// collection dir) for move/copy, `None` for a create. Shared by the
+    /// `<leader>n`/`<leader>N` create gestures and move-to / copy-to.
+    Destination {
+        state: picker::PickerState,
+        dirs: Vec<PathBuf>,
+        purpose: DestPurpose,
+        source: Option<PathBuf>,
+    },
+}
+
+/// What a [`Picker::Destination`] does once a target directory is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestPurpose {
+    /// Create a new endpoint in the chosen collection (then the name prompt).
+    CreateEndpoint,
+    /// Create a new (sub-)collection under the chosen collection (then the prompt).
+    CreateCollection,
+    /// Move the source endpoint into the chosen collection.
+    MoveEndpoint,
+    /// Copy the source endpoint into the chosen collection.
+    CopyEndpoint,
+    /// Move the source collection subtree under the chosen collection.
+    MoveCollection,
+    /// Copy the source collection subtree under the chosen collection.
+    CopyCollection,
 }
 
 impl Picker {
@@ -199,6 +229,7 @@ impl Picker {
             | Picker::Profile { state, .. }
             | Picker::Workspace { state, .. }
             | Picker::Sequence { state, .. }
+            | Picker::Destination { state, .. }
             | Picker::Auth { state } => state,
         }
     }
@@ -211,6 +242,7 @@ impl Picker {
             | Picker::Profile { state, .. }
             | Picker::Workspace { state, .. }
             | Picker::Sequence { state, .. }
+            | Picker::Destination { state, .. }
             | Picker::Auth { state } => state,
         }
     }
@@ -235,8 +267,6 @@ pub enum PromptPurpose {
     /// Destination path (inside the workspace) for a workspace export in the
     /// carried dialect.
     ExportWorkspace(JsonDialect),
-    /// A curl command to import as a new endpoint in the selected collection.
-    PasteCurl,
     /// Name for a new request sequence; opens the editor on the created file.
     NewSequence,
 }
@@ -260,7 +290,6 @@ impl PromptPurpose {
                 "Export workspace · Postman v2.1"
             }
             PromptPurpose::ExportWorkspace(JsonDialect::Native) => "Export workspace · churl JSON",
-            PromptPurpose::PasteCurl => "Paste curl",
             PromptPurpose::NewSequence => "New sequence",
         }
     }

@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 922
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐  Create user                                     
@@ -23,6 +24,6 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │
-│<leader>s a to add          ││                                                │
+│<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  REQUEST · demo · ? help · space leader · / search · : palette

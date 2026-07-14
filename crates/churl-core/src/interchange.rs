@@ -60,6 +60,11 @@ pub struct CollectionImport {
     pub requests: Vec<ImportedRequest>,
     /// Human-readable warnings (unsupported body modes, dropped variables, …).
     pub warnings: Vec<String>,
+    /// Top-level collection name → its ordering `seq`, when a churl-native import
+    /// carried a non-zero one. Empty for Postman (no per-collection order key —
+    /// order lives in array position). [`write_import`] applies these to the
+    /// created collections' `folder.toml`, so a native export round-trips ordering.
+    pub collection_seqs: std::collections::BTreeMap<String, u32>,
 }
 
 /// A summary of a [`write_import`] run, for the CLI/TUI to report.
@@ -148,6 +153,8 @@ pub fn import_postman_v21(json: &str) -> Result<CollectionImport, InterchangeErr
         name,
         requests: ctx.requests,
         warnings: ctx.warnings,
+        // Postman has no per-collection order key — order lives in array position.
+        collection_seqs: std::collections::BTreeMap::new(),
     })
 }
 
@@ -196,6 +203,7 @@ pub fn import_churl_native(json: &str) -> Result<CollectionImport, InterchangeEr
 
     let mut requests = Vec::new();
     let mut warnings = Vec::new();
+    let mut collection_seqs = std::collections::BTreeMap::new();
     if let Some(collections) = obj.get("collections").and_then(Value::as_array) {
         for (ci, collection) in collections.iter().enumerate() {
             let cname = collection
@@ -204,6 +212,13 @@ pub fn import_churl_native(json: &str) -> Result<CollectionImport, InterchangeEr
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("Imported")
                 .to_owned();
+            // A collection ordering key, when present and non-zero, round-trips
+            // the sibling order the exporter saw (applied by `write_import`).
+            if let Some(seq) = collection.get("seq").and_then(Value::as_u64)
+                && seq != 0
+            {
+                collection_seqs.insert(cname.clone(), seq as u32);
+            }
             let Some(endpoints) = collection.get("endpoints").and_then(Value::as_array) else {
                 continue;
             };
@@ -225,6 +240,7 @@ pub fn import_churl_native(json: &str) -> Result<CollectionImport, InterchangeEr
         name,
         requests,
         warnings,
+        collection_seqs,
     })
 }
 
@@ -644,6 +660,15 @@ pub fn write_import(
                 dir_owner.insert(dir.clone(), collection_name.clone());
             }
         }
+        // Apply a churl-native collection ordering key to the (freshly created or
+        // reused) directory, so a native export round-trips sibling order.
+        if let Some(&seq) = import.collection_seqs.get(collection_name)
+            && seq != 0
+        {
+            let mut meta = persistence::load_collection_meta(&dir)?;
+            meta.seq = seq;
+            persistence::save_collection_meta(&dir, &meta)?;
+        }
         for req in &groups[collection_name] {
             // `create_endpoint` makes a default file + name; overwrite it with
             // the imported request via `save_endpoint` (which runs the secrets
@@ -694,14 +719,17 @@ pub fn export_workspace(
     ws: &OpenWorkspace,
     dialect: JsonDialect,
 ) -> Result<String, InterchangeError> {
-    let mut collections: Vec<(String, Vec<Endpoint>)> = Vec::new();
+    let mut collections: Vec<(String, u32, Vec<Endpoint>)> = Vec::new();
     for collection in ws.collections()? {
+        let seq = persistence::load_collection_meta(&collection.path)
+            .map(|m| m.seq)
+            .unwrap_or(0);
         let endpoints = collection
             .endpoints()?
             .into_iter()
             .map(|(_, ep)| ep)
             .collect::<Vec<_>>();
-        collections.push((collection.name, endpoints));
+        collections.push((collection.name, seq, endpoints));
     }
     let name = ws.manifest().name.clone();
     export_collections(&name, &collections, dialect)
@@ -715,19 +743,22 @@ pub fn export_collection(
 ) -> Result<String, InterchangeError> {
     export_collections(
         name,
-        std::slice::from_ref(&(name.to_owned(), endpoints.to_vec())),
+        std::slice::from_ref(&(name.to_owned(), 0, endpoints.to_vec())),
         dialect,
     )
 }
 
-/// Shared export core over `(collection name, endpoints)` groups.
+/// Shared export core over `(collection name, seq, endpoints)` groups. `seq` is
+/// the collection's ordering key, carried into the churl-native envelope so a
+/// re-import preserves ordering (Postman has no equivalent — it is ignored there,
+/// order living in array position).
 fn export_collections(
     name: &str,
-    collections: &[(String, Vec<Endpoint>)],
+    collections: &[(String, u32, Vec<Endpoint>)],
     dialect: JsonDialect,
 ) -> Result<String, InterchangeError> {
     // Refuse to write any literal secret auth value (mirrors persistence).
-    for (_, endpoints) in collections {
+    for (_, _, endpoints) in collections {
         for endpoint in endpoints {
             let violations = auth_secret_violations(endpoint);
             if !violations.is_empty() {
@@ -748,14 +779,19 @@ fn export_collections(
 /// Builds the churl-native envelope: `{ churl_version, name, collections: [ {
 /// name, endpoints: [Endpoint...] } ] }` (lossless — endpoints reuse their
 /// serde derives).
-fn native_value(name: &str, collections: &[(String, Vec<Endpoint>)]) -> Value {
+fn native_value(name: &str, collections: &[(String, u32, Vec<Endpoint>)]) -> Value {
     let collections: Vec<Value> = collections
         .iter()
-        .map(|(cname, endpoints)| {
-            json!({
-                "name": cname,
-                "endpoints": endpoints,
-            })
+        .map(|(cname, seq, endpoints)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), json!(cname));
+            // Omit `seq = 0` so an all-default (pre-M7.12) corpus round-trips to
+            // byte-identical minimal JSON; a non-zero key round-trips ordering.
+            if *seq != 0 {
+                obj.insert("seq".into(), json!(seq));
+            }
+            obj.insert("endpoints".into(), json!(endpoints));
+            Value::Object(obj)
         })
         .collect();
     json!({
@@ -767,13 +803,13 @@ fn native_value(name: &str, collections: &[(String, Vec<Endpoint>)]) -> Value {
 
 /// Builds a Postman v2.1 document. Multiple collections become folder item
 /// groups; a single collection's endpoints sit at the top level.
-fn postman_value(name: &str, collections: &[(String, Vec<Endpoint>)]) -> Value {
+fn postman_value(name: &str, collections: &[(String, u32, Vec<Endpoint>)]) -> Value {
     let items: Vec<Value> = if collections.len() == 1 {
-        collections[0].1.iter().map(postman_item).collect()
+        collections[0].2.iter().map(postman_item).collect()
     } else {
         collections
             .iter()
-            .map(|(cname, endpoints)| {
+            .map(|(cname, _seq, endpoints)| {
                 json!({
                     "name": cname,
                     "item": endpoints.iter().map(postman_item).collect::<Vec<_>>(),

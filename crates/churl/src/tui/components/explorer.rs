@@ -264,14 +264,16 @@ impl ExplorerState {
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         // The root node is implicitly expanded; walk it without emitting a row for
-        // it. Root endpoints first (depth 0), then its child collections.
+        // it. Collections first, then the root's own endpoints — the SAME order as
+        // a nested collection (M7.12 render-order consistency fix: root used to
+        // list endpoints-then-collections, nested was collections-then-endpoints).
         if !self.collections.is_empty() {
-            self.push_endpoint_rows(0, &mut rows);
             if let Some(children) = self.collections[0].children.as_ref() {
                 for &ci in children {
                     self.push_collection_rows(ci, &mut rows);
                 }
             }
+            self.push_endpoint_rows(0, &mut rows);
         }
         rows
     }
@@ -1067,7 +1069,7 @@ pub fn render_sequences_pane(
             Line::from(Span::styled("No sequences yet", theme.statusline)),
             Line::from(""),
             Line::from(Span::styled(
-                "Press <leader>s a to add one",
+                "Press <leader>s n to add one",
                 theme.statusline,
             )),
         ]);
@@ -1102,7 +1104,7 @@ pub fn sequences_stub_summary(state: &ExplorerState, theme: &Theme) -> Line<'sta
     let text = match state.sequences.len() {
         // A zero-sequence peek shows an add affordance, not a dead "no
         // sequences" — matches the `<leader>` glyph convention used elsewhere.
-        0 => "<leader>s a to add".to_owned(),
+        0 => "<leader>s n to add".to_owned(),
         1 => "1 sequence".to_owned(),
         n => format!("{n} sequences"),
     };

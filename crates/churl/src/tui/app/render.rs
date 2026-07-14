@@ -447,7 +447,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             prompt::render_prompt(
                 frame,
                 main,
-                purpose.title(),
+                prompt_title(app, purpose),
                 &app.prompt_editor,
                 hint.as_deref(),
                 &theme,
@@ -709,10 +709,21 @@ fn render_collapsed_stub(
     frame.render_widget(Paragraph::new(summary), inner);
 }
 
+/// The prompt overlay title, flipping the shared name prompt to "Import from
+/// curl" the moment its buffer reads as a pasted curl command.
+fn prompt_title(app: &App, purpose: PromptPurpose) -> &'static str {
+    if purpose == PromptPurpose::NewEndpoint && app.prompt_buffer_is_curl() {
+        "Import from curl"
+    } else {
+        purpose.title()
+    }
+}
+
 /// The dim hint line under a prompt (the collection name to type for a
 /// typed-confirm delete; none otherwise).
 fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
     match purpose {
+        PromptPurpose::NewEndpoint => Some("name, or paste a curl to import".to_owned()),
         PromptPurpose::DeleteCollectionConfirm => app
             .explorer
             .selected_name()
@@ -721,7 +732,6 @@ fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
         PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
             Some("destination path (must stay inside the workspace)".to_owned())
         }
-        PromptPurpose::PasteCurl => Some("paste a curl command".to_owned()),
         _ => None,
     }
 }

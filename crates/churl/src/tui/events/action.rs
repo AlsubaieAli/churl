@@ -100,10 +100,31 @@ pub enum Action {
     NewEndpoint,
     /// Create a new collection.
     NewCollection,
+    /// Create a new endpoint via the destination picker (`<leader>n`): choose the
+    /// target collection or root explicitly, then the shared name prompt.
+    NewEndpointPick,
+    /// Create a new collection via the destination picker (`<leader>N`).
+    NewCollectionPick,
+    /// Create a new request sequence (`<leader>s n`): opens the name prompt, then
+    /// the editor on the created file.
+    NewSequence,
     /// Rename the selected endpoint or collection.
     Rename,
     /// Delete the selected endpoint or collection (with a confirm).
     Delete,
+    /// Move the selected node (endpoint or collection) into another collection or
+    /// the root, via the destination picker.
+    MoveTo,
+    /// Copy the selected node (endpoint or collection) into another collection or
+    /// the root, via the destination picker.
+    CopyTo,
+    /// Duplicate the selected node (endpoint / collection / sequence) in place
+    /// (`-N` suffix; recursive for a collection).
+    Duplicate,
+    /// Reorder the selected node up one slot among its siblings.
+    MoveUp,
+    /// Reorder the selected node down one slot among its siblings.
+    MoveDown,
     /// Delete the selected sequence in the Sequences sub-pane (with a y/n
     /// confirm). Parallels [`Action::Delete`] for the endpoints tree.
     DeleteSequence,
@@ -280,8 +301,24 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::RowEdit, "row-edit", "edit row"),
     (Action::NewEndpoint, "new-endpoint", "new endpoint"),
     (Action::NewCollection, "new-collection", "new collection"),
+    (
+        Action::NewEndpointPick,
+        "new-endpoint-pick",
+        "new endpoint (choose location)",
+    ),
+    (
+        Action::NewCollectionPick,
+        "new-collection-pick",
+        "new collection (choose location)",
+    ),
+    (Action::NewSequence, "new-sequence", "new sequence"),
     (Action::Rename, "rename", "rename"),
     (Action::Delete, "delete", "delete"),
+    (Action::MoveTo, "move-to", "move to…"),
+    (Action::CopyTo, "copy-to", "copy to…"),
+    (Action::Duplicate, "duplicate", "duplicate"),
+    (Action::MoveUp, "move-up", "reorder up"),
+    (Action::MoveDown, "move-down", "reorder down"),
     (Action::DeleteSequence, "delete-sequence", "delete sequence"),
     (
         Action::ToggleExplorer,

@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1479
+assertion_line: 1544
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -24,6 +24,6 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│              ┏ leader · load ━━━━━━━━━━━━━━━━━━┓
 ┌ Sequences ─────────────────┐│              ┃ Space  load test (pick endpoint)┃
-│<leader>s a to add          ││              ┃ c  load test endpoint           ┃
+│<leader>s n to add          ││              ┃ c  load test endpoint           ┃
 └────────────────────────────┘└──────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

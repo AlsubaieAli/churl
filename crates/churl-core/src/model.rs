@@ -154,6 +154,13 @@ fn is_default_placement(placement: &ApiKeyPlacement) -> bool {
     *placement == ApiKeyPlacement::default()
 }
 
+/// Returns whether an ordering key is the default `0`; used to omit `seq = 0`
+/// from serialized [`CollectionMeta`] so a var-less collection keeps a minimal
+/// (or absent) `folder.toml`.
+fn is_zero_seq(seq: &u32) -> bool {
+    *seq == 0
+}
+
 /// Auth on a request. Persisted as an internally-tagged `[request.auth]` table
 /// (`type = "basic" | "bearer" | "apikey"`).
 ///
@@ -270,11 +277,18 @@ pub struct Workspace {
 
 /// Optional per-collection metadata: the parsed form of a **sub-collection's**
 /// `folder.toml` (`persistence::FOLDER_FILENAME`, a reserved name and never
-/// listed as an endpoint). Currently just collection-level template variables —
-/// environment-independent defaults, no per-collection profiles (profiles are a
-/// root-only role; the root collection's meta is [`Workspace`], not this).
+/// listed as an endpoint). Carries collection-level template variables and an
+/// explicit ordering key. The root collection's meta is [`Workspace`], not this.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionMeta {
+    /// Explicit ordering key among sibling collections (lower sorts first).
+    /// Defaults to `0`; **omitted from serialized output when `0`** so a var-less
+    /// collection keeps an empty (or absent) `folder.toml` until it is reordered.
+    /// The loader sorts sibling collections by `(seq, name)`, so an all-`0` corpus
+    /// (every hand-written / pre-M7.12 collection) keeps its byte-identical
+    /// alphabetical order — back-compat by construction, no migration.
+    #[serde(default, skip_serializing_if = "is_zero_seq")]
+    pub seq: u32,
     /// Collection-level template variables under a `[vars]` table; omitted from
     /// serialized output when empty. A rung in the endpoint's ancestor-chain scope
     /// walk: it overrides its parent collections and the root, and is overridden by

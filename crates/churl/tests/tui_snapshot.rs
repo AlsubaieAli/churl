@@ -752,7 +752,7 @@ fn zero_sequence_workspace_shows_add_affordance() {
     let mut app = App::new(workspace, KeyMap::default()).unwrap();
     let rendered = snapshot(&mut app);
     assert!(
-        rendered.contains("<leader>s a to add"),
+        rendered.contains("<leader>s n to add"),
         "zero-sequence Sequences stub shows the add affordance: {rendered}"
     );
 }
@@ -778,7 +778,7 @@ fn focused_empty_sequences_pane_shows_expanded_empty_state() {
         "focused empty Sequences pane shows the expanded empty state: {rendered}"
     );
     assert!(
-        rendered.contains("Press <leader>s a to add one"),
+        rendered.contains("Press <leader>s n to add one"),
         "expanded empty state names the add gesture: {rendered}"
     );
 }
@@ -1021,8 +1021,20 @@ fn every_palette_command_dispatches() {
             Action::Save => expect_status(&mut app, "no endpoint to save"),
             Action::NewEndpoint => expect_status(&mut app, "no workspace open"),
             Action::NewCollection => expect_status(&mut app, "no workspace open"),
+            // The `<leader>n`/`<leader>N` create gestures open the destination
+            // picker, which needs a workspace; without one they warn.
+            Action::NewEndpointPick | Action::NewCollectionPick => {
+                expect_status(&mut app, "open a workspace first")
+            }
+            Action::NewSequence => expect_status(&mut app, "open a workspace first"),
             Action::Rename => expect_status(&mut app, "nothing selected to rename"),
             Action::Delete => expect_status(&mut app, "nothing selected to delete"),
+            // Tree CRUD (M7.12): with nothing selected in this fixture they warn.
+            Action::MoveTo | Action::CopyTo => expect_status(&mut app, "nothing selected to move"),
+            Action::Duplicate => expect_status(&mut app, "nothing selected to duplicate"),
+            Action::MoveUp | Action::MoveDown => {
+                expect_status(&mut app, "nothing selected to reorder")
+            }
             Action::SwitchProfile => {
                 assert!(
                     matches!(app.mode, Mode::Palette),

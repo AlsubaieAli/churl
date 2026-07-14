@@ -131,8 +131,11 @@ impl OpenWorkspace {
     }
 
     /// Lists the workspace's collections: every immediate subdirectory of the root
-    /// whose name does not start with `.`, sorted by name. Nothing is parsed —
-    /// endpoint files are read only when [`Collection::endpoints`] is called.
+    /// whose name does not start with `.`, sorted by **`(seq, name)`**. Each
+    /// collection's `seq` is read from its `folder.toml` (absent/malformed →
+    /// `0`, so the ordering degrades gracefully and a corpus with no explicit
+    /// `seq` keeps its byte-identical alphabetical order). Endpoint files are
+    /// still read only when [`Collection::endpoints`] is called.
     pub fn collections(&self) -> Result<Vec<Collection>, PersistenceError> {
         let read_err = |source| PersistenceError::Read {
             path: self.root.clone(),
@@ -148,13 +151,17 @@ impl OpenWorkspace {
             if name.starts_with('.') || name == SEQUENCES_DIRNAME || !path.is_dir() {
                 continue;
             }
-            collections.push(Collection {
-                name: name.to_owned(),
-                path,
-            });
+            let seq = load_collection_meta(&path).map(|m| m.seq).unwrap_or(0);
+            collections.push((
+                seq,
+                Collection {
+                    name: name.to_owned(),
+                    path,
+                },
+            ));
         }
-        collections.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(collections)
+        collections.sort_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| a.name.cmp(&b.name)));
+        Ok(collections.into_iter().map(|(_, c)| c).collect())
     }
 
     /// Loads every request sequence from the workspace's `sequences/` directory,
@@ -280,7 +287,8 @@ impl Collection {
     }
 
     /// Lists this collection's immediate sub-collections: every child directory
-    /// whose name does not start with `.`, sorted by name. Nothing is parsed.
+    /// whose name does not start with `.`, sorted by **`(seq, name)`** (each
+    /// child's `seq` read from its `folder.toml`, absent/malformed → `0`).
     ///
     /// Unlike [`OpenWorkspace::collections`] (the root), the reserved `sequences/`
     /// directory is **not** skipped here — `sequences` is reserved at the root
@@ -302,13 +310,17 @@ impl Collection {
             if name.starts_with('.') || !path.is_dir() {
                 continue;
             }
-            collections.push(Collection {
-                name: name.to_owned(),
-                path,
-            });
+            let seq = load_collection_meta(&path).map(|m| m.seq).unwrap_or(0);
+            collections.push((
+                seq,
+                Collection {
+                    name: name.to_owned(),
+                    path,
+                },
+            ));
         }
-        collections.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(collections)
+        collections.sort_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| a.name.cmp(&b.name)));
+        Ok(collections.into_iter().map(|(_, c)| c).collect())
     }
 
     /// Parses every `*.toml` file in the collection directory (excluding the

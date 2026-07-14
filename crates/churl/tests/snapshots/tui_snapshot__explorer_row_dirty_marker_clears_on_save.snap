@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 2045
 expression: dirty_rendered
 ---
 ┌ Explorer ──────────────────┐  List users ●                                    
@@ -23,6 +24,6 @@ expression: dirty_rendered
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │
-│<leader>s a to add          ││                                                │
+│<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  URL · demo · ● unsaved · w save · ? help · space leader · / search · : palette

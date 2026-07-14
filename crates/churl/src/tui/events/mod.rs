@@ -194,6 +194,12 @@ impl Default for KeyMap {
         overlay(PaneCtx::Explorer, key!(shift - n), Action::NewCollection);
         overlay(PaneCtx::Explorer, key!(r), Action::Rename);
         overlay(PaneCtx::Explorer, key!(d), Action::Delete);
+        // Reorder the selected node among its siblings: `K` up, `J` down (mnemonic
+        // "move the item", mirroring the sequence-editor Ctrl-j/Ctrl-k swap). `J`/`K`
+        // are free in the Explorer overlay. move-to/copy-to/duplicate stay
+        // palette-only (rare reorganization ops).
+        overlay(PaneCtx::Explorer, key!(shift - k), Action::MoveUp);
+        overlay(PaneCtx::Explorer, key!(shift - j), Action::MoveDown);
         // `s` switches focus/zoom between the endpoints tree and the sequences
         // sub-pane — a lawful in-pane move, only live when the left
         // column is focused. `s` is otherwise free in the Explorer overlay.
@@ -299,6 +305,12 @@ impl Default for KeyMap {
         // explorer); `r` is free at root (plain `r` is the Explorer-overlay
         // rename, a distinct non-leader state).
         root_bind(key!(r), LeaderEntry::Act(Action::Reload));
+        // Unified create gestures: `<leader>n` new endpoint, `<leader>N` new
+        // collection — each opens the destination picker (choose where), then the
+        // shared name prompt. `n`/`N` are free at root (the Explorer overlay `n`/`N`
+        // are cursor-context creates, a distinct non-leader state).
+        root_bind(key!(n), LeaderEntry::Act(Action::NewEndpointPick));
+        root_bind(key!(shift - n), LeaderEntry::Act(Action::NewCollectionPick));
         // Submenu descents (two-level which-key). The submenu names match the
         // seeded `submenus` keys below; config can point new keys at them or
         // create fresh submenus.
@@ -311,11 +323,14 @@ impl Default for KeyMap {
         // byte-identical to the former hardcoded `sub_*` maps.
         let mut submenus: HashMap<String, Submenu> = HashMap::new();
 
-        // `<leader>s …`: sequence actions (add / open / run).
+        // `<leader>s …`: sequence actions (new / open / run).
         let mut sequences = Submenu::new("sequences");
+        // `<leader>s n` creates a new sequence. Replaces `<leader>s a`, which
+        // opened the FIRST sequence (a `selected_sequence()`-always-0 bug) instead
+        // of creating one.
         sequences
             .binds
-            .insert(key!(a).normalized(), Action::EditSequence);
+            .insert(key!(n).normalized(), Action::NewSequence);
         // `<leader>s <leader>` (Space) is the single "find/open a sequence"
         // picker, mirroring `<leader><leader>` for endpoints (owner drive-test
         // 2026-07-10) — one key for one job; the former `o`/`f` binds are gone. A

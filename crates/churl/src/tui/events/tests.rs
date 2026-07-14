@@ -397,8 +397,13 @@ fn leader_submenu_lookups() {
         Some(Action::RunSequencePick)
     );
     assert_eq!(
+        // `<leader>s n` creates a new sequence (replaced the buggy `<leader>s a`).
+        keymap.leader_sub_lookup("sequences", press(KeyCode::Char('n'), KeyModifiers::NONE)),
+        Some(Action::NewSequence)
+    );
+    assert_eq!(
         keymap.leader_sub_lookup("sequences", press(KeyCode::Char('a'), KeyModifiers::NONE)),
-        Some(Action::EditSequence)
+        None
     );
     // `<leader>s <leader>` (Space) is the single sequence finder (mirrors
     // `<leader><leader>` for endpoints); the former `o`/`f` binds are gone
@@ -517,8 +522,8 @@ fn leader_submenu_table_parses() {
     );
     // Defaults in the submenu survive.
     assert_eq!(
-        keymap.leader_sub_lookup("sequences", press(KeyCode::Char('a'), KeyModifiers::NONE)),
-        Some(Action::EditSequence)
+        keymap.leader_sub_lookup("sequences", press(KeyCode::Char('n'), KeyModifiers::NONE)),
+        Some(Action::NewSequence)
     );
 }
 

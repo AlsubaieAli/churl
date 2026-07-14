@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 958
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -11,9 +12,9 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │                            ││                                                │
 │                            ││                                                │
-│                            ││                                                │
 │              ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
 │              ┃> Update user█                                  ┃              │
+│              ┃name, or paste a curl to import                 ┃              │
 │              ┃                                                ┃──────────────┘
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
 │                            ││no response yet                                 │
@@ -23,6 +24,6 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │
-│<leader>s a to add          ││                                                │
+│<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

@@ -63,6 +63,19 @@ impl App {
             .insert(name, value);
     }
 
+    /// Deletes a single session var by name from the current workspace's in-memory
+    /// store (the env-editor Session group's `d` action). Returns whether a var was
+    /// removed. In-memory only — never persisted.
+    pub(in crate::tui::app) fn delete_session_var(&mut self, name: &str) -> bool {
+        let Some(key) = self.session_key() else {
+            return false;
+        };
+        match self.session_vars.get_mut(&key) {
+            Some(map) => map.remove(name).is_some(),
+            None => false,
+        }
+    }
+
     /// Clears the current workspace's Session captures (the env-editor Session
     /// group's clear action). Returns whether anything was cleared.
     pub(in crate::tui::app) fn clear_session_vars(&mut self) -> bool {

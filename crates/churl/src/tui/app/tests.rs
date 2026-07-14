@@ -2333,8 +2333,8 @@ fn focused_empty_sequences_pane_is_not_a_dead_end() {
     assert_eq!(app.left_active, LeftPane::Endpoints);
 }
 
-/// Note #3 — the add path works from the focused-empty pane: `<leader>s a`
-/// (`EditSequence`) opens the new-sequence prompt (the add entry point) with
+/// Note #3 — the create path works from the focused-empty pane: `<leader>s n`
+/// (`NewSequence`) opens the new-sequence prompt (the create entry point) with
 /// zero sequences, and none of the in-pane nav keys panic on an empty list.
 #[test]
 fn empty_sequences_pane_add_and_nav_never_panic() {
@@ -2357,12 +2357,13 @@ fn empty_sequences_pane_add_and_nav_never_panic() {
     assert_eq!(app.explorer.seq_cursor(), 0, "cursor stays pinned at 0");
     assert!(app.explorer.selected_sequence().is_none());
 
-    // `<leader>s a` (EditSequence) reaches the same add entry point.
+    // `<leader>s n` (NewSequence) is the create entry point (it replaced the
+    // buggy `<leader>s a`, which opened the first sequence instead of creating).
     app.mode = Mode::Normal;
-    app.dispatch(Action::EditSequence, None).unwrap();
+    app.dispatch(Action::NewSequence, None).unwrap();
     assert!(
         matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)),
-        "<leader>s a opens the add-sequence prompt from the empty pane"
+        "<leader>s n opens the new-sequence prompt"
     );
     // `r` (RunSequence) with nothing selected is a safe no-op (no panic).
     app.mode = Mode::Normal;
@@ -5718,5 +5719,472 @@ fn m79_root_endpoint_sees_only_root_vars() {
         resolver.substitute("{{who}}"),
         "root",
         "a root endpoint resolves only the root collection's vars"
+    );
+}
+
+// --- M7.12 creation gestures + curl auto-detect ---
+
+/// Number of `*.toml` files directly under `dir` (endpoint/manifest files).
+fn count_toml(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+        .count()
+}
+
+/// `<leader>n` opens the destination picker (root first), not a bare name prompt.
+#[test]
+fn leader_new_endpoint_opens_destination_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::NewEndpointPick, None).unwrap();
+    assert!(matches!(app.mode, Mode::Palette));
+    match &app.picker {
+        Some(Picker::Destination { dirs, purpose, .. }) => {
+            assert_eq!(*purpose, DestPurpose::CreateEndpoint);
+            assert_eq!(
+                dirs.first(),
+                Some(&dir.path().to_path_buf()),
+                "root is first"
+            );
+            assert!(
+                dirs.iter().any(|d| d.ends_with("users")),
+                "collections listed"
+            );
+        }
+        other => panic!("expected a destination picker, got {other:?}"),
+    }
+}
+
+/// `<leader>n` → pick root → name prompt → the endpoint lands at the chosen root.
+#[test]
+fn destination_picker_creates_endpoint_at_chosen_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::NewEndpointPick, None).unwrap();
+    // Accept the first destination (root).
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    assert!(
+        app.pending_create_dir.is_some(),
+        "picked destination carried"
+    );
+    app.prompt_editor = LineEditor::new("health");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        dir.path().join("health.toml").exists(),
+        "endpoint created at the picked root"
+    );
+    assert!(app.pending_create_dir.is_none(), "destination consumed");
+}
+
+/// The shared name prompt auto-detects a pasted curl: it imports + auto-names the
+/// endpoint instead of creating a blank one.
+#[test]
+fn name_prompt_auto_imports_pasted_curl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    app.prompt_editor = LineEditor::new("curl https://api.test/health");
+    assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Lands in the cursor's collection (the `users` row), auto-named `/health`.
+    let file = dir.path().join("users").join("health.toml");
+    assert!(
+        file.exists(),
+        "curl imported + auto-named from the URL path"
+    );
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "https://api.test/health");
+}
+
+/// A curl that fails to parse is fail-loud: nothing is created and the prompt
+/// stays open with the buffer intact.
+#[test]
+fn name_prompt_curl_parse_failure_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let before = count_toml(dir.path());
+    app.begin_new_endpoint();
+    app.prompt_editor = LineEditor::new("curl"); // no URL → parse error
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "prompt stays open on a curl parse failure"
+    );
+    assert_eq!(count_toml(dir.path()), before, "no endpoint created");
+}
+
+/// The retired `PasteCurl` action is now an alias that opens the unified
+/// new-endpoint prompt (which auto-detects the pasted curl).
+#[test]
+fn paste_curl_action_opens_unified_new_endpoint_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::PasteCurl, None).unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "PasteCurl aliases the unified new-endpoint prompt"
+    );
+}
+
+// --- M7.12 tree CRUD wiring ---
+
+/// Reorder down on a selected endpoint swaps its `seq` with the next sibling.
+#[test]
+fn move_down_reorders_selected_endpoint_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let users = dir.path().join("users");
+    persistence::create_endpoint(&users, "beta").unwrap(); // seq 1, after get (seq 0)
+    app.reload_explorer().unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the first endpoint under `users` (Get user)
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.dispatch(Action::MoveDown, None).unwrap();
+    let names: Vec<String> = persistence::Collection {
+        name: "users".into(),
+        path: users.clone(),
+    }
+    .endpoints()
+    .unwrap()
+    .into_iter()
+    .map(|(_, e)| e.name)
+    .collect();
+    assert_eq!(
+        names,
+        vec!["beta", "Get user"],
+        "endpoint order swapped on disk"
+    );
+}
+
+/// Reorder up at the top of a group reports the edge instead of a silent no-op.
+#[test]
+fn reorder_up_at_top_reports_already_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    persistence::create_endpoint(&dir.path().join("users"), "beta").unwrap();
+    app.reload_explorer().unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the first endpoint
+    app.dispatch(Action::MoveUp, None).unwrap();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("already first")
+    );
+}
+
+/// Move-to an endpoint (app handler) relocates the file and rewrites the
+/// sequence steps that referenced it.
+#[test]
+fn relocate_endpoint_move_rewrites_sequence_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    let archive = persistence::create_collection(root, "archive", root).unwrap();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    let src = root.join("users").join("get.toml");
+    app.relocate_endpoint(src.clone(), archive.clone(), true)
+        .unwrap();
+    assert!(!src.exists(), "source endpoint moved away");
+    assert!(archive.join("get.toml").exists(), "endpoint at destination");
+    let seq = persistence::load_sequence(&root.join("sequences/flow.toml")).unwrap();
+    assert_eq!(
+        seq.steps[0].endpoint, "archive/get.toml",
+        "referencing step repointed by the move"
+    );
+}
+
+/// Copy-to leaves the original in place and never rewrites references.
+#[test]
+fn relocate_endpoint_copy_keeps_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    let archive = persistence::create_collection(root, "archive", root).unwrap();
+    let src = root.join("users").join("get.toml");
+    app.relocate_endpoint(src.clone(), archive.clone(), false)
+        .unwrap();
+    assert!(src.exists(), "copy leaves the original endpoint");
+    assert!(
+        archive.join("get.toml").exists(),
+        "copy present at destination"
+    );
+}
+
+/// Render-order fix: collections render before a node's own endpoints at the
+/// root, matching the nested order.
+#[test]
+fn root_renders_collections_before_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    std::fs::create_dir(root.join("zed")).unwrap();
+    std::fs::write(
+        root.join("zed/x.toml"),
+        "name = \"X\"\n\n[request]\nmethod = \"GET\"\nurl = \"\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("aaa.toml"),
+        "name = \"Aaa\"\n\n[request]\nmethod = \"GET\"\nurl = \"\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(root).unwrap();
+    let app = App::new(ws, KeyMap::default()).unwrap();
+    let rows = app.explorer.rows();
+    let coll_idx = rows.iter().position(|r| r.kind == RowKind::Collection);
+    let ep_idx = rows.iter().position(|r| r.kind == RowKind::Endpoint);
+    assert_eq!(rows[0].name, "zed", "the collection sorts first");
+    assert!(
+        coll_idx < ep_idx,
+        "collections render before root-level endpoints"
+    );
+}
+
+/// Duplicate on a selected endpoint creates a suffixed sibling in the same
+/// collection.
+#[test]
+fn duplicate_selected_endpoint_creates_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the endpoint under `users`
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.dispatch(Action::Duplicate, None).unwrap();
+    let n = count_toml(&dir.path().join("users"));
+    assert_eq!(n, 2, "duplicate created a second endpoint file");
+}
+
+// --- M7.12 interactive set-session-var (env editor) ---
+
+/// Drives the env editor to the Session group and sets a var `name=value`
+/// through the real key seam (`G` to the Session scope, `a`, name, Enter, value,
+/// Enter).
+fn set_session_var(app: &mut App, name: &str, value: &str) {
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(k('G')).unwrap(); // jump to the last scope (Session)
+    app.handle_key(k('a')).unwrap(); // open the name prompt
+    for c in name.chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit name → value phase
+    for c in value.chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit value → SetSessionVar
+}
+
+#[test]
+fn set_session_var_resolves_standalone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    assert!(matches!(app.mode, Mode::EnvEditor(_)));
+    set_session_var(&mut app, "token", "abc123");
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("abc123")
+    );
+    // A standalone `{{token}}` resolves from the in-memory session store.
+    assert_eq!(app.build_env_resolver().substitute("{{token}}"), "abc123");
+}
+
+#[test]
+fn set_session_var_overwrite_is_last_write_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    set_session_var(&mut app, "token", "first");
+    set_session_var(&mut app, "token", "second");
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("second"),
+        "setting an existing name replaces it"
+    );
+}
+
+#[test]
+fn set_session_var_empty_name_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    app.handle_key(k('G')).unwrap();
+    app.handle_key(k('a')).unwrap();
+    // Enter with an empty name is fail-loud: nothing written, prompt stays open.
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.session_vars().is_empty(),
+        "no var created on empty name"
+    );
+    match &app.mode {
+        Mode::EnvEditor(ed) => assert!(
+            ed.session_input.is_some(),
+            "the name prompt stays open after an empty-name reject"
+        ),
+        _ => panic!("still in the env editor"),
+    }
+}
+
+#[test]
+fn delete_session_var_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_env_editor();
+    set_session_var(&mut app, "token", "abc");
+    assert!(!app.session_vars().is_empty());
+    // Back on the Session scope, `d` deletes the selected (only) session var.
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.session_vars().is_empty(),
+        "delete removed the session var"
+    );
+}
+
+/// Every regular file under `dir`, recursively.
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_files(&p));
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn session_var_never_touches_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    app.open_env_editor();
+    let k = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    // Edit a REAL workspace var so the forced save below actually writes churl.toml
+    // (a no-change save would write nothing and prove nothing).
+    app.handle_key(k('l')).unwrap(); // ScopeList → VarRows on the Workspace scope
+    app.handle_key(k('a')).unwrap(); // add row → name edit
+    for c in "wsvar".chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit name → value edit
+    for c in "wsval".chars() {
+        app.handle_key(k(c)).unwrap();
+    }
+    app.handle_key(enter).unwrap(); // commit value
+    app.handle_key(k('h')).unwrap(); // back to ScopeList
+    // Stash a session secret, then force a full save (`w`).
+    set_session_var(&mut app, "sekret_token", "s3cr3tV4LUE");
+    app.handle_key(k('w')).unwrap();
+    // (a) the workspace var was saved; the session name/value never reach churl.toml.
+    let manifest = std::fs::read_to_string(root.join("churl.toml")).unwrap();
+    assert!(manifest.contains("wsvar"), "the workspace var was saved");
+    assert!(
+        !manifest.contains("sekret_token") && !manifest.contains("s3cr3tV4LUE"),
+        "no session name/value in churl.toml: {manifest}"
+    );
+    // (b) the session name AND value appear in NO file anywhere in the workspace.
+    for path in walk_files(root) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            assert!(
+                !text.contains("sekret_token"),
+                "session var NAME leaked into {path:?}"
+            );
+            assert!(
+                !text.contains("s3cr3tV4LUE"),
+                "session var VALUE leaked into {path:?}"
+            );
+        }
+    }
+    assert_eq!(
+        app.session_vars().get("sekret_token").map(String::as_str),
+        Some("s3cr3tV4LUE"),
+        "the value is held only in the in-memory store"
+    );
+}
+
+/// A rename whose sequence-step rewrite fails surfaces the error (fail-loud) —
+/// not a false "renamed" success with a stranded sequence.
+#[cfg(unix)]
+#[test]
+fn rename_surfaces_sequence_rewrite_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    // sequences/ read-only: the rename lands, but the step rewrite's save fails.
+    std::fs::set_permissions(
+        root.join("sequences"),
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1;
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.commit_rename("fetched".to_owned()).unwrap();
+    std::fs::set_permissions(
+        root.join("sequences"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let msg = app
+        .message
+        .as_ref()
+        .map(|m| m.text.as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.starts_with("error:"),
+        "the rename surfaces the rewrite error rather than a false success: {msg:?}"
+    );
+}
+
+/// Renaming an endpoint rewrites the sequence steps that referenced it (closing
+/// the latent rename-breaks-sequences bug).
+#[test]
+fn rename_endpoint_rewrites_referencing_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    // Select the endpoint under `users`, then rename it.
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1;
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.commit_rename("fetched".to_owned()).unwrap();
+    let seq = persistence::load_sequence(&root.join("sequences/flow.toml")).unwrap();
+    assert_eq!(
+        seq.steps[0].endpoint, "users/fetched.toml",
+        "referencing step repointed by the rename"
     );
 }

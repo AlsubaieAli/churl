@@ -19,6 +19,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 - Concurrent load testing — fire throttled batches with live stats and bounded, memory-safe retention.
 - Response viewer polish — JSON pretty-printing, fold/wrap, in-viewer search, line-number gutter, control-char/ANSI sanitizing.
 - Navigation & keymap unification — a 4-region Tab model, jump-to-pane, and a fully data-driven remappable keymap with load-time conflict warnings.
+- Unified creation & tree CRUD — one `<leader>n`/`<leader>N` gesture (destination picker → name prompt, with a pasted curl auto-detected and imported), `K`/`J` reorder, and move-to / copy-to / duplicate across the recursive collection tree (per-collection `seq` ordering; a move rewrites referencing sequence steps). Plus a writable in-memory Session var group in the env editor (`a` set / `d` delete / `c` clear, masked, never persisted).
 - Durability hardening — atomic saves, SQLite WAL + migration locking, comment-preserving TOML merges, reserved-name guards, and bounded memory/disk growth.
 - Cross-platform proof — macOS + Windows CI matrix, `cargo-deny`, `install.ps1`, native Wayland clipboard.
 
@@ -37,7 +38,6 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 ## Planned ⏳
 
 - **Nested collections & root-level endpoints** — the workspace becomes one recursive collection tree (the root *is* a collection): collections nest to arbitrary depth and endpoints can live directly at the root (today the tree is one level deep and every endpoint lives inside a collection). Variables inherit down the tree (child overrides parent); existing workspaces keep working unchanged. (F)
-- **Unified creation flow** — one `<leader>n` gesture to create a collection, endpoint, or sequence (from the root or inside any collection). Follows the hierarchy change, since creation targets the tree. (F)
 - **Cookies + proxy** — cookie-jar persistence and HTTP(S) proxy support. (F)
 
 ## Exploring 🔭

@@ -85,7 +85,7 @@ pub fn endpoint_to_toml(ep: &Endpoint) -> Result<String, PersistenceError> {
 /// endpoint `seq` (plain +1 — the corpus uses no fixed step), or `0` when the
 /// collection is empty. Unreadable/malformed files are ignored here (an empty
 /// collection and a broken one both start at `0`; broken files surface on load).
-fn next_seq(dir: &Path) -> u32 {
+pub(super) fn next_seq(dir: &Path) -> u32 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
