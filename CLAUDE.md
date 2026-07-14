@@ -94,11 +94,17 @@ crates/
       history.rs           # rusqlite HistoryStore, user_version migrations (append-only); WAL + busy_timeout +
                            #   BEGIN IMMEDIATE migration lock; a SEPARATE load_batches table (LoadBatchSummary) —
                            #   load runs write one summary row there, never to history (structural non-flooding);
-                           #   prune-on-insert row caps
+                           #   prune-on-insert row caps; migration 5 (M8): cookies table (per-workspace jar_json blob)
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
-                           #   Response.truncated; build_client(timeout); runtime-agnostic (no AbortHandle in core);
-                           #   applies AuthWire effects (enabled user header with the same name wins)
-      import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error)
+                           #   Response.truncated; build_client(timeout) → build_client_with(&ClientConfig
+                           #   {timeout,proxy,insecure,cookies}) (M8: one client seam; proxy=Proxy::all,
+                           #   insecure=danger_accept_invalid_certs, cookies=cookie_provider); runtime-agnostic
+                           #   (no AbortHandle in core); applies AuthWire effects (user header of same name wins)
+      cookies.rs           # ChurlCookieJar (M8): RwLock<cookie_store::CookieStore> impl of reqwest CookieStore;
+                           #   RFC 6265 origin scoping (no cross-origin leak); to_json/load_json (persistent only),
+                           #   list/delete/clear for the Options overlay + `churl cookies` CLI
+      import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error;
+                           #   -x/--proxy → import note, -k/--insecure → session-scoped note, neither persisted)
       export.rs            # Endpoint → curl command (shlex::try_quote; round-trip contract with import)
       pin.rs               # optional `.churl-version` workspace pin (pure: discover/parse/compare,
                            #   semver-aware w/ exact-string fallback); warn-only, the bin displays it
@@ -112,24 +118,25 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive): global --var/--profile, subcommands (import, keymaps, tutorial,
-                           #   update, uninstall) | TUI; #[tokio::main]
+      main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k, subcommands (import, keymaps,
+                           #   cookies list|clear, tutorial, update, uninstall) | TUI; #[tokio::main]
       tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
       update.rs            # churl update: verified self-replace from GitHub releases (self_replace crate);
                            #   pure target→asset/version-compare/checksum fns, network+swap bin-only
       uninstall.rs         # churl uninstall: binary by default, config+state behind --purge (pure removal_plan)
-      tui.rs               # terminal init/restore + run(cli_vars, profile) entry point (thin);
+      tui.rs               # terminal init/restore + run(cli_vars, profile, proxy, insecure) entry point (thin);
                            #   warns once on a `.churl-version` mismatch at workspace load
       tui/
         app/               # App state + orchestration (directory module; mod.rs is the spine)
           mod.rs           # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor/
-                           #   Sequence/LoadRunner — each mode owns its state in-variant)/AppMsg (incl. SequenceStep,
+                           #   Sequence/LoadRunner/Options — each mode owns its state in-variant)/AppMsg (incl. SequenceStep,
                            #   LoadStarted/LoadResult); Picker enum (data-carrying, one variant per picker kind);
                            #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
                            #   lookup_ctx; tokio::select! loop + event loop; send-time {{var}} resolution,
                            #   profile switching, Theme; send/cancel, history, highlight cache
           handlers/        # per-concern key/action handlers: buffers, crud, editing, env_editor, help,
-                           #   load_runner, response, send, sequence, vars, workspace (+ mod.rs)
+                           #   load_runner, options (M8: overlay + <leader>k toggle + client rebuild + jar persist),
+                           #   response, send, sequence, vars, workspace (+ mod.rs)
           render.rs        # the render layer (render + leader popup / collapsed-stub / prompt / confirm helpers)
           state.rs         # pure state types
           pure.rs          # self-free helpers (query split/decode, auth-tab + export-path helpers)
@@ -152,6 +159,8 @@ crates/
                            #   env_editor/ (environments & vars editor: split-view over workspace/collection/profile scopes
                            #     + a read-only masked Session group — profile CRUD, dirty/discard guard, secret mask+refuse,
                            #     live precedence display; core stays UI-free; `p` ephemeral peek reveals a masked value + `y` copies it),
+                           #   options/ (M8 session Options overlay: proxy/TLS/cookies rows + cookie list; mod.rs state +
+                           #     render.rs + edit.rs, mirrors env_editor; UI-only, emits OptionsOutcome the app applies),
                            #   picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump (pane-only jump labels), statusline,
                            #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors),
