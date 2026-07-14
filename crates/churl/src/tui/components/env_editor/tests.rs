@@ -307,6 +307,87 @@ fn save_refuses_new_literal_secret() {
 }
 
 #[test]
+fn refused_credentialed_proxy_save_masks_credentials_in_message() {
+    // A hand-edited churl.toml with a credentialed proxy: a var-only save is
+    // refused (correct), and the on-screen message must NOT echo the password.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n",
+            "proxy = \"http://alice:hunter2@proxy.local:3128\"\n\n",
+            "[vars]\n",
+            "base_url = \"https://api.example.com\"\n",
+        ),
+    )
+    .unwrap();
+    let ws = OpenWorkspace::open(dir.path()).unwrap();
+    let mut s =
+        EnvEditorState::from_workspace(&ws, None, BTreeMap::new(), &BTreeMap::new()).unwrap();
+    s.scopes[0].vars[0].1 = "https://changed.example.com".into();
+
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
+    let EnvSaveResult::Failed(msg) = &result else {
+        panic!("expected Failed on a credentialed proxy, got {result:?}");
+    };
+    assert!(
+        !msg.contains("hunter2") && !msg.contains("alice:hunter2"),
+        "the refusal message leaked proxy credentials: {msg}"
+    );
+    assert!(
+        msg.contains("***"),
+        "message should show the masked proxy: {msg}"
+    );
+}
+
+#[test]
+fn var_only_save_preserves_proxy_and_cookies() {
+    // The prune-trap regression: a var-only save must round-trip the manifest's
+    // proxy + cookies through `build_workspace`, or the format-preserving merge
+    // would prune the on-disk keys (they'd be absent from the rebuilt struct).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("churl.toml"),
+        concat!(
+            "name = \"demo\"\n",
+            "proxy = \"http://proxy.local:3128\"\n",
+            "cookies = true\n\n",
+            "[vars]\n",
+            "base_url = \"https://api.example.com\"\n",
+        ),
+    )
+    .unwrap();
+    let ws = OpenWorkspace::open(dir.path()).unwrap();
+    let mut s =
+        EnvEditorState::from_workspace(&ws, None, BTreeMap::new(), &BTreeMap::new()).unwrap();
+    // A var-only edit (change the workspace base_url value).
+    s.scopes[0].vars[0].1 = "https://changed.example.com".into();
+    assert!(s.is_dirty(), "the value edit must dirty the manifest scope");
+
+    let result = s.save(dir.path(), "demo", SecretPolicy::Strict);
+    assert!(
+        matches!(result, EnvSaveResult::Ok { .. }),
+        "var-only save must succeed: {result:?}"
+    );
+
+    // Both non-var manifest keys survived the save.
+    let reloaded = load_workspace_manifest(dir.path()).unwrap();
+    assert_eq!(
+        reloaded.proxy.as_deref(),
+        Some("http://proxy.local:3128"),
+        "proxy must survive a var-only save"
+    );
+    assert!(
+        reloaded.cookies,
+        "cookies flag must survive a var-only save"
+    );
+    assert_eq!(
+        reloaded.vars.get("base_url").map(String::as_str),
+        Some("https://changed.example.com")
+    );
+}
+
+#[test]
 fn save_grandfathers_pre_existing_secret_with_warning() {
     // A secret literal already on disk is grandfathered: an unrelated edit saves
     // (with a warning naming it), rather than refusing the whole write.

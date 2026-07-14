@@ -47,6 +47,9 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 - "Save current session settings as a workspace/global default" from the overlay.
 - **SOCKS** proxy (`socks` feature), per-scheme distinct proxies, PAC.
 - SameSite / third-party cookie policy knobs (rely on crate defaults); cookie-jar encryption at rest (parity with the unencrypted, local-only `state.sqlite`).
+- **Async cookie-jar persistence** — the jar is currently written synchronously on the UI thread (after a mutating send / toggle-off / clear / exit); under cross-process WAL-lock contention that can stall the UI up to the ~5 s `busy_timeout`. Move the write off-thread.
+- **Cookie-jar `RwLock` poison recovery** — `ChurlCookieJar` methods `.expect("lock poisoned")`, so a prior panic while holding the lock would crash the next jar access. Recover from a poisoned lock instead.
+- **Proper masked-secret proxy input** — the Options overlay's inline proxy edit masks the password of a complete `user:pass@` value, but a password typed *before* the `@` is entered still renders in plaintext for that moment (a single-line editor limitation). A dedicated masked-secret input widget closes the pre-`@` gap.
 
 ## Exploring 🔭
 

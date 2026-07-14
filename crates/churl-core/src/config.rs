@@ -391,6 +391,21 @@ pub fn proxy_has_credentials(proxy: &str) -> bool {
     }
 }
 
+/// Masks any userinfo (`user:pass@`) in a proxy URL for display, so a proxy that
+/// carries credentials at runtime never shows them on screen, in a log, or in an
+/// error/import note. Returns the input unchanged when there is no userinfo. Only
+/// the authority's userinfo is touched (the scheme + host + port survive).
+pub fn mask_proxy(proxy: &str) -> String {
+    let (scheme, rest) = match proxy.split_once("://") {
+        Some((s, r)) => (format!("{s}://"), r),
+        None => (String::new(), proxy),
+    };
+    match rest.split_once('@') {
+        Some((_creds, host)) => format!("{scheme}***@{host}"),
+        None => proxy.to_owned(),
+    }
+}
+
 /// Returns the path of the global config file (`<config_dir>/churl/config.toml`),
 /// or `None` when the platform config directory cannot be determined.
 pub fn global_config_path() -> Option<PathBuf> {

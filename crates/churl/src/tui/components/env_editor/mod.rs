@@ -539,7 +539,7 @@ impl EnvEditorState {
         if manifest_changed
             && let Err(err) = save_workspace_manifest_checked(root, &workspace, policy)
         {
-            let msg = format!("save failed (churl.toml): {err}");
+            let msg = save_error_message(&err);
             self.message = Some(msg.clone());
             return EnvSaveResult::Failed(msg);
         }
@@ -863,6 +863,20 @@ fn rows_to_map(rows: &[(String, String)]) -> BTreeMap<String, String> {
         .filter(|(name, _)| !name.trim().is_empty())
         .map(|(name, value)| (name.trim().to_owned(), value.clone()))
         .collect()
+}
+
+/// Formats a manifest-save error for on-screen display, masking any proxy
+/// credentials the error text would otherwise leak: `ProxyCredentialsRefused`'s
+/// `Display` embeds the raw `user:pass@host`, and the refusal message must never
+/// print the credentials it is refusing to persist.
+fn save_error_message(err: &PersistenceError) -> String {
+    match err {
+        PersistenceError::ProxyCredentialsRefused { proxy } => format!(
+            "save failed (churl.toml): refusing to persist a credentialed proxy URL ({})",
+            crate::tui::components::options::mask_proxy(proxy)
+        ),
+        other => format!("save failed (churl.toml): {other}"),
+    }
 }
 
 /// Human-readable list of what a partial save had written before it failed.

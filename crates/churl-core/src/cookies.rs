@@ -60,17 +60,16 @@ impl ChurlCookieJar {
     /// Serializes the **persistent, unexpired** cookies to JSON for storage.
     /// Session cookies (no `Max-Age`/`Expires`) are deliberately excluded — they
     /// live only in RAM and evaporate on exit, matching browser behaviour.
-    pub fn to_json(&self) -> String {
+    pub fn to_json(&self) -> Result<String, CookieError> {
         let mut buf = Vec::new();
         // `save_json` only writes persistent + unexpired cookies. A serialize
-        // failure is treated as an empty jar rather than propagated: persistence
-        // is best-effort (the jar still works in-memory), and returning `""` round
-        // trips cleanly through `load_json`.
+        // failure is returned as an error — NOT swallowed as an empty string:
+        // persisting `""` over a good on-disk blob would silently wipe the jar.
+        // The caller MUST skip the write on error (see `App::persist_cookie_jar`).
         let store = self.0.read().expect("cookie jar lock poisoned");
-        if cookie_store::serde::json::save(&store, &mut buf).is_err() {
-            return String::new();
-        }
-        String::from_utf8(buf).unwrap_or_default()
+        cookie_store::serde::json::save(&store, &mut buf)
+            .map_err(|err| CookieError(err.to_string()))?;
+        String::from_utf8(buf).map_err(|err| CookieError(err.to_string()))
     }
 
     /// Every stored (unexpired) cookie, for the Options overlay + `churl cookies
@@ -206,7 +205,7 @@ mod tests {
         let jar = ChurlCookieJar::new();
         // Max-Age makes this cookie persistent, so it survives serialization.
         set_cookie(&jar, "token=xyz; Max-Age=3600", "https://a.example/");
-        let json = jar.to_json();
+        let json = jar.to_json().unwrap();
         assert!(!json.is_empty(), "a persistent cookie must serialize");
 
         let restored = ChurlCookieJar::load_json(&json).unwrap();
@@ -219,7 +218,7 @@ mod tests {
         let jar = ChurlCookieJar::new();
         // No Max-Age/Expires → a session cookie, RAM-only, never persisted.
         set_cookie(&jar, "sess=temp", "https://a.example/");
-        let json = jar.to_json();
+        let json = jar.to_json().unwrap();
         let restored = ChurlCookieJar::load_json(&json).unwrap();
         assert!(
             restored.cookies(&url("https://a.example/")).is_none(),
@@ -249,5 +248,18 @@ mod tests {
     fn load_json_blank_is_empty_jar() {
         assert!(ChurlCookieJar::load_json("").unwrap().list().is_empty());
         assert!(ChurlCookieJar::load_json("   ").unwrap().list().is_empty());
+    }
+
+    #[test]
+    fn to_json_is_fallible_and_empty_jar_serializes_ok() {
+        // `to_json` returns a Result (a serialize failure is surfaced, never
+        // silently returned as "" — which, persisted over a good blob, would wipe
+        // the jar). An empty jar serializes cleanly and round-trips to empty.
+        let jar = ChurlCookieJar::new();
+        let json = jar.to_json().expect("empty jar must serialize");
+        assert!(
+            ChurlCookieJar::load_json(&json).unwrap().list().is_empty(),
+            "empty jar round-trips to empty"
+        );
     }
 }

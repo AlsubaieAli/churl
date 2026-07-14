@@ -15,6 +15,8 @@ use super::line_editor::LineEditor;
 
 mod edit;
 mod render;
+#[cfg(test)]
+mod tests;
 
 pub use render::render;
 
@@ -145,17 +147,29 @@ impl OptionsState {
 }
 
 /// Masks any userinfo (`user:pass@`) in a proxy URL for display — a proxy may
-/// carry credentials at runtime, but they must never be shown on screen. Returns
-/// the input unchanged when there is no userinfo. `"(none — env proxy)"` is the
-/// caller's job for a `None` proxy.
+/// carry credentials at runtime, but they must never be shown on screen. Thin
+/// re-export of [`churl_core::config::mask_proxy`] so the whole app masks
+/// identically. `"(none — env proxy)"` is the caller's job for a `None` proxy.
 pub(crate) fn mask_proxy(proxy: &str) -> String {
-    // Split scheme:// from the rest so we only touch the authority's userinfo.
+    churl_core::config::mask_proxy(proxy)
+}
+
+/// Masks ONLY the password segment of a proxy for the inline edit line, keeping
+/// the scheme/user/host visible so the field stays editable while the password
+/// never renders in plaintext. A proxy still being typed (no `@` yet) is returned
+/// as-is — a proper masked-secret input widget for the pre-`@` case is deferred
+/// (M8.1); this closes the concrete "editing a stored `user:pass@` proxy renders
+/// the password verbatim" leak the review flagged.
+pub(crate) fn mask_proxy_password(proxy: &str) -> String {
     let (scheme, rest) = match proxy.split_once("://") {
         Some((s, r)) => (format!("{s}://"), r),
         None => (String::new(), proxy),
     };
-    match rest.split_once('@') {
-        Some((_creds, host)) => format!("{scheme}***@{host}"),
-        None => proxy.to_owned(),
+    let Some((authority, tail)) = rest.split_once('@') else {
+        return proxy.to_owned();
+    };
+    match authority.split_once(':') {
+        Some((user, _pass)) => format!("{scheme}{user}:••••@{tail}"),
+        None => format!("{scheme}{authority}@{tail}"),
     }
 }

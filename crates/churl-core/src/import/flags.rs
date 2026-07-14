@@ -122,8 +122,10 @@ impl Parser {
     /// so it is never persisted onto the imported endpoint — the note points the
     /// user at where it *is* set (session-scoped).
     fn note_proxy(&mut self, proxy: &str) {
+        // Mask any `user:pass@` — a proxy note must never echo credentials.
+        let shown = crate::config::mask_proxy(proxy);
         self.warnings.push(format!(
-            "proxy {proxy:?} — not stored per-endpoint; set it via --proxy or the Options overlay"
+            "proxy {shown:?} — not stored per-endpoint; set it via --proxy or the Options overlay"
         ));
     }
 

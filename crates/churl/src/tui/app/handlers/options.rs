@@ -31,6 +31,12 @@ impl App {
 
     /// Routes a key to the open Options overlay and acts on its outcome. Every
     /// applied change rebuilds the client and refreshes the overlay's mirror.
+    ///
+    /// A client rebuild can only fail on a malformed proxy URL; such a failure is
+    /// caught, the offending change is rolled back (the prior valid client stays
+    /// installed), and the error is shown inline in the overlay footer — it must
+    /// NEVER propagate out of here, or the run loop's `handle_key(key)?` would tear
+    /// down the whole session over a typo.
     pub(in crate::tui::app) fn handle_options_key(&mut self, key: KeyEvent) -> Result<()> {
         let Mode::Options(state) = &mut self.mode else {
             return Ok(());
@@ -40,34 +46,43 @@ impl App {
             OptionsOutcome::Consumed => {}
             OptionsOutcome::Close => self.close_options(),
             OptionsOutcome::ApplyProxy(proxy) => {
-                self.session_proxy = proxy;
-                self.rebuild_client()?;
-                let msg = match &self.session_proxy {
-                    Some(p) => format!("proxy set: {}", mask_proxy(p)),
-                    None => "proxy cleared (using env proxy)".to_owned(),
-                };
-                self.notify(msg);
+                match self.with_client_rebuild(|s| s.session_proxy = proxy) {
+                    Ok(()) => {
+                        let msg = match &self.session_proxy {
+                            Some(p) => format!("proxy set: {}", mask_proxy(p)),
+                            None => "proxy cleared (using env proxy)".to_owned(),
+                        };
+                        self.notify(msg);
+                    }
+                    Err(err) => self.set_options_message(format!("invalid proxy — {err}")),
+                }
                 self.refresh_options_overlay();
             }
             OptionsOutcome::ToggleInsecure => {
-                self.session_insecure = !self.session_insecure;
-                self.rebuild_client()?;
-                self.notify(insecure_message(self.session_insecure));
+                match self.with_client_rebuild(|s| s.session_insecure = !s.session_insecure) {
+                    Ok(()) => self.notify(insecure_message(self.session_insecure)),
+                    Err(err) => self.set_options_message(format!("could not apply — {err}")),
+                }
                 self.refresh_options_overlay();
             }
             OptionsOutcome::ToggleCookies => {
-                self.cookies_enabled = !self.cookies_enabled;
-                // Persist on the way off, so the in-RAM jar's persistent cookies
-                // are captured before it stops receiving new ones.
-                if !self.cookies_enabled {
-                    self.persist_cookie_jar();
+                match self.with_client_rebuild(|s| s.cookies_enabled = !s.cookies_enabled) {
+                    Ok(()) => {
+                        // Persist on the way off, so the in-RAM jar's persistent
+                        // cookies are captured before the client stops receiving new
+                        // ones. (Only after a successful rebuild — a rolled-back
+                        // toggle must not trigger a spurious save.)
+                        if !self.cookies_enabled {
+                            self.persist_cookie_jar();
+                        }
+                        self.notify(if self.cookies_enabled {
+                            "cookie jar enabled"
+                        } else {
+                            "cookie jar disabled"
+                        });
+                    }
+                    Err(err) => self.set_options_message(format!("could not apply — {err}")),
                 }
-                self.rebuild_client()?;
-                self.notify(if self.cookies_enabled {
-                    "cookie jar enabled"
-                } else {
-                    "cookie jar disabled"
-                });
                 self.refresh_options_overlay();
             }
             OptionsOutcome::DeleteCookie { domain, name } => {
@@ -92,8 +107,45 @@ impl App {
         Ok(())
     }
 
+    /// Applies a session-setting `mutate`, then rebuilds the single client. A
+    /// rebuild failure (only a malformed proxy can cause one) rolls back ALL three
+    /// session controls to their prior — necessarily valid — values and returns the
+    /// error string for inline display. `rebuild_client` reassigns `self.client`
+    /// only on success (its `?` returns before the assignment), so on failure the
+    /// previous valid client stays installed; there is nothing to rebuild again.
+    /// This is the single guard that keeps a bad setting from killing the session.
+    fn with_client_rebuild(
+        &mut self,
+        mutate: impl FnOnce(&mut Self),
+    ) -> std::result::Result<(), String> {
+        let prev = (
+            self.session_proxy.clone(),
+            self.session_insecure,
+            self.cookies_enabled,
+        );
+        mutate(self);
+        if let Err(err) = self.rebuild_client() {
+            (
+                self.session_proxy,
+                self.session_insecure,
+                self.cookies_enabled,
+            ) = prev;
+            return Err(err.to_string());
+        }
+        Ok(())
+    }
+
+    /// Sets an inline message in the open Options overlay footer (a no-op when the
+    /// overlay is not open). Used to surface a rejected change without a crash.
+    fn set_options_message(&mut self, msg: impl Into<String>) {
+        if let Mode::Options(state) = &mut self.mode {
+            state.message = Some(msg.into());
+        }
+    }
+
     /// Refreshes the open Options overlay's mirror of the session settings after
-    /// an applied change. A no-op when the overlay is not open.
+    /// an applied change. A no-op when the overlay is not open. Preserves any
+    /// inline message already set (so a rejection note survives the refresh).
     fn refresh_options_overlay(&mut self) {
         let proxy = self.session_proxy.clone();
         let insecure = self.session_insecure;
@@ -105,14 +157,16 @@ impl App {
     }
 
     /// Toggles insecure-TLS from anywhere (`<leader>k`). Rebuilds the client so the
-    /// change takes effect immediately, surfaces a loud message, and refreshes the
-    /// Options overlay if it happens to be open.
-    pub(in crate::tui::app) fn toggle_insecure(&mut self) -> Result<()> {
-        self.session_insecure = !self.session_insecure;
-        self.rebuild_client()?;
-        self.notify(insecure_message(self.session_insecure));
+    /// change takes effect immediately and surfaces a loud message. Never fails the
+    /// caller: a rebuild error (only a malformed proxy already in effect could
+    /// cause one) rolls back and notifies rather than propagating a session-killing
+    /// error up through `dispatch`/`handle_key`.
+    pub(in crate::tui::app) fn toggle_insecure(&mut self) {
+        match self.with_client_rebuild(|s| s.session_insecure = !s.session_insecure) {
+            Ok(()) => self.notify(insecure_message(self.session_insecure)),
+            Err(err) => self.notify(format!("could not toggle TLS — {err}")),
+        }
         self.refresh_options_overlay();
-        Ok(())
     }
 
     /// Whether TLS verification is currently OFF (drives the loud statusline

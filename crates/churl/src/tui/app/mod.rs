@@ -997,9 +997,7 @@ impl App {
             .and_then(|ws| ws.manifest().proxy.clone());
         // Precedence: CLI > workspace churl.toml > global config; a `None` result
         // means "no explicit proxy", so reqwest honors the env proxy for free.
-        self.session_proxy = cli_proxy
-            .or(ws_proxy)
-            .or_else(|| config.proxy().map(str::to_owned));
+        self.session_proxy = pure::resolve_proxy(cli_proxy, ws_proxy, config.proxy());
         // `-k` forces insecure on; otherwise the global default applies (there is
         // no CLI "force secure" — the safe default is already secure).
         self.session_insecure = cli_insecure || config.insecure();
@@ -1068,15 +1066,34 @@ impl App {
         Ok(())
     }
 
-    /// Persists the current cookie jar for this workspace (best-effort). Called
-    /// after a send that may have mutated the jar, on toggle-off / clear, and on
-    /// exit. A write failure is non-fatal — the jar still works in memory.
+    /// Persists the current cookie jar for this workspace. Called after a send
+    /// that may have mutated the jar, on toggle-off / clear, and on exit. The jar
+    /// still works in memory regardless, but a failure is surfaced loudly (never
+    /// swallowed) and — critically — the write is SKIPPED on a serialize failure
+    /// so a transient error can never clobber the good on-disk blob with `""`
+    /// (which `ON CONFLICT DO UPDATE` would persist as an empty jar = silent
+    /// permanent cookie loss).
     pub(in crate::tui::app) fn persist_cookie_jar(&mut self) {
-        let (Some(key), Some(store)) = (self.cookie_workspace_key(), self.history.as_ref()) else {
+        let Some(key) = self.cookie_workspace_key() else {
             return;
         };
-        let json = self.cookie_jar.to_json();
-        let _ = store.save_cookie_jar(&key, &json, now_ms());
+        let json = match self.cookie_jar.to_json() {
+            Ok(json) => json,
+            Err(err) => {
+                // Do NOT write — persisting an empty/partial blob would wipe a
+                // good jar. Fail loud instead.
+                self.message = Some(Message::new(format!(
+                    "cookie save failed (serialize): {err}"
+                )));
+                return;
+            }
+        };
+        let Some(store) = self.history.as_ref() else {
+            return;
+        };
+        if let Err(err) = store.save_cookie_jar(&key, &json, now_ms()) {
+            self.message = Some(Message::new(format!("cookie save failed: {err}")));
+        }
     }
 
     /// Runs the event loop: `tokio::select!` over the crossterm event stream, a
@@ -1416,7 +1433,7 @@ impl App {
             Action::SwitchProfile => self.open_profile_picker(),
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::OpenOptions => self.open_options(),
-            Action::ToggleInsecure => self.toggle_insecure()?,
+            Action::ToggleInsecure => self.toggle_insecure(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

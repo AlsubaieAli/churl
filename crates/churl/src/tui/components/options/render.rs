@@ -8,7 +8,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use super::{OptionsFocus, OptionsRow, OptionsState, mask_proxy};
+use super::{OptionsFocus, OptionsRow, OptionsState, mask_proxy, mask_proxy_password};
 use crate::tui::theme::Theme;
 
 /// Renders the Options overlay over `area`.
@@ -51,9 +51,10 @@ fn render_rows(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Them
     let rows_focused = state.focus == OptionsFocus::Rows;
     let sel = |row: OptionsRow| rows_focused && state.row == row;
 
-    // Proxy row: masked value, or the inline editor's live text while editing.
+    // Proxy row: masked value, or the inline editor's live text while editing
+    // (the password segment stays masked even mid-edit — never plaintext creds).
     let proxy_display = if let Some(editor) = &state.editing {
-        format!("{}█", editor.text())
+        format!("{}█", mask_proxy_password(&editor.text()))
     } else {
         match &state.proxy {
             Some(p) => mask_proxy(p),
