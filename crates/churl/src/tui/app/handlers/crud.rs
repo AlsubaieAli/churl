@@ -90,14 +90,112 @@ impl App {
         self.open_prompt(PromptPurpose::ExportWorkspace(dialect), &seed);
     }
 
-    /// Palette: prompt for a curl command to import as a new endpoint (in the
-    /// cursor's collection context, or the root collection).
-    pub(in crate::tui::app) fn begin_paste_curl(&mut self) {
-        if self.explorer.cursor_collection_dir().is_none() {
-            self.notify("no workspace open");
+    /// `<leader>n`: choose a destination collection (or the root), then the shared
+    /// name prompt — a create that always asks *where* explicitly.
+    pub(in crate::tui::app) fn begin_new_endpoint_pick(&mut self) {
+        self.open_destination_picker(DestPurpose::CreateEndpoint, " New endpoint in ");
+    }
+
+    /// `<leader>N`: choose a destination collection (or the root) for a new
+    /// (sub-)collection, then the shared name prompt.
+    pub(in crate::tui::app) fn begin_new_collection_pick(&mut self) {
+        self.open_destination_picker(DestPurpose::CreateCollection, " New collection in ");
+    }
+
+    /// `(label, dir)` for every collection destination: the **root first**, then
+    /// every collection in load order, nested collections shown with a
+    /// `parent / child` path label. Drives the create destination picker (shared,
+    /// later, by move-to / copy-to).
+    pub(in crate::tui::app) fn collection_destinations(&self) -> Vec<(String, PathBuf)> {
+        let Some(ws) = self.workspace.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = vec![("(root)".to_owned(), ws.root().to_owned())];
+        fn walk(coll: &persistence::Collection, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+            let label = if prefix.is_empty() {
+                coll.name.clone()
+            } else {
+                format!("{prefix} / {}", coll.name)
+            };
+            out.push((label.clone(), coll.path.clone()));
+            if let Ok(subs) = coll.sub_collections() {
+                for sub in subs {
+                    walk(&sub, &label, out);
+                }
+            }
+        }
+        if let Ok(cols) = ws.collections() {
+            for c in &cols {
+                walk(c, "", &mut out);
+            }
+        }
+        out
+    }
+
+    /// Opens the fuzzy destination picker (root first) for `purpose`.
+    pub(in crate::tui::app) fn open_destination_picker(
+        &mut self,
+        purpose: DestPurpose,
+        title: &'static str,
+    ) {
+        let dests = self.collection_destinations();
+        if dests.is_empty() {
+            self.notify("open a workspace first");
             return;
         }
-        self.open_prompt(PromptPurpose::PasteCurl, "");
+        let (labels, dirs): (Vec<String>, Vec<PathBuf>) = dests.into_iter().unzip();
+        self.picker = Some(Picker::Destination {
+            state: picker::PickerState::new(title, labels),
+            dirs,
+            purpose,
+        });
+        // Reuse the Palette routing tier (like the profile/auth pickers) — the
+        // items travel with the variant, so the shared overlay handling applies.
+        self.mode = Mode::Palette;
+    }
+
+    /// Imports a pasted curl into a new endpoint under `dir`, seeding
+    /// method/URL/headers/body and auto-naming from the parsed request (reuses the
+    /// M4 `import_curl` parser). Returns whether an endpoint was created (`false` =
+    /// nothing written). On success the new endpoint is opened as its own buffer.
+    pub(in crate::tui::app) fn create_endpoint_from_curl(
+        &mut self,
+        dir: &Path,
+        curl: &str,
+    ) -> Result<bool> {
+        let result = match churl_core::import::import_curl(curl) {
+            Ok(result) => result,
+            Err(err) => {
+                self.notify(format!("curl import failed: {err}"));
+                return Ok(false);
+            }
+        };
+        let path = match persistence::create_endpoint(dir, &result.endpoint.name) {
+            Ok(path) => path,
+            Err(err) => {
+                self.crud_error(err);
+                return Ok(false);
+            }
+        };
+        // Overwrite the default endpoint with the import, keeping the
+        // collection-assigned seq.
+        let mut endpoint = result.endpoint;
+        endpoint.seq = persistence::load_endpoint(&path)
+            .map(|e| e.seq)
+            .unwrap_or(0);
+        if let Err(err) = persistence::save_endpoint(&path, &endpoint) {
+            self.crud_error(err);
+            return Ok(false);
+        }
+        self.reload_explorer()?;
+        let mut msg = format!("imported curl → {}", endpoint.name);
+        if !result.warnings.is_empty() {
+            msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
+        }
+        self.notify(msg);
+        // Open the new endpoint as its own buffer (File target — no confirm).
+        self.guarded_load(PendingLoad::File(path))?;
+        Ok(true)
     }
 
     /// The display name of the collection the selection belongs to (a collection
@@ -256,48 +354,6 @@ impl App {
         }
     }
 
-    /// Commits a paste-curl prompt: import the curl command and create an
-    /// endpoint in the selected collection.
-    pub(in crate::tui::app) fn commit_paste_curl(&mut self, curl: String) -> Result<()> {
-        let Some(dir) = self.explorer.cursor_collection_dir() else {
-            self.notify("no workspace open");
-            return Ok(());
-        };
-        let result = match churl_core::import::import_curl(&curl) {
-            Ok(result) => result,
-            Err(err) => {
-                self.notify(format!("curl import failed: {err}"));
-                return Ok(());
-            }
-        };
-        let path = match persistence::create_endpoint(&dir, &result.endpoint.name) {
-            Ok(path) => path,
-            Err(err) => {
-                self.crud_error(err);
-                return Ok(());
-            }
-        };
-        // Overwrite the default endpoint with the import, keeping the
-        // collection-assigned seq.
-        let mut endpoint = result.endpoint;
-        endpoint.seq = persistence::load_endpoint(&path)
-            .map(|e| e.seq)
-            .unwrap_or(0);
-        if let Err(err) = persistence::save_endpoint(&path, &endpoint) {
-            self.crud_error(err);
-            return Ok(());
-        }
-        self.reload_explorer()?;
-        let mut msg = format!("pasted curl → {}", endpoint.name);
-        if !result.warnings.is_empty() {
-            msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
-        }
-        self.notify(msg);
-        // Open the new endpoint as its own buffer (File target — no confirm).
-        self.guarded_load(PendingLoad::File(path))?;
-        Ok(())
-    }
-
     /// Handles one key in a text-prompt overlay.
     pub(in crate::tui::app) fn handle_prompt_key(
         &mut self,
@@ -305,7 +361,12 @@ impl App {
         purpose: PromptPurpose,
     ) -> Result<()> {
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => {
+                // Cancelling a create abandons any picker-chosen destination, so a
+                // later cursor-context `n`/`N` never reuses a stale target.
+                self.pending_create_dir = None;
+                self.mode = Mode::Normal;
+            }
             KeyCode::Enter => {
                 let text = self.prompt_editor.text();
                 self.mode = Mode::Normal;
@@ -326,11 +387,27 @@ impl App {
     ) -> Result<()> {
         match purpose {
             PromptPurpose::NewEndpoint => {
-                // Cursor-aware target (M7.9): the collection under the cursor, or
-                // the root collection when nothing is selected (→ a root endpoint).
-                let Some(dir) = self.explorer.cursor_collection_dir() else {
+                // Target = the `<leader>n` picker's chosen destination, else the
+                // cursor's collection context (M7.9 fast-path — the collection under
+                // the cursor, or the root when nothing is selected).
+                let Some(dir) = self
+                    .pending_create_dir
+                    .take()
+                    .or_else(|| self.explorer.cursor_collection_dir())
+                else {
                     return Ok(());
                 };
+                // The shared name prompt auto-detects a pasted curl: a buffer
+                // starting with the `curl` word imports + auto-names instead of
+                // creating a blank endpoint. A parse failure is fail-loud — nothing
+                // is created and the prompt re-opens with the buffer intact.
+                if looks_like_curl(&text) {
+                    if !self.create_endpoint_from_curl(&dir, &text)? {
+                        self.pending_create_dir = Some(dir);
+                        self.open_prompt(PromptPurpose::NewEndpoint, &text);
+                    }
+                    return Ok(());
+                }
                 match persistence::create_endpoint(&dir, &text) {
                     Ok(path) => {
                         self.reload_explorer()?;
@@ -343,9 +420,14 @@ impl App {
                 }
             }
             PromptPurpose::NewCollection => {
-                // Cursor-aware target (M7.9): a sub-collection under the collection
-                // at the cursor, or a top-level collection at the root.
-                let Some(parent) = self.explorer.cursor_collection_dir() else {
+                // Target = the `<leader>N` picker's chosen parent, else the cursor's
+                // collection context (a sub-collection under the collection at the
+                // cursor, or a top-level collection at the root).
+                let Some(parent) = self
+                    .pending_create_dir
+                    .take()
+                    .or_else(|| self.explorer.cursor_collection_dir())
+                else {
                     return Ok(());
                 };
                 let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
@@ -387,7 +469,6 @@ impl App {
             PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
                 self.commit_export(purpose, text)
             }
-            PromptPurpose::PasteCurl => self.commit_paste_curl(text)?,
             PromptPurpose::NewSequence => self.commit_new_sequence(text)?,
         }
         Ok(())
@@ -637,4 +718,19 @@ impl App {
     pub(in crate::tui::app) fn crud_error(&mut self, err: PersistenceError) {
         self.message = Some(Message::new(format!("error: {err}")));
     }
+
+    /// Whether the live prompt buffer currently reads as a pasted curl — drives
+    /// the name prompt's live "Import from curl" label flip.
+    pub(in crate::tui::app) fn prompt_buffer_is_curl(&self) -> bool {
+        looks_like_curl(&self.prompt_editor.text())
+    }
+}
+
+/// Whether a name-prompt buffer is a pasted curl command: it starts with the
+/// `curl` word (a word boundary, so `curls` / `curling` do not match). Drives the
+/// shared name prompt's blank-vs-import branch and its live label flip.
+pub(in crate::tui::app) fn looks_like_curl(text: &str) -> bool {
+    text.trim_start()
+        .strip_prefix("curl")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }

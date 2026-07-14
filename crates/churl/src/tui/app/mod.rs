@@ -172,6 +172,11 @@ pub struct App {
     /// path, resolved by `s`/`d`, aborted by `Esc`. Mutually exclusive with
     /// `pending_load` — only one is `Some` while the confirm is up.
     pending_close: Option<PendingClose>,
+    /// The destination directory chosen in a `<leader>n`/`<leader>N` create
+    /// gesture's destination picker, carried into the following name prompt. When
+    /// `Some`, the create commits into it; when `None` (a cursor-context `n`/`N`),
+    /// the commit falls back to the cursor's collection context.
+    pending_create_dir: Option<PathBuf>,
     /// Which pane is zoomed, or `None` for the normal split.
     zoom: Option<ZoomPane>,
     /// Whether the explorer sidebar is hidden. Session-only.
@@ -429,6 +434,7 @@ impl App {
             prompt_editor: LineEditor::default(),
             pending_load: None,
             pending_close: None,
+            pending_create_dir: None,
             zoom: None,
             explorer_hidden: false,
             left_active: LeftPane::Endpoints,
@@ -1321,6 +1327,10 @@ impl App {
                 self.notify("not available in the sequences pane")
             }
             Action::NewCollection => self.begin_new_collection(),
+            // Leader create gestures always ask *where* via the destination picker.
+            Action::NewEndpointPick => self.begin_new_endpoint_pick(),
+            Action::NewCollectionPick => self.begin_new_collection_pick(),
+            Action::NewSequence => self.new_sequence_prompt(),
             // `r` on the sequences sub-pane runs the hovered sequence (Run face);
             // everywhere else it renames the selected tree node.
             Action::Rename if self.left_column_on_sequences() => self.run_selected_sequence(),
@@ -1357,7 +1367,9 @@ impl App {
             Action::ExportCollectionNative => self.begin_export_collection(JsonDialect::Native),
             Action::ExportWorkspacePostman => self.begin_export_workspace(JsonDialect::Postman),
             Action::ExportWorkspaceNative => self.begin_export_workspace(JsonDialect::Native),
-            Action::PasteCurl => self.begin_paste_curl(),
+            // Retired as a distinct flow — the shared new-endpoint name prompt
+            // auto-detects a pasted curl. Kept as a palette alias that opens it.
+            Action::PasteCurl => self.begin_new_endpoint(),
             Action::CopyAsCurl => self.copy_as_curl(false),
             Action::CopyAsCurlResolved => self.copy_as_curl(true),
             Action::BufferNext => self.buffer_cycle(true),
@@ -1895,6 +1907,20 @@ impl App {
                 }
             }
             Picker::Auth { .. } => self.set_auth_kind(index),
+            Picker::Destination { dirs, purpose, .. } => {
+                if let Some(dir) = dirs.get(index).cloned() {
+                    // Stash the chosen destination for the following name prompt.
+                    self.pending_create_dir = Some(dir);
+                    match purpose {
+                        DestPurpose::CreateEndpoint => {
+                            self.open_prompt(PromptPurpose::NewEndpoint, "")
+                        }
+                        DestPurpose::CreateCollection => {
+                            self.open_prompt(PromptPurpose::NewCollection, "")
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2028,8 +2054,8 @@ mod state;
 // `ConfirmPurpose`, …, used by the snapshot integration test) is preserved; the
 // module-private types keep their crate-internal visibility via a plain `use`.
 use state::{
-    APP_CHANNEL_CAPACITY, Buffer, EndpointBuffer, InFlightRequest, PendingClose, PendingCopy,
-    PendingLoad, Picker, ResponseSurface, fold_body_text, overwrite_body_text,
+    APP_CHANNEL_CAPACITY, Buffer, DestPurpose, EndpointBuffer, InFlightRequest, PendingClose,
+    PendingCopy, PendingLoad, Picker, ResponseSurface, fold_body_text, overwrite_body_text,
 };
 pub use state::{
     AppMsg, ConfirmPurpose, LeaderState, LeftPane, Mode, Pane, PromptPurpose, SeqView, ZoomPane,

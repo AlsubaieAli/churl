@@ -1067,7 +1067,7 @@ pub fn render_sequences_pane(
             Line::from(Span::styled("No sequences yet", theme.statusline)),
             Line::from(""),
             Line::from(Span::styled(
-                "Press <leader>s a to add one",
+                "Press <leader>s n to add one",
                 theme.statusline,
             )),
         ]);
@@ -1102,7 +1102,7 @@ pub fn sequences_stub_summary(state: &ExplorerState, theme: &Theme) -> Line<'sta
     let text = match state.sequences.len() {
         // A zero-sequence peek shows an add affordance, not a dead "no
         // sequences" — matches the `<leader>` glyph convention used elsewhere.
-        0 => "<leader>s a to add".to_owned(),
+        0 => "<leader>s n to add".to_owned(),
         1 => "1 sequence".to_owned(),
         n => format!("{n} sequences"),
     };

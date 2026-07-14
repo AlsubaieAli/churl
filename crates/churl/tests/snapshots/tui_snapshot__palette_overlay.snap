@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 115
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -13,16 +14,16 @@ expression: snapshot(&mut app)
 │           ┃  save request                                        ┃           │
 │           ┃  new endpoint                                        ┃           │
 │           ┃  new collection                                      ┃           │
-│           ┃  rename                                              ┃           │
-│           ┃  delete                                              ┃───────────┘
-│           ┃  switch profile                                      ┃───────────┐
+│           ┃  new endpoint (choose location)                      ┃           │
+│           ┃  new collection (choose location)                    ┃───────────┘
+│           ┃  rename                                              ┃───────────┐
+│           ┃  delete                                              ┃           │
+│           ┃  switch profile                                      ┃           │
 │           ┃  environments & vars                                 ┃           │
 │           ┃  reload workspace from disk                          ┃           │
 │           ┃  run sequence                                        ┃           │
-│           ┃  add sequence                                        ┃           │
-│           ┃  open sequence                                       ┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
-│<leader>s a to add          ││                                                │
+│<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
  EXPLORER · demo · ? help · space leader · / search · : palette

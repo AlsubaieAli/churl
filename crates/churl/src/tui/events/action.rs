@@ -100,6 +100,14 @@ pub enum Action {
     NewEndpoint,
     /// Create a new collection.
     NewCollection,
+    /// Create a new endpoint via the destination picker (`<leader>n`): choose the
+    /// target collection or root explicitly, then the shared name prompt.
+    NewEndpointPick,
+    /// Create a new collection via the destination picker (`<leader>N`).
+    NewCollectionPick,
+    /// Create a new request sequence (`<leader>s n`): opens the name prompt, then
+    /// the editor on the created file.
+    NewSequence,
     /// Rename the selected endpoint or collection.
     Rename,
     /// Delete the selected endpoint or collection (with a confirm).
@@ -280,6 +288,17 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::RowEdit, "row-edit", "edit row"),
     (Action::NewEndpoint, "new-endpoint", "new endpoint"),
     (Action::NewCollection, "new-collection", "new collection"),
+    (
+        Action::NewEndpointPick,
+        "new-endpoint-pick",
+        "new endpoint (choose location)",
+    ),
+    (
+        Action::NewCollectionPick,
+        "new-collection-pick",
+        "new collection (choose location)",
+    ),
+    (Action::NewSequence, "new-sequence", "new sequence"),
     (Action::Rename, "rename", "rename"),
     (Action::Delete, "delete", "delete"),
     (Action::DeleteSequence, "delete-sequence", "delete sequence"),

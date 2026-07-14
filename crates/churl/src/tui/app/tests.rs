@@ -2333,8 +2333,8 @@ fn focused_empty_sequences_pane_is_not_a_dead_end() {
     assert_eq!(app.left_active, LeftPane::Endpoints);
 }
 
-/// Note #3 — the add path works from the focused-empty pane: `<leader>s a`
-/// (`EditSequence`) opens the new-sequence prompt (the add entry point) with
+/// Note #3 — the create path works from the focused-empty pane: `<leader>s n`
+/// (`NewSequence`) opens the new-sequence prompt (the create entry point) with
 /// zero sequences, and none of the in-pane nav keys panic on an empty list.
 #[test]
 fn empty_sequences_pane_add_and_nav_never_panic() {
@@ -2357,12 +2357,13 @@ fn empty_sequences_pane_add_and_nav_never_panic() {
     assert_eq!(app.explorer.seq_cursor(), 0, "cursor stays pinned at 0");
     assert!(app.explorer.selected_sequence().is_none());
 
-    // `<leader>s a` (EditSequence) reaches the same add entry point.
+    // `<leader>s n` (NewSequence) is the create entry point (it replaced the
+    // buggy `<leader>s a`, which opened the first sequence instead of creating).
     app.mode = Mode::Normal;
-    app.dispatch(Action::EditSequence, None).unwrap();
+    app.dispatch(Action::NewSequence, None).unwrap();
     assert!(
         matches!(app.mode, Mode::Prompt(PromptPurpose::NewSequence)),
-        "<leader>s a opens the add-sequence prompt from the empty pane"
+        "<leader>s n opens the new-sequence prompt"
     );
     // `r` (RunSequence) with nothing selected is a safe no-op (no panic).
     app.mode = Mode::Normal;
@@ -5718,5 +5719,117 @@ fn m79_root_endpoint_sees_only_root_vars() {
         resolver.substitute("{{who}}"),
         "root",
         "a root endpoint resolves only the root collection's vars"
+    );
+}
+
+// --- M7.12 creation gestures + curl auto-detect ---
+
+/// Number of `*.toml` files directly under `dir` (endpoint/manifest files).
+fn count_toml(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+        .count()
+}
+
+/// `<leader>n` opens the destination picker (root first), not a bare name prompt.
+#[test]
+fn leader_new_endpoint_opens_destination_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::NewEndpointPick, None).unwrap();
+    assert!(matches!(app.mode, Mode::Palette));
+    match &app.picker {
+        Some(Picker::Destination { dirs, purpose, .. }) => {
+            assert_eq!(*purpose, DestPurpose::CreateEndpoint);
+            assert_eq!(
+                dirs.first(),
+                Some(&dir.path().to_path_buf()),
+                "root is first"
+            );
+            assert!(
+                dirs.iter().any(|d| d.ends_with("users")),
+                "collections listed"
+            );
+        }
+        other => panic!("expected a destination picker, got {other:?}"),
+    }
+}
+
+/// `<leader>n` → pick root → name prompt → the endpoint lands at the chosen root.
+#[test]
+fn destination_picker_creates_endpoint_at_chosen_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::NewEndpointPick, None).unwrap();
+    // Accept the first destination (root).
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    assert!(
+        app.pending_create_dir.is_some(),
+        "picked destination carried"
+    );
+    app.prompt_editor = LineEditor::new("health");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        dir.path().join("health.toml").exists(),
+        "endpoint created at the picked root"
+    );
+    assert!(app.pending_create_dir.is_none(), "destination consumed");
+}
+
+/// The shared name prompt auto-detects a pasted curl: it imports + auto-names the
+/// endpoint instead of creating a blank one.
+#[test]
+fn name_prompt_auto_imports_pasted_curl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    app.prompt_editor = LineEditor::new("curl https://api.test/health");
+    assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Lands in the cursor's collection (the `users` row), auto-named `/health`.
+    let file = dir.path().join("users").join("health.toml");
+    assert!(
+        file.exists(),
+        "curl imported + auto-named from the URL path"
+    );
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "https://api.test/health");
+}
+
+/// A curl that fails to parse is fail-loud: nothing is created and the prompt
+/// stays open with the buffer intact.
+#[test]
+fn name_prompt_curl_parse_failure_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let before = count_toml(dir.path());
+    app.begin_new_endpoint();
+    app.prompt_editor = LineEditor::new("curl"); // no URL → parse error
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "prompt stays open on a curl parse failure"
+    );
+    assert_eq!(count_toml(dir.path()), before, "no endpoint created");
+}
+
+/// The retired `PasteCurl` action is now an alias that opens the unified
+/// new-endpoint prompt (which auto-detects the pasted curl).
+#[test]
+fn paste_curl_action_opens_unified_new_endpoint_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::PasteCurl, None).unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "PasteCurl aliases the unified new-endpoint prompt"
     );
 }

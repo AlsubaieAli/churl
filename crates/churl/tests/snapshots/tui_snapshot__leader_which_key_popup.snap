@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1521
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
@@ -9,20 +10,20 @@ expression: snapshot(&mut app)
 ┃                            ┃│                                                │
 ┃                            ┃│no endpoint selected                            │
 ┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                                                │
-┃                            ┃│                 ┏ leader ━━━━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│                 ┃ Space  request picker        ┃
-┃                            ┃│                 ┃ c  cancel request            ┃
-┃                            ┃└─────────────────┃ e  toggle explorer sidebar   ┃
-┃                            ┃┌ Response ───────┃ p  switch profile            ┃
-┃                            ┃│no response yet  ┃ q  quit                      ┃
-┃                            ┃│                 ┃ r  reload workspace from disk┃
-┃                            ┃│no endpoint selec┃ v  Environments & vars       ┃
-┃                            ┃│                 ┃ w  workspace picker          ┃
-┃                            ┃│                 ┃ y  copy request as curl      ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                 ┃ l  ▸ load                    ┃
-┌ Sequences ─────────────────┐│                 ┃ s  ▸ sequences               ┃
-│<leader>s a to add          ││                 ┃ t  ▸ tabs                    ┃
-└────────────────────────────┘└─────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃│     ┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│     ┃ Shift-n  new collection (choose location)┃
+┃                            ┃│     ┃ Space  request picker                    ┃
+┃                            ┃│     ┃ c  cancel request                        ┃
+┃                            ┃│     ┃ e  toggle explorer sidebar               ┃
+┃                            ┃└─────┃ n  new endpoint (choose location)        ┃
+┃                            ┃┌ Resp┃ p  switch profile                        ┃
+┃                            ┃│no re┃ q  quit                                  ┃
+┃                            ┃│     ┃ r  reload workspace from disk            ┃
+┃                            ┃│no en┃ v  Environments & vars                   ┃
+┃                            ┃│     ┃ w  workspace picker                      ┃
+┃                            ┃│     ┃ y  copy request as curl                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│     ┃ l  ▸ load                                ┃
+┌ Sequences ─────────────────┐│     ┃ s  ▸ sequences                           ┃
+│<leader>s n to add          ││     ┃ t  ▸ tabs                                ┃
+└────────────────────────────┘└─────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette

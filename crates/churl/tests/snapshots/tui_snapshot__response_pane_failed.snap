@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 287
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -23,6 +24,6 @@ expression: snapshot(&mut app)
 │                            │┃request failed: error sending request           ┃
 └────────────────────────────┘┃                                                ┃
 ┌ Sequences ─────────────────┐┃no response — status, body, and timing are      ┃
-│<leader>s a to add          │┃unavailable                                     ┃
+│<leader>s n to add          │┃unavailable                                     ┃
 └────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  RESPONSE · demo · ? help · space leader · / search · : palette
