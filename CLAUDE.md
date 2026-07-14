@@ -52,13 +52,18 @@ crates/
                            #   recurses to arbitrary depth (sequences/ reserved at ROOT only);
                            #   Collection::endpoints() strict + endpoints_lenient() -> CollectionLoad (skip one bad file →
                            #   warning; both skip folder.toml AND churl.toml at every level);
-                           #   CollectionMeta (folder.toml [vars]) load/save; CRUD seams:
+                           #   CollectionMeta (folder.toml [vars] + seq: u32 skip-if-0; loaders sort (seq,name),
+                           #   all-default corpus stays byte-identical → no migration); CRUD seams:
                            #   create/rename/delete_endpoint + create/rename/delete_collection (slug+seq,
                            #   baseline-aware secret gate on every save path — save_*_checked(policy) return
                            #   SecretDecision, plain save_* wrap them at Strict; SecretsRefused only on a
                            #   newly-authored name-anchored literal, reserved-name disambiguation);
+                           #   M7.12 tree CRUD (relocate.rs/reorder.rs/refs.rs): move/copy/duplicate_endpoint +
+                           #   _collection (atomic claim + -N, append-at-dest seq), reorder_{endpoint,collection,
+                           #   sequence} (dense-renumber then swap; ReorderOutcome edge report),
+                           #   retarget_sequence_steps (rewrite step endpoint on rename/move; copy never rewrites);
                            #   SEQUENCES_DIRNAME (excluded from collections()), OpenWorkspace::sequences() →
-                           #   SequenceLoad (lenient), load/save/create/rename/delete_sequence
+                           #   SequenceLoad (lenient), load/save/create/rename/delete/duplicate_sequence
       sequence.rs          # run engine (UI-free): extract_value (status/header:/JSON-path subset, no
                            #   jsonpath dep), prepare_step (resolver + prepended extracted scope), extract_step,
                            #   classify_step (single classify+extract seam), ordered_steps, run_sequence
