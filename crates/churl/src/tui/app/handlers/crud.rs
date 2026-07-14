@@ -148,6 +148,7 @@ impl App {
             state: picker::PickerState::new(title, labels),
             dirs,
             purpose,
+            source: None,
         });
         // Reuse the Palette routing tier (like the profile/auth pickers) — the
         // items travel with the variant, so the shared overlay handling applies.
@@ -723,6 +724,311 @@ impl App {
     /// the name prompt's live "Import from curl" label flip.
     pub(in crate::tui::app) fn prompt_buffer_is_curl(&self) -> bool {
         looks_like_curl(&self.prompt_editor.text())
+    }
+
+    // --- M7.12 tree CRUD: move-to / copy-to / duplicate / reorder ---
+
+    /// Move-to (`is_move`) / copy-to: open the destination picker for the selected
+    /// node (endpoint or collection), carrying it as the source. Sequences have no
+    /// move-to (root-only, nowhere to relocate).
+    pub(in crate::tui::app) fn begin_relocate(&mut self, is_move: bool) {
+        if self.left_column_on_sequences() {
+            self.notify("sequences are root-only — nowhere to move to");
+            return;
+        }
+        match self.explorer.selected_kind() {
+            Some(RowKind::Endpoint) => {
+                let Some(src) = self.explorer.selected_endpoint_file() else {
+                    return;
+                };
+                let (purpose, title) = if is_move {
+                    (DestPurpose::MoveEndpoint, " Move endpoint to ")
+                } else {
+                    (DestPurpose::CopyEndpoint, " Copy endpoint to ")
+                };
+                self.open_relocate_picker(purpose, src, title);
+            }
+            Some(RowKind::Collection) => {
+                let Some(src) = self.explorer.selected_collection_dir() else {
+                    return;
+                };
+                let (purpose, title) = if is_move {
+                    (DestPurpose::MoveCollection, " Move collection to ")
+                } else {
+                    (DestPurpose::CopyCollection, " Copy collection to ")
+                };
+                self.open_relocate_picker(purpose, src, title);
+            }
+            None => self.notify("nothing selected to move"),
+        }
+    }
+
+    /// Opens the destination picker for a move/copy, excluding the source subtree
+    /// (a collection can never move into itself or one of its descendants).
+    fn open_relocate_picker(&mut self, purpose: DestPurpose, source: PathBuf, title: &'static str) {
+        let dests: Vec<(String, PathBuf)> = self
+            .collection_destinations()
+            .into_iter()
+            .filter(|(_, dir)| !dir.starts_with(&source))
+            .collect();
+        if dests.is_empty() {
+            self.notify("no destination available");
+            return;
+        }
+        let (labels, dirs): (Vec<String>, Vec<PathBuf>) = dests.into_iter().unzip();
+        self.picker = Some(Picker::Destination {
+            state: picker::PickerState::new(title, labels),
+            dirs,
+            purpose,
+            source: Some(source),
+        });
+        self.mode = Mode::Palette;
+    }
+
+    /// Moves/copies the endpoint `source` into `dest`. A move rewrites referencing
+    /// sequence steps and repoints an open buffer for the moved file; a copy never
+    /// rewrites (the original stays referenced).
+    pub(in crate::tui::app) fn relocate_endpoint(
+        &mut self,
+        source: PathBuf,
+        dest: PathBuf,
+        is_move: bool,
+    ) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return Ok(());
+        };
+        let result = if is_move {
+            persistence::move_endpoint(&source, &dest)
+        } else {
+            persistence::copy_endpoint(&source, &dest)
+        };
+        match result {
+            Ok(new_path) => {
+                if is_move && new_path == source {
+                    self.notify("already in that collection");
+                    return Ok(());
+                }
+                let mut msg = if is_move {
+                    "moved endpoint".to_owned()
+                } else {
+                    "copied endpoint".to_owned()
+                };
+                if is_move {
+                    // Repoint an open buffer for the moved file (unsaved edits
+                    // survive), then rewrite referencing sequence steps.
+                    for buf in &mut self.buffers {
+                        if let Some(b) = buf.as_endpoint_mut()
+                            && b.endpoint.file == source
+                        {
+                            b.endpoint.file = new_path.clone();
+                        }
+                    }
+                    if let (Ok(old_rel), Ok(new_rel)) =
+                        (source.strip_prefix(&root), new_path.strip_prefix(&root))
+                    {
+                        match persistence::retarget_sequence_steps(&root, old_rel, new_rel) {
+                            Ok(n) if n > 0 => msg.push_str(&format!(" · {n} step(s) repointed")),
+                            Ok(_) => {}
+                            Err(err) => {
+                                self.crud_error(err);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                self.reload_explorer()?;
+                self.notify(msg);
+            }
+            Err(err) => self.crud_error(err),
+        }
+        Ok(())
+    }
+
+    /// Moves/copies the collection subtree `source` under `dest`. A move rewrites
+    /// steps whose path lies under the old prefix and repoints open buffers; a copy
+    /// never rewrites.
+    pub(in crate::tui::app) fn relocate_collection(
+        &mut self,
+        source: PathBuf,
+        dest: PathBuf,
+        is_move: bool,
+    ) -> Result<()> {
+        let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+            return Ok(());
+        };
+        let result = if is_move {
+            persistence::move_collection(&source, &dest, &root)
+        } else {
+            persistence::copy_collection(&source, &dest, &root)
+        };
+        match result {
+            Ok(new_dir) => {
+                if is_move && new_dir == source {
+                    self.notify("already there");
+                    return Ok(());
+                }
+                let mut msg = if is_move {
+                    "moved collection".to_owned()
+                } else {
+                    "copied collection".to_owned()
+                };
+                if is_move {
+                    for buf in &mut self.buffers {
+                        if let Some(b) = buf.as_endpoint_mut()
+                            && let Ok(rest) = b.endpoint.file.strip_prefix(&source)
+                        {
+                            b.endpoint.file = new_dir.join(rest);
+                        }
+                    }
+                    if let (Ok(old_rel), Ok(new_rel)) =
+                        (source.strip_prefix(&root), new_dir.strip_prefix(&root))
+                    {
+                        match persistence::retarget_sequence_steps(&root, old_rel, new_rel) {
+                            Ok(n) if n > 0 => msg.push_str(&format!(" · {n} step(s) repointed")),
+                            Ok(_) => {}
+                            Err(err) => {
+                                self.crud_error(err);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                self.reload_explorer()?;
+                self.notify(msg);
+            }
+            Err(err) => self.crud_error(err),
+        }
+        Ok(())
+    }
+
+    /// Duplicates the selected node in place (`-N`): endpoint, collection subtree,
+    /// or (on the sequences sub-pane) the hovered sequence.
+    pub(in crate::tui::app) fn duplicate_selected(&mut self) -> Result<()> {
+        if self.left_column_on_sequences() {
+            let Some(sel) = self.explorer.selected_sequence() else {
+                self.notify("no sequence selected");
+                return Ok(());
+            };
+            match persistence::duplicate_sequence(&sel.file) {
+                Ok(_) => {
+                    self.reload_explorer()?;
+                    self.notify("duplicated sequence");
+                }
+                Err(err) => self.crud_error(err),
+            }
+            return Ok(());
+        }
+        match self.explorer.selected_kind() {
+            Some(RowKind::Endpoint) => {
+                let Some(file) = self.explorer.selected_endpoint_file() else {
+                    return Ok(());
+                };
+                match persistence::duplicate_endpoint(&file) {
+                    Ok(_) => {
+                        self.reload_explorer()?;
+                        self.notify("duplicated endpoint");
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            Some(RowKind::Collection) => {
+                let Some(dir) = self.explorer.selected_collection_dir() else {
+                    return Ok(());
+                };
+                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                    self.notify("no workspace open");
+                    return Ok(());
+                };
+                match persistence::duplicate_collection(&dir, &root) {
+                    Ok(_) => {
+                        self.reload_explorer()?;
+                        self.notify("duplicated collection");
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            None => self.notify("nothing selected to duplicate"),
+        }
+        Ok(())
+    }
+
+    /// Reorders the selected node one slot among its siblings (endpoint,
+    /// collection, or hovered sequence). Group-internal + parent-preserving; edge
+    /// hits ("already first/last") surface a status line.
+    pub(in crate::tui::app) fn reorder_selected(
+        &mut self,
+        direction: persistence::ReorderDir,
+    ) -> Result<()> {
+        if self.left_column_on_sequences() {
+            let Some(sel) = self.explorer.selected_sequence() else {
+                self.notify("no sequence selected");
+                return Ok(());
+            };
+            let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                self.notify("no workspace open");
+                return Ok(());
+            };
+            let file = sel.file.clone();
+            let seq_dir = root.join("sequences");
+            match persistence::reorder_sequence(&seq_dir, &file, direction) {
+                Ok(outcome) => {
+                    self.reload_explorer()?;
+                    self.explorer.select_sequence_file(&file);
+                    self.notify_reorder(outcome);
+                }
+                Err(err) => self.crud_error(err),
+            }
+            return Ok(());
+        }
+        match self.explorer.selected_kind() {
+            Some(RowKind::Endpoint) => {
+                let Some(file) = self.explorer.selected_endpoint_file() else {
+                    return Ok(());
+                };
+                // The endpoint's own collection dir is its parent — no workspace
+                // lookup needed for the sibling group.
+                let Some(coll) = file.parent().map(Path::to_owned) else {
+                    return Ok(());
+                };
+                match persistence::reorder_endpoint(&coll, &file, direction) {
+                    Ok(outcome) => {
+                        self.reload_explorer()?;
+                        // Keep the cursor on the moved endpoint (no request reload).
+                        let _ = self.explorer.select_file(&file);
+                        self.notify_reorder(outcome);
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            Some(RowKind::Collection) => {
+                let Some(dir) = self.explorer.selected_collection_dir() else {
+                    return Ok(());
+                };
+                let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
+                    self.notify("no workspace open");
+                    return Ok(());
+                };
+                match persistence::reorder_collection(&dir, &root, direction) {
+                    Ok(outcome) => {
+                        self.reload_explorer()?;
+                        self.notify_reorder(outcome);
+                    }
+                    Err(err) => self.crud_error(err),
+                }
+            }
+            None => self.notify("nothing selected to reorder"),
+        }
+        Ok(())
+    }
+
+    /// Surfaces the reorder edge feedback (a successful swap is silent — the tree
+    /// re-renders in the new order).
+    fn notify_reorder(&mut self, outcome: persistence::ReorderOutcome) {
+        match outcome {
+            persistence::ReorderOutcome::Moved => {}
+            persistence::ReorderOutcome::AlreadyFirst => self.notify("already first"),
+            persistence::ReorderOutcome::AlreadyLast => self.notify("already last"),
+        }
     }
 }
 

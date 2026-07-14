@@ -192,12 +192,14 @@ pub enum Picker {
     /// collection node **including the root** (root first). `dirs[i]` is the target
     /// directory for item `i` (the workspace root for the root entry); `purpose`
     /// says what to do with the chosen destination (create here / move-to /
-    /// copy-to). Shared by the `<leader>n`/`<leader>N` create gestures and (later)
-    /// move-to / copy-to.
+    /// copy-to); `source` is the node being relocated (the endpoint file or
+    /// collection dir) for move/copy, `None` for a create. Shared by the
+    /// `<leader>n`/`<leader>N` create gestures and move-to / copy-to.
     Destination {
         state: picker::PickerState,
         dirs: Vec<PathBuf>,
         purpose: DestPurpose,
+        source: Option<PathBuf>,
     },
 }
 
@@ -208,6 +210,14 @@ pub enum DestPurpose {
     CreateEndpoint,
     /// Create a new (sub-)collection under the chosen collection (then the prompt).
     CreateCollection,
+    /// Move the source endpoint into the chosen collection.
+    MoveEndpoint,
+    /// Copy the source endpoint into the chosen collection.
+    CopyEndpoint,
+    /// Move the source collection subtree under the chosen collection.
+    MoveCollection,
+    /// Copy the source collection subtree under the chosen collection.
+    CopyCollection,
 }
 
 impl Picker {

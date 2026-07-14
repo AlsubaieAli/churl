@@ -194,6 +194,12 @@ impl Default for KeyMap {
         overlay(PaneCtx::Explorer, key!(shift - n), Action::NewCollection);
         overlay(PaneCtx::Explorer, key!(r), Action::Rename);
         overlay(PaneCtx::Explorer, key!(d), Action::Delete);
+        // Reorder the selected node among its siblings: `K` up, `J` down (mnemonic
+        // "move the item", mirroring the sequence-editor Ctrl-j/Ctrl-k swap). `J`/`K`
+        // are free in the Explorer overlay. move-to/copy-to/duplicate stay
+        // palette-only (rare reorganization ops).
+        overlay(PaneCtx::Explorer, key!(shift - k), Action::MoveUp);
+        overlay(PaneCtx::Explorer, key!(shift - j), Action::MoveDown);
         // `s` switches focus/zoom between the endpoints tree and the sequences
         // sub-pane — a lawful in-pane move, only live when the left
         // column is focused. `s` is otherwise free in the Explorer overlay.

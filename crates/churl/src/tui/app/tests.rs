@@ -5833,3 +5833,136 @@ fn paste_curl_action_opens_unified_new_endpoint_prompt() {
         "PasteCurl aliases the unified new-endpoint prompt"
     );
 }
+
+// --- M7.12 tree CRUD wiring ---
+
+/// Reorder down on a selected endpoint swaps its `seq` with the next sibling.
+#[test]
+fn move_down_reorders_selected_endpoint_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let users = dir.path().join("users");
+    persistence::create_endpoint(&users, "beta").unwrap(); // seq 1, after get (seq 0)
+    app.reload_explorer().unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the first endpoint under `users` (Get user)
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.dispatch(Action::MoveDown, None).unwrap();
+    let names: Vec<String> = persistence::Collection {
+        name: "users".into(),
+        path: users.clone(),
+    }
+    .endpoints()
+    .unwrap()
+    .into_iter()
+    .map(|(_, e)| e.name)
+    .collect();
+    assert_eq!(
+        names,
+        vec!["beta", "Get user"],
+        "endpoint order swapped on disk"
+    );
+}
+
+/// Reorder up at the top of a group reports the edge instead of a silent no-op.
+#[test]
+fn reorder_up_at_top_reports_already_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    persistence::create_endpoint(&dir.path().join("users"), "beta").unwrap();
+    app.reload_explorer().unwrap();
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the first endpoint
+    app.dispatch(Action::MoveUp, None).unwrap();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("already first")
+    );
+}
+
+/// Move-to an endpoint (app handler) relocates the file and rewrites the
+/// sequence steps that referenced it.
+#[test]
+fn relocate_endpoint_move_rewrites_sequence_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    let archive = persistence::create_collection(root, "archive", root).unwrap();
+    std::fs::create_dir_all(root.join("sequences")).unwrap();
+    std::fs::write(
+        root.join("sequences/flow.toml"),
+        "name = \"flow\"\n\n[[step]]\nseq = 0\nendpoint = \"users/get.toml\"\n",
+    )
+    .unwrap();
+    let src = root.join("users").join("get.toml");
+    app.relocate_endpoint(src.clone(), archive.clone(), true)
+        .unwrap();
+    assert!(!src.exists(), "source endpoint moved away");
+    assert!(archive.join("get.toml").exists(), "endpoint at destination");
+    let seq = persistence::load_sequence(&root.join("sequences/flow.toml")).unwrap();
+    assert_eq!(
+        seq.steps[0].endpoint, "archive/get.toml",
+        "referencing step repointed by the move"
+    );
+}
+
+/// Copy-to leaves the original in place and never rewrites references.
+#[test]
+fn relocate_endpoint_copy_keeps_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let root = dir.path();
+    let archive = persistence::create_collection(root, "archive", root).unwrap();
+    let src = root.join("users").join("get.toml");
+    app.relocate_endpoint(src.clone(), archive.clone(), false)
+        .unwrap();
+    assert!(src.exists(), "copy leaves the original endpoint");
+    assert!(
+        archive.join("get.toml").exists(),
+        "copy present at destination"
+    );
+}
+
+/// Render-order fix: collections render before a node's own endpoints at the
+/// root, matching the nested order.
+#[test]
+fn root_renders_collections_before_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    std::fs::create_dir(root.join("zed")).unwrap();
+    std::fs::write(
+        root.join("zed/x.toml"),
+        "name = \"X\"\n\n[request]\nmethod = \"GET\"\nurl = \"\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("aaa.toml"),
+        "name = \"Aaa\"\n\n[request]\nmethod = \"GET\"\nurl = \"\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(root).unwrap();
+    let app = App::new(ws, KeyMap::default()).unwrap();
+    let rows = app.explorer.rows();
+    let coll_idx = rows.iter().position(|r| r.kind == RowKind::Collection);
+    let ep_idx = rows.iter().position(|r| r.kind == RowKind::Endpoint);
+    assert_eq!(rows[0].name, "zed", "the collection sorts first");
+    assert!(
+        coll_idx < ep_idx,
+        "collections render before root-level endpoints"
+    );
+}
+
+/// Duplicate on a selected endpoint creates a suffixed sibling in the same
+/// collection.
+#[test]
+fn duplicate_selected_endpoint_creates_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.cursor = 1; // the endpoint under `users`
+    assert_eq!(app.explorer.selected_kind(), Some(RowKind::Endpoint));
+    app.dispatch(Action::Duplicate, None).unwrap();
+    let n = count_toml(&dir.path().join("users"));
+    assert_eq!(n, 2, "duplicate created a second endpoint file");
+}

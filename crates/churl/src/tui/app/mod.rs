@@ -1340,6 +1340,13 @@ impl App {
             Action::Delete if self.left_column_on_sequences() => self.begin_delete_sequence(),
             Action::Delete => self.begin_delete(),
             Action::DeleteSequence => self.begin_delete_sequence(),
+            // Tree CRUD (M7.12): move-to/copy-to open the destination picker;
+            // duplicate + reorder act on the selected node's kind in place.
+            Action::MoveTo => self.begin_relocate(true),
+            Action::CopyTo => self.begin_relocate(false),
+            Action::Duplicate => self.duplicate_selected()?,
+            Action::MoveUp => self.reorder_selected(persistence::ReorderDir::Up)?,
+            Action::MoveDown => self.reorder_selected(persistence::ReorderDir::Down)?,
             Action::HalfPageDown | Action::HalfPageUp => {
                 if self.focus == Pane::Response {
                     self.response_half_page(matches!(action, Action::HalfPageDown));
@@ -1907,16 +1914,41 @@ impl App {
                 }
             }
             Picker::Auth { .. } => self.set_auth_kind(index),
-            Picker::Destination { dirs, purpose, .. } => {
-                if let Some(dir) = dirs.get(index).cloned() {
-                    // Stash the chosen destination for the following name prompt.
-                    self.pending_create_dir = Some(dir);
+            Picker::Destination {
+                dirs,
+                purpose,
+                source,
+                ..
+            } => {
+                if let Some(dest) = dirs.get(index).cloned() {
                     match purpose {
                         DestPurpose::CreateEndpoint => {
-                            self.open_prompt(PromptPurpose::NewEndpoint, "")
+                            self.pending_create_dir = Some(dest);
+                            self.open_prompt(PromptPurpose::NewEndpoint, "");
                         }
                         DestPurpose::CreateCollection => {
-                            self.open_prompt(PromptPurpose::NewCollection, "")
+                            self.pending_create_dir = Some(dest);
+                            self.open_prompt(PromptPurpose::NewCollection, "");
+                        }
+                        DestPurpose::MoveEndpoint => {
+                            if let Some(src) = source {
+                                self.relocate_endpoint(src, dest, true)?;
+                            }
+                        }
+                        DestPurpose::CopyEndpoint => {
+                            if let Some(src) = source {
+                                self.relocate_endpoint(src, dest, false)?;
+                            }
+                        }
+                        DestPurpose::MoveCollection => {
+                            if let Some(src) = source {
+                                self.relocate_collection(src, dest, true)?;
+                            }
+                        }
+                        DestPurpose::CopyCollection => {
+                            if let Some(src) = source {
+                                self.relocate_collection(src, dest, false)?;
+                            }
                         }
                     }
                 }

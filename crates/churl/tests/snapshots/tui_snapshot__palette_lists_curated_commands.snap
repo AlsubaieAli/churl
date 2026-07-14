@@ -18,10 +18,10 @@ expression: snapshot(&mut app)
 │           ┃  new collection (choose location)                    ┃───────────┘
 │           ┃  rename                                              ┃───────────┐
 │           ┃  delete                                              ┃           │
-│           ┃  switch profile                                      ┃           │
-│           ┃  environments & vars                                 ┃           │
-│           ┃  reload workspace from disk                          ┃           │
-│           ┃  run sequence                                        ┃           │
+│           ┃  move to…                                            ┃           │
+│           ┃  copy to…                                            ┃           │
+│           ┃  duplicate                                           ┃           │
+│           ┃  reorder up                                          ┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │

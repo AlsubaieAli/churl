@@ -1029,6 +1029,12 @@ fn every_palette_command_dispatches() {
             Action::NewSequence => expect_status(&mut app, "open a workspace first"),
             Action::Rename => expect_status(&mut app, "nothing selected to rename"),
             Action::Delete => expect_status(&mut app, "nothing selected to delete"),
+            // Tree CRUD (M7.12): with nothing selected in this fixture they warn.
+            Action::MoveTo | Action::CopyTo => expect_status(&mut app, "nothing selected to move"),
+            Action::Duplicate => expect_status(&mut app, "nothing selected to duplicate"),
+            Action::MoveUp | Action::MoveDown => {
+                expect_status(&mut app, "nothing selected to reorder")
+            }
             Action::SwitchProfile => {
                 assert!(
                     matches!(app.mode, Mode::Palette),

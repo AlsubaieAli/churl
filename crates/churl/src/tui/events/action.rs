@@ -112,6 +112,19 @@ pub enum Action {
     Rename,
     /// Delete the selected endpoint or collection (with a confirm).
     Delete,
+    /// Move the selected node (endpoint or collection) into another collection or
+    /// the root, via the destination picker.
+    MoveTo,
+    /// Copy the selected node (endpoint or collection) into another collection or
+    /// the root, via the destination picker.
+    CopyTo,
+    /// Duplicate the selected node (endpoint / collection / sequence) in place
+    /// (`-N` suffix; recursive for a collection).
+    Duplicate,
+    /// Reorder the selected node up one slot among its siblings.
+    MoveUp,
+    /// Reorder the selected node down one slot among its siblings.
+    MoveDown,
     /// Delete the selected sequence in the Sequences sub-pane (with a y/n
     /// confirm). Parallels [`Action::Delete`] for the endpoints tree.
     DeleteSequence,
@@ -301,6 +314,11 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::NewSequence, "new-sequence", "new sequence"),
     (Action::Rename, "rename", "rename"),
     (Action::Delete, "delete", "delete"),
+    (Action::MoveTo, "move-to", "move to…"),
+    (Action::CopyTo, "copy-to", "copy to…"),
+    (Action::Duplicate, "duplicate", "duplicate"),
+    (Action::MoveUp, "move-up", "reorder up"),
+    (Action::MoveDown, "move-down", "reorder down"),
     (Action::DeleteSequence, "delete-sequence", "delete sequence"),
     (
         Action::ToggleExplorer,
