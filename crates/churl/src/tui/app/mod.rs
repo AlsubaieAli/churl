@@ -277,6 +277,11 @@ pub struct App {
     /// snapshot-test construction and when history is unavailable. Flushed and
     /// joined on quit so no write is lost.
     cookie_writer: Option<CookieJarWriter>,
+    /// An error from the FINAL on-quit cookie flush, if any. Captured during the
+    /// quit path (where a statusline message could never render) and surfaced by
+    /// the caller to stderr *after* the terminal is restored, so a failed last
+    /// write is reported loudly rather than swallowed.
+    cookie_exit_error: Option<String>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -500,6 +505,7 @@ impl App {
             cookies_enabled: false,
             cookie_jar: Arc::new(ChurlCookieJar::new()),
             cookie_writer: None,
+            cookie_exit_error: None,
         })
     }
 
@@ -1144,9 +1150,21 @@ impl App {
     /// stalls on the WAL write-lock. The write is SKIPPED on a serialize failure so
     /// a transient error can never clobber the good on-disk blob with `""` (which
     /// `ON CONFLICT DO UPDATE` would persist as an empty jar = silent permanent
-    /// cookie loss) — the writer therefore only ever receives a good blob. Any
-    /// error from a *prior* off-thread write is surfaced here, loudly.
+    /// cookie loss) — the writer therefore only ever receives a good blob.
+    ///
+    /// A failure from a *prior* off-thread write is polled and surfaced FIRST (it
+    /// can only be known now, asynchronously — it is not this call's write), worded
+    /// as a previous save so the message is not misattributed to the current one.
     pub(in crate::tui::app) fn persist_cookie_jar(&mut self) {
+        // Surface any error from an earlier off-thread write before enqueuing a new
+        // one (Constitution: fail loudly, never swallow). Read into a local so the
+        // immutable borrow of `cookie_writer` ends before we touch `self.message`.
+        let prior_error = self.cookie_writer.as_ref().and_then(|w| w.take_error());
+        if let Some(err) = prior_error {
+            self.message = Some(Message::new(format!(
+                "a previous cookie save failed: {err}"
+            )));
+        }
         let Some(key) = self.cookie_workspace_key() else {
             return;
         };
@@ -1165,11 +1183,6 @@ impl App {
             return;
         };
         writer.enqueue(key, json, now_ms());
-        // Surface any failure from a previous off-thread write (Constitution: fail
-        // loudly, never swallow).
-        if let Some(err) = writer.take_error() {
-            self.message = Some(Message::new(format!("cookie save failed: {err}")));
-        }
     }
 
     /// Runs the event loop: `tokio::select!` over the crossterm event stream, a
@@ -1243,11 +1256,19 @@ impl App {
             self.persist_cookie_jar();
         }
         // Synchronously flush + join the off-thread writer so the last snapshot is
-        // durable before the process (and the tokio runtime) tears down.
+        // durable before the process (and the tokio runtime) tears down. A failed
+        // FINAL flush is stashed for the caller to print AFTER terminal restore —
+        // no statusline exists here, and `take_error` polling has stopped.
         if let Some(mut writer) = self.cookie_writer.take() {
-            writer.shutdown();
+            self.cookie_exit_error = writer.shutdown();
         }
         Ok(())
+    }
+
+    /// Takes the error (if any) from the final on-quit cookie flush, for the caller
+    /// to surface to stderr after the terminal is restored.
+    pub fn take_cookie_exit_error(&mut self) -> Option<String> {
+        self.cookie_exit_error.take()
     }
 
     /// On quit, mirror [`Self::cancel_request`] for every in-flight buffer: abort
