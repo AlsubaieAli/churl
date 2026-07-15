@@ -54,6 +54,10 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 - **SOCKS** proxy (`socks` feature), per-scheme distinct proxies, PAC.
 - SameSite / third-party cookie policy knobs (rely on crate defaults); cookie-jar encryption at rest (parity with the unencrypted, local-only `state.sqlite`).
 
+### Known limitations (M8.1) 🐞
+- **Cookies learned over an insecure hop are not quarantined.** The per-endpoint insecure client shares the single `Arc<ChurlCookieJar>` with the verifying client, so a cookie set over an unverified request to `a.example.com` (`Domain=example.com`) can later ride a *verified* request to `api.example.com`. Cross-*origin* leak is still blocked by RFC 6265 scoping; this is the cross-*subdomain*, insecure→secure seam (see DECISIONS "Per-endpoint insecure-TLS"). The real fix — tagging jar entries with the verification state of the hop that set them and withholding insecure-origin cookies from verified requests — is bigger than M8.1.
+- **No end-to-end integration test drives a real opted-in send through `App::client_for`.** Per-endpoint insecure routing is currently covered by unit tests (the `client_for` divergence white-box + the http-layer secure-vs-insecure TLS test) plus a manual PTY drive, not an automated test that sends an opted-in endpoint through the real send path against a self-signed server. Add one.
+
 ## Exploring 🔭
 
 - **Plugin system** — community extensibility for auth schemes, body types, and viewers. (F)
