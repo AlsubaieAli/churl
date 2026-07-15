@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
 use churl_core::cookies::ChurlCookieJar;
-use churl_core::history::{HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path};
+use churl_core::history::{
+    CookieJarWriter, HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path,
+};
 use churl_core::http::{ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, build_client_with};
 use churl_core::interchange::{self, JsonDialect};
 use churl_core::load::{LoadCheck, LoadConfig, ReqOutcome};
@@ -269,6 +271,12 @@ pub struct App {
     /// accumulated cookies; persisted to `state.sqlite` on mutating sends, toggle
     /// off, clear, and exit.
     cookie_jar: Arc<ChurlCookieJar>,
+    /// Off-UI-thread writer for the cookie jar: `persist_cookie_jar` serializes on
+    /// the UI thread (cheap, in-RAM) then hands the snapshot here, so the blocking
+    /// SQLite write never stalls the UI under WAL-lock contention. `None` in
+    /// snapshot-test construction and when history is unavailable. Flushed and
+    /// joined on quit so no write is lost.
+    cookie_writer: Option<CookieJarWriter>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -491,6 +499,7 @@ impl App {
             session_insecure: false,
             cookies_enabled: false,
             cookie_jar: Arc::new(ChurlCookieJar::new()),
+            cookie_writer: None,
         })
     }
 
@@ -981,7 +990,19 @@ impl App {
         self.highlight_tx = highlight::spawn(self.tx.clone(), self.theme.is_light());
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
-                Ok(store) => self.history = Some(store),
+                Ok(store) => {
+                    self.history = Some(store);
+                    // Spawn the off-thread cookie writer against the same DB. A
+                    // spawn failure is non-fatal: the jar still works in RAM, but
+                    // persistence is disabled with a loud note.
+                    match CookieJarWriter::spawn(&path) {
+                        Ok(writer) => self.cookie_writer = Some(writer),
+                        Err(err) => {
+                            self.message =
+                                Some(Message::new(format!("cookie persistence disabled: {err}")));
+                        }
+                    }
+                }
                 Err(err) => {
                     self.message = Some(Message::new(format!("history disabled: {err}")));
                 }
@@ -1116,11 +1137,15 @@ impl App {
 
     /// Persists the current cookie jar for this workspace. Called after a send
     /// that may have mutated the jar, on toggle-off / clear, and on exit. The jar
-    /// still works in memory regardless, but a failure is surfaced loudly (never
-    /// swallowed) and — critically — the write is SKIPPED on a serialize failure
-    /// so a transient error can never clobber the good on-disk blob with `""`
-    /// (which `ON CONFLICT DO UPDATE` would persist as an empty jar = silent
-    /// permanent cookie loss).
+    /// still works in memory regardless.
+    ///
+    /// Serialization runs here on the UI thread (cheap, in-RAM); the blocking
+    /// SQLite write is handed to the off-thread [`CookieJarWriter`] so the UI never
+    /// stalls on the WAL write-lock. The write is SKIPPED on a serialize failure so
+    /// a transient error can never clobber the good on-disk blob with `""` (which
+    /// `ON CONFLICT DO UPDATE` would persist as an empty jar = silent permanent
+    /// cookie loss) — the writer therefore only ever receives a good blob. Any
+    /// error from a *prior* off-thread write is surfaced here, loudly.
     pub(in crate::tui::app) fn persist_cookie_jar(&mut self) {
         let Some(key) = self.cookie_workspace_key() else {
             return;
@@ -1128,7 +1153,7 @@ impl App {
         let json = match self.cookie_jar.to_json() {
             Ok(json) => json,
             Err(err) => {
-                // Do NOT write — persisting an empty/partial blob would wipe a
+                // Do NOT enqueue — persisting an empty/partial blob would wipe a
                 // good jar. Fail loud instead.
                 self.message = Some(Message::new(format!(
                     "cookie save failed (serialize): {err}"
@@ -1136,10 +1161,13 @@ impl App {
                 return;
             }
         };
-        let Some(store) = self.history.as_ref() else {
+        let Some(writer) = self.cookie_writer.as_ref() else {
             return;
         };
-        if let Err(err) = store.save_cookie_jar(&key, &json, now_ms()) {
+        writer.enqueue(key, json, now_ms());
+        // Surface any failure from a previous off-thread write (Constitution: fail
+        // loudly, never swallow).
+        if let Some(err) = writer.take_error() {
             self.message = Some(Message::new(format!("cookie save failed: {err}")));
         }
     }
@@ -1209,9 +1237,15 @@ impl App {
         self.record_inflight_on_quit();
         // Flush the cookie jar on exit so a session's persistent cookies survive
         // to the next launch (best-effort; a no-op when cookies are disabled or no
-        // workspace is open).
+        // workspace is open). This enqueues the final snapshot; the shutdown below
+        // then drains it to disk before the writer thread exits — no lost writes.
         if self.cookies_enabled {
             self.persist_cookie_jar();
+        }
+        // Synchronously flush + join the off-thread writer so the last snapshot is
+        // durable before the process (and the tokio runtime) tears down.
+        if let Some(mut writer) = self.cookie_writer.take() {
+            writer.shutdown();
         }
         Ok(())
     }

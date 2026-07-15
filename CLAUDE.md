@@ -95,7 +95,9 @@ crates/
       history.rs           # rusqlite HistoryStore, user_version migrations (append-only); WAL + busy_timeout +
                            #   BEGIN IMMEDIATE migration lock; a SEPARATE load_batches table (LoadBatchSummary) —
                            #   load runs write one summary row there, never to history (structural non-flooding);
-                           #   prune-on-insert row caps; migration 5 (M8): cookies table (per-workspace jar_json blob)
+                           #   prune-on-insert row caps; migration 5 (M8): cookies table (per-workspace jar_json blob);
+                           #   cookie_writer.rs (M8.1): CookieJarWriter — off-UI-thread cookie persistence (own
+                           #   connection + coalescing map/condvar; flush+join on quit)
       http.rs              # reqwest+rustls execute(client, request, &ExecuteOptions); streamed body cap →
                            #   Response.truncated; build_client(timeout) → build_client_with(&ClientConfig
                            #   {timeout,proxy,insecure,cookies}) (M8: one client seam; proxy=Proxy::all,
