@@ -224,14 +224,37 @@ fn mask_proxy_hides_userinfo() {
 
 #[test]
 fn mask_proxy_password_keeps_user_visible_hides_password() {
+    // No credentials at all: nothing to mask.
+    assert_eq!(
+        mask_proxy_password("http://proxy.local"),
+        "http://proxy.local"
+    );
+    // Username only (no `:`): nothing to mask, with or without a trailing `@`.
+    assert_eq!(mask_proxy_password("http://user"), "http://user");
+    assert_eq!(mask_proxy_password("http://user@host"), "http://user@host");
+
+    // `user:pass` typed BEFORE the `@` is entered — the leak this fix closes. The
+    // password must be masked as it grows, not shown in plaintext.
+    assert_eq!(mask_proxy_password("http://user:pass"), "http://user:••••");
+    assert_eq!(mask_proxy_password("user:secret"), "user:••••");
+
+    // Full `user:pass@host:port`: password masked; the host:port after `@` is
+    // untouched (its `:` is a port, not credentials).
     assert_eq!(
         mask_proxy_password("http://user:pass@proxy.local:3128"),
         "http://user:••••@proxy.local:3128"
     );
     assert_eq!(mask_proxy_password("user:pass@host"), "user:••••@host");
-    // Username-only or no userinfo: nothing to mask; port colon untouched.
-    assert_eq!(mask_proxy_password("http://user@host"), "http://user@host");
-    assert_eq!(mask_proxy_password("http://host:8080"), "http://host:8080");
-    // Never leaks a password.
-    assert!(!mask_proxy_password("http://u:supersecret@h").contains("supersecret"));
+
+    // A `:` that is a port, not a password: after `@` it stays visible.
+    let masked = mask_proxy_password("http://user:pass@proxy.local:3128");
+    assert!(
+        masked.ends_with(":3128"),
+        "the port must stay visible: {masked}"
+    );
+
+    // Password with special characters never leaks (masked whether or not the `@`
+    // is present yet).
+    assert!(!mask_proxy_password("http://u:p$s!w0rd@h").contains("p$s!w0rd"));
+    assert!(!mask_proxy_password("http://u:p$s!w0rd").contains("p$s!w0rd"));
 }
