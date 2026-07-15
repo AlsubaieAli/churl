@@ -1,0 +1,113 @@
+name: Rollback release
+
+# Repoints the "Latest" release (what `releases/latest`, the installer, and
+# `curl | sh` serve) back to a known-good version, and optionally demotes a bad
+# release to a prerelease. This is the inverse of release.yml's finalize-release
+# step. It is METADATA-ONLY (`gh release edit`) — it never uploads assets, so it
+# runs fine even when `uploads.github.com` is unreachable (Twingate).
+#
+# It does NOT touch crates.io (immutable — use `cargo yank` for that; see
+# CONTRIBUTING.md) and does NOT delete anything. The preferred fix for a bad
+# release is still to roll FORWARD (revert + Force release); this is the fast
+# stop-gap for the binary/installer path.
+#
+# Actions tab -> "Rollback release" -> Run workflow: pick the last-good tag to
+# restore as Latest, and optionally the bad tag to demote.
+
+on:
+  workflow_dispatch:
+    inputs:
+      good_version:
+        description: Tag to restore as "Latest" (e.g. v0.2.0) — must have binaries
+        required: true
+      bad_version:
+        description: Tag to demote to prerelease (optional, e.g. v0.3.0)
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize concurrent rollbacks so two runs can't fight over which tag is
+  # "Latest". (release.yml's finalize has no matching group, so this does not
+  # serialize a rollback against an in-flight release — rare in practice, and a
+  # rollback is a deliberate manual act; add a shared group later if it bites.)
+  group: rollback-latest
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Repoint Latest
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'AlsubaieAli'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GOOD: ${{ inputs.good_version }}
+      BAD: ${{ inputs.bad_version }}
+    steps:
+      - name: Validate inputs and the good release
+        run: |
+          # A prerelease tag must never become Latest — that's the exact thing the
+          # release finalize/prerelease dance exists to prevent (release.yml gates
+          # finalize on a hyphen-free tag). Stable churl tags are vX.Y.Z.
+          case "$GOOD" in
+            *-*)
+              echo "::error::$GOOD looks like a prerelease (contains '-'); Latest must be a stable tag"
+              exit 1
+              ;;
+          esac
+          # good == bad would restore then immediately demote the SAME release,
+          # leaving no Latest at all.
+          if [ -n "$BAD" ] && [ "$GOOD" = "$BAD" ]; then
+            echo "::error::good_version and bad_version are both $GOOD — that would demote the release you're restoring"
+            exit 1
+          fi
+          if ! gh release view "$GOOD" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::release $GOOD not found"
+            exit 1
+          fi
+          # Never repoint Latest at an assetless release — the installer resolves
+          # `releases/latest/download/...` and would 404. A full release ships 5
+          # platform archives; warn (don't fail) below 5 so a valid older release
+          # built on a smaller matrix isn't rejected, but a partial build is flagged.
+          assets=$(gh release view "$GOOD" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '[.assets[].name] | map(select(endswith(".tar.gz") or endswith(".zip"))) | length')
+          echo "good release $GOOD has ${assets:-0} binary archive(s)"
+          if [ "${assets:-0}" -lt 1 ]; then
+            echo "::error::$GOOD has no binary archives — refusing to make it Latest"
+            exit 1
+          fi
+          if [ "${assets:-0}" -lt 5 ]; then
+            echo "::warning::$GOOD has only ${assets} archive(s); a full release ships 5 platforms — installs may 404 on a missing target"
+          fi
+
+      - name: Restore the good release as Latest
+        # --prerelease=false + --latest together: a prerelease can't be Latest, and
+        # marking one release Latest moves the pointer off whatever held it before.
+        run: |
+          gh release edit "$GOOD" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          echo "Latest now points at $GOOD"
+
+      - name: Demote the bad release to prerelease
+        if: ${{ inputs.bad_version != '' }}
+        # Belt-and-braces: marking GOOD as Latest already unset it, but flagging BAD
+        # as a prerelease keeps it out of `releases/latest` and off `cargo install`
+        # expectations, and labels it clearly in the UI.
+        run: |
+          if gh release view "$BAD" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$BAD" --repo "$GITHUB_REPOSITORY" --prerelease=true --latest=false
+            echo "Demoted $BAD to prerelease"
+          else
+            echo "::warning::bad release $BAD not found — skipping demotion"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Rollback complete"
+            echo "- **Latest** → \`$GOOD\`"
+            [ -n "$BAD" ] && echo "- Demoted → \`$BAD\`"
+            echo ""
+            echo "crates.io is immutable — if the bad version is published there, \`cargo yank --version <ver>\` separately. Prefer rolling forward (revert + Force release) for a real fix."
+          } >> "$GITHUB_STEP_SUMMARY"

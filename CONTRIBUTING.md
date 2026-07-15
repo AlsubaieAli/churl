@@ -125,6 +125,12 @@ git tag v0.2.0-beta.1 && git push origin v0.2.0-beta.1
 installer, and plain `cargo install churl` keep serving stable. Publish a beta
 to crates.io only if testers need `cargo install --version`.
 
+A tag is an immutable pointer to a commit, so a beta persists on its own —
+moving `master` forward never disturbs it, and testers keep installing it with
+`install.sh --tag v0.2.0-beta.1`. When a beta proves good and you want the
+**stable** release to be byte-for-byte what testers vetted, cut stable from the
+**same commit** the beta was tagged on (rather than a newer `master`).
+
 ### Forcing a release (installer / infra changes)
 
 release-plz versions the **crate** — it hashes what `cargo publish` ships. A
@@ -148,6 +154,37 @@ If a PR changes `install.sh` **and** crate code together, release-plz handles it
 as a normal crate release and the new installer rides along — the force path
 stays out of the way.
 
+### Rolling back a release
+
+There is no single "undo" — rollback is per-surface, because each ships
+differently. In order of preference:
+
+1. **Roll forward (preferred).** Releases are cheap and CI-only, so the cleanest
+   fix for a bad release is to revert the offending commit and cut a new patch —
+   via a normal PR, or the **Force release** workflow for an on-demand bump. The
+   bad version stays in history; the new one supersedes it everywhere.
+
+2. **Repoint the installer / `Latest` (fast stop-gap).** The `curl | sh`
+   installer follows `releases/latest`. Run the **Rollback release** workflow
+   (Actions tab → **Rollback release** → Run workflow) with the last-good tag
+   (and optionally the bad tag to demote). It re-marks the good release `Latest`
+   and demotes the bad one to a prerelease. It is **metadata-only** (`gh release
+   edit`, no asset upload), so it runs even when `uploads.github.com` is
+   unreachable (Twingate). It verifies the good release actually has binaries
+   first, so it can't point `Latest` at an assetless release.
+
+3. **crates.io (`cargo install churl`).** crates.io is **immutable** — a
+   published version can never be overwritten or deleted, only *yanked*:
+
+   ```sh
+   cargo yank --version 0.3.1        # hide from new dependency resolution
+   cargo yank --version 0.3.1 --undo # reverse it
+   ```
+
+   Yank leaves existing lockfiles working; it only stops new picks. To actually
+   replace the code, publish a higher patch (roll forward). The Rollback workflow
+   does **not** touch crates.io — yank is a separate, deliberate call.
+
 ### Dev builds
 
 Need a binary from an unreleased branch? Comment `/build` on the PR
@@ -165,6 +202,7 @@ binaries appear as workflow artifacts with 14-day retention.
 | `.github/workflows/release-plz.yml` | Release PR + crates.io publish + tag push |
 | `.github/workflows/release.yml` | Binaries + GitHub release on `v*` tags; installer smoke-test gate |
 | `.github/workflows/force-release.yml` | Cuts a release for installer/infra changes release-plz skips |
+| `.github/workflows/rollback.yml` | Repoints `Latest`/installer to a known-good release (metadata-only rollback) |
 | `.github/workflows/dev-build.yml` | Tester binaries from any ref |
 | `install.sh` | End-user installer (attached to every release) |
 
