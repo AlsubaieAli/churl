@@ -414,6 +414,14 @@ pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
     }
 }
 
+/// Normalises a bracketed-paste payload's line endings to `\n`: `\r\n` and lone
+/// `\r` both collapse to `\n`. Terminals and multiplexers (tmux `paste-buffer`)
+/// deliver paste newlines inconsistently as CR / CRLF / LF; downstream (the curl
+/// importer's `\`-continuation logic, and the LineEditor buffer) only wants LF.
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 impl App {
     /// How many consecutive history/load-summary write failures trigger the
     /// sticky "history not recording" status-bar flag. Set to 1 so the
@@ -923,6 +931,71 @@ impl App {
             .is_some_and(|b| b.url_popup.is_some())
     }
 
+    /// The [`LineEditor`] currently receiving text input, if any — the routing
+    /// target for a bracketed paste into a single-line surface. Mirrors the key
+    /// precedence in [`Self::handle_key`]: help search → inline URL edit → body
+    /// search → CRUD/new-endpoint prompt. Returns `None` when no `LineEditor`
+    /// surface is active (the caller then tries the edtui surfaces or no-ops).
+    fn active_line_editor(&mut self) -> Option<&mut LineEditor> {
+        if self.help_open && self.help_search_input {
+            return Some(&mut self.help_search_editor);
+        }
+        if self.url_editor_active() {
+            return self
+                .active_endpoint_buffer_mut()
+                .and_then(|b| b.url_editor.as_mut());
+        }
+        if matches!(self.mode, Mode::BodySearch) {
+            return Some(&mut self.body_search_editor);
+        }
+        if matches!(self.mode, Mode::Prompt(_)) {
+            return Some(&mut self.prompt_editor);
+        }
+        None
+    }
+
+    /// Routes a bracketed-paste payload into the active text surface as literal
+    /// characters (newlines preserved, never interpreted as submit). Precedence:
+    ///
+    /// 1. Any active [`LineEditor`] surface (prompt / inline URL / help+body
+    ///    search) — the important one being the `<leader>n` new-endpoint prompt,
+    ///    where the full multi-line curl must land intact for `import_curl`.
+    /// 2. The edtui URL popup, then the Body editor when it is in an insert-capable
+    ///    (non-Normal) mode — so enabling bracketed paste does not silently break
+    ///    pasting into those multi-line editors (they previously absorbed the
+    ///    per-key stream).
+    ///
+    /// Any other surface (env editor, request-row field edit, sequence fields) or
+    /// no active input drops the paste safely rather than misrouting it.
+    ///
+    /// Line endings are normalised to `\n` first: terminals (and tmux) deliver a
+    /// bracketed paste's newlines inconsistently as CR, CRLF, or LF, but the curl
+    /// importer's line-continuation logic only recognises `\`+LF / `\`+CRLF, and a
+    /// LineEditor should never store a raw CR. Normalising keeps a multi-line
+    /// curl parseable whatever the terminal sends.
+    fn handle_paste(&mut self, text: String) {
+        let text = normalize_paste_newlines(&text);
+        if let Some(editor) = self.active_line_editor() {
+            editor.insert_str(&text);
+            return;
+        }
+        if self.url_popup_active() {
+            if let Some(b) = self.active_endpoint_buffer_mut()
+                && let Some(editor) = b.url_popup.as_mut()
+            {
+                b.url_popup_events.on_paste_event(text, editor);
+            }
+            return;
+        }
+        if self.focus == Pane::Request
+            && self.active_tab() == RequestTab::Body
+            && self.body_editor_non_normal()
+            && let Some(b) = self.active_endpoint_buffer_mut()
+        {
+            b.editor_events.on_paste_event(text, &mut b.editor);
+        }
+    }
+
     /// The success message of a queued-but-not-yet-flushed clipboard copy, if
     /// any. Exposed for tests: the actual copy (and its real success/fail
     /// message) runs in the terminal-owning run loop, which drives a real
@@ -1220,6 +1293,12 @@ impl App {
                             self.notify(msg);
                         }
                     }
+                    // A bracketed paste (enabled in `tui::init`): route the whole
+                    // clipboard payload into the active text surface as literal
+                    // characters — newlines are preserved in the buffer instead of
+                    // acting as Enter, so a multi-line curl reaches `import_curl`
+                    // intact on submit.
+                    Some(Ok(Event::Paste(text))) => self.handle_paste(text),
                     Some(Ok(_)) => {} // resize etc. — redraw happens next iteration
                     Some(Err(err)) => return Err(err.into()),
                     None => break, // input stream closed

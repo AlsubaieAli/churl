@@ -41,8 +41,11 @@ struct Cli {
 enum Command {
     /// Import a curl command as an endpoint (prints TOML; --out writes a file)
     Import {
-        /// The curl command to import (quote the whole command)
-        curl: String,
+        /// The curl command to import (quote the whole command). Omit it, or pass
+        /// `-`, to read the entire command from stdin — e.g. `pbpaste | churl
+        /// import` or `churl import < cmd.txt`, which avoids the shell mangling a
+        /// multi-line curl's quotes and backslashes.
+        curl: Option<String>,
         /// Override the endpoint name derived from the URL
         #[arg(long)]
         name: Option<String>,
@@ -110,6 +113,16 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Import { curl, name, out }) => {
+            // No arg (or `-`) ⇒ read the whole curl command from stdin, so a
+            // multi-line paste survives without the shell mangling it.
+            let curl = match curl.as_deref() {
+                None | Some("-") => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf
+                }
+                Some(arg) => arg.to_owned(),
+            };
             run_import(&curl, name, out)?;
         }
         Some(Command::Keymaps) => {

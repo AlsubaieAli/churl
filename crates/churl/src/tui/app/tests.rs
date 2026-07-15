@@ -5805,6 +5805,42 @@ fn name_prompt_auto_imports_pasted_curl() {
     assert_eq!(ep.request.url, "https://api.test/health");
 }
 
+/// A bracketed paste routes the whole multi-line curl into the prompt editor
+/// (newlines normalised from the terminal's bare CR to LF) so the existing
+/// submit → `import_curl` path parses it — the real fix for the "unbalanced
+/// quotes / multiple URLs" bug (a per-key stream would have submitted early on
+/// the first embedded newline).
+#[test]
+fn handle_paste_fills_prompt_and_imports_multiline_curl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    // As a real terminal / tmux delivers a bracketed paste: bare CR line breaks
+    // and curl's `\[\]` glob-escaping of an array param.
+    let pasted = "curl 'https://api.test/orders?fields\\[\\]=a&fields\\[\\]=b' \\\r  -H 'accept: application/json'";
+    app.handle_paste(pasted.to_string());
+    let buf = app.prompt_editor.text();
+    assert!(
+        buf.contains("fields\\[\\]=a"),
+        "raw buffer keeps curl's escaping until import"
+    );
+    assert!(
+        buf.contains('\n') && !buf.contains('\r'),
+        "CR line breaks normalised to LF in the buffer"
+    );
+    assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("orders.toml");
+    assert!(file.exists(), "multi-line curl imported to an endpoint");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(
+        ep.request.url, "https://api.test/orders?fields[]=a&fields[]=b",
+        "continuations collapsed and brackets unescaped"
+    );
+}
+
 /// A curl that fails to parse is fail-loud: nothing is created and the prompt
 /// stays open with the buffer intact.
 #[test]

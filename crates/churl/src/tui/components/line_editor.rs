@@ -123,6 +123,18 @@ impl LineEditor {
         self.cursor
     }
 
+    /// Inserts a whole string at the cursor, char-by-char, advancing the cursor by
+    /// the inserted char count. Newlines (and other control chars) are stored
+    /// verbatim — they render as zero-width via [`char_width`], and are exactly
+    /// what a multi-line bracketed paste (e.g. a `\`-continued curl) needs so the
+    /// full command survives to submit. Empty input is a no-op.
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.chars.insert(self.cursor, c);
+            self.cursor += 1;
+        }
+    }
+
     /// Handles one key event, mutating the buffer/cursor. Returns `true` when the
     /// key was consumed (so the caller does not treat it as a commit/cancel).
     /// `Enter`/`Esc`/`Tab` are *not* consumed here — they are control keys the
@@ -280,6 +292,48 @@ mod tests {
         assert_eq!(view.text, "日本");
         assert!(view.clipped_right);
         assert_eq!(view.cursor_col, 0);
+    }
+
+    #[test]
+    fn insert_str_at_end_advances_cursor() {
+        let mut ed = LineEditor::new("ab");
+        ed.insert_str("cde");
+        assert_eq!(ed.text(), "abcde");
+        assert_eq!(ed.cursor(), 5, "cursor advances by inserted char count");
+    }
+
+    #[test]
+    fn insert_str_mid_buffer() {
+        let mut ed = LineEditor::new("abef");
+        ed.handle_key(key(KeyCode::Home));
+        ed.handle_key(key(KeyCode::Right));
+        ed.handle_key(key(KeyCode::Right)); // cursor between 'b' and 'e'
+        assert_eq!(ed.cursor(), 2);
+        ed.insert_str("cd");
+        assert_eq!(ed.text(), "abcdef");
+        assert_eq!(ed.cursor(), 4, "cursor lands after the inserted run");
+    }
+
+    #[test]
+    fn insert_str_preserves_newlines_and_counts_chars() {
+        // A multi-line paste (as from a `\`-continued curl) keeps its newlines
+        // verbatim in the buffer, and the cursor advances by the full char count
+        // (newlines included), so a later insert lands correctly.
+        let mut ed = LineEditor::new("");
+        let pasted = "curl 'x' \\\n  -H 'a: b'";
+        ed.insert_str(pasted);
+        assert_eq!(ed.text(), pasted);
+        assert_eq!(ed.cursor(), pasted.chars().count());
+        assert!(ed.text().contains('\n'), "newline stored verbatim");
+    }
+
+    #[test]
+    fn insert_str_empty_is_noop() {
+        let mut ed = LineEditor::new("abc");
+        ed.handle_key(key(KeyCode::Home));
+        ed.insert_str("");
+        assert_eq!(ed.text(), "abc");
+        assert_eq!(ed.cursor(), 0);
     }
 
     #[test]
