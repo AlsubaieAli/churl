@@ -201,6 +201,7 @@ fn reorder_endpoints_normalizes_legacy_zero_seq() {
                 params: Vec::new(),
                 body: None,
                 auth: None,
+                insecure: false,
             },
         };
         save_endpoint(&p, &ep).unwrap();

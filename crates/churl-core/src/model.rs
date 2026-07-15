@@ -226,6 +226,15 @@ pub struct Request {
     /// Optional first-class auth; omitted from serialized output when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Auth>,
+    /// Durable per-endpoint insecure-TLS opt-in: when `true`, this endpoint's
+    /// request goes out with certificate *and* hostname verification off, even
+    /// while the session as a whole verifies. The effective insecure for a send is
+    /// `endpoint.request.insecure || session_insecure`, so a sibling secure
+    /// endpoint in the same session still verifies. Serde-default keeps existing
+    /// endpoint files (which lack the key) verifying, and it is omitted from
+    /// serialized output when `false` so a secure endpoint stays byte-minimal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 /// A saved endpoint: one `.toml` file inside a collection directory.

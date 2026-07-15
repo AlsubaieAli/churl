@@ -23,6 +23,7 @@ fn get(url: String) -> Request {
         params: Vec::new(),
         body: None,
         auth: None,
+        insecure: false,
     }
 }
 
@@ -125,6 +126,34 @@ async fn secure_client_rejects_hostname_mismatch() {
             .is_err(),
         "the secure client must reject a hostname-mismatched cert"
     );
+}
+
+#[tokio::test]
+async fn per_endpoint_insecure_diverges_within_one_session() {
+    // The per-endpoint feature's core guarantee: within ONE session (a shared
+    // verifying client), a secure endpoint (`insecure = false`) is rejected by the
+    // self-signed cert while an opted-in endpoint (`insecure = true`) — served by
+    // the divergent insecure client that `App::client_for` builds — succeeds. Both
+    // hit the SAME server, so this isolates the TLS-verification difference to the
+    // per-endpoint flag alone.
+    let url = spawn_self_signed("127.0.0.1").await;
+
+    // The shared session client verifies (session_insecure = false).
+    let session = build_client(Duration::from_secs(5)).unwrap();
+    // The divergent client an opted-in endpoint sends through: same knobs, verify
+    // off.
+    let opted_in = build_client_insecure();
+
+    assert!(
+        execute(&session, &get(url.clone()), &Default::default())
+            .await
+            .is_err(),
+        "the verifying (secure) endpoint must reject the self-signed cert"
+    );
+    let response = execute(&opted_in, &get(url), &Default::default())
+        .await
+        .expect("the opted-in (insecure) endpoint must accept the self-signed cert");
+    assert_eq!(response.status, 200);
 }
 
 fn build_client_insecure() -> reqwest::Client {

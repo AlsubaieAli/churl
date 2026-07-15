@@ -108,6 +108,14 @@ pub struct App {
     rx: mpsc::Receiver<AppMsg>,
     /// The shared reqwest client; `None` in snapshot-test construction (runtime-free).
     pub client: Option<Client>,
+    /// Lazily-built client that mirrors [`Self::client`]'s knobs (timeout / proxy /
+    /// cookies) but forces insecure-TLS on. Used only for the divergent case — a
+    /// session that verifies sending an endpoint whose `request.insecure` opted in.
+    /// Built on first such send and invalidated (`None`) by every
+    /// [`Self::rebuild_client`], so it can never drift from the shared client's
+    /// other settings. Stays `None` when the session is already insecure (the
+    /// shared client already matches).
+    insecure_client: Option<Client>,
     /// Per-execution knobs (body-size cap) resolved from config in
     /// [`App::install_runtime`]; defaults under snapshot-test construction.
     execute_options: ExecuteOptions,
@@ -441,6 +449,7 @@ impl App {
             tx,
             rx,
             client: None,
+            insecure_client: None,
             execute_options: ExecuteOptions::default(),
             generation: 0,
             orphan_response: ResponseState::Idle,
@@ -1063,7 +1072,46 @@ impl App {
             cookies: self.cookies_enabled.then(|| self.cookie_jar.clone()),
         };
         self.client = Some(build_client_with(&cfg)?);
+        // Any session-knob change invalidates the cached insecure variant so it
+        // rebuilds (lazily) against the new timeout/proxy/cookies next time an
+        // opted-in endpoint sends.
+        self.insecure_client = None;
         Ok(())
+    }
+
+    /// The client an endpoint's send must use, honoring the **effective** insecure
+    /// flag (`endpoint.request.insecure || session_insecure`). The common case
+    /// returns the shared [`Self::client`] untouched. Only the divergent case — a
+    /// verifying session sending an endpoint that individually opted into insecure
+    /// — needs a different client; that is served by a lazily-built, cached
+    /// insecure variant mirroring the shared client's other knobs. A sibling secure
+    /// endpoint in the same session keeps using the verifying shared client.
+    pub(in crate::tui::app) fn client_for(&mut self, request: &Request) -> Option<Client> {
+        if !request.insecure || self.session_insecure {
+            // No divergence: either the endpoint didn't opt in, or the whole
+            // session is already insecure — the shared client already matches.
+            return self.client.clone();
+        }
+        if self.insecure_client.is_none() {
+            // Snapshot-test / runtime-free construction: no shared client means no
+            // runtime, so there is nothing to send with either.
+            self.client.as_ref()?;
+            let cfg = ClientConfig {
+                timeout: self.client_timeout,
+                proxy: self.session_proxy.clone(),
+                insecure: true,
+                cookies: self.cookies_enabled.then(|| self.cookie_jar.clone()),
+            };
+            match build_client_with(&cfg) {
+                Ok(client) => self.insecure_client = Some(client),
+                Err(err) => {
+                    self.message =
+                        Some(Message::new(format!("insecure client build failed: {err}")));
+                    return None;
+                }
+            }
+        }
+        self.insecure_client.clone()
     }
 
     /// Persists the current cookie jar for this workspace. Called after a send
@@ -1434,6 +1482,7 @@ impl App {
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::OpenOptions => self.open_options(),
             Action::ToggleInsecure => self.toggle_insecure(),
+            Action::ToggleEndpointInsecure => self.toggle_endpoint_insecure(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

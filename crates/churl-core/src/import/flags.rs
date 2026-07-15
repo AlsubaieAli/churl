@@ -129,11 +129,14 @@ impl Parser {
         ));
     }
 
-    /// Records a `-k`/`--insecure` import note. Insecure-TLS is session-scoped, so
-    /// it is not baked into the endpoint — the note names how to turn it on.
+    /// Handles `-k`/`--insecure`: bakes durable insecure-TLS onto the imported
+    /// endpoint and warns loudly, since it turns off certificate verification for
+    /// every send of this endpoint (unlike the session-scoped `-x` proxy).
     fn note_insecure(&mut self) {
+        self.insecure = true;
         self.warnings.push(
-            "imported with -k; enable insecure via -k or <leader>k (session-scoped)".to_owned(),
+            "imported with -k: TLS certificate verification is OFF for this endpoint (saved)"
+                .to_owned(),
         );
     }
 

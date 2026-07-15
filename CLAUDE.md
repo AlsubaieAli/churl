@@ -41,7 +41,8 @@ crates/
   churl-core/              # pure library — zero TUI deps, ever
     src/
       lib.rs               # pub const VERSION + module exports
-      model.rs             # Method, Endpoint, Request, Response, Header, Param, Profile, Workspace,
+      model.rs             # Method, Endpoint, Request (incl. durable per-endpoint insecure: bool, M8.1),
+                           #   Response, Header, Param, Profile, Workspace,
                            #   Auth/ApiKeyPlacement (internally-tagged [request.auth]);
                            #   Sequence/SequenceStep/OnError — request-chain execution
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
@@ -104,7 +105,8 @@ crates/
                            #   RFC 6265 origin scoping (no cross-origin leak); to_json/load_json (persistent only),
                            #   list/delete/clear for the Options overlay + `churl cookies` CLI
       import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error;
-                           #   -x/--proxy → import note, -k/--insecure → session-scoped note, neither persisted)
+                           #   -x/--proxy → session-scoped import note (not persisted), -k/--insecure → bakes
+                           #   endpoint insecure=true (persisted, M8.1))
       export.rs            # Endpoint → curl command (shlex::try_quote; round-trip contract with import)
       pin.rs               # optional `.churl-version` workspace pin (pure: discover/parse/compare,
                            #   semver-aware w/ exact-string fallback); warn-only, the bin displays it
@@ -135,7 +137,8 @@ crates/
                            #   lookup_ctx; tokio::select! loop + event loop; send-time {{var}} resolution,
                            #   profile switching, Theme; send/cancel, history, highlight cache
           handlers/        # per-concern key/action handlers: buffers, crud, editing, env_editor, help,
-                           #   load_runner, options (M8: overlay + <leader>k toggle + client rebuild + jar persist),
+                           #   load_runner, options (M8: overlay + <leader>k session toggle + client rebuild + jar
+                           #   persist; M8.1: <leader>K per-endpoint insecure toggle + client_for divergence seam),
                            #   response, send, sequence, vars, workspace (+ mod.rs)
           render.rs        # the render layer (render + leader popup / collapsed-stub / prompt / confirm helpers)
           state.rs         # pure state types

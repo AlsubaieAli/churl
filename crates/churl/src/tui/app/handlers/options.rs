@@ -169,18 +169,64 @@ impl App {
         self.refresh_options_overlay();
     }
 
-    /// Whether TLS verification is currently OFF (drives the loud statusline
-    /// indicator). `pub(crate)` so the render layer can read it.
+    /// Toggles the SELECTED endpoint's durable insecure-TLS opt-in (`<leader>K`)
+    /// and persists it onto the endpoint file — distinct from the session-wide
+    /// `<leader>k`. The flag rides on the request, so a send of this endpoint goes
+    /// out with cert verification off while sibling endpoints keep verifying. Loud
+    /// on the way on, since it disables verification for every future send. A save
+    /// failure rolls the in-memory flip back so state matches disk.
+    pub(in crate::tui::app) fn toggle_endpoint_insecure(&mut self) {
+        let Some(sel) = self.selected_mut() else {
+            self.message = Some(Message::new("no endpoint selected"));
+            return;
+        };
+        sel.endpoint.request.insecure = !sel.endpoint.request.insecure;
+        let now_on = sel.endpoint.request.insecure;
+        let path = sel.file.clone();
+        let endpoint = sel.endpoint.clone();
+        match persistence::save_endpoint(&path, &endpoint) {
+            Ok(()) => {
+                // Keep the saved snapshot in sync so the change doesn't read as
+                // unsaved, and refresh the explorer's cached copy.
+                if let Some(b) = self.active_endpoint_buffer_mut() {
+                    b.loaded_snapshot = endpoint.clone();
+                }
+                self.refresh_explorer_endpoint(&path, endpoint);
+                self.notify(endpoint_insecure_message(now_on));
+            }
+            Err(err) => {
+                if let Some(sel) = self.selected_mut() {
+                    sel.endpoint.request.insecure = !now_on;
+                }
+                self.message = Some(Message::new(format!("could not save endpoint: {err}")));
+            }
+        }
+    }
+
+    /// Whether TLS verification is currently OFF for the selected endpoint — the
+    /// **effective** insecure (`session_insecure || selected.request.insecure`) —
+    /// driving the loud statusline indicator. Reflects the durable per-endpoint
+    /// opt-in as well as the session-wide override. `pub(crate)` so the render
+    /// layer can read it.
     pub(crate) fn insecure_active(&self) -> bool {
-        self.session_insecure
+        self.session_insecure || self.selected().is_some_and(|s| s.endpoint.request.insecure)
     }
 }
 
-/// The status message for an insecure-TLS toggle.
+/// The status message for a session-wide insecure-TLS toggle.
 fn insecure_message(insecure: bool) -> String {
     if insecure {
         "⚠ TLS verification OFF — certificates not checked".to_owned()
     } else {
         "TLS verification on".to_owned()
+    }
+}
+
+/// The status message for a per-endpoint insecure-TLS toggle (persisted).
+fn endpoint_insecure_message(insecure: bool) -> String {
+    if insecure {
+        "⚠ TLS verification OFF for this endpoint — saved".to_owned()
+    } else {
+        "TLS verification on for this endpoint — saved".to_owned()
     }
 }

@@ -137,6 +137,7 @@ fn apikey_auth_round_trips_wire_equivalent_not_structural() {
             params: Vec::new(),
             body: None,
             auth: Some(auth),
+            insecure: false,
         },
     };
 

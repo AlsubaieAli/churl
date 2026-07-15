@@ -49,8 +49,10 @@ impl App {
             return;
         }
 
-        // No client = runtime-free construction (snapshot tests); do nothing.
-        let Some(client) = self.client.clone() else {
+        // Pick the client honoring this endpoint's effective insecure flag
+        // (`request.insecure || session_insecure`). No client = runtime-free
+        // construction (snapshot tests); do nothing.
+        let Some(client) = self.client_for(&request) else {
             return;
         };
 

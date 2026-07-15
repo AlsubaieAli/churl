@@ -98,6 +98,10 @@ struct Parser {
     /// First-class auth (`-u` or a `Authorization: Bearer …` header); the slot
     /// goes to whichever auth source appears first in the command.
     auth: Option<Auth>,
+    /// Set by `-k`/`--insecure`: bakes durable insecure-TLS onto the imported
+    /// endpoint (a security-relevant property of the request, unlike the
+    /// session-scoped proxy).
+    insecure: bool,
     url: Option<String>,
     warnings: Vec<String>,
 }
@@ -159,6 +163,7 @@ impl Parser {
                     params: Vec::new(), // query string stays in the URL
                     body,
                     auth: self.auth,
+                    insecure: self.insecure,
                 },
             },
             warnings: self.warnings,
@@ -592,15 +597,19 @@ mod tests {
     }
 
     #[test]
-    fn insecure_and_compressed_warn() {
+    fn insecure_bakes_endpoint_flag_and_warns() {
         let result = import("curl -k --compressed https://e.com/x");
-        // `-k` is now an actionable note (how to enable session-scoped insecure),
-        // not an "ignored" warning.
+        // `-k` now durably bakes insecure-TLS onto the endpoint (not session-scoped)
+        // and warns loudly that verification is off.
+        assert!(
+            result.endpoint.request.insecure,
+            "-k must set the endpoint's insecure flag"
+        );
         assert!(
             result
                 .warnings
                 .iter()
-                .any(|w| w.contains("<leader>k") && w.contains("insecure")),
+                .any(|w| w.contains("-k") && w.to_lowercase().contains("verification")),
             "warnings: {:?}",
             result.warnings
         );
@@ -608,23 +617,25 @@ mod tests {
     }
 
     #[test]
-    fn insecure_inside_cluster_warns() {
+    fn insecure_inside_cluster_bakes_flag() {
         let result = import("curl -sk https://e.com/x");
         assert!(
-            result.warnings.iter().any(|w| w.contains("<leader>k")),
-            "warnings: {:?}",
-            result.warnings
+            result.endpoint.request.insecure,
+            "-k inside a cluster must set the endpoint's insecure flag"
         );
     }
 
     #[test]
-    fn insecure_long_flag_notes() {
+    fn insecure_long_flag_bakes_flag() {
         let result = import("curl --insecure https://e.com/x");
-        assert!(
-            result.warnings.iter().any(|w| w.contains("<leader>k")),
-            "warnings: {:?}",
-            result.warnings
-        );
+        assert!(result.endpoint.request.insecure);
+    }
+
+    #[test]
+    fn no_insecure_flag_leaves_endpoint_secure() {
+        // The default must stay secure: an import without -k never opts in.
+        let result = import("curl https://e.com/x");
+        assert!(!result.endpoint.request.insecure);
     }
 
     #[test]

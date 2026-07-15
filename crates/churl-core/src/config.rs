@@ -1136,6 +1136,7 @@ mod tests {
                 params: Vec::new(),
                 body: None,
                 auth,
+                insecure: false,
             },
         };
         // No auth → clean.

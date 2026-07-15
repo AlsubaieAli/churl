@@ -34,14 +34,20 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 
 - **Lifecycle & distribution** — self-update, uninstall, version pinning. (F)
 - **Secret & request safety hardening** — tighter placeholder gating, broadened secret markers, grandfathered pre-existing secrets, request-wide save-gate coverage (headers/URL/body/params), `secret_policy = strict | warn`, and a cross-origin `redirect = strict | strip | follow-all` policy (default `strip`: auth-bearing headers are dropped when a redirect crosses the scheme+host+port origin), plus a bundled UX papercut: a first-class `<leader>r` reload that re-reads `churl.toml` + rebuilds the explorer (dirty-guarded), so external edits are picked up without a restart. (R)
+- **M8.1 — request-safety follow-ups** — durable **per-endpoint** insecure-TLS opt-in (`<leader>K`, persisted on the endpoint; effective insecure = `endpoint || session`, sibling secure endpoints still verify), off-UI-thread cookie-jar persistence (no stall under WAL-lock contention), cookie-jar `RwLock` poison recovery, and masking the proxy password *while it is typed*. (F)
 
 ## Planned ⏳
 
 - **Nested collections & root-level endpoints** — the workspace becomes one recursive collection tree (the root *is* a collection): collections nest to arbitrary depth and endpoints can live directly at the root (today the tree is one level deep and every endpoint lives inside a collection). Variables inherit down the tree (child overrides parent); existing workspaces keep working unchanged. (F)
 - **Cookies + proxy + insecure-TLS** — a persistent per-workspace cookie jar (opt-in, origin-scoped, stored in `state.sqlite`), an HTTP(S) proxy (CLI `--proxy` > workspace `churl.toml` > global config > env; credentials never persisted), and a session insecure-TLS opt-in (`-k`/`<leader>k`, loud RED statusline flag). All three are session state applied by rebuilding the single client, configurable at launch (CLI + config) and live from an in-TUI **Options overlay** (`<leader>o`). Headless: `churl cookies list|clear`. (F)
 
-### Deferred to M8.1 ⏳
-- Per-endpoint / per-workspace **insecure-TLS persistence** (a disk-level TLS downgrade — needs an explicit owner call).
+### M8.1 scope 🚧 (in progress)
+- 🚧 Durable **per-endpoint insecure-TLS opt-in** (`<leader>K`, persisted on the endpoint file; effective = endpoint || session). Per-*workspace* persistence stays out of scope by design.
+- 🚧 **Off-UI-thread cookie-jar persistence** (moves the write off the UI thread; see the ⏳ item below).
+- 🚧 **Cookie-jar `RwLock` poison recovery** (see the ⏳ item below).
+- 🚧 **Masking the proxy password while it is typed** (closes the pre-`@` plaintext gap; see the ⏳ item below).
+
+### Still deferred ⏳
 - **Adding/editing** a cookie in the Options overlay (M8 ships view + delete only).
 - curl-import remap of the cookie flags `-b`/`--cookie`, `-c`/`--cookie-jar` (M8 remaps `-x`/`--proxy` and re-notes `-k`).
 - "Save current session settings as a workspace/global default" from the overlay.
