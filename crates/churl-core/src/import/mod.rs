@@ -60,7 +60,8 @@ pub enum ImportError {
 /// Parses a curl command into an [`Endpoint`]. A leading `curl` token is
 /// accepted and stripped; its absence is fine too.
 pub fn import_curl(command: &str) -> Result<ImportResult, ImportError> {
-    let tokens = shlex::split(command).ok_or(ImportError::Tokenize)?;
+    let command = normalize_continuations(command);
+    let tokens = shlex::split(&command).ok_or(ImportError::Tokenize)?;
     let mut args = tokens.into_iter().peekable();
     if args.peek().map(String::as_str) == Some("curl") {
         args.next();
@@ -84,6 +85,72 @@ pub fn import_curl(command: &str) -> Result<ImportResult, ImportError> {
         }
     }
     parser.finish()
+}
+
+/// Strips bash line-continuations from a multi-line curl command before
+/// tokenization. Every browser's "Copy as cURL" wraps flags across lines with a
+/// trailing `\`+newline; left in, `shlex` turns each ` \⏎` into a spurious empty
+/// token (parsed as a second URL) or fails on a dangling `\` ("unbalanced
+/// quotes"). A continuation joins the lines with nothing (bash), *except inside
+/// single quotes* where `\`+newline is literal — so this scans quote state and
+/// only drops a `\`+newline (LF or CRLF) when it is a real continuation. Every
+/// other character (including escaped quotes `\'` / `\"` and `\\`) passes through
+/// verbatim for `shlex` to tokenize, so a quoted body is never rewritten.
+fn normalize_continuations(command: &str) -> String {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::with_capacity(command.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_single {
+            // Inside single quotes nothing is special but the closing quote; a
+            // backslash-newline here is literal, never a continuation.
+            if c == '\'' {
+                in_single = false;
+            }
+            out.push(c);
+            i += 1;
+        } else if c == '\\' {
+            if chars.get(i + 1) == Some(&'\n') {
+                i += 2; // LF continuation — drop both.
+            } else if chars.get(i + 1) == Some(&'\r') && chars.get(i + 2) == Some(&'\n') {
+                i += 3; // CRLF continuation — drop all three.
+            } else if let Some(&next) = chars.get(i + 1) {
+                // An escape (`\'`, `\"`, `\\`, …): pass the pair through as a unit
+                // so the escaped char can't be mistaken for a quote toggle.
+                out.push('\\');
+                out.push(next);
+                i += 2;
+            } else {
+                out.push('\\'); // trailing lone backslash — let shlex judge it.
+                i += 1;
+            }
+        } else if c == '\'' && !in_double {
+            in_single = true;
+            out.push(c);
+            i += 1;
+        } else {
+            if c == '"' {
+                in_double = !in_double;
+            }
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Undoes curl's glob-escaping of `[ ] { }` in a URL. curl treats these as URL
+/// globbing metacharacters, so a browser escapes them (`fields\[\]=` for the very
+/// common `fields[]=` array-param form). churl does no globbing, so the literal
+/// bracket/brace is what the server must receive.
+fn unescape_curl_url_globs(url: &str) -> String {
+    url.replace("\\[", "[")
+        .replace("\\]", "]")
+        .replace("\\{", "{")
+        .replace("\\}", "}")
 }
 
 /// Accumulated request state while walking the argument list.
@@ -110,6 +177,7 @@ type Args = std::iter::Peekable<std::vec::IntoIter<String>>;
 
 impl Parser {
     fn set_url(&mut self, value: String) -> Result<(), ImportError> {
+        let value = unescape_curl_url_globs(&value);
         match &self.url {
             Some(existing) => Err(ImportError::MultipleUrls(existing.clone(), value)),
             None => {
@@ -263,6 +331,59 @@ mod tests {
         assert!(result.endpoint.request.body.is_none());
         assert!(result.warnings.is_empty());
         assert_eq!(result.endpoint.name, "health");
+    }
+
+    #[test]
+    fn multiline_browser_copy_as_curl_imports() {
+        // Chrome/Firefox "Copy as cURL": trailing `\` line-continuations plus
+        // glob-escaped `[]` in an array query param. Regression for the real
+        // paste that failed with "multiple URLs" (empty continuation token).
+        let cmd = "curl 'https://api.example.com/v2/orders/42?format=light&fields\\[\\]=is_blocked&fields\\[\\]=branches' \\\n  -H 'accept: application/json' \\\n  -H 'accept-language: ar' \\\n  -H 'origin: https://s.example.sa'";
+        let result = import(cmd);
+        assert_eq!(result.endpoint.request.method, Method::Get);
+        assert_eq!(
+            result.endpoint.request.url,
+            "https://api.example.com/v2/orders/42?format=light&fields[]=is_blocked&fields[]=branches"
+        );
+        assert_eq!(result.endpoint.request.headers.len(), 3);
+    }
+
+    #[test]
+    fn line_continuation_does_not_produce_an_empty_url() {
+        // The ` \⏎` between the URL and the first flag must not become a second
+        // (empty) URL token.
+        let result = import("curl 'https://x.dev/o' \\\n  -H 'accept: application/json'");
+        assert_eq!(result.endpoint.request.url, "https://x.dev/o");
+        assert_eq!(result.endpoint.request.headers.len(), 1);
+    }
+
+    #[test]
+    fn trailing_backslash_is_tolerated() {
+        // A partial paste ending mid-continuation must not fail tokenization.
+        let result = import("curl 'https://x.dev/o' \\\n");
+        assert_eq!(result.endpoint.request.url, "https://x.dev/o");
+    }
+
+    #[test]
+    fn curl_glob_escapes_in_url_are_unescaped() {
+        let result = import("curl 'https://x.dev/o?a\\[\\]=1&b\\{2\\}=3'");
+        assert_eq!(result.endpoint.request.url, "https://x.dev/o?a[]=1&b{2}=3");
+    }
+
+    #[test]
+    fn single_quoted_body_keeps_backslash_newline_literal() {
+        // Inside single quotes, `\`+newline is literal (bash), NOT a line
+        // continuation — the body must survive byte-for-byte, not be collapsed.
+        let result = import("curl https://e.com/n --data-raw 'text=a\\\nb'");
+        assert_eq!(result.endpoint.request.body.unwrap().content, "text=a\\\nb");
+    }
+
+    #[test]
+    fn continuation_outside_single_quotes_joins_with_nothing() {
+        // A continuation joins with nothing (bash), so a double-quoted value split
+        // across a continuation rejoins seamlessly — no stray space injected.
+        let result = import("curl https://e.com/n --data-raw \"a=1\\\nb=2\"");
+        assert_eq!(result.endpoint.request.body.unwrap().content, "a=1b=2");
     }
 
     #[test]
