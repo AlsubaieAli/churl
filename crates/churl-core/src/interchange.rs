@@ -321,6 +321,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
                 params: Vec::new(),
                 body: None,
                 auth: None,
+                insecure: false,
             },
         };
     }
@@ -363,6 +364,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             params: Vec::new(), // query stays in the URL (matches curl import)
             body,
             auth,
+            insecure: false,
         },
     }
 }

@@ -125,6 +125,7 @@ fn scaffold_endpoints(coll_dir: &Path) -> Result<()> {
                 ],
                 body: None,
                 auth: None,
+                insecure: false,
             },
         };
         save_endpoint(&path, &ep).with_context(|| "failed to write 'Get Anything' endpoint")?;
@@ -152,6 +153,7 @@ fn scaffold_endpoints(coll_dir: &Path) -> Result<()> {
                     content: r#"{"greeting": "hello"}"#.to_owned(),
                 }),
                 auth: None,
+                insecure: false,
             },
         };
         save_endpoint(&path, &ep).with_context(|| "failed to write 'Post JSON' endpoint")?;
@@ -174,6 +176,7 @@ fn scaffold_endpoints(coll_dir: &Path) -> Result<()> {
                 auth: Some(Auth::Bearer {
                     token: "{{token}}".to_owned(),
                 }),
+                insecure: false,
             },
         };
         save_endpoint(&path, &ep).with_context(|| "failed to write 'Bearer Auth' endpoint")?;

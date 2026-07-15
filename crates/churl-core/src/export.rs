@@ -31,6 +31,11 @@ pub fn export_curl(endpoint: &Endpoint) -> String {
         args.push("-X".to_owned());
         args.push(request.method.to_string());
     }
+    if request.insecure {
+        // Round-trips the durable per-endpoint insecure-TLS opt-in (import bakes
+        // `-k` onto the endpoint; export re-emits it).
+        args.push("-k".to_owned());
+    }
     match &request.auth {
         Some(Auth::Basic { username, password }) => {
             args.push("-u".to_owned());
@@ -133,6 +138,7 @@ mod tests {
             params: Vec::new(),
             body: None,
             auth: None,
+            insecure: false,
         }
     }
 
@@ -140,6 +146,22 @@ mod tests {
     fn bare_get_omits_method_flag() {
         let cmd = export_curl(&endpoint(get("https://example.com/health")));
         assert_eq!(cmd, "curl https://example.com/health");
+    }
+
+    #[test]
+    fn insecure_endpoint_emits_dash_k_and_round_trips() {
+        let mut request = get("https://staging.internal/status");
+        request.insecure = true;
+        let cmd = export_curl(&endpoint(request));
+        assert!(
+            cmd.contains(" -k "),
+            "insecure endpoint must export -k: {cmd}"
+        );
+        // A secure endpoint never emits it.
+        assert!(!export_curl(&endpoint(get("https://e.com/x"))).contains("-k"));
+        // And the flag survives a re-import (structural round-trip).
+        let reimported = crate::import::import_curl(&cmd).unwrap();
+        assert!(reimported.endpoint.request.insecure);
     }
 
     #[test]

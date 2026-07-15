@@ -354,6 +354,7 @@ mod tests {
                     params: Vec::new(),
                     body: None,
                     auth: None,
+                    insecure: false,
                 },
             };
             let result = save_endpoint(claim.path(), &ep);

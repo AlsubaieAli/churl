@@ -124,20 +124,32 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
     // Build indicator spans (right-aligned, space-separated). The unsaved dot
     // sits first so it stays visible when the bar is narrow; it carries the
     // theme accent (same steady accent as the statusline unsaved marker).
-    let mut indicators: Vec<String> = Vec::new();
+    let dim = Style::default().fg(theme
+        .border_unfocused
+        .fg
+        .unwrap_or(ratatui::style::Color::DarkGray));
+    let mut pieces: Vec<(String, Style)> = Vec::new();
+    if ctx.dirty {
+        pieces.push(("●".to_owned(), theme.accent));
+    }
+    // Loud per-endpoint durable insecure-TLS marker: steady error style so a saved
+    // verify-off endpoint is visible at rest here, alongside the session-effective
+    // statusline flag.
+    if request.insecure {
+        pieces.push(("⚠ insecure".to_owned(), theme.status_error));
+    }
     if let Some(auth) = &request.auth {
-        indicators.push(auth_indicator(auth).to_owned());
+        pieces.push((auth_indicator(auth).to_owned(), dim));
     }
     let n = request_placeholder_count(request);
     if n > 0 {
-        indicators.push(format!("{{{{{n}}}}}"));
+        pieces.push((format!("{{{{{n}}}}}"), dim));
     }
-    let rest_str = indicators.join("  ");
-    let indicator_str = match (ctx.dirty, rest_str.is_empty()) {
-        (true, true) => "●".to_owned(),
-        (true, false) => format!("●  {rest_str}"),
-        (false, _) => rest_str.clone(),
-    };
+    let indicator_str = pieces
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("  ");
 
     // Split the inner area into left (method+url) and right (indicators) first,
     // so the inline editor's horizontal viewport can follow the cursor within the
@@ -190,19 +202,12 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: UrlBarCtx, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(method_line), left_area);
     if let Some(right_area) = right_area {
-        let dim = Style::default().fg(theme
-            .border_unfocused
-            .fg
-            .unwrap_or(ratatui::style::Color::DarkGray));
         let mut spans: Vec<Span> = Vec::new();
-        if ctx.dirty {
-            spans.push(Span::styled("●", theme.accent));
-            if !rest_str.is_empty() {
+        for (i, (text, style)) in pieces.iter().enumerate() {
+            if i > 0 {
                 spans.push(Span::raw("  "));
             }
-        }
-        if !rest_str.is_empty() {
-            spans.push(Span::styled(rest_str, dim));
+            spans.push(Span::styled(text.clone(), *style));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), right_area);
     }
@@ -247,5 +252,56 @@ mod tests {
         assert_eq!(count_placeholders("{{a}}{{b}}{{c}}"), 3);
         // Unclosed brace — not a placeholder.
         assert_eq!(count_placeholders("{{unclosed"), 0);
+    }
+
+    fn render_indicators(insecure: bool) -> String {
+        use churl_core::model::Method;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let request = Request {
+            method: Method::Get,
+            url: "https://api.test/x".to_owned(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+            insecure,
+        };
+        let theme = Theme::dark();
+        let backend = TestBackend::new(60, HEIGHT);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    Rect::new(0, 0, 60, HEIGHT),
+                    UrlBarCtx {
+                        request: Some(&request),
+                        focused: false,
+                        editor: None,
+                        dirty: false,
+                        jump_label: None,
+                    },
+                    &theme,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..HEIGHT {
+            for x in 0..60 {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn per_endpoint_insecure_shows_marker() {
+        // A saved verify-off endpoint carries a visible "insecure" marker; a secure
+        // one shows nothing of the sort.
+        assert!(render_indicators(true).contains("insecure"));
+        assert!(!render_indicators(false).contains("insecure"));
     }
 }

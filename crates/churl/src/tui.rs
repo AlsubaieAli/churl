@@ -66,6 +66,11 @@ pub async fn run(
     let mut terminal = init();
     let result = app.run(&mut terminal).await;
     restore();
+    // Surface a failed FINAL on-quit cookie flush now that the terminal is back —
+    // it could not be shown on the (torn-down) statusline. Non-fatal.
+    if let Some(err) = app.take_cookie_exit_error() {
+        eprintln!("churl: failed to persist cookies on exit: {err}");
+    }
     result
 }
 

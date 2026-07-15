@@ -22,10 +22,12 @@ const BUSY_TIMEOUT_MS: u32 = 5_000;
 /// distinct workspace path).
 const HISTORY_ROW_CAP: i64 = 10_000;
 
+mod cookie_writer;
 mod reads;
 mod schema;
 mod writes;
 
+pub use cookie_writer::CookieJarWriter;
 use schema::MIGRATIONS;
 
 /// Error opening or querying the history store.
@@ -43,6 +45,12 @@ pub enum HistoryError {
     /// An underlying SQLite operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// The off-thread cookie-jar writer thread could not be spawned.
+    #[error("failed to spawn the cookie-writer thread: {source}")]
+    WriterSpawn {
+        /// Underlying OS error.
+        source: std::io::Error,
+    },
     /// `PRAGMA journal_mode=WAL` did not take — the filesystem silently fell back
     /// to another journal mode (some network/virtual filesystems reject WAL). We
     /// fail loud rather than run in a mode we didn't ask for (Constitution).

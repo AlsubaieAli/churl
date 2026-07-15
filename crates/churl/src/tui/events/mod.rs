@@ -294,6 +294,13 @@ impl Default for KeyMap {
         // verified free at the leader root (mnemonics: o=options, k=insecure).
         root_bind(key!(o), LeaderEntry::Act(Action::OpenOptions));
         root_bind(key!(k), LeaderEntry::Act(Action::ToggleInsecure));
+        // `<leader>K` (shift-k) toggles the SELECTED endpoint's durable insecure-TLS
+        // opt-in — a persisted per-endpoint flag, deliberately distinct from the
+        // session-wide `<leader>k`. `K` was free at the leader root.
+        root_bind(
+            key!(shift - k),
+            LeaderEntry::Act(Action::ToggleEndpointInsecure),
+        );
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
         // `<leader><leader>` (Space as its own continuation) opens the
         // endpoint/request picker — owner drive-test 2026-07-10 moved it off `f`,

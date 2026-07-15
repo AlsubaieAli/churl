@@ -23,6 +23,7 @@ fn get(url: String) -> Request {
         params: Vec::new(),
         body: None,
         auth: None,
+        insecure: false,
     }
 }
 
@@ -125,6 +126,34 @@ async fn secure_client_rejects_hostname_mismatch() {
             .is_err(),
         "the secure client must reject a hostname-mismatched cert"
     );
+}
+
+#[tokio::test]
+async fn per_endpoint_insecure_diverges_within_one_session() {
+    // Proves the http-layer primitive the per-endpoint feature relies on: a
+    // verifying client and an insecure client — the two `App::client_for` chooses
+    // between for a secure session vs. an opted-in endpoint — behave differently
+    // against the SAME self-signed server (verify rejects, insecure accepts). This
+    // exercises `build_client`/`build_client_with` directly, NOT `App::client_for`
+    // (that selection logic is unit-tested in the `churl` binary); it isolates the
+    // TLS-verification difference to the client's insecure flag alone.
+    let url = spawn_self_signed("127.0.0.1").await;
+
+    // The client a secure session/endpoint uses (verifies).
+    let verifying = build_client(Duration::from_secs(5)).unwrap();
+    // The client an opted-in endpoint uses: same knobs, verify off.
+    let opted_in = build_client_insecure();
+
+    assert!(
+        execute(&verifying, &get(url.clone()), &Default::default())
+            .await
+            .is_err(),
+        "the verifying client must reject the self-signed cert"
+    );
+    let response = execute(&opted_in, &get(url), &Default::default())
+        .await
+        .expect("the insecure client must accept the self-signed cert");
+    assert_eq!(response.status, 200);
 }
 
 fn build_client_insecure() -> reqwest::Client {

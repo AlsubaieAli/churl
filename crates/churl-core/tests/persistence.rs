@@ -106,6 +106,41 @@ fn mutated_round_trip_keeps_all_comments() {
 }
 
 #[test]
+fn insecure_flag_is_serde_default_and_omitted_when_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ep.toml");
+
+    // Backward compatibility: an endpoint file predating the field (no `insecure`
+    // key) loads as secure — no migration needed.
+    fs::write(
+        &path,
+        "seq = 0\nname = \"legacy\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/x\"\n",
+    )
+    .unwrap();
+    let legacy = load_endpoint(&path).unwrap();
+    assert!(!legacy.request.insecure, "absent key defaults to secure");
+
+    // A secure endpoint stays byte-minimal: the field is omitted when false.
+    save_endpoint(&path, &legacy).unwrap();
+    let secure_toml = fs::read_to_string(&path).unwrap();
+    assert!(
+        !secure_toml.contains("insecure"),
+        "insecure = false must be omitted:\n{secure_toml}"
+    );
+
+    // Opting in serializes the key and round-trips.
+    let mut opted = legacy;
+    opted.request.insecure = true;
+    save_endpoint(&path, &opted).unwrap();
+    let insecure_toml = fs::read_to_string(&path).unwrap();
+    assert!(
+        insecure_toml.contains("insecure = true"),
+        "the opt-in must serialize:\n{insecure_toml}"
+    );
+    assert!(load_endpoint(&path).unwrap().request.insecure);
+}
+
+#[test]
 fn headers_render_as_array_of_tables() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fresh.toml");
@@ -130,6 +165,7 @@ fn headers_render_as_array_of_tables() {
                 content: "{}".into(),
             }),
             auth: None,
+            insecure: false,
         },
     };
     save_endpoint(&path, &endpoint).unwrap();
@@ -166,6 +202,7 @@ fn endpoint_with_headers(name: &str, n: usize) -> Endpoint {
             params: Vec::new(),
             body: None,
             auth: None,
+            insecure: false,
         },
     }
 }
@@ -284,6 +321,7 @@ fn literal_secret_endpoint() -> Endpoint {
             auth: Some(Auth::Bearer {
                 token: "ghp_definitely_a_literal".into(),
             }),
+            insecure: false,
         },
     }
 }
@@ -1440,6 +1478,7 @@ fn endpoint_with(
             params,
             body,
             auth: None,
+            insecure: false,
         },
     }
 }

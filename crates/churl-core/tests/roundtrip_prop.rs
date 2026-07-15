@@ -92,6 +92,7 @@ fn endpoint() -> impl Strategy<Value = Endpoint> {
                     params,
                     body,
                     auth,
+                    insecure: false,
                 },
             },
         )

@@ -156,20 +156,31 @@ pub(crate) fn mask_proxy(proxy: &str) -> String {
 
 /// Masks ONLY the password segment of a proxy for the inline edit line, keeping
 /// the scheme/user/host visible so the field stays editable while the password
-/// never renders in plaintext. A proxy still being typed (no `@` yet) is returned
-/// as-is — a proper masked-secret input widget for the pre-`@` case is deferred
-/// (M8.1); this closes the concrete "editing a stored `user:pass@` proxy renders
-/// the password verbatim" leak the review flagged.
+/// never renders in plaintext — including **while it is being typed**, before the
+/// closing `@` is entered.
+///
+/// The password lives in the *userinfo*: everything before the FIRST `@`. Anything
+/// after the `@` is `host[:port]`, where a `:` introduces a port, never a password,
+/// so it is left untouched. When no `@` is present yet the user is mid-type, so the
+/// whole remainder is treated as userinfo and the run after its first `:` is masked
+/// as it grows — a half-typed `user:pass` is indistinguishable from a `host:port`
+/// until the `@` (or end of input) resolves it, and erring toward masking is the
+/// safe direction for a secret.
 pub(crate) fn mask_proxy_password(proxy: &str) -> String {
     let (scheme, rest) = match proxy.split_once("://") {
         Some((s, r)) => (format!("{s}://"), r),
         None => (String::new(), proxy),
     };
-    let Some((authority, tail)) = rest.split_once('@') else {
-        return proxy.to_owned();
+    let (userinfo, tail) = match rest.split_once('@') {
+        Some((user, host)) => (user, Some(host)),
+        None => (rest, None),
     };
-    match authority.split_once(':') {
-        Some((user, _pass)) => format!("{scheme}{user}:••••@{tail}"),
-        None => format!("{scheme}{authority}@{tail}"),
+    let masked_userinfo = match userinfo.split_once(':') {
+        Some((user, _pass)) => format!("{user}:••••"),
+        None => userinfo.to_owned(),
+    };
+    match tail {
+        Some(tail) => format!("{scheme}{masked_userinfo}@{tail}"),
+        None => format!("{scheme}{masked_userinfo}"),
     }
 }

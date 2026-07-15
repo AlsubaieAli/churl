@@ -297,6 +297,7 @@ fn prepare_step_session_scope_precedence() {
                 content: String::new(),
             }),
             auth: None,
+            insecure: false,
         },
     };
     save_endpoint(&root.join("c/e.toml"), &ep).unwrap();

@@ -383,6 +383,7 @@ mod tests {
                 username: "{{user}}".into(),
                 password: "{{pass}}".into(),
             }),
+            insecure: false,
         };
         resolver.substitute_request(&mut req);
         assert_eq!(req.url, "https://api.test/x");
@@ -410,6 +411,7 @@ mod tests {
             params: vec![],
             body: None,
             auth: None,
+            insecure: false,
         }
     }
 
@@ -446,6 +448,7 @@ mod tests {
                 username: "{{user}}".into(),
                 password: "{{pass}}".into(),
             }),
+            insecure: false,
         };
         assert_eq!(
             unresolved_placeholders(&req),
@@ -560,6 +563,7 @@ mod tests {
             auth: Some(Auth::Bearer {
                 token: "{{tok}}".into(),
             }),
+            insecure: false,
         };
         resolver.substitute_request(&mut bearer);
         assert_eq!(
@@ -580,6 +584,7 @@ mod tests {
                 value: "{{kv}}".into(),
                 placement: ApiKeyPlacement::Header,
             }),
+            insecure: false,
         };
         resolver.substitute_request(&mut apikey);
         assert_eq!(

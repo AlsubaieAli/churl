@@ -30,6 +30,7 @@ fn get_endpoint(name: &str, url: &str) -> Endpoint {
             params: Vec::new(),
             body: None,
             auth: None,
+            insecure: false,
         },
     }
 }

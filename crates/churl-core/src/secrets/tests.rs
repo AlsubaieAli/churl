@@ -13,6 +13,7 @@ fn endpoint(auth: Option<Auth>) -> Endpoint {
             params: Vec::new(),
             body: None,
             auth,
+            insecure: false,
         },
     }
 }

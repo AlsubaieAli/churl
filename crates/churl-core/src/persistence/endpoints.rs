@@ -135,6 +135,7 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
             params: Vec::new(),
             body: None,
             auth: None,
+            insecure: false,
         },
     };
     save_endpoint(claim.path(), &endpoint)?;

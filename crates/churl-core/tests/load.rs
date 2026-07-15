@@ -21,6 +21,7 @@ fn get(url: String) -> Request {
         params: Vec::new(),
         body: None,
         auth: None,
+        insecure: false,
     }
 }
 

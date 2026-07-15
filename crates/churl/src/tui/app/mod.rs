@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
 use churl_core::cookies::ChurlCookieJar;
-use churl_core::history::{HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path};
+use churl_core::history::{
+    CookieJarWriter, HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path,
+};
 use churl_core::http::{ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, build_client_with};
 use churl_core::interchange::{self, JsonDialect};
 use churl_core::load::{LoadCheck, LoadConfig, ReqOutcome};
@@ -108,6 +110,14 @@ pub struct App {
     rx: mpsc::Receiver<AppMsg>,
     /// The shared reqwest client; `None` in snapshot-test construction (runtime-free).
     pub client: Option<Client>,
+    /// Lazily-built client that mirrors [`Self::client`]'s knobs (timeout / proxy /
+    /// cookies) but forces insecure-TLS on. Used only for the divergent case — a
+    /// session that verifies sending an endpoint whose `request.insecure` opted in.
+    /// Built on first such send and invalidated (`None`) by every
+    /// [`Self::rebuild_client`], so it can never drift from the shared client's
+    /// other settings. Stays `None` when the session is already insecure (the
+    /// shared client already matches).
+    insecure_client: Option<Client>,
     /// Per-execution knobs (body-size cap) resolved from config in
     /// [`App::install_runtime`]; defaults under snapshot-test construction.
     execute_options: ExecuteOptions,
@@ -261,6 +271,17 @@ pub struct App {
     /// accumulated cookies; persisted to `state.sqlite` on mutating sends, toggle
     /// off, clear, and exit.
     cookie_jar: Arc<ChurlCookieJar>,
+    /// Off-UI-thread writer for the cookie jar: `persist_cookie_jar` serializes on
+    /// the UI thread (cheap, in-RAM) then hands the snapshot here, so the blocking
+    /// SQLite write never stalls the UI under WAL-lock contention. `None` in
+    /// snapshot-test construction and when history is unavailable. Flushed and
+    /// joined on quit so no write is lost.
+    cookie_writer: Option<CookieJarWriter>,
+    /// An error from the FINAL on-quit cookie flush, if any. Captured during the
+    /// quit path (where a statusline message could never render) and surfaced by
+    /// the caller to stderr *after* the terminal is restored, so a failed last
+    /// write is reported loudly rather than swallowed.
+    cookie_exit_error: Option<String>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -441,6 +462,7 @@ impl App {
             tx,
             rx,
             client: None,
+            insecure_client: None,
             execute_options: ExecuteOptions::default(),
             generation: 0,
             orphan_response: ResponseState::Idle,
@@ -482,6 +504,8 @@ impl App {
             session_insecure: false,
             cookies_enabled: false,
             cookie_jar: Arc::new(ChurlCookieJar::new()),
+            cookie_writer: None,
+            cookie_exit_error: None,
         })
     }
 
@@ -972,7 +996,19 @@ impl App {
         self.highlight_tx = highlight::spawn(self.tx.clone(), self.theme.is_light());
         match default_state_path() {
             Some(path) => match HistoryStore::open(&path) {
-                Ok(store) => self.history = Some(store),
+                Ok(store) => {
+                    self.history = Some(store);
+                    // Spawn the off-thread cookie writer against the same DB. A
+                    // spawn failure is non-fatal: the jar still works in RAM, but
+                    // persistence is disabled with a loud note.
+                    match CookieJarWriter::spawn(&path) {
+                        Ok(writer) => self.cookie_writer = Some(writer),
+                        Err(err) => {
+                            self.message =
+                                Some(Message::new(format!("cookie persistence disabled: {err}")));
+                        }
+                    }
+                }
                 Err(err) => {
                     self.message = Some(Message::new(format!("history disabled: {err}")));
                 }
@@ -1063,24 +1099,79 @@ impl App {
             cookies: self.cookies_enabled.then(|| self.cookie_jar.clone()),
         };
         self.client = Some(build_client_with(&cfg)?);
+        // Any session-knob change invalidates the cached insecure variant so it
+        // rebuilds (lazily) against the new timeout/proxy/cookies next time an
+        // opted-in endpoint sends.
+        self.insecure_client = None;
         Ok(())
+    }
+
+    /// The client an endpoint's send must use, honoring the **effective** insecure
+    /// flag (`endpoint.request.insecure || session_insecure`). The common case
+    /// returns the shared [`Self::client`] untouched. Only the divergent case — a
+    /// verifying session sending an endpoint that individually opted into insecure
+    /// — needs a different client; that is served by a lazily-built, cached
+    /// insecure variant mirroring the shared client's other knobs. A sibling secure
+    /// endpoint in the same session keeps using the verifying shared client.
+    pub(in crate::tui::app) fn client_for(&mut self, request: &Request) -> Option<Client> {
+        if !request.insecure || self.session_insecure {
+            // No divergence: either the endpoint didn't opt in, or the whole
+            // session is already insecure — the shared client already matches.
+            return self.client.clone();
+        }
+        if self.insecure_client.is_none() {
+            // Snapshot-test / runtime-free construction: no shared client means no
+            // runtime, so there is nothing to send with either.
+            self.client.as_ref()?;
+            let cfg = ClientConfig {
+                timeout: self.client_timeout,
+                proxy: self.session_proxy.clone(),
+                insecure: true,
+                cookies: self.cookies_enabled.then(|| self.cookie_jar.clone()),
+            };
+            match build_client_with(&cfg) {
+                Ok(client) => self.insecure_client = Some(client),
+                Err(err) => {
+                    self.message =
+                        Some(Message::new(format!("insecure client build failed: {err}")));
+                    return None;
+                }
+            }
+        }
+        self.insecure_client.clone()
     }
 
     /// Persists the current cookie jar for this workspace. Called after a send
     /// that may have mutated the jar, on toggle-off / clear, and on exit. The jar
-    /// still works in memory regardless, but a failure is surfaced loudly (never
-    /// swallowed) and — critically — the write is SKIPPED on a serialize failure
-    /// so a transient error can never clobber the good on-disk blob with `""`
-    /// (which `ON CONFLICT DO UPDATE` would persist as an empty jar = silent
-    /// permanent cookie loss).
+    /// still works in memory regardless.
+    ///
+    /// Serialization runs here on the UI thread (cheap, in-RAM); the blocking
+    /// SQLite write is handed to the off-thread [`CookieJarWriter`] so the UI never
+    /// stalls on the WAL write-lock. The write is SKIPPED on a serialize failure so
+    /// a transient error can never clobber the good on-disk blob with `""` (which
+    /// `ON CONFLICT DO UPDATE` would persist as an empty jar = silent permanent
+    /// cookie loss) — the writer therefore only ever receives a good blob.
+    ///
+    /// A failure from a *prior* off-thread write is polled and surfaced FIRST (it
+    /// can only be known now, asynchronously — it is not this call's write), worded
+    /// as a previous save so the message is not misattributed to the current one.
     pub(in crate::tui::app) fn persist_cookie_jar(&mut self) {
+        // Surface any error from an earlier off-thread write before enqueuing a new
+        // one (Constitution: fail loudly, never swallow). Read into a local so the
+        // immutable borrow of `cookie_writer` ends before we touch `self.message`.
+        let prior_error = self.cookie_writer.as_ref().and_then(|w| w.take_error());
+        if let Some(err) = prior_error {
+            self.message = Some(Message::new(format!(
+                "a previous cookie save failed: {err}"
+            )));
+        }
         let Some(key) = self.cookie_workspace_key() else {
             return;
         };
         let json = match self.cookie_jar.to_json() {
             Ok(json) => json,
             Err(err) => {
-                // Do NOT write — persisting an empty/partial blob would wipe a
+                // Do NOT enqueue — persisting an empty/partial blob would wipe a
                 // good jar. Fail loud instead.
                 self.message = Some(Message::new(format!(
                     "cookie save failed (serialize): {err}"
@@ -1088,12 +1179,10 @@ impl App {
                 return;
             }
         };
-        let Some(store) = self.history.as_ref() else {
+        let Some(writer) = self.cookie_writer.as_ref() else {
             return;
         };
-        if let Err(err) = store.save_cookie_jar(&key, &json, now_ms()) {
-            self.message = Some(Message::new(format!("cookie save failed: {err}")));
-        }
+        writer.enqueue(key, json, now_ms());
     }
 
     /// Runs the event loop: `tokio::select!` over the crossterm event stream, a
@@ -1161,11 +1250,25 @@ impl App {
         self.record_inflight_on_quit();
         // Flush the cookie jar on exit so a session's persistent cookies survive
         // to the next launch (best-effort; a no-op when cookies are disabled or no
-        // workspace is open).
+        // workspace is open). This enqueues the final snapshot; the shutdown below
+        // then drains it to disk before the writer thread exits — no lost writes.
         if self.cookies_enabled {
             self.persist_cookie_jar();
         }
+        // Synchronously flush + join the off-thread writer so the last snapshot is
+        // durable before the process (and the tokio runtime) tears down. A failed
+        // FINAL flush is stashed for the caller to print AFTER terminal restore —
+        // no statusline exists here, and `take_error` polling has stopped.
+        if let Some(mut writer) = self.cookie_writer.take() {
+            self.cookie_exit_error = writer.shutdown();
+        }
         Ok(())
+    }
+
+    /// Takes the error (if any) from the final on-quit cookie flush, for the caller
+    /// to surface to stderr after the terminal is restored.
+    pub fn take_cookie_exit_error(&mut self) -> Option<String> {
+        self.cookie_exit_error.take()
     }
 
     /// On quit, mirror [`Self::cancel_request`] for every in-flight buffer: abort
@@ -1434,6 +1537,7 @@ impl App {
             Action::OpenEnvEditor => self.open_env_editor(),
             Action::OpenOptions => self.open_options(),
             Action::ToggleInsecure => self.toggle_insecure(),
+            Action::ToggleEndpointInsecure => self.toggle_endpoint_insecure(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

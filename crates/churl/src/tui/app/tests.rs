@@ -82,6 +82,7 @@ fn open_bare_endpoint(app: &mut App) {
             params: Vec::new(),
             body: None,
             auth: None,
+            insecure: false,
         },
     };
     app.open_or_focus_buffer(SelectedEndpoint {
@@ -4682,6 +4683,7 @@ fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
                     content: c.to_owned(),
                 }),
                 auth: None,
+                insecure: false,
             },
         },
     }
@@ -6187,4 +6189,121 @@ fn rename_endpoint_rewrites_referencing_steps() {
         seq.steps[0].endpoint, "users/fetched.toml",
         "referencing step repointed by the rename"
     );
+}
+
+// ---- per-endpoint insecure-TLS opt-in (M8.1 Item 1) ------------------
+
+/// Seeds a one-endpoint workspace on disk and loads that endpoint into a buffer,
+/// returning `(app, endpoint_file_path)`.
+fn app_with_loaded_endpoint(root: &Path) -> (App, PathBuf) {
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = root.join("api");
+    std::fs::create_dir(&coll).unwrap();
+    let file = coll.join("get.toml");
+    std::fs::write(
+        &file,
+        "seq = 0\nname = \"Get\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/x\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let endpoint = churl_core::persistence::load_endpoint(&file).unwrap();
+    app.open_or_focus_buffer(SelectedEndpoint {
+        display_path: "api/Get".to_owned(),
+        file: file.clone(),
+        collection: 0,
+        endpoint,
+    });
+    (app, file)
+}
+
+#[test]
+fn toggle_endpoint_insecure_persists_and_drives_effective_badge() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, file) = app_with_loaded_endpoint(dir.path());
+
+    // Starts secure: neither session nor endpoint opted in.
+    assert!(!app.selected().unwrap().endpoint.request.insecure);
+    assert!(!app.insecure_active(), "badge off while fully secure");
+
+    // Toggle on: in-memory flag, effective badge, and the on-disk file all flip.
+    app.toggle_endpoint_insecure();
+    assert!(app.selected().unwrap().endpoint.request.insecure);
+    assert!(
+        app.insecure_active(),
+        "effective badge reflects the per-endpoint opt-in even with a secure session"
+    );
+    assert!(
+        churl_core::persistence::load_endpoint(&file)
+            .unwrap()
+            .request
+            .insecure,
+        "the opt-in persisted to disk"
+    );
+
+    // Toggle off: flag, badge, and disk return to secure.
+    app.toggle_endpoint_insecure();
+    assert!(!app.selected().unwrap().endpoint.request.insecure);
+    assert!(!app.insecure_active());
+    assert!(
+        !churl_core::persistence::load_endpoint(&file)
+            .unwrap()
+            .request
+            .insecure
+    );
+}
+
+#[test]
+fn toggle_endpoint_insecure_without_selection_is_a_noop_message() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.toggle_endpoint_insecure();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("no endpoint selected")
+    );
+}
+
+#[test]
+fn client_for_builds_insecure_variant_only_when_the_endpoint_diverges() {
+    // White-box: with a secure session, a secure endpoint reuses the shared
+    // client (no variant built) while an opted-in endpoint builds and caches a
+    // distinct insecure client. A client rebuild invalidates the cache.
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.client = Some(churl_core::http::build_client_with(&Default::default()).unwrap());
+
+    let mut secure = open_bare_request();
+    secure.insecure = false;
+    let mut opted = open_bare_request();
+    opted.insecure = true;
+
+    assert!(app.client_for(&secure).is_some());
+    assert!(
+        app.insecure_client.is_none(),
+        "a secure endpoint must not build the insecure variant"
+    );
+
+    assert!(app.client_for(&opted).is_some());
+    assert!(
+        app.insecure_client.is_some(),
+        "an opted-in endpoint builds and caches the insecure variant"
+    );
+
+    app.rebuild_client().unwrap();
+    assert!(
+        app.insecure_client.is_none(),
+        "rebuild_client invalidates the cached insecure variant"
+    );
+}
+
+/// A bare GET request used by the client_for divergence test.
+fn open_bare_request() -> Request {
+    Request {
+        method: churl_core::model::Method::Get,
+        url: "https://api.test/x".to_owned(),
+        headers: Vec::new(),
+        params: Vec::new(),
+        body: None,
+        auth: None,
+        insecure: false,
+    }
 }

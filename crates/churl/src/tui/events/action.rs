@@ -57,6 +57,9 @@ pub enum Action {
     OpenOptions,
     /// Toggle insecure-TLS (certificate verification off/on) for the session.
     ToggleInsecure,
+    /// Toggle the selected endpoint's durable insecure-TLS opt-in (persisted onto
+    /// the endpoint file), distinct from the session-wide [`Action::ToggleInsecure`].
+    ToggleEndpointInsecure,
     /// Run the selected request sequence (opens the sequence surface, Run face).
     RunSequence,
     /// Edit the selected sequence, or create a new one (opens the sequence surface).
@@ -279,6 +282,11 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::ToggleInsecure,
         "toggle-insecure",
         "toggle insecure TLS (verify off/on)",
+    ),
+    (
+        Action::ToggleEndpointInsecure,
+        "toggle-endpoint-insecure",
+        "toggle insecure TLS for this endpoint (saved)",
     ),
     (Action::RunSequence, "run-sequence", "run sequence"),
     (Action::EditSequence, "edit-sequence", "add sequence"),

@@ -217,6 +217,7 @@ fn sample_endpoints() -> Vec<Endpoint> {
                 auth: Some(Auth::Bearer {
                     token: "{{token}}".into(),
                 }),
+                insecure: false,
             },
         },
         Endpoint {
@@ -235,6 +236,7 @@ fn sample_endpoints() -> Vec<Endpoint> {
                     username: "alice".into(),
                     password: "{{password}}".into(),
                 }),
+                insecure: false,
             },
         },
         Endpoint {
@@ -254,6 +256,7 @@ fn sample_endpoints() -> Vec<Endpoint> {
                     value: "{{api_key}}".into(),
                     placement: ApiKeyPlacement::Header,
                 }),
+                insecure: false,
             },
         },
     ]
@@ -267,6 +270,7 @@ fn assert_request_eq(a: &Request, b: &Request) {
     assert_eq!(a.params, b.params, "params");
     assert_eq!(a.body, b.body, "body");
     assert_eq!(a.auth, b.auth, "auth");
+    assert_eq!(a.insecure, b.insecure, "insecure");
 }
 
 #[test]
@@ -309,6 +313,7 @@ fn export_refuses_literal_secret_auth() {
             auth: Some(Auth::Bearer {
                 token: "ghp_literalsecret".into(),
             }),
+            insecure: false,
         },
     }];
     for dialect in [JsonDialect::Postman, JsonDialect::Native] {
@@ -453,6 +458,9 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                         auth: Some(Auth::Bearer {
                             token: "{{token}}".into(),
                         }),
+                        // Durable per-endpoint insecure-TLS: must survive the
+                        // native export→import round-trip below.
+                        insecure: true,
                     },
                 },
                 Endpoint {
@@ -471,6 +479,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                             username: "alice".into(),
                             password: "{{password}}".into(),
                         }),
+                        insecure: false,
                     },
                 },
             ],
@@ -495,6 +504,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                             value: "{{api_key}}".into(),
                             placement: ApiKeyPlacement::Header,
                         }),
+                        insecure: false,
                     },
                 },
                 Endpoint {
@@ -514,6 +524,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                             value: "{{api_key}}".into(),
                             placement: ApiKeyPlacement::Query,
                         }),
+                        insecure: false,
                     },
                 },
             ],

@@ -7,23 +7,23 @@ expression: snapshot(&mut app)
 ┃> ▸ orders                  ┃│no endpoint selected                            │
 ┃  ▸ users                   ┃└────────────────────────────────────────────────┘
 ┃                            ┃┌ Request ───────────────────────────────────────┐
-┃                            ┃│                                                │
-┃                            ┃│no en┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                            ┃│     ┃ Shift-n  new collection (choose location)┃
-┃                            ┃│     ┃ Space  request picker                    ┃
-┃                            ┃│     ┃ c  cancel request                        ┃
-┃                            ┃│     ┃ e  toggle explorer sidebar               ┃
-┃                            ┃│     ┃ k  toggle insecure TLS (verify off/on)   ┃
-┃                            ┃│     ┃ n  new endpoint (choose location)        ┃
-┃                            ┃└─────┃ o  Options (proxy · TLS · cookies)       ┃
-┃                            ┃┌ Resp┃ p  switch profile                        ┃
-┃                            ┃│no re┃ q  quit                                  ┃
-┃                            ┃│     ┃ r  reload workspace from disk            ┃
-┃                            ┃│no en┃ v  Environments & vars                   ┃
-┃                            ┃│     ┃ w  workspace picker                      ┃
-┃                            ┃│     ┃ y  copy request as curl                  ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│     ┃ l  ▸ load                                ┃
-┌ Sequences ─────────────────┐│     ┃ s  ▸ sequences                           ┃
-│<leader>s n to add          ││     ┃ t  ▸ tabs                                ┃
-└────────────────────────────┘└─────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃                            ┃┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃┃ Shift-k  toggle insecure TLS for this endpoint ┃
+┃                            ┃┃ Shift-n  new collection (choose location)      ┃
+┃                            ┃┃ Space  request picker                          ┃
+┃                            ┃┃ c  cancel request                              ┃
+┃                            ┃┃ e  toggle explorer sidebar                     ┃
+┃                            ┃┃ k  toggle insecure TLS (verify off/on)         ┃
+┃                            ┃┃ n  new endpoint (choose location)              ┃
+┃                            ┃┃ o  Options (proxy · TLS · cookies)             ┃
+┃                            ┃┃ p  switch profile                              ┃
+┃                            ┃┃ q  quit                                        ┃
+┃                            ┃┃ r  reload workspace from disk                  ┃
+┃                            ┃┃ v  Environments & vars                         ┃
+┃                            ┃┃ w  workspace picker                            ┃
+┃                            ┃┃ y  copy request as curl                        ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃ l  ▸ load                                      ┃
+┌ Sequences ─────────────────┐┃ s  ▸ sequences                                 ┃
+│<leader>s n to add          │┃ t  ▸ tabs                                      ┃
+└────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  EXPLORER · demo · ? help · space leader · / search · : palette
