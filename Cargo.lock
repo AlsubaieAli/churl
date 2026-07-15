@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "churl"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "base64",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "churl-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "cookie_store",
