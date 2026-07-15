@@ -189,9 +189,13 @@ impl App {
             return Ok(false);
         }
         self.reload_explorer()?;
+        // Surface the warning TEXT, not just a count — some warnings are
+        // security-relevant (e.g. `-k` baked insecure-TLS onto the endpoint) and
+        // must be loud in the TUI, matching the CLI import path.
         let mut msg = format!("imported curl → {}", endpoint.name);
         if !result.warnings.is_empty() {
-            msg.push_str(&format!(" ({} warning(s))", result.warnings.len()));
+            msg.push_str(" · ");
+            msg.push_str(&result.warnings.join(" · "));
         }
         self.notify(msg);
         // Open the new endpoint as its own buffer (File target — no confirm).
