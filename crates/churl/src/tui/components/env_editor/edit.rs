@@ -45,6 +45,34 @@ impl EnvEditorState {
         }
     }
 
+    /// Routes a paste into whichever text sub-input is open, mirroring the
+    /// [`handle_key`](Self::handle_key) precedence (session-var input → profile
+    /// naming → row field edit). Returns `true` when a surface consumed it; the
+    /// discard-confirm sub-overlay and the plain row/scope navigation take no text
+    /// input, so those yield `false` (the app then no-ops).
+    pub fn paste(&mut self, text: &str) -> bool {
+        if self.pending_close {
+            return false;
+        }
+        if let Some(input) = self.session_input.as_mut() {
+            input.editor.insert_str(text);
+            return true;
+        }
+        if let Some(naming) = self.naming.as_mut() {
+            naming.editor.insert_str(text);
+            return true;
+        }
+        if let Some(edit) = self.editing.as_mut() {
+            edit.editor.insert_str(text);
+            // Mirror the buffer into the working row live, exactly as the per-key
+            // editing path does, so render + dirty state track the paste.
+            let (row, field, value) = (edit.row, edit.field, edit.editor.text());
+            self.write_field(row, field, value);
+            return true;
+        }
+        false
+    }
+
     /// Discard-confirm keys (`s` save+close, `d` discard+close, `Esc` stay).
     fn handle_confirm_key(&mut self, key: KeyEvent) -> EnvKeyOutcome {
         match key.code {

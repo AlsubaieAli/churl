@@ -114,9 +114,18 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Import { curl, name, out }) => {
             // No arg (or `-`) ⇒ read the whole curl command from stdin, so a
-            // multi-line paste survives without the shell mangling it.
+            // multi-line paste survives without the shell mangling it. Guard
+            // against a hang: reading a TTY would block forever waiting for
+            // Ctrl-D, so refuse (with a usage hint) when stdin is a terminal.
             let curl = match curl.as_deref() {
                 None | Some("-") => {
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        return Err(eyre!(
+                            "no curl command given: provide it as an argument, \
+                             or pipe one in — e.g. `pbpaste | churl import -`"
+                        ));
+                    }
                     let mut buf = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
                     buf

@@ -289,6 +289,26 @@ impl SequenceEditorState {
         EditorOutcome::Consumed
     }
 
+    /// Routes a paste into the open text sub-input, mirroring the
+    /// [`handle_key`](Self::handle_key) precedence: the add-step picker's filter
+    /// query (refilter after), then a rule field edit. The discard-confirm overlay
+    /// and plain step/rule navigation take no text, so those return `false`.
+    pub fn paste(&mut self, text: &str) -> bool {
+        if self.pending_close {
+            return false;
+        }
+        if let Some(picker) = self.picker.as_mut() {
+            picker.query.insert_str(text);
+            self.refilter_picker();
+            return true;
+        }
+        if let Some(edit) = self.edit.as_mut() {
+            edit.editor.insert_str(text);
+            return true;
+        }
+        false
+    }
+
     fn handle_close_confirm(&mut self, key: KeyEvent) -> EditorOutcome {
         match key.code {
             KeyCode::Char('s') => EditorOutcome::SaveAndClose,

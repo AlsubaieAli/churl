@@ -5841,6 +5841,63 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     );
 }
 
+/// P1 regression: enabling bracketed paste globally must NOT silently drop a
+/// paste into a request-row field. Pasting a token into a Headers VALUE field
+/// (a core action) still inserts — `handle_paste` mirrors `handle_normal_key`'s
+/// field-edit routing.
+#[test]
+fn paste_into_request_row_value_field_inserts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.explorer.expand().unwrap();
+    app.guarded_load(PendingLoad::Row(1)).unwrap();
+    app.set_focus(Pane::Request);
+    // Open a value-field edit seeded with a prefix, as `a`/edit would.
+    if let Some(b) = app.active_endpoint_buffer_mut() {
+        b.tabs.active = RequestTab::Headers;
+        b.tabs.editing = Some(FieldEdit {
+            row: 0,
+            field: EditField::Value,
+            editor: LineEditor::new("Bearer "),
+        });
+    }
+    assert!(app.tabs_editing_active(), "a field edit is active");
+    app.handle_paste("token-123".to_string());
+    let text = app
+        .active_endpoint_buffer()
+        .unwrap()
+        .tabs
+        .editing
+        .as_ref()
+        .unwrap()
+        .editor
+        .text();
+    assert_eq!(
+        text, "Bearer token-123",
+        "paste inserted at the cursor of the value field"
+    );
+}
+
+/// P1 regression: a paste into an open fuzzy picker's filter appends to the
+/// query (and refilters), rather than vanishing.
+#[test]
+fn paste_into_picker_filter_appends_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    // `<leader><leader>` opens the endpoint/request search picker.
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Search), "search picker open");
+    app.handle_paste("user".to_string());
+    assert_eq!(
+        app.picker_state().unwrap().query,
+        "user",
+        "pasted term appended to the picker filter"
+    );
+}
+
 /// A curl that fails to parse is fail-loud: nothing is created and the prompt
 /// stays open with the buffer intact.
 #[test]
