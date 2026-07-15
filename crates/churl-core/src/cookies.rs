@@ -15,7 +15,7 @@
 //! foreign hop) — the two are independent belts, not a single point of failure.
 
 use std::io::BufReader;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use cookie_store::{CookieStore, RawCookie};
 use reqwest::header::HeaderValue;
@@ -45,6 +45,25 @@ impl ChurlCookieJar {
         Self(RwLock::new(CookieStore::default()))
     }
 
+    /// A read guard on the store that **recovers from a poisoned lock** instead of
+    /// panicking. A panic elsewhere while holding the write guard poisons the lock;
+    /// without recovery every later cookie op would then panic in turn, wedging the
+    /// app. The store's data is still structurally valid after such a panic (at
+    /// worst a single in-flight mutation was interrupted), so continuing is the safe
+    /// choice — a cookie jar must never be a crash amplifier.
+    fn store_read(&self) -> RwLockReadGuard<'_, CookieStore> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A write guard on the store with the same poison recovery as [`Self::store_read`].
+    fn store_write(&self) -> RwLockWriteGuard<'_, CookieStore> {
+        self.0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Builds a jar from a JSON blob previously produced by [`Self::to_json`]. A
     /// blank/empty blob yields an empty jar (the common "no cookies stored yet"
     /// case) rather than an error.
@@ -66,7 +85,7 @@ impl ChurlCookieJar {
         // failure is returned as an error — NOT swallowed as an empty string:
         // persisting `""` over a good on-disk blob would silently wipe the jar.
         // The caller MUST skip the write on error (see `App::persist_cookie_jar`).
-        let store = self.0.read().expect("cookie jar lock poisoned");
+        let store = self.store_read();
         cookie_store::serde::json::save(&store, &mut buf)
             .map_err(|err| CookieError(err.to_string()))?;
         String::from_utf8(buf).map_err(|err| CookieError(err.to_string()))
@@ -75,7 +94,7 @@ impl ChurlCookieJar {
     /// Every stored (unexpired) cookie, for the Options overlay + `churl cookies
     /// list`. Ordered by domain then name for a stable display.
     pub fn list(&self) -> Vec<CookieView> {
-        let store = self.0.read().expect("cookie jar lock poisoned");
+        let store = self.store_read();
         let mut views: Vec<CookieView> = store
             .iter_unexpired()
             .map(|cookie| CookieView {
@@ -94,7 +113,7 @@ impl ChurlCookieJar {
     /// collected first (ending the read borrow) before removing.
     pub fn delete(&self, domain: &str, name: &str) -> bool {
         let coords: Vec<(String, String, String)> = {
-            let store = self.0.read().expect("cookie jar lock poisoned");
+            let store = self.store_read();
             store
                 .iter_any()
                 .filter(|c| String::from(&c.domain) == domain && c.name() == name)
@@ -110,7 +129,7 @@ impl ChurlCookieJar {
         if coords.is_empty() {
             return false;
         }
-        let mut store = self.0.write().expect("cookie jar lock poisoned");
+        let mut store = self.store_write();
         for (d, p, n) in &coords {
             store.remove(d, p, n);
         }
@@ -119,7 +138,7 @@ impl ChurlCookieJar {
 
     /// Empties the jar.
     pub fn clear(&self) {
-        self.0.write().expect("cookie jar lock poisoned").clear();
+        self.store_write().clear();
     }
 }
 
@@ -136,17 +155,14 @@ impl reqwest::cookie::CookieStore for ChurlCookieJar {
             let s = std::str::from_utf8(value.as_bytes()).ok()?;
             RawCookie::parse(s).ok().map(|c| c.into_owned())
         });
-        self.0
-            .write()
-            .expect("cookie jar lock poisoned")
-            .store_response_cookies(iter, url);
+        self.store_write().store_response_cookies(iter, url);
     }
 
     // Returns the `Cookie` header value for `url` — only cookies whose
     // domain/path/Secure scope matches are included, so a cookie set for host A is
     // never emitted for host B.
     fn cookies(&self, url: &reqwest::Url) -> Option<HeaderValue> {
-        let store = self.0.read().expect("cookie jar lock poisoned");
+        let store = self.store_read();
         let header = store
             .get_request_values(url)
             .map(|(name, value)| format!("{name}={value}"))
@@ -242,6 +258,47 @@ mod tests {
 
         jar.clear();
         assert!(jar.list().is_empty());
+    }
+
+    #[test]
+    fn poisoned_lock_recovers_without_panicking() {
+        use std::sync::Arc;
+
+        let jar = Arc::new(ChurlCookieJar::new());
+        set_cookie(&jar, "a=1; Max-Age=3600", "https://x.example/");
+
+        // Poison the lock: a thread panics while holding the write guard.
+        let poisoner = Arc::clone(&jar);
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.0.write().unwrap();
+            panic!("boom while holding the cookie write guard");
+        })
+        .join();
+        assert!(joined.is_err(), "the poisoning thread must have panicked");
+        assert!(jar.0.is_poisoned(), "the lock must now be poisoned");
+
+        // Every op must now recover instead of panicking, and see sane data.
+        let listed = jar.list();
+        assert_eq!(
+            listed.len(),
+            1,
+            "read recovers and sees the pre-poison cookie"
+        );
+        assert_eq!(listed[0].name, "a");
+
+        // A write recovers too.
+        assert!(jar.delete("x.example", "a"), "write recovers and mutates");
+        assert!(jar.list().is_empty());
+
+        // The reqwest-trait hot-path methods recover as well.
+        set_cookie(&jar, "b=2; Max-Age=3600", "https://y.example/");
+        assert!(
+            jar.cookies(&url("https://y.example/")).is_some(),
+            "set_cookies + cookies recover after poisoning"
+        );
+
+        // Serialization (the persistence path) also recovers.
+        assert!(jar.to_json().is_ok());
     }
 
     #[test]
