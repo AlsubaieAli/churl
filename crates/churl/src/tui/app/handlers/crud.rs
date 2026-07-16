@@ -55,9 +55,16 @@ impl App {
         }
     }
 
-    /// Opens a text prompt seeded with `seed`.
+    /// Opens a text prompt seeded with `seed`. The new-endpoint prompt gets the
+    /// multi-line vim editor (a pasted browser curl is editable across lines);
+    /// every other purpose uses the single-line editor.
     pub(in crate::tui::app) fn open_prompt(&mut self, purpose: PromptPurpose, seed: &str) {
-        self.prompt_editor = LineEditor::new(seed);
+        if purpose == PromptPurpose::NewEndpoint {
+            self.curl_prompt = Some(CurlPrompt::new(seed));
+        } else {
+            self.curl_prompt = None;
+            self.prompt_editor = LineEditor::new(seed);
+        }
         self.mode = Mode::Prompt(purpose);
     }
 
@@ -389,12 +396,16 @@ impl App {
         }
     }
 
-    /// Handles one key in a text-prompt overlay.
+    /// Handles one key in a text-prompt overlay. The new-endpoint prompt runs on
+    /// the multi-line vim editor; the rest on the single-line editor.
     pub(in crate::tui::app) fn handle_prompt_key(
         &mut self,
         key: KeyEvent,
         purpose: PromptPurpose,
     ) -> Result<()> {
+        if purpose == PromptPurpose::NewEndpoint {
+            return self.handle_curl_prompt_key(key);
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancelling a create abandons any picker-chosen destination, so a
@@ -410,6 +421,54 @@ impl App {
             _ => {
                 self.prompt_editor.handle_key(key);
             }
+        }
+        Ok(())
+    }
+
+    /// Handles one key in the multi-line new-endpoint (paste-curl) prompt. Mirrors
+    /// the URL vim-popup: Search mode routes everything to edtui; Enter submits
+    /// (running the shared curl-detect → import path, newlines preserved so a
+    /// multi-line curl parses); Normal-mode `vim_ext` motions win before the
+    /// Esc-cancel check; Esc in Normal cancels; the rest falls through to edtui.
+    pub(in crate::tui::app) fn handle_curl_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(mode) = self.curl_prompt.as_ref().map(|c| c.editor.mode) else {
+            return Ok(());
+        };
+        if mode == EditorMode::Search {
+            if let Some(c) = self.curl_prompt.as_mut() {
+                c.events.on_key_event(key, &mut c.editor);
+            }
+            return Ok(());
+        }
+        if key.code == KeyCode::Enter {
+            // Submit: take the buffer (newlines kept — a browser curl spans lines)
+            // and run the shared name/curl-detect commit path. A parse failure
+            // re-opens the prompt with the buffer intact (see `commit_prompt`).
+            let text = self.curl_prompt.take().map(|c| c.text());
+            if let Some(text) = text {
+                self.mode = Mode::Normal;
+                self.commit_prompt(PromptPurpose::NewEndpoint, text)?;
+            }
+            return Ok(());
+        }
+        // Normal-mode churl vim motions win before the Esc-cancel check — Esc while
+        // an f/F/t/T find is pending aborts the find, it must not close the prompt.
+        if mode == EditorMode::Normal
+            && let Some(c) = self.curl_prompt.as_mut()
+            && vim_ext::handle_key(key, &mut c.editor, &mut c.vim)
+        {
+            return Ok(());
+        }
+        if key.code == KeyCode::Esc && mode == EditorMode::Normal {
+            // Cancel: abandon any picker-chosen destination so a later `n` never
+            // reuses a stale target (parity with the single-line prompt's Esc).
+            self.pending_create_dir = None;
+            self.curl_prompt = None;
+            self.mode = Mode::Normal;
+            return Ok(());
+        }
+        if let Some(c) = self.curl_prompt.as_mut() {
+            c.events.on_key_event(key, &mut c.editor);
         }
         Ok(())
     }
@@ -799,9 +858,14 @@ impl App {
     }
 
     /// Whether the live prompt buffer currently reads as a pasted curl — drives
-    /// the name prompt's live "Import from curl" label flip.
+    /// the name prompt's live "Import from curl" label flip. Reads the multi-line
+    /// editor while the new-endpoint prompt is open, else the single-line one.
     pub(in crate::tui::app) fn prompt_buffer_is_curl(&self) -> bool {
-        looks_like_curl(&self.prompt_editor.text())
+        let text = match &self.curl_prompt {
+            Some(c) => c.text(),
+            None => self.prompt_editor.text(),
+        };
+        looks_like_curl(&text)
     }
 
     // --- M7.12 tree CRUD: move-to / copy-to / duplicate / reorder ---

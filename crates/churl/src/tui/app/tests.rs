@@ -5823,7 +5823,7 @@ fn destination_picker_creates_endpoint_at_chosen_root() {
         app.pending_create_dir.is_some(),
         "picked destination carried"
     );
-    app.prompt_editor = LineEditor::new("health");
+    app.handle_paste("health".to_string());
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(
@@ -5841,7 +5841,7 @@ fn name_prompt_auto_imports_pasted_curl() {
     let mut app = workspace_fixture(dir.path());
     app.begin_new_endpoint();
     assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
-    app.prompt_editor = LineEditor::new("curl https://api.test/health");
+    app.handle_paste("curl https://api.test/health".to_string());
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
@@ -5864,8 +5864,9 @@ fn importing_curl_captures_bearer_token_into_session_var() {
     let mut app = workspace_fixture(dir.path());
     assert!(app.session_vars().is_empty(), "no session vars yet");
     app.begin_new_endpoint();
-    app.prompt_editor =
-        LineEditor::new("curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'");
+    app.handle_paste(
+        "curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'".to_string(),
+    );
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     // Session var `token` holds the REAL value…
@@ -5886,11 +5887,11 @@ fn importing_curl_captures_bearer_token_into_session_var() {
     );
 }
 
-/// A bracketed paste routes the whole multi-line curl into the prompt editor
-/// (newlines normalised from the terminal's bare CR to LF) so the existing
-/// submit → `import_curl` path parses it — the real fix for the "unbalanced
-/// quotes / multiple URLs" bug (a per-key stream would have submitted early on
-/// the first embedded newline).
+/// A bracketed paste routes the whole multi-line curl into the multi-line
+/// new-endpoint editor (newlines normalised from the terminal's bare CR to LF)
+/// so the existing submit → `import_curl` path parses it — the real fix for
+/// the "unbalanced quotes / multiple URLs" bug (a per-key stream would have
+/// submitted early on the first embedded newline).
 #[test]
 fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     let dir = tempfile::tempdir().unwrap();
@@ -5901,7 +5902,7 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     // and curl's `\[\]` glob-escaping of an array param.
     let pasted = "curl 'https://api.test/orders?fields\\[\\]=a&fields\\[\\]=b' \\\r  -H 'accept: application/json'";
     app.handle_paste(pasted.to_string());
-    let buf = app.prompt_editor.text();
+    let buf = app.curl_prompt.as_ref().unwrap().text();
     assert!(
         buf.contains("fields\\[\\]=a"),
         "raw buffer keeps curl's escaping until import"
@@ -5920,6 +5921,85 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
         ep.request.url, "https://api.test/orders?fields[]=a&fields[]=b",
         "continuations collapsed and brackets unescaped"
     );
+}
+
+/// The whole point of upgrading the new-endpoint prompt to the multi-line vim
+/// editor: after a paste, the user can navigate *across lines* (`k`/`j`) and
+/// edit a value on a different line than where the paste left the cursor,
+/// then submit — the same curl-detect → import path picks up the edit.
+#[test]
+fn new_endpoint_multiline_editor_edits_across_lines_before_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    let pasted = "curl 'https://api.test/orders' \\\r  -H 'X-Custom: old'";
+    app.handle_paste(pasted.to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "paste lands while still in insert mode"
+    );
+    // Leave insert mode (edtui's own Esc binding), then walk up to the first
+    // line and back down to the header line — exercising real cross-line
+    // motion the single-line editor could never do.
+    esc(&mut app);
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal
+    );
+    press(&mut app, 'k'); // up to (or already at) the `curl …` line
+    press(&mut app, 'j'); // back down to the `-H 'X-Custom: old'` line
+    press(&mut app, '$'); // end of line: the closing quote
+    press(&mut app, 'h'); // 'd'
+    press(&mut app, 'h'); // 'l'
+    press(&mut app, 'h'); // 'o' — start of "old"
+    press(&mut app, 'x'); // delete o/l/d one at a time
+    press(&mut app, 'x');
+    press(&mut app, 'x');
+    press(&mut app, 'i'); // insert before the (now-adjacent) closing quote
+    for c in "new".chars() {
+        press(&mut app, c);
+    }
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("X-Custom: new"),
+        "edit landed on the header line, not the URL line: {buf:?}"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("orders.toml");
+    assert!(file.exists(), "edited multi-line curl still imported");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    let header = ep
+        .request
+        .headers
+        .iter()
+        .find(|h| h.name == "X-Custom")
+        .expect("custom header present");
+    assert_eq!(
+        header.value, "new",
+        "in-editor edit made it into the import"
+    );
+}
+
+/// A plain (non-curl) name typed directly into the multi-line editor —
+/// keystroke by keystroke, not pasted — still falls through to a plain
+/// endpoint, same as the old single-line editor.
+#[test]
+fn new_endpoint_multiline_editor_plain_name_falls_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "ping".chars() {
+        press(&mut app, c);
+    }
+    assert!(!app.prompt_buffer_is_curl(), "a plain name is not curl");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("ping.toml");
+    assert!(file.exists(), "plain name created a plain endpoint");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "", "plain endpoint has no URL to import");
 }
 
 /// P1 regression: enabling bracketed paste globally must NOT silently drop a
@@ -5987,7 +6067,7 @@ fn name_prompt_curl_parse_failure_creates_nothing() {
     let mut app = workspace_fixture(dir.path());
     let before = count_toml(dir.path());
     app.begin_new_endpoint();
-    app.prompt_editor = LineEditor::new("curl"); // no URL → parse error
+    app.handle_paste("curl".to_string()); // no URL → parse error
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(

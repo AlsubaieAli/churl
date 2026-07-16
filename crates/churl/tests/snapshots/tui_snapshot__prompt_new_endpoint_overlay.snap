@@ -9,18 +9,18 @@ expression: snapshot(&mut app)
 │                            │┌ Request ───────────────────────────────────────┐
 │                            ││                                                │
 │                            ││no endpoint selected                            │
-│                            ││                                                │
-│                            ││                                                │
-│                            ││                                                │
-│              ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
-│              ┃> Update user█                                  ┃              │
-│              ┃name, or paste a curl to import                 ┃              │
-│              ┃                                                ┃──────────────┘
-│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
-│                            ││no response yet                                 │
-│                            ││                                                │
-│                            ││no endpoint selected                            │
-│                            ││                                                │
+│           ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓           │
+│           ┃Update user                                           ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃───────────┘
+│           ┃                                                      ┃───────────┐
+│           ┃                                                      ┃           │
+│           ┃  Insert                                              ┃           │
+│           ┃name, or paste a curl to import                       ┃           │
+│           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━ enter submit · esc cancel ┛           │
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │

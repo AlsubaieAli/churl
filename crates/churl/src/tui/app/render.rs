@@ -446,15 +446,31 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         Overlay::Prompt(purpose) => {
+            // Compute the title/hint (immutable borrows) before taking the
+            // multi-line editor mutably for the new-endpoint prompt.
             let hint = prompt_hint(app, purpose);
-            prompt::render_prompt(
-                frame,
-                main,
-                prompt_title(app, purpose),
-                &app.prompt_editor,
-                hint.as_deref(),
-                &theme,
-            );
+            let title = prompt_title(app, purpose);
+            if purpose == PromptPurpose::NewEndpoint {
+                if let Some(curl) = app.curl_prompt.as_mut() {
+                    prompt::render_prompt_multiline(
+                        frame,
+                        main,
+                        title,
+                        &mut curl.editor,
+                        hint.as_deref(),
+                        &theme,
+                    );
+                }
+            } else {
+                prompt::render_prompt(
+                    frame,
+                    main,
+                    title,
+                    &app.prompt_editor,
+                    hint.as_deref(),
+                    &theme,
+                );
+            }
         }
         Overlay::Confirm(purpose) => {
             let (title, question, hint) = confirm_text(purpose, app.pending_close.is_some());

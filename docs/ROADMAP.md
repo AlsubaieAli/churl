@@ -77,8 +77,8 @@ churl is already a full request workbench. The path to 1.0 closes the edges — 
 CLI, real testing, and the polish to launch — grouped by target release.
 
 ### 0.6 — Quick wins 🚧
-- [ ] Response structural navigation — jump between collapsible nodes in the response viewer.
-- [ ] Editable paste-curl — review and adjust a pasted curl before importing.
+- [x] Response structural navigation — jump between collapsible nodes in the response viewer.
+- [x] Editable paste-curl — review and adjust a pasted curl before importing.
 
 ### 0.7 — CLI & headless (agent-first) ⏳
 - [ ] `churl send` / `churl run <endpoint>` — headless execution for scripting, CI, and agents,
