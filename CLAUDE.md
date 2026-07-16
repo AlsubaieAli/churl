@@ -28,10 +28,12 @@ cargo test --all
 ## Code navigation (Serena)
 
 This repo is [Serena](https://github.com/oraios/serena)-enabled (`.serena/project.yml`,
-Rust via rust-analyzer). When the Serena MCP tools are available, prefer them for
-navigating the codebase — `find_symbol`, `find_referencing_symbols`,
-`get_symbols_overview` — over bulk file reads and grep. Setup is in
-CONTRIBUTING.md → "Semantic code navigation (Serena)".
+Rust via rust-analyzer). **Whenever the Serena MCP tools are available, use them for code
+navigation** — `find_symbol`, `find_referencing_symbols`, `get_symbols_overview` — instead of
+bulk file reads or grep. They locate symbols, callers, and definitions faster and cheaper; fall
+back to Read/grep only when a symbolic lookup genuinely can't answer the question (plain-text
+search, comments, non-code files). Setup is in CONTRIBUTING.md → "Semantic code navigation
+(Serena)".
 
 ## Workspace layout
 
@@ -201,7 +203,7 @@ Working conventions (code structure, comments, process, commits) are canonical i
 
 ## Milestone workflow
 
-1. Read `docs/ROADMAP.md` for scope and the current milestone. The roadmap is repo-authoritative; the maintainers' vault hub mirrors it milestone-grain.
+1. Read `docs/ROADMAP.md` for scope and the current milestone. It is the authoritative roadmap.
 2. Implement the milestone's deliverables.
 3. Update `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, and this file **before** the milestone commit.
 4. Verify: fmt + clippy + test all green, `cargo run -p churl -- --version` works.
