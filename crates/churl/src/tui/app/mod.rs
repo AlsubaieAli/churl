@@ -1003,6 +1003,16 @@ impl App {
             .is_some_and(|e| e.mode != EditorMode::Normal)
     }
 
+    /// Whether the new-endpoint multi-line curl editor is in an insert-capable
+    /// (non-Normal) mode — the same edtui + vim_ext pairing as the URL popup, so
+    /// it needs the same paste gate: a paste routed to it in Normal mode would
+    /// trigger vim's paste-after and land one char off.
+    fn curl_prompt_non_normal(&self) -> bool {
+        self.curl_prompt
+            .as_ref()
+            .is_some_and(|c| c.editor.mode != EditorMode::Normal)
+    }
+
     /// Routes a bracketed-paste payload into the active text surface as literal
     /// characters (newlines never interpreted as submit). The routing MIRRORS the
     /// key precedence in [`Self::handle_key`] exactly, so every surface that
@@ -1052,25 +1062,42 @@ impl App {
             }
             Mode::Prompt(PromptPurpose::NewEndpoint) if self.curl_prompt.is_some() => {
                 // Already expanded: normalise newlines to `\n` (the curl parser
-                // keys on LF continuations) and insert the whole payload at the
-                // cursor via edtui, so a multi-line browser curl lands intact.
-                let s = normalize_paste_newlines(&text);
-                if let Some(c) = self.curl_prompt.as_mut() {
+                // keys on LF continuations). Gated on insert-capable mode exactly
+                // like the URL popup above — a second bracketed paste can arrive
+                // while the editor still sits in Normal mode (right after a
+                // curl-paste switch, or a parse-fail re-open), and routing it
+                // there would trigger vim's Normal-mode paste-after, landing one
+                // char off instead of at the cursor.
+                if self.curl_prompt_non_normal()
+                    && let Some(c) = self.curl_prompt.as_mut()
+                {
+                    let s = normalize_paste_newlines(&text);
                     c.events.on_paste_event(s, &mut c.editor);
                 }
             }
             Mode::Prompt(PromptPurpose::NewEndpoint) => {
-                // Single-line sub-state: a paste that looks like curl (or spans
-                // multiple lines) expands into the multi-line editor instead of
-                // becoming part of the name — landing in Normal mode, ready to
-                // review/edit/submit. Prior typed text was typed first, so it
-                // prefixes the pasted content in the seed (the common case is an
-                // empty editor, so the seed is just the paste). The paste is
-                // consumed here — it never also reaches `prompt_editor.insert_str`
-                // below, so there is no double-insert.
+                // Single-line sub-state: a paste expands into the multi-line
+                // editor instead of becoming part of the name, landing in Normal
+                // mode, ready to review/edit/submit. The paste is consumed here —
+                // it never also reaches `prompt_editor.insert_str` below, so
+                // there is no double-insert.
                 let s = normalize_paste_newlines(&text);
                 let trimmed = s.trim();
-                if trimmed.starts_with("curl") || s.contains('\n') {
+                if handlers::crud::looks_like_curl(trimmed) {
+                    // The paste itself is a curl: seed with the curl ALONE,
+                    // discarding any already-typed prefix. Prepending it (as the
+                    // multi-line branch below does) would make the seed
+                    // `<prefix>curl …`, which fails `looks_like_curl` on submit
+                    // and silently degrades the import into a plain endpoint
+                    // named `<prefix>curl …` — a curl import derives its name
+                    // from the URL, so the half-typed prefix is intentionally
+                    // dropped, not merged.
+                    self.open_curl_editor(&s, EditorMode::Normal);
+                } else if s.contains('\n') {
+                    // Multi-line but not a recognized curl: this is name/notes
+                    // text typed across lines, not an import, so prior typed
+                    // text is real content — it was typed first, so it prefixes
+                    // the pasted content in the seed.
                     let seed = format!("{}{s}", self.prompt_editor.text());
                     self.open_curl_editor(&seed, EditorMode::Normal);
                 } else {

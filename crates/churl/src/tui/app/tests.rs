@@ -6366,11 +6366,36 @@ fn paste_plain_word_stays_single_line() {
     );
 }
 
-/// Prior typed text is carried into the multi-line seed (prepended, since it
-/// was typed first) when a curl paste triggers the expansion — the common
-/// case is an empty editor, but existing content must never be dropped.
+/// A curl-lookalike word (no word boundary after `curl`) stays on the
+/// single-line editor, same as any other plain word — the expand trigger now
+/// shares `looks_like_curl` with the submit-time import check instead of a
+/// bare `starts_with("curl")`, so `curly`/`curl-metrics` no longer wrongly
+/// expand into the multi-line editor.
 #[test]
-fn paste_switch_carries_prior_typed_text_into_seed() {
+fn paste_curl_lookalike_word_stays_single_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curly".to_string());
+    assert!(
+        app.curl_prompt.is_none(),
+        "a `curl`-prefixed but non-curl word never expands"
+    );
+    assert_eq!(
+        app.prompt_editor.text(),
+        "curly",
+        "pasted word lands in the name, same as typing it"
+    );
+}
+
+/// When the pasted text itself is a curl, the seed is the curl ALONE — any
+/// already-typed prefix is discarded, not prepended. Prepending it would
+/// produce `<prefix>curl …`, which fails `looks_like_curl` on submit and
+/// silently degrades the import into a plain endpoint (see
+/// `typed_prefix_then_curl_paste_still_imports_on_submit` for the submit-time
+/// proof).
+#[test]
+fn paste_switch_discards_prior_typed_prefix_when_pasted_curl() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
     app.begin_new_endpoint();
@@ -6380,9 +6405,93 @@ fn paste_switch_carries_prior_typed_text_into_seed() {
     app.handle_paste("curl https://api.test/health".to_string());
     assert!(app.curl_prompt.is_some());
     let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert_eq!(
+        buf, "curl https://api.test/health",
+        "the typed prefix is discarded, not merged into the seed: {buf:?}"
+    );
+}
+
+/// The typed-prefix-then-curl-paste sequence, taken all the way through
+/// submit: the endpoint must IMPORT (method/URL from the curl), not fall
+/// through to a plain endpoint named after the mangled `<prefix>curl …`
+/// string — the actual P2-3 regression (`paste_switch_carries_prior_typed_
+/// text_into_seed` above only ever built the buffer, it never submitted).
+#[test]
+fn typed_prefix_then_curl_paste_still_imports_on_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "myapi-".chars() {
+        press(&mut app, c);
+    }
+    app.handle_paste("curl https://api.test/health".to_string());
     assert!(
-        buf.starts_with("myapi-curl"),
-        "prior typed text prefixes the pasted content in the seed: {buf:?}"
+        app.prompt_buffer_is_curl(),
+        "buffer reads as curl despite the earlier typed prefix"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Auto-named from the URL path, same as a prefix-free curl paste — proof
+    // the typed prefix never reached the import (a mangled seed would have
+    // failed `looks_like_curl` and created a plain `myapi-curl…` endpoint
+    // instead).
+    let file = dir.path().join("users").join("health.toml");
+    assert!(
+        file.exists(),
+        "typed prefix + curl paste still imports, not a plain endpoint"
+    );
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "https://api.test/health");
+}
+
+/// The OTHER branch — a multi-line paste that is NOT a curl — still prefixes
+/// prior typed text (it's name/notes content, not an import): the two-branch
+/// split only changes seed-construction for the curl case.
+#[test]
+fn paste_switch_prepends_prior_typed_text_for_plain_multiline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "notes-".chars() {
+        press(&mut app, c);
+    }
+    app.handle_paste("first line\nsecond line".to_string());
+    assert!(app.curl_prompt.is_some());
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.starts_with("notes-first line"),
+        "prior typed text still prefixes a non-curl multi-line paste: {buf:?}"
+    );
+}
+
+/// A second bracketed paste that arrives while the multi-line curl editor
+/// still sits in Normal mode (right after the paste-switch) must not land as
+/// a vim Normal-mode paste-after one char off — gated exactly like the URL
+/// popup, so it's dropped in Normal mode and lands correctly once the editor
+/// is insert-capable.
+#[test]
+fn curl_prompt_second_paste_gated_to_insert_capable_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/orders".to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "curl paste-switch lands in Normal mode"
+    );
+    let before = app.curl_prompt.as_ref().unwrap().text();
+    app.handle_paste("EXTRA".to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().text(),
+        before,
+        "a paste while still in Normal mode is dropped, not misplaced"
+    );
+    press(&mut app, 'i'); // Normal -> Insert
+    app.handle_paste("EXTRA".to_string());
+    assert!(
+        app.curl_prompt.as_ref().unwrap().text().contains("EXTRA"),
+        "once insert-capable, the paste lands at the cursor"
     );
 }
 

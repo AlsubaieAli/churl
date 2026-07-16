@@ -7,7 +7,10 @@
 //! that's needed; every call site resolves via `self.`.
 
 mod buffers;
-mod crud;
+// `pub(in crate::tui::app)`: `mod.rs`'s `handle_paste` needs the free fn
+// `looks_like_curl` (not a method, so it can't reach it via `self.`) to keep
+// the expand-trigger predicate identical to the submit-time import check.
+pub(in crate::tui::app) mod crud;
 mod editing;
 mod env_editor;
 mod help;
