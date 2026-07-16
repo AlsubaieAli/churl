@@ -55,17 +55,27 @@ impl App {
         }
     }
 
-    /// Opens a text prompt seeded with `seed`. The new-endpoint prompt gets the
-    /// multi-line vim editor (a pasted browser curl is editable across lines);
-    /// every other purpose uses the single-line editor.
+    /// Opens a text prompt seeded with `seed`, always on the light single-line
+    /// editor — including `NewEndpoint`, which starts here like every other
+    /// purpose and only escalates to the multi-line curl editor via
+    /// [`Self::open_curl_editor`] (a curl/multi-line paste, or `Ctrl-e`).
     pub(in crate::tui::app) fn open_prompt(&mut self, purpose: PromptPurpose, seed: &str) {
-        if purpose == PromptPurpose::NewEndpoint {
-            self.curl_prompt = Some(CurlPrompt::new(seed));
-        } else {
-            self.curl_prompt = None;
-            self.prompt_editor = LineEditor::new(seed);
-        }
+        self.curl_prompt = None;
+        self.prompt_editor = LineEditor::new(seed);
         self.mode = Mode::Prompt(purpose);
+    }
+
+    /// Switches the `NewEndpoint` prompt into its multi-line curl-editor
+    /// sub-state, seeded with `seed` and starting in `mode` — Normal for a
+    /// paste-switch or a parse-failure re-open (content is ready to review/
+    /// submit), Insert for an explicit `Ctrl-e` expand (nothing pasted yet).
+    /// The single-line `prompt_editor` is left alone; `curl_prompt` being
+    /// `Some` is what routes key/paste handling to the multi-line path.
+    pub(in crate::tui::app) fn open_curl_editor(&mut self, seed: &str, mode: EditorMode) {
+        let mut prompt = CurlPrompt::new(seed);
+        prompt.editor.mode = mode;
+        self.curl_prompt = Some(prompt);
+        self.mode = Mode::Prompt(PromptPurpose::NewEndpoint);
     }
 
     /// Palette: prompt for a JSON collection file path to import.
@@ -396,15 +406,31 @@ impl App {
         }
     }
 
-    /// Handles one key in a text-prompt overlay. The new-endpoint prompt runs on
-    /// the multi-line vim editor; the rest on the single-line editor.
+    /// Handles one key in a text-prompt overlay. `NewEndpoint` runs on the
+    /// multi-line vim editor once expanded (`curl_prompt.is_some()`); every
+    /// other case — every other purpose, and `NewEndpoint` before it expands —
+    /// runs on the single-line editor.
     pub(in crate::tui::app) fn handle_prompt_key(
         &mut self,
         key: KeyEvent,
         purpose: PromptPurpose,
     ) -> Result<()> {
-        if purpose == PromptPurpose::NewEndpoint {
+        if purpose == PromptPurpose::NewEndpoint && self.curl_prompt.is_some() {
             return self.handle_curl_prompt_key(key);
+        }
+        if purpose == PromptPurpose::NewEndpoint
+            && key.code == KeyCode::Char('e')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            // `Ctrl-e` normally reaches `LineEditor::handle_key`, which binds it
+            // to end-of-line (readline-style, paired with `Ctrl-a`). Intercepted
+            // here — scoped to the `NewEndpoint` single-line sub-state only, so
+            // every other prompt purpose keeps end-of-line — to expand into the
+            // multi-line curl editor instead, seeded with whatever was already
+            // typed and ready to compose a curl by hand (Insert mode).
+            let seed = self.prompt_editor.text();
+            self.open_curl_editor(&seed, EditorMode::Insert);
+            return Ok(());
         }
         match key.code {
             KeyCode::Esc => {
@@ -503,8 +529,12 @@ impl App {
                 // is created and the prompt re-opens with the buffer intact.
                 if looks_like_curl(&text) {
                     if !self.create_endpoint_from_curl(&dir, &text)? {
+                        // Fail-loud re-open: land back in the multi-line editor
+                        // (not the single-line default) with the buffer intact in
+                        // Normal mode, ready to fix and resubmit — the user has
+                        // curl content to correct, and single-line would lose it.
                         self.pending_create_dir = Some(dir);
-                        self.open_prompt(PromptPurpose::NewEndpoint, &text);
+                        self.open_curl_editor(&text, EditorMode::Normal);
                     }
                     return Ok(());
                 }

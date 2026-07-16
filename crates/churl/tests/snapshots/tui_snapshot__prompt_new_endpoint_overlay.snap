@@ -8,18 +8,18 @@ expression: snapshot(&mut app)
 │                            │┌ Request ───────────────────────────────────────┐
 │                            ││                                                │
 │                            ││no endpoint selected                            │
-│           ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓           │
-│           ┃Update user                                           ┃           │
-│           ┃                                                      ┃           │
-│           ┃                                                      ┃           │
-│           ┃                                                      ┃           │
-│           ┃                                                      ┃           │
-│           ┃                                                      ┃───────────┘
-│           ┃                                                      ┃───────────┐
-│           ┃                                                      ┃           │
-│           ┃  Insert                                              ┃           │
-│           ┃name, or paste a curl to import                       ┃           │
-│           ┗━━━━━━━━━━━━━━━━━━ insert: enter=newline · esc=normal ┛           │
+│                            ││                                                │
+│                            ││                                                │
+│                            ││                                                │
+│              ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
+│              ┃> Update user█                                  ┃              │
+│              ┃name — paste a curl (or ctrl-e) to expand       ┃              │
+│              ┃                                                ┃──────────────┘
+│              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
+│                            ││no response yet                                 │
+│                            ││                                                │
+│                            ││no endpoint selected                            │
+│                            ││                                                │
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │
