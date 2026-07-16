@@ -111,7 +111,7 @@ running with `churl --version`):
 | `cargo install churl` | `cargo install churl` — cargo rebuilds when a newer version is published |
 | git | `cargo install --git … churl --force` (`--force` reinstalls even if the version number hasn't changed) |
 
-No package-manager distribution (Homebrew/AUR) so far.
+Package-manager distribution (Homebrew / AUR) arrives at 1.0.
 
 ### Uninstalling
 
@@ -240,17 +240,18 @@ churl keymaps
 
 ## What's next
 
-Roughly in order — see [docs/ROADMAP.md](docs/ROADMAP.md) for the authoritative roadmap:
+The road to **1.0**, roughly in order — see [docs/ROADMAP.md](docs/ROADMAP.md) for the full roadmap:
 
-- **Collection interchange** — JSON collection import/export, plus curl paste/copy directly inside the TUI
-- **Environments & variables editor** — manage profiles, collection, and workspace vars without leaving the app
-- **Quick-jump pickers** — fuzzy-jump straight to any request or workspace
-- **Request sequences** — chain requests into end-to-end flows with shared state
-- **Concurrent requests** — fire throttled batches for smoke and light load testing
-- **Nested collections & root-level endpoints** — organize requests in a folder tree and create endpoints at the workspace root
-- **Cookies & proxy** — cookie jar persistence and HTTP(S) proxy support
-- **Plugin system** — extend auth schemes, body types, and viewers
-- Also on the backlog: multipart bodies (`curl -F`)
+- **CLI & headless** — `churl send`/`run` for scripting, CI, and AI agents, with structured JSON output and clean exit codes
+- **Debugging & testing** — a request inspector, plus status / header / body assertions that make churl a real testing tool
+- **Settings, multipart & save-response-to-file**
+- **Saved reports & storage maintenance** — persist and reload sequence and load runs
+- **Interop** — OpenAPI, Postman, and `.http` import/export
+- **1.0** — a final quality and security sweep, refreshed docs, and Homebrew / AUR
+
+After 1.0: a plugin system (community auth schemes, body types, viewers, and import/export
+formats), streaming (Server-Sent Events, then WebSocket), and an MCP server so agents can
+drive churl as a tool.
 
 ---
 
