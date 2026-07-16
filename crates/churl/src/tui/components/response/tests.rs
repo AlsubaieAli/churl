@@ -1060,6 +1060,102 @@ fn wrapped_continuation_rows_have_a_blank_gutter() {
     }
 }
 
+/// Renders a focused `Done` view and returns the raw `TestBackend` buffer so a
+/// caller can inspect per-cell *style* (not just symbols). Cursor sits at the
+/// given display row.
+fn render_buffer_focused(
+    view: ResponseView,
+    w: u16,
+    h: u16,
+    cursor: usize,
+) -> ratatui::buffer::Buffer {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let state = ResponseState::Done { view };
+    let cache = HashMap::new();
+    let theme = Theme::default();
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                RenderCtx {
+                    state: &state,
+                    request: None,
+                    focused: true,
+                    scroll: 0,
+                    cursor,
+                    cache: &cache,
+                    theme: &theme,
+                    jump_label: None,
+                    tick_count: 0,
+                },
+            );
+        })
+        .expect("draw");
+    terminal.backend().buffer().clone()
+}
+
+#[test]
+fn cursor_row_content_is_selection_highlighted_with_the_gutter_on() {
+    // Regression: the response cursor was invisible whenever the line-number
+    // gutter was on (its default) — `prepend_gutter`'s `Line::from(spans)`
+    // dropped the line-level selection style `apply_cursor` had set, so `j`/`k`
+    // moved an unseen cursor and the pane read as "scroll broken". The contract:
+    // with the gutter ON and the pane focused, the cursor row carries the theme
+    // selection background as a full-width cursorline (gutter number included).
+    let sel_bg = Theme::default().selection.bg.expect("selection has a bg");
+    let body: String = (0..10)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let v = view(&body);
+    assert!(
+        v.line_numbers(),
+        "gutter defaults on — the buggy configuration"
+    );
+    let buf = render_buffer_focused(v, 40, 14, 0);
+
+    // Locate the cursor row (row carrying "line0") and the column where its
+    // content ("line0") begins, past the border + gutter.
+    let (row_y, text_x) = (0..buf.area.height)
+        .find_map(|y| {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_owned())
+                .collect();
+            row.find("line0").map(|byte_x| (y, byte_x as u16))
+        })
+        .expect("cursor row with line0");
+
+    assert_eq!(
+        buf[(text_x, row_y)].style().bg,
+        Some(sel_bg),
+        "cursor-row content must carry the selection background"
+    );
+    // Full-width cursorline: the gutter number ('1', two cols left of the text)
+    // is part of the highlight too.
+    assert_eq!(
+        buf[(text_x - 2, row_y)].style().bg,
+        Some(sel_bg),
+        "the gutter number shares the cursor row's selection background"
+    );
+    // A non-cursor row's content is unstyled by the selection.
+    let (other_y, other_x) = (0..buf.area.height)
+        .find_map(|y| {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_owned())
+                .collect();
+            row.find("line1").map(|bx| (y, bx as u16))
+        })
+        .expect("row with line1");
+    assert_ne!(
+        buf[(other_x, other_y)].style().bg,
+        Some(sel_bg),
+        "a non-cursor row must not be selection-highlighted"
+    );
+}
+
 #[test]
 fn continuation_row_at_viewport_top_has_a_blank_gutter() {
     // P1 regression guard: line 1 is long (wraps to 9 rows at a 36-col body),

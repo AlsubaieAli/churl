@@ -11,19 +11,31 @@ pub mod theme;
 use std::collections::BTreeMap;
 
 use color_eyre::Result;
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::execute;
 use ratatui::DefaultTerminal;
 
 use app::App;
 use events::KeyMap;
 use theme::Theme;
 
-/// Initialise the terminal (raw mode + alternate screen, via `ratatui::init`).
+/// Initialise the terminal (raw mode + alternate screen, via `ratatui::init`),
+/// then request bracketed paste so a multi-line clipboard paste (e.g. a browser
+/// "Copy as cURL") arrives as one [`crossterm::event::Event::Paste`] instead of a
+/// stream of key events whose embedded newlines would submit a prompt early.
+/// A failed enable is non-fatal (paste falls back to key events) and is silenced
+/// rather than printed, since stdout is already inside the alternate screen.
 pub fn init() -> DefaultTerminal {
-    ratatui::init()
+    let terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    terminal
 }
 
 /// Restore the terminal to its original state. Safe to call multiple times.
+/// Disables bracketed paste (best-effort) *before* handing the screen back so the
+/// launching shell is not left in bracketed-paste mode.
 pub fn restore() {
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 }
 

@@ -493,14 +493,29 @@ pub(crate) fn build_search_spans(
 /// Prepends the dim line-number `label` to `line` as a leading span.
 /// The gutter reuses the same `Modifier::DIM` the viewer already uses
 /// for secondary text (fold suffixes, non-current search matches).
+///
+/// Carries the incoming line's base style onto the rebuilt line — critically,
+/// the selection style `apply_cursor` sets at the *line* level on the cursor row.
+/// Rebuilding via a bare `Line::from(spans)` dropped it, which left the response
+/// cursor invisible whenever the gutter was on (its default): `j`/`k` moved an
+/// unseen cursor and the pane read as "scroll broken".
+///
+/// ratatui patches the line style onto the base, then each span's style onto
+/// *that* (`Line::styled_graphemes` → `Span::styled_graphemes`), so a span field
+/// wins wherever it is set. Our spans set only `fg` (syntax highlight) or only
+/// modifiers (search: REVERSED / DIM+UNDERLINED) and leave `bg` unset, so the
+/// line-level selection `bg` fills every cell — a full-width cursorline covering
+/// the gutter — while each span's `fg` survives (syntax colours stay on the
+/// cursor row). The gutter span's DIM modifier likewise survives underneath.
 fn prepend_gutter(line: Line<'_>, label: String) -> Line<'_> {
+    let base = line.style;
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
     spans.push(Span::styled(
         label,
         Style::default().add_modifier(Modifier::DIM),
     ));
     spans.extend(line.spans);
-    Line::from(spans)
+    Line::from(spans).style(base)
 }
 
 /// Applies the cursor-row style to a line when `is_cursor`. Reuses

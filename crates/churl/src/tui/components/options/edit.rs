@@ -70,6 +70,17 @@ impl OptionsState {
         }
     }
 
+    /// Routes a paste into the proxy inline editor when it is open (the only text
+    /// surface in this overlay). Returns `true` when consumed, `false` otherwise
+    /// (the row list / cookie list take no free text).
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Some(editor) = self.editing.as_mut() else {
+            return false;
+        };
+        editor.insert_str(text);
+        true
+    }
+
     /// Keys while the proxy inline edit is open.
     fn handle_proxy_edit_key(&mut self, key: KeyEvent) -> OptionsOutcome {
         let Some(editor) = self.editing.as_mut() else {

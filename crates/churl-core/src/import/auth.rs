@@ -46,6 +46,10 @@ impl Parser {
                          workspace files; supply the real value via a profile/env (M6)"
                             .to_owned(),
                     );
+                    // Capture the real token so a live session can bind `{{token}}`
+                    // in RAM (never written to a workspace file).
+                    self.captured_secrets
+                        .push(("token".to_owned(), token.to_owned()));
                     "{{token}}".to_owned()
                 };
                 self.auth = Some(Auth::Bearer { token });
@@ -83,12 +87,16 @@ impl Parser {
             Some((user, pass)) if is_template_placeholder(pass) => {
                 (user.to_owned(), pass.to_owned())
             }
-            Some((user, _)) => {
+            Some((user, pass)) => {
                 self.warnings.push(
                     "-u password replaced with {{password}} placeholder — no secrets in \
                      workspace files; supply the real value via a profile/env (M6)"
                         .to_owned(),
                 );
+                // Capture the real password so a live session can bind
+                // `{{password}}` in RAM (never written to a workspace file).
+                self.captured_secrets
+                    .push(("password".to_owned(), pass.to_owned()));
                 (user.to_owned(), "{{password}}".to_owned())
             }
             None => {

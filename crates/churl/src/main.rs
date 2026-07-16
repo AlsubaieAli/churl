@@ -39,16 +39,24 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Import a curl command as an endpoint (prints TOML; --out writes a file)
+    /// Import a curl command as an endpoint (prints TOML; --out writes a file).
+    ///
+    /// Three input forms: paste the whole command as ONE quoted string
+    /// (`churl import "curl 'url' -H '…'"`); paste it RAW so the shell tokenises it
+    /// (`churl import curl 'url' -H '…'` — `-H` etc. are captured, not parsed as
+    /// churl flags); or omit it / pass `-` to read from stdin
+    /// (`pbpaste | churl import`). Put `--name`/`--out` BEFORE the command.
     Import {
-        /// The curl command to import (quote the whole command)
-        curl: String,
-        /// Override the endpoint name derived from the URL
+        /// Override the endpoint name derived from the URL (place before the curl)
         #[arg(long)]
         name: Option<String>,
-        /// Write the endpoint TOML to this file instead of stdout
+        /// Write the endpoint TOML to this file instead of stdout (place before the curl)
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// The curl command: one quoted string, raw trailing tokens, or empty/`-`
+        /// to read from stdin.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        curl: Vec<String>,
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
@@ -109,8 +117,33 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Import { curl, name, out }) => {
-            run_import(&curl, name, out)?;
+        Some(Command::Import { name, out, curl }) => {
+            // Dispatch on how many trailing tokens the shell handed us:
+            //   • 0 tokens (or a lone `-`) → read the whole command from stdin
+            //     (multi-line paste survives without the shell mangling it). Guard
+            //     against a hang: reading a TTY blocks forever on Ctrl-D, so refuse
+            //     with a usage hint when stdin is an interactive terminal.
+            //   • exactly 1 token → a full command STRING → `import_curl` (shlex).
+            //   • >1 tokens → the shell already tokenised the curl → parse the
+            //     tokens directly (no re-tokenising) via `import_curl_tokens`.
+            let is_stdin = curl.is_empty() || (curl.len() == 1 && curl[0] == "-");
+            let parsed = if is_stdin {
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    return Err(eyre!(
+                        "no curl command given: provide it as an argument, \
+                         or pipe one in — e.g. `pbpaste | churl import -`"
+                    ));
+                }
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                churl_core::import::import_curl(&buf)
+            } else if curl.len() == 1 {
+                churl_core::import::import_curl(&curl[0])
+            } else {
+                churl_core::import::import_curl_tokens(curl)
+            };
+            run_import(parsed, name, out)?;
         }
         Some(Command::Keymaps) => {
             run_keymaps()?;
@@ -329,11 +362,21 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// `churl import`: parse the curl command, print the endpoint's TOML to stdout
-/// (warnings on stderr), or write it through the persistence save with `--out`.
-/// A parse failure prints the error on stderr and exits non-zero.
-fn run_import(curl: &str, name: Option<String>, out: Option<PathBuf>) -> Result<()> {
-    let result = match churl_core::import::import_curl(curl) {
+/// `churl import`: take an already-parsed import result, print the endpoint's
+/// TOML to stdout (warnings on stderr), or write it through the persistence save
+/// with `--out`. A parse failure prints the error on stderr and exits non-zero.
+///
+/// The CLI has no live session, so any placeholdered secret (`{{token}}` /
+/// `{{password}}`) stays a placeholder — the `no secrets in workspace files`
+/// warning already tells the user to bind it via a profile/env. The real secret
+/// value in `captured_secrets` is deliberately NOT printed (stdout/`--out` land
+/// on disk).
+fn run_import(
+    parsed: Result<churl_core::import::ImportResult, churl_core::import::ImportError>,
+    name: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let result = match parsed {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error: {err}");

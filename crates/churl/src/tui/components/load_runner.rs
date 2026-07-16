@@ -411,6 +411,19 @@ impl LoadRunnerState {
         }
     }
 
+    /// Routes a paste into the inline numeric field editor when it is open. Only
+    /// ASCII digits are inserted — mirroring the per-key path, which ignores every
+    /// non-digit so the field stays a valid number. Returns `true` when the field
+    /// editor is open (even if the payload had no digits), `false` otherwise.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Some(editor) = self.editing.as_mut() else {
+            return false;
+        };
+        let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+        editor.insert_str(&digits);
+        true
+    }
+
     /// Routes a key. Returns what (if anything) the App must do.
     pub fn handle_key(&mut self, key: KeyEvent) -> LoadOutcome {
         // The guardrail confirm intercepts first.

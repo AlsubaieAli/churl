@@ -414,6 +414,14 @@ pub fn open_workspace(dir: &Path) -> Result<Option<OpenWorkspace>> {
     }
 }
 
+/// Normalises a bracketed-paste payload's line endings to `\n`: `\r\n` and lone
+/// `\r` both collapse to `\n`. Terminals and multiplexers (tmux `paste-buffer`)
+/// deliver paste newlines inconsistently as CR / CRLF / LF; downstream (the curl
+/// importer's `\`-continuation logic, and the LineEditor buffer) only wants LF.
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 impl App {
     /// How many consecutive history/load-summary write failures trigger the
     /// sticky "history not recording" status-bar flag. Set to 1 so the
@@ -923,6 +931,128 @@ impl App {
             .is_some_and(|b| b.url_popup.is_some())
     }
 
+    /// Whether the URL popup edtui editor is in an insert-capable (non-Normal)
+    /// mode on the active buffer — the gate for routing a paste there so it lands
+    /// at the cursor rather than triggering vim's Normal-mode paste-after.
+    fn url_popup_non_normal(&self) -> bool {
+        self.active_endpoint_buffer()
+            .and_then(|b| b.url_popup.as_ref())
+            .is_some_and(|e| e.mode != EditorMode::Normal)
+    }
+
+    /// Routes a bracketed-paste payload into the active text surface as literal
+    /// characters (newlines never interpreted as submit). The routing MIRRORS the
+    /// key precedence in [`Self::handle_key`] exactly, so every surface that
+    /// accepts typed keys also accepts a paste — otherwise, with bracketed paste
+    /// enabled globally, a paste into an unrouted surface would silently vanish.
+    ///
+    /// `LineEditor` / picker surfaces get newlines normalised to `\n` (single-line
+    /// editors never want a raw CR; the curl prompt's `\`-continuation logic keys
+    /// on LF). The edtui multi-line surfaces (Body editor / URL popup) get the RAW
+    /// payload so a pasted body keeps its CRLF, and are gated on an insert-capable
+    /// mode. When no text surface is active (Normal mode with no inline editor,
+    /// jump, a y/n confirm, a pending leader, the method menu) the paste is dropped
+    /// — never replayed as keys, which would fire commands.
+    fn handle_paste(&mut self, text: String) {
+        // Keyboard-owning overlays first (mirrors `handle_key`'s top guards).
+        if self.help_open {
+            if self.help_search_input {
+                self.help_search_editor
+                    .insert_str(&normalize_paste_newlines(&text));
+            }
+            return;
+        }
+        if self.url_popup_active() {
+            // edtui, raw payload, only when insert-capable (avoid vim paste-after
+            // landing it one char off in Normal mode).
+            if self.url_popup_non_normal()
+                && let Some(b) = self.active_endpoint_buffer_mut()
+                && let Some(editor) = b.url_popup.as_mut()
+            {
+                b.url_popup_events.on_paste_event(text, editor);
+            }
+            return;
+        }
+        if self.leader.is_some() {
+            return;
+        }
+        match &self.mode {
+            Mode::Search | Mode::Palette | Mode::WorkspacePicker | Mode::SequencePicker => {
+                let s = normalize_paste_newlines(&text);
+                if let Some(picker) = self.picker.as_mut().map(Picker::state_mut) {
+                    picker.push_str(&s, &mut self.finder);
+                }
+            }
+            Mode::BodySearch => {
+                let s = normalize_paste_newlines(&text);
+                self.body_search_editor.insert_str(&s);
+            }
+            Mode::Prompt(_) => {
+                let s = normalize_paste_newlines(&text);
+                self.prompt_editor.insert_str(&s);
+            }
+            Mode::EnvEditor(_) => {
+                let s = normalize_paste_newlines(&text);
+                if let Mode::EnvEditor(editor) = &mut self.mode {
+                    editor.paste(&s);
+                }
+            }
+            Mode::Options(_) => {
+                let s = normalize_paste_newlines(&text);
+                if let Mode::Options(state) = &mut self.mode {
+                    state.paste(&s);
+                }
+            }
+            Mode::Sequence { .. } => {
+                let s = normalize_paste_newlines(&text);
+                if let Some(editor) = self.sequence_editor_mut() {
+                    editor.paste(&s);
+                }
+            }
+            Mode::LoadRunner(_) => {
+                let s = normalize_paste_newlines(&text);
+                if let Mode::LoadRunner(state) = &mut self.mode {
+                    state.paste(&s);
+                }
+            }
+            Mode::Jump | Mode::MethodMenu | Mode::Confirm(_) => {}
+            Mode::Normal => self.handle_paste_normal(text),
+        }
+    }
+
+    /// The `Mode::Normal` half of [`Self::handle_paste`], mirroring
+    /// [`Self::handle_normal_key`]'s inline-editor precedence: inline URL edit →
+    /// request-row field edit (both `LineEditor`, normalised) → Body edtui in an
+    /// insert-capable mode (raw payload). Anything else (a bare focused pane, a
+    /// keymap-action context) has no text surface, so the paste is dropped.
+    fn handle_paste_normal(&mut self, text: String) {
+        if self.url_editor_active() {
+            let s = normalize_paste_newlines(&text);
+            if let Some(b) = self.active_endpoint_buffer_mut()
+                && let Some(editor) = b.url_editor.as_mut()
+            {
+                editor.insert_str(&s);
+            }
+            return;
+        }
+        if self.focus == Pane::Request && self.tabs_editing_active() {
+            let s = normalize_paste_newlines(&text);
+            if let Some(b) = self.active_endpoint_buffer_mut()
+                && let Some(edit) = b.tabs.editing.as_mut()
+            {
+                edit.editor.insert_str(&s);
+            }
+            return;
+        }
+        if self.focus == Pane::Request
+            && self.active_tab() == RequestTab::Body
+            && self.body_editor_non_normal()
+            && let Some(b) = self.active_endpoint_buffer_mut()
+        {
+            b.editor_events.on_paste_event(text, &mut b.editor);
+        }
+    }
+
     /// The success message of a queued-but-not-yet-flushed clipboard copy, if
     /// any. Exposed for tests: the actual copy (and its real success/fail
     /// message) runs in the terminal-owning run loop, which drives a real
@@ -1220,6 +1350,12 @@ impl App {
                             self.notify(msg);
                         }
                     }
+                    // A bracketed paste (enabled in `tui::init`): route the whole
+                    // clipboard payload into the active text surface as literal
+                    // characters — newlines are preserved in the buffer instead of
+                    // acting as Enter, so a multi-line curl reaches `import_curl`
+                    // intact on submit.
+                    Some(Ok(Event::Paste(text))) => self.handle_paste(text),
                     Some(Ok(_)) => {} // resize etc. — redraw happens next iteration
                     Some(Err(err)) => return Err(err.into()),
                     None => break, // input stream closed

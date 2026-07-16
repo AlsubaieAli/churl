@@ -43,6 +43,16 @@ impl PickerState {
         self.refilter(finder);
     }
 
+    /// Appends a whole string to the query and refilters once (a pasted filter
+    /// term). Empty input is a no-op that still leaves the query unchanged.
+    pub fn push_str(&mut self, s: &str, finder: &mut FuzzyFinder) {
+        if s.is_empty() {
+            return;
+        }
+        self.query.push_str(s);
+        self.refilter(finder);
+    }
+
     /// Deletes the last query character and refilters.
     pub fn backspace(&mut self, finder: &mut FuzzyFinder) {
         self.query.pop();

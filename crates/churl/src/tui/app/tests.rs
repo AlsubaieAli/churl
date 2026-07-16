@@ -5805,6 +5805,130 @@ fn name_prompt_auto_imports_pasted_curl() {
     assert_eq!(ep.request.url, "https://api.test/health");
 }
 
+/// Importing a curl with a real Bearer token captures it into a RAM-only Session
+/// var so `{{token}}` resolves and the endpoint is sendable — while the endpoint
+/// file itself keeps only the placeholder (no secret on disk).
+#[test]
+fn importing_curl_captures_bearer_token_into_session_var() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    assert!(app.session_vars().is_empty(), "no session vars yet");
+    app.begin_new_endpoint();
+    app.prompt_editor =
+        LineEditor::new("curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Session var `token` holds the REAL value…
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("v4.public.REALTOKEN"),
+        "real token captured into the session store"
+    );
+    // …but the persisted endpoint keeps only the placeholder.
+    let file = dir.path().join("users").join("me.toml");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(
+        ep.request.auth,
+        Some(churl_core::model::Auth::Bearer {
+            token: "{{token}}".to_owned()
+        }),
+        "endpoint file holds the placeholder, not the secret"
+    );
+}
+
+/// A bracketed paste routes the whole multi-line curl into the prompt editor
+/// (newlines normalised from the terminal's bare CR to LF) so the existing
+/// submit → `import_curl` path parses it — the real fix for the "unbalanced
+/// quotes / multiple URLs" bug (a per-key stream would have submitted early on
+/// the first embedded newline).
+#[test]
+fn handle_paste_fills_prompt_and_imports_multiline_curl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    // As a real terminal / tmux delivers a bracketed paste: bare CR line breaks
+    // and curl's `\[\]` glob-escaping of an array param.
+    let pasted = "curl 'https://api.test/orders?fields\\[\\]=a&fields\\[\\]=b' \\\r  -H 'accept: application/json'";
+    app.handle_paste(pasted.to_string());
+    let buf = app.prompt_editor.text();
+    assert!(
+        buf.contains("fields\\[\\]=a"),
+        "raw buffer keeps curl's escaping until import"
+    );
+    assert!(
+        buf.contains('\n') && !buf.contains('\r'),
+        "CR line breaks normalised to LF in the buffer"
+    );
+    assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("orders.toml");
+    assert!(file.exists(), "multi-line curl imported to an endpoint");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(
+        ep.request.url, "https://api.test/orders?fields[]=a&fields[]=b",
+        "continuations collapsed and brackets unescaped"
+    );
+}
+
+/// P1 regression: enabling bracketed paste globally must NOT silently drop a
+/// paste into a request-row field. Pasting a token into a Headers VALUE field
+/// (a core action) still inserts — `handle_paste` mirrors `handle_normal_key`'s
+/// field-edit routing.
+#[test]
+fn paste_into_request_row_value_field_inserts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.explorer.expand().unwrap();
+    app.guarded_load(PendingLoad::Row(1)).unwrap();
+    app.set_focus(Pane::Request);
+    // Open a value-field edit seeded with a prefix, as `a`/edit would.
+    if let Some(b) = app.active_endpoint_buffer_mut() {
+        b.tabs.active = RequestTab::Headers;
+        b.tabs.editing = Some(FieldEdit {
+            row: 0,
+            field: EditField::Value,
+            editor: LineEditor::new("Bearer "),
+        });
+    }
+    assert!(app.tabs_editing_active(), "a field edit is active");
+    app.handle_paste("token-123".to_string());
+    let text = app
+        .active_endpoint_buffer()
+        .unwrap()
+        .tabs
+        .editing
+        .as_ref()
+        .unwrap()
+        .editor
+        .text();
+    assert_eq!(
+        text, "Bearer token-123",
+        "paste inserted at the cursor of the value field"
+    );
+}
+
+/// P1 regression: a paste into an open fuzzy picker's filter appends to the
+/// query (and refilters), rather than vanishing.
+#[test]
+fn paste_into_picker_filter_appends_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    // `<leader><leader>` opens the endpoint/request search picker.
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::Search), "search picker open");
+    app.handle_paste("user".to_string());
+    assert_eq!(
+        app.picker_state().unwrap().query,
+        "user",
+        "pasted term appended to the picker filter"
+    );
+}
+
 /// A curl that fails to parse is fail-loud: nothing is created and the prompt
 /// stays open with the buffer intact.
 #[test]
