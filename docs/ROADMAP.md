@@ -54,8 +54,8 @@ stable **1.0** and beyond.
   response to feed the next.
 - **Concurrent load testing** — throttled batches with live stats and bounded, memory-safe
   retention.
-- **Response viewer** — JSON pretty-printing, fold/wrap, in-viewer search, line-number gutter,
-  control-char/ANSI sanitizing.
+- **Response viewer** — JSON pretty-printing, fold/wrap, structural node navigation, in-viewer
+  search, line-number gutter, control-char/ANSI sanitizing.
 - **Navigation & keymap** — a 4-region layout, jump-to-pane, and a fully remappable,
   data-driven keymap with load-time conflict warnings.
 - **Durability & cross-platform** — atomic saves, SQLite WAL, bounded growth; macOS + Windows

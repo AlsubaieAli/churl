@@ -596,6 +596,34 @@ impl ResponseView {
         changed
     }
 
+    /// The logical line of the next (`forward`) or previous collapsible JSON node
+    /// visible from `from` — structural navigation between object/array openers,
+    /// skipping leaf lines.
+    ///
+    /// Fold-aware for free: the candidate stops are the fold-openers that survive
+    /// the current fold-filtered visible map, so a folded node's header is itself
+    /// a valid stop while its hidden descendants (elided from the map) are
+    /// skipped. Navigation never mutates fold state — this is the skip-over-folded
+    /// default; a future open-folded-on-arrival setting would branch on the
+    /// visible-opener selection here. Returns `None` at the last/first stop or
+    /// when the body has no collapsible nodes.
+    pub fn structural_target(&mut self, from: usize, forward: bool) -> Option<usize> {
+        let openers: HashSet<usize> = self.ensure_folds().iter().map(|r| r.opener).collect();
+        if openers.is_empty() {
+            return None;
+        }
+        let visible = self.cached_visible_map();
+        let stops = visible
+            .iter()
+            .map(|v| v.logical())
+            .filter(|l| openers.contains(l));
+        if forward {
+            stops.filter(|&l| l > from).min()
+        } else {
+            stops.filter(|&l| l < from).max()
+        }
+    }
+
     // ---- geometry cache (A3) ----
 
     /// The signature of the current fold-filtered visible map: response

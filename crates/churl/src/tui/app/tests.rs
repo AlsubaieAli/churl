@@ -3941,6 +3941,56 @@ fn load_response_fold_uses_runner_cursor() {
     );
 }
 
+/// `J`/`K` jump the runner Response cursor between collapsible JSON nodes,
+/// proving structural navigation routes through the runner surface.
+#[test]
+fn load_response_structural_jump_moves_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app_with_response(dir.path(), "{\"outer\":{\"x\":1,\"y\":2}}");
+    render_once(&mut app);
+    // Cursor starts on the root opener (row 0). `J` jumps to the first
+    // collapsible node — the `"outer": {` opener at row 1.
+    assert_eq!(app.load_runner().unwrap().geometry.cursor, 0);
+    app.handle_key(shift('J')).unwrap();
+    assert_eq!(
+        app.load_runner().unwrap().geometry.cursor,
+        1,
+        "J moved the cursor to the outer opener"
+    );
+    // `K` climbs back out to the root opener.
+    app.handle_key(shift('K')).unwrap();
+    assert_eq!(
+        app.load_runner().unwrap().geometry.cursor,
+        0,
+        "K returned to the root opener"
+    );
+}
+
+/// `J` on a non-JSON body notifies (mirroring the fold guard) instead of moving
+/// the cursor — structural navigation is JSON-only.
+#[tokio::test]
+async fn structural_jump_non_json_notifies() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.generation = 5;
+    set_active_in_flight(&mut app, 5);
+    // `response()` carries no content-type, so the body is not JSON.
+    app.on_response(5, Ok(response()), meta());
+    app.focus = Pane::Response;
+    render_once(&mut app);
+    app.handle_key(shift('J')).unwrap();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("folding: JSON responses only"),
+        "J on a non-JSON body notifies rather than moving"
+    );
+    assert_eq!(
+        app.response_cursor_logical(),
+        Some(0),
+        "the cursor did not move"
+    );
+}
+
 /// `/` opens body search over the RUNNER response, `n` steps matches, and Esc
 /// returns to the runner (NOT to Normal mode — the runner stays open).
 #[test]

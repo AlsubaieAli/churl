@@ -1419,3 +1419,93 @@ fn max_h_scroll_cache_survives_horizontal_pan() {
         "widest-line bound is stable across a horizontal pan"
     );
 }
+
+/// The owner's example body, pretty-reformatted by the view on build (JSON
+/// defaults to pretty). Structural navigation walks its collapsible nodes.
+fn owner_example_view() -> ResponseView {
+    json_view(
+        r#"{ "name": "ali",
+  "data": { "age": 30, "certs": [1, 2, 3] },
+  "history": [ { "date": "12-12-2012" }, { "date": "13-12-2012" } ] }"#,
+    )
+}
+
+/// The trimmed text of a logical line, for content-based (indent-agnostic)
+/// assertions on where a jump landed.
+fn landed(v: &ResponseView, logical: usize) -> String {
+    v.logical_line(logical).trim().to_owned()
+}
+
+#[test]
+fn structural_forward_walks_collapsible_nodes() {
+    let mut v = owner_example_view();
+    // From the root opener (line 0), J visits each collapsible node in
+    // pre-order, skipping leaf lines: data → certs → history → each item.
+    let mut cur = 0;
+    let mut walk = Vec::new();
+    while let Some(next) = v.structural_target(cur, true) {
+        walk.push(landed(&v, next));
+        cur = next;
+    }
+    assert_eq!(
+        walk,
+        vec![
+            "\"data\": {".to_owned(),
+            "\"certs\": [".to_owned(),
+            "\"history\": [".to_owned(),
+            "{".to_owned(),
+            "{".to_owned(),
+        ],
+    );
+    // At the last collapsible node the forward jump is a no-op.
+    assert_eq!(v.structural_target(cur, true), None);
+}
+
+#[test]
+fn structural_backward_climbs_to_enclosing_nodes() {
+    let mut v = owner_example_view();
+    // A leaf line inside `certs` (the `1` element). K climbs to the nearest
+    // preceding/enclosing collapsible: certs → data → root.
+    let inside_certs = (0..v.source_line_count())
+        .find(|&i| v.logical_line(i).trim() == "1,")
+        .expect("the `1` array element");
+    let certs = v.structural_target(inside_certs, false).unwrap();
+    assert_eq!(landed(&v, certs), "\"certs\": [");
+    let data = v.structural_target(certs, false).unwrap();
+    assert_eq!(landed(&v, data), "\"data\": {");
+    let root = v.structural_target(data, false).unwrap();
+    assert_eq!(landed(&v, root), "{");
+    // At the root there is nothing further out: backward is a no-op.
+    assert_eq!(v.structural_target(root, false), None);
+}
+
+#[test]
+fn structural_forward_skips_hidden_subtree_of_folded_node() {
+    let mut v = owner_example_view();
+    let data = v.structural_target(0, true).unwrap();
+    assert_eq!(landed(&v, data), "\"data\": {");
+    v.toggle_fold_at(data);
+    // The folded node's own header stays a valid stop…
+    assert_eq!(v.structural_target(0, true), Some(data));
+    // …but its hidden subtree (`certs`) is skipped: from data, J lands on
+    // `history`, not the elided `certs`.
+    let next = v.structural_target(data, true).unwrap();
+    assert_eq!(landed(&v, next), "\"history\": [");
+}
+
+#[test]
+fn structural_navigation_is_none_on_non_json() {
+    // A non-JSON body has no collapsible nodes — the handler notifies instead.
+    let mut v = view("plain text\nsecond line");
+    assert_eq!(v.structural_target(0, true), None);
+    assert_eq!(v.structural_target(0, false), None);
+}
+
+#[test]
+fn structural_navigation_single_node_has_no_stops() {
+    // A one-line JSON object with no inner collapsible nodes: the sole opener is
+    // the root, so a jump from it (or into it) finds nothing.
+    let mut v = json_view("{}");
+    assert_eq!(v.structural_target(0, true), None);
+    assert_eq!(v.structural_target(0, false), None);
+}

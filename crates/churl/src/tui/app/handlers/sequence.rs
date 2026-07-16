@@ -455,6 +455,8 @@ impl App {
             Action::SearchPrev => self.response_search_step(false),
             Action::ToggleFold => self.response_toggle_fold(),
             Action::ToggleAllFolds => self.response_toggle_all_folds(),
+            Action::StructuralNext => self.response_structural_jump(true),
+            Action::StructuralPrev => self.response_structural_jump(false),
             Action::CopyResponse => self.response_copy_view(),
             Action::CopyLine => self.response_copy_line(),
             Action::ScrollBodyLeft => self.response_scroll_h(false),
