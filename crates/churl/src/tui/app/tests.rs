@@ -5805,6 +5805,37 @@ fn name_prompt_auto_imports_pasted_curl() {
     assert_eq!(ep.request.url, "https://api.test/health");
 }
 
+/// Importing a curl with a real Bearer token captures it into a RAM-only Session
+/// var so `{{token}}` resolves and the endpoint is sendable — while the endpoint
+/// file itself keeps only the placeholder (no secret on disk).
+#[test]
+fn importing_curl_captures_bearer_token_into_session_var() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    assert!(app.session_vars().is_empty(), "no session vars yet");
+    app.begin_new_endpoint();
+    app.prompt_editor =
+        LineEditor::new("curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Session var `token` holds the REAL value…
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("v4.public.REALTOKEN"),
+        "real token captured into the session store"
+    );
+    // …but the persisted endpoint keeps only the placeholder.
+    let file = dir.path().join("users").join("me.toml");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(
+        ep.request.auth,
+        Some(churl_core::model::Auth::Bearer {
+            token: "{{token}}".to_owned()
+        }),
+        "endpoint file holds the placeholder, not the secret"
+    );
+}
+
 /// A bracketed paste routes the whole multi-line curl into the prompt editor
 /// (newlines normalised from the terminal's bare CR to LF) so the existing
 /// submit → `import_curl` path parses it — the real fix for the "unbalanced

@@ -189,10 +189,29 @@ impl App {
             return Ok(false);
         }
         self.reload_explorer()?;
+        // Bind any placeholdered secret (Bearer `{{token}}` / `-u` `{{password}}`)
+        // into a RAM-only Session var so the imported endpoint is actually
+        // sendable — the workspace file still holds only the placeholder. Overwrite
+        // an existing same-named session var for now (dedup/rename is deferred; see
+        // docs/ROADMAP.md). Never echo the secret value.
+        let captured = result.captured_secrets.clone();
+        for (name, value) in captured.iter().cloned() {
+            self.write_session_var(name, value);
+        }
         // Surface the warning TEXT, not just a count — some warnings are
         // security-relevant (e.g. `-k` baked insecure-TLS onto the endpoint) and
         // must be loud in the TUI, matching the CLI import path.
         let mut msg = format!("imported curl → {}", endpoint.name);
+        for (name, _) in &captured {
+            let what = match name.as_str() {
+                "token" => "Bearer token",
+                "password" => "password",
+                other => other,
+            };
+            msg.push_str(&format!(
+                " · {what} captured into session var {{{{{name}}}}} (masked, this session only)"
+            ));
+        }
         if !result.warnings.is_empty() {
             msg.push_str(" · ");
             msg.push_str(&result.warnings.join(" · "));

@@ -48,6 +48,7 @@ The authoritative roadmap. Detailed build tracking lives with the maintainers.
 - 🚧 **Mask the proxy password while it is typed** — the Options overlay's inline proxy edit masked the password of a *complete* `user:pass@` value, but a password typed *before* the `@` still rendered in plaintext; now masked within the userinfo segment as it is typed.
 
 ### Still deferred ⏳
+- **Imported-secret var naming / overwrite** — a curl import captures a Bearer token / `-u` password into a RAM-only Session var (`{{token}}` / `{{password}}`) so the endpoint is sendable. If that var already holds a value, the import currently **clobbers** it. Decide dedup-vs-clobber and per-import var naming (e.g. `token_2`, or scope by endpoint) before an import can silently overwrite a live session token.
 - **Adding/editing** a cookie in the Options overlay (M8 ships view + delete only).
 - curl-import remap of the cookie flags `-b`/`--cookie`, `-c`/`--cookie-jar` (M8 remaps `-x`/`--proxy` and re-notes `-k`).
 - "Save current session settings as a workspace/global default" from the overlay.

@@ -28,6 +28,14 @@ pub struct ImportResult {
     pub endpoint: Endpoint,
     /// Human-readable warnings, one per accepted-but-ignored/remapped flag.
     pub warnings: Vec<String>,
+    /// Secrets extracted while remapping auth to a `{{name}}` placeholder, as
+    /// `(var_name, real_value)` — e.g. `("token", "v4.public…")` for a Bearer
+    /// header, `("password", "s3cr3t")` for `-u user:pass`. A caller with a live
+    /// session (the TUI) captures these into RAM-only Session vars so the
+    /// placeholder resolves; the workspace files still hold only the placeholder.
+    /// Empty when nothing real was extracted (e.g. the token was already a
+    /// `{{…}}` placeholder, or `-u` had no password).
+    pub captured_secrets: Vec<(String, String)>,
 }
 
 /// Error importing a curl command.
@@ -57,11 +65,30 @@ pub enum ImportError {
     InvalidMethod(String),
 }
 
-/// Parses a curl command into an [`Endpoint`]. A leading `curl` token is
-/// accepted and stripped; its absence is fine too.
+/// Parses a curl command STRING into an [`Endpoint`]. Strips bash
+/// line-continuations, then shell-tokenises (`shlex`) and hands off to
+/// [`import_curl_tokens`]. A leading `curl` token is accepted and stripped; its
+/// absence is fine too. Use this for a single pasted/typed command; when the
+/// shell has ALREADY tokenised the command (a var-arg CLI invocation), call
+/// [`import_curl_tokens`] directly so the tokens are not re-split.
 pub fn import_curl(command: &str) -> Result<ImportResult, ImportError> {
     let command = normalize_continuations(command);
     let tokens = shlex::split(&command).ok_or(ImportError::Tokenize)?;
+    import_curl_tokens(tokens)
+}
+
+/// Parses PRE-TOKENISED curl args (already shell-split — e.g. the trailing
+/// var-args of `churl import curl 'url' -H '…'`) into an [`Endpoint`]. Shares the
+/// whole flag/URL walk with [`import_curl`]; the only difference is the input is
+/// not re-tokenised (no `shlex`, no continuation stripping — the shell did that).
+/// A leading `curl` token is accepted and stripped. `set_url` still glob-unescapes
+/// `\[\]` etc., which the shell's single quotes leave intact.
+pub fn import_curl_tokens<I>(tokens: I) -> Result<ImportResult, ImportError>
+where
+    I: IntoIterator<Item = String>,
+{
+    // Collect so `args` is the concrete `Args` type the flag handlers expect.
+    let tokens: Vec<String> = tokens.into_iter().collect();
     let mut args = tokens.into_iter().peekable();
     if args.peek().map(String::as_str) == Some("curl") {
         args.next();
@@ -171,6 +198,10 @@ struct Parser {
     insecure: bool,
     url: Option<String>,
     warnings: Vec<String>,
+    /// Real secret values extracted while placeholdering auth, as
+    /// `(var_name, real_value)`. Populated by [`Parser::add_header`] /
+    /// [`Parser::add_basic_auth`]; surfaced verbatim in [`ImportResult`].
+    captured_secrets: Vec<(String, String)>,
 }
 
 type Args = std::iter::Peekable<std::vec::IntoIter<String>>;
@@ -235,6 +266,7 @@ impl Parser {
                 },
             },
             warnings: self.warnings,
+            captured_secrets: self.captured_secrets,
         })
     }
 }
@@ -630,6 +662,85 @@ mod tests {
                 .any(|w| w.contains("{{token}}") && w.contains("no secrets")),
             "warnings: {:?}",
             result.warnings
+        );
+    }
+
+    #[test]
+    fn captured_secrets_hold_the_real_bearer_and_password() {
+        // Bearer header → capture ("token", real).
+        let result = import("curl -H 'Authorization: Bearer ghp_16C7e42F' https://e.com/me");
+        assert_eq!(
+            result.captured_secrets,
+            vec![("token".to_owned(), "ghp_16C7e42F".to_owned())],
+            "real Bearer token captured for the session"
+        );
+        assert_eq!(
+            result.endpoint.request.auth,
+            Some(Auth::Bearer {
+                token: "{{token}}".to_owned()
+            }),
+            "the endpoint itself keeps only the placeholder"
+        );
+
+        // -u user:pass → capture ("password", real).
+        let result = import("curl -u alice:s3cr3t https://e.com/private");
+        assert_eq!(
+            result.captured_secrets,
+            vec![("password".to_owned(), "s3cr3t".to_owned())]
+        );
+    }
+
+    #[test]
+    fn already_placeholder_secrets_are_not_captured() {
+        // A token/password that was ALREADY a `{{…}}` placeholder has nothing real
+        // to store — captured_secrets stays empty.
+        let bearer = import("curl -H 'authorization: Bearer {{gh_token}}' https://e.com/me");
+        assert!(
+            bearer.captured_secrets.is_empty(),
+            "placeholder token not captured: {:?}",
+            bearer.captured_secrets
+        );
+        let basic = import("curl -u 'alice:{{admin_pass}}' https://e.com/private");
+        assert!(
+            basic.captured_secrets.is_empty(),
+            "placeholder password not captured: {:?}",
+            basic.captured_secrets
+        );
+        // `-u` with no password: placeholdered but nothing real → not captured.
+        let no_pass = import("curl -u alice https://e.com/private");
+        assert!(
+            no_pass.captured_secrets.is_empty(),
+            "absent password not captured: {:?}",
+            no_pass.captured_secrets
+        );
+    }
+
+    #[test]
+    fn import_curl_tokens_matches_import_curl_on_the_joined_string() {
+        // A pre-tokenised arg vector (as the shell hands the var-arg CLI) parses
+        // identically to the same command as one shlex-split string.
+        let tokens = vec![
+            "curl".to_owned(),
+            "https://e.com/o?a\\[\\]=1".to_owned(), // single-quoted at the shell → backslashes intact
+            "-H".to_owned(),
+            "Authorization: Bearer ghp_ABC".to_owned(),
+            "-X".to_owned(),
+            "POST".to_owned(),
+            "-d".to_owned(),
+            "x=1".to_owned(),
+        ];
+        let from_tokens = import_curl_tokens(tokens.clone()).unwrap();
+        // The equivalent single string (each token single-quoted so shlex yields
+        // exactly these tokens back).
+        let joined =
+            "curl 'https://e.com/o?a\\[\\]=1' -H 'Authorization: Bearer ghp_ABC' -X POST -d 'x=1'";
+        let from_string = import_curl(joined).unwrap();
+        assert_eq!(from_tokens, from_string);
+        // Sanity: the shared URL glob-unescape still ran on the token path.
+        assert_eq!(from_tokens.endpoint.request.url, "https://e.com/o?a[]=1");
+        assert_eq!(
+            from_tokens.captured_secrets,
+            vec![("token".to_owned(), "ghp_ABC".to_owned())]
         );
     }
 
