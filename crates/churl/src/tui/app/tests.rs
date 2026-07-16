@@ -5824,6 +5824,7 @@ fn destination_picker_creates_endpoint_at_chosen_root() {
         "picked destination carried"
     );
     app.handle_paste("health".to_string());
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(
@@ -5843,6 +5844,7 @@ fn name_prompt_auto_imports_pasted_curl() {
     assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
     app.handle_paste("curl https://api.test/health".to_string());
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     // Lands in the cursor's collection (the `users` row), auto-named `/health`.
@@ -5867,6 +5869,7 @@ fn importing_curl_captures_bearer_token_into_session_var() {
     app.handle_paste(
         "curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'".to_string(),
     );
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     // Session var `token` holds the REAL value…
@@ -5912,6 +5915,7 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
         "CR line breaks normalised to LF in the buffer"
     );
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     let file = dir.path().join("users").join("orders.toml");
@@ -5965,6 +5969,7 @@ fn new_endpoint_multiline_editor_edits_across_lines_before_submit() {
         buf.contains("X-Custom: new"),
         "edit landed on the header line, not the URL line: {buf:?}"
     );
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     let file = dir.path().join("users").join("orders.toml");
@@ -5994,12 +5999,84 @@ fn new_endpoint_multiline_editor_plain_name_falls_through() {
         press(&mut app, c);
     }
     assert!(!app.prompt_buffer_is_curl(), "a plain name is not curl");
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     let file = dir.path().join("users").join("ping.toml");
     assert!(file.exists(), "plain name created a plain endpoint");
     let ep = persistence::load_endpoint(&file).unwrap();
     assert_eq!(ep.request.url, "", "plain endpoint has no URL to import");
+}
+
+/// Vim-faithful: Insert-mode Enter in the multi-line curl prompt is a plain
+/// newline (edtui's own Insert-mode binding), never a submit — only
+/// Normal-mode Enter commits. Distinct from the single-line prompts, where
+/// Enter always commits.
+#[test]
+fn new_endpoint_editor_insert_enter_adds_line_without_submitting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let before = count_toml(dir.path());
+    app.begin_new_endpoint();
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "opens in insert mode"
+    );
+    for c in "ping".chars() {
+        press(&mut app, c);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "Insert-mode Enter must not submit the prompt"
+    );
+    assert_eq!(count_toml(dir.path()), before, "no endpoint created");
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("ping") && buf.contains('\n'),
+        "Insert-mode Enter inserted a newline into the buffer: {buf:?}"
+    );
+}
+
+/// `o` in Normal mode opens a line below the cursor and switches to Insert —
+/// edtui's own default binding, exercised here through the new-endpoint
+/// prompt's key routing (nothing in `handle_curl_prompt_key` or `vim_ext`
+/// intercepts `o`, so it falls through to edtui unmodified).
+#[test]
+fn new_endpoint_editor_normal_o_opens_line_below() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/health".to_string());
+    esc(&mut app); // Insert -> Normal
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal
+    );
+    press(&mut app, 'o');
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "`o` opens a line and drops into insert mode"
+    );
+    for c in "-H 'X-New: 1'".chars() {
+        press(&mut app, c);
+    }
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("curl https://api.test/health"),
+        "original line kept: {buf:?}"
+    );
+    assert!(
+        buf.contains("-H 'X-New: 1'"),
+        "text typed after `o` landed on the opened line: {buf:?}"
+    );
+    assert!(
+        buf.contains('\n'),
+        "`o` opened a genuinely new line: {buf:?}"
+    );
 }
 
 /// P1 regression: enabling bracketed paste globally must NOT silently drop a
@@ -6068,6 +6145,7 @@ fn name_prompt_curl_parse_failure_creates_nothing() {
     let before = count_toml(dir.path());
     app.begin_new_endpoint();
     app.handle_paste("curl".to_string()); // no URL → parse error
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(

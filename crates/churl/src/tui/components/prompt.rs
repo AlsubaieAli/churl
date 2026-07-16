@@ -6,7 +6,7 @@
 //! rendered as compact boxes centred over the main area — the same visual
 //! family as the picker, smaller.
 
-use edtui::{EditorState, EditorTheme, EditorView};
+use edtui::{EditorMode, EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
@@ -67,9 +67,12 @@ pub fn render_prompt(
 
 /// Renders a multi-line text-input prompt: a titled box hosting the edtui
 /// vim editor (the new-endpoint paste-curl prompt), with an optional dim hint
-/// under it and commit/cancel hints in the bottom border. Taller than the
-/// single-line [`render_prompt`] so a pasted multi-line browser curl is visible
-/// while editing. Reuses the same edtui `EditorView` the URL popup renders.
+/// under it and a mode-aware commit/cancel hint in the bottom border — Insert
+/// mode edits (Enter adds a line, vim-faithful), Normal mode is where Enter
+/// submits, matching [`crate::tui::app::handlers::crud::App::handle_curl_prompt_key`].
+/// Taller than the single-line [`render_prompt`] so a pasted multi-line browser
+/// curl is visible while editing. Reuses the same edtui `EditorView` the URL
+/// popup renders.
 pub fn render_prompt_multiline(
     frame: &mut Frame,
     area: Rect,
@@ -86,12 +89,17 @@ pub fn render_prompt_multiline(
         .areas(modal);
 
     frame.render_widget(Clear, modal);
+    let footer = if editor.mode == EditorMode::Insert {
+        " insert: enter=newline · esc=normal "
+    } else {
+        " normal: enter=submit · esc=cancel "
+    };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
         .title(format!(" {title} "))
         .title_style(theme.title)
-        .title_bottom(Line::from(" enter submit · esc cancel ").right_aligned());
+        .title_bottom(Line::from(footer).right_aligned());
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 

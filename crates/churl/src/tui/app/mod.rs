@@ -72,8 +72,9 @@ use super::theme::Theme;
 /// The multi-line vim editor state for the new-endpoint (paste-curl) prompt —
 /// the same edtui + vim_ext trio the URL popup uses, so a pasted browser curl is
 /// editable across lines before submit. Opens in Insert mode so a paste lands and
-/// typing starts immediately; Enter submits (newlines preserved), and a plain
-/// name still falls through to a plain endpoint.
+/// typing starts immediately; vim-faithful: Insert-mode Enter inserts a newline,
+/// Normal-mode Enter submits (newlines preserved), and a plain name still falls
+/// through to a plain endpoint.
 pub(in crate::tui::app) struct CurlPrompt {
     pub(in crate::tui::app) editor: EditorState,
     pub(in crate::tui::app) events: EditorEventHandler,

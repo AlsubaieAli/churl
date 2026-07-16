@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 958
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -20,7 +19,7 @@ expression: snapshot(&mut app)
 │           ┃                                                      ┃           │
 │           ┃  Insert                                              ┃           │
 │           ┃name, or paste a curl to import                       ┃           │
-│           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━ enter submit · esc cancel ┛           │
+│           ┗━━━━━━━━━━━━━━━━━━ insert: enter=newline · esc=normal ┛           │
 │                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │

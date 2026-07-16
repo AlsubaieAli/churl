@@ -425,11 +425,13 @@ impl App {
         Ok(())
     }
 
-    /// Handles one key in the multi-line new-endpoint (paste-curl) prompt. Mirrors
-    /// the URL vim-popup: Search mode routes everything to edtui; Enter submits
+    /// Handles one key in the multi-line new-endpoint (paste-curl) prompt.
+    /// Search mode routes everything to edtui. Normal-mode Enter submits
     /// (running the shared curl-detect → import path, newlines preserved so a
-    /// multi-line curl parses); Normal-mode `vim_ext` motions win before the
-    /// Esc-cancel check; Esc in Normal cancels; the rest falls through to edtui.
+    /// multi-line curl parses) before `vim_ext` motions or Esc-cancel are
+    /// checked. Insert-mode Enter is *not* intercepted here — it falls
+    /// through to edtui as a plain newline insert, so a pasted curl can be
+    /// hand-edited across lines before submitting from Normal mode.
     pub(in crate::tui::app) fn handle_curl_prompt_key(&mut self, key: KeyEvent) -> Result<()> {
         let Some(mode) = self.curl_prompt.as_ref().map(|c| c.editor.mode) else {
             return Ok(());
@@ -440,10 +442,12 @@ impl App {
             }
             return Ok(());
         }
-        if key.code == KeyCode::Enter {
+        if key.code == KeyCode::Enter && mode == EditorMode::Normal {
             // Submit: take the buffer (newlines kept — a browser curl spans lines)
             // and run the shared name/curl-detect commit path. A parse failure
             // re-opens the prompt with the buffer intact (see `commit_prompt`).
+            // Checked ahead of `vim_ext` since Enter is not a churl find/motion
+            // key — submit must win even while e.g. a pending `f` find is armed.
             let text = self.curl_prompt.take().map(|c| c.text());
             if let Some(text) = text {
                 self.mode = Mode::Normal;
@@ -467,6 +471,8 @@ impl App {
             self.mode = Mode::Normal;
             return Ok(());
         }
+        // Insert-mode Enter lands here and becomes a newline (edtui's own
+        // Insert-mode binding), matching vim: only Normal-mode Enter submits.
         if let Some(c) = self.curl_prompt.as_mut() {
             c.events.on_key_event(key, &mut c.editor);
         }
