@@ -93,6 +93,7 @@ impl App {
     }
 
     /// Opens the centered vim-popup URL editor (`e`, or `url_edit = "popup"`).
+    /// Clipboard: see [`new_editor_state`] — in-memory, not the OS clipboard.
     pub(in crate::tui::app) fn begin_url_popup(&mut self) {
         let Some(url) = self.live_request().map(|r| r.url.clone()) else {
             self.notify("no endpoint selected");
@@ -101,7 +102,7 @@ impl App {
         self.set_focus(Pane::UrlBar);
         if let Some(b) = self.active_endpoint_buffer_mut() {
             b.url_editor = None;
-            b.url_popup = Some(EditorState::new(Lines::from(url.as_str())));
+            b.url_popup = Some(new_editor_state(url.as_str()));
             b.url_popup_vim.reset();
         }
     }

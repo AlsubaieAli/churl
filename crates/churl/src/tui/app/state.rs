@@ -490,7 +490,8 @@ impl EndpointBuffer {
             .as_ref()
             .map(|body| body.content.as_str())
             .unwrap_or("");
-        let editor = EditorState::new(Lines::from(body));
+        // Clipboard: see `new_editor_state` in `app/mod.rs` — in-memory, not the OS clipboard.
+        let editor = new_editor_state(body);
         let mut editor_vim = VimExt::default();
         editor_vim.reset();
         Self {

@@ -6079,6 +6079,68 @@ fn new_endpoint_editor_normal_o_opens_line_below() {
     );
 }
 
+/// FIX (P2-1) regression: every edtui `EditorState` churl constructs (curl
+/// prompt, URL popup, Body editor) must be wired to edtui's in-memory
+/// clipboard via the `new_editor_state` helper (`app/mod.rs`), not left on
+/// edtui's arboard/OS-clipboard default — that default is a single shared OS
+/// handle, and concurrent access to it from more than one live editor (e.g.
+/// this very test suite's parallel threads) has been observed to segfault.
+///
+/// A live yank/paste round-trip can't discriminate reverted-vs-fixed code
+/// here: `edtui::clipboard`'s arboard-backed `Default` impl silently falls
+/// back to an internal, non-shared clipboard whenever no display is
+/// available, and CI runs headless — so with or without the fix, headless
+/// tests observe the same paste behaviour. `EditorState`'s clipboard field is
+/// also `pub(crate)` inside edtui, so there is no supported way to ask a
+/// constructed instance which backend it holds. Absent any environment- or
+/// introspection-based way to observe the difference at runtime, this
+/// asserts the source directly: the helper wires `InternalClipboard`, and
+/// every real construction site routes through it rather than calling
+/// `EditorState::new` on its own.
+#[test]
+fn every_editor_construction_uses_internal_clipboard_helper() {
+    let mod_rs = include_str!("mod.rs");
+    let state_rs = include_str!("state.rs");
+    let editing_rs = include_str!("handlers/editing.rs");
+
+    let helper_start = mod_rs
+        .find("fn new_editor_state(text: &str) -> EditorState {")
+        .expect("new_editor_state helper must exist in app/mod.rs");
+    let helper_body = &mod_rs[helper_start..];
+    let helper_end = helper_body
+        .find("\n}\n")
+        .expect("new_editor_state helper body must be closed");
+    let helper_body = &helper_body[..helper_end];
+    assert!(
+        helper_body.contains("set_clipboard") && helper_body.contains("InternalClipboard"),
+        "new_editor_state must wire edtui's in-memory clipboard: {helper_body:?}"
+    );
+
+    // The helper's own construction is the ONLY direct `EditorState::new(` in
+    // mod.rs — every other site (there or in sibling files) must go through it.
+    assert_eq!(
+        mod_rs.matches("EditorState::new(").count(),
+        1,
+        "only new_editor_state may construct EditorState directly in app/mod.rs"
+    );
+    assert!(
+        !state_rs.contains("EditorState::new("),
+        "EndpointBuffer::new (Body editor) must build its editor via new_editor_state"
+    );
+    assert!(
+        !editing_rs.contains("EditorState::new("),
+        "begin_url_popup (URL popup editor) must build its editor via new_editor_state"
+    );
+    assert!(
+        state_rs.contains("new_editor_state(body)"),
+        "EndpointBuffer::new must call new_editor_state"
+    );
+    assert!(
+        editing_rs.contains("new_editor_state(url.as_str())"),
+        "begin_url_popup must call new_editor_state"
+    );
+}
+
 /// P1 regression: enabling bracketed paste globally must NOT silently drop a
 /// paste into a request-row field. Pasting a token into a Headers VALUE field
 /// (a core action) still inserts — `handle_paste` mirrors `handle_normal_key`'s

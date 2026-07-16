@@ -69,6 +69,22 @@ use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
 
+/// Builds an `EditorState` seeded with `text`, wired to edtui's in-memory
+/// clipboard rather than its arboard-backed OS-clipboard default. Every edtui
+/// surface in churl (curl prompt, URL popup, Body editor) shares this: vim's
+/// own yank/paste (`y`/`p`/`d`) targets the unnamed register, not the system
+/// clipboard, and edtui's arboard default is a single shared OS handle — a
+/// stray in-editor yank on any surface must not clobber the user's real
+/// clipboard, and concurrent access to it from more than one editor at once
+/// (e.g. the test suite's parallel threads) has been observed to segfault the
+/// OS clipboard backend. Terminal bracketed-paste is unaffected: it lands via
+/// `on_paste_event`/`paste`, a separate path from this vim-register clipboard.
+fn new_editor_state(text: &str) -> EditorState {
+    let mut editor = EditorState::new(Lines::from(text));
+    editor.set_clipboard(edtui::clipboard::InternalClipboard::default());
+    editor
+}
+
 /// The multi-line vim editor state for the new-endpoint (paste-curl) prompt —
 /// the same edtui + vim_ext trio the URL popup uses, so a pasted browser curl is
 /// editable across lines before submit. Opens in Insert mode so a paste lands and
@@ -83,19 +99,11 @@ pub(in crate::tui::app) struct CurlPrompt {
 
 impl CurlPrompt {
     /// A fresh prompt seeded with `seed` (empty on open, or the prior buffer when
-    /// re-opened after a curl parse failure), starting in Insert mode.
-    ///
-    /// Uses edtui's in-memory clipboard rather than its arboard-backed default:
-    /// this prompt only ever receives content via the terminal's bracketed
-    /// paste (`handle_paste`, not a vim `y`/`p`), and edtui's default clipboard
-    /// is a single shared OS handle — a stray in-editor yank must not clobber
-    /// the user's real clipboard, and concurrent access to it from more than
-    /// one editor at once (e.g. the test suite's parallel threads) has been
-    /// observed to segfault the OS clipboard backend.
+    /// re-opened after a curl parse failure), starting in Insert mode. See
+    /// [`new_editor_state`] for the clipboard rationale.
     fn new(seed: &str) -> Self {
-        let mut editor = EditorState::new(Lines::from(seed));
+        let mut editor = new_editor_state(seed);
         editor.mode = EditorMode::Insert;
-        editor.set_clipboard(edtui::clipboard::InternalClipboard::default());
         Self {
             editor,
             events: EditorEventHandler::default(),
