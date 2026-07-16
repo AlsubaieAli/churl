@@ -588,6 +588,7 @@ pub fn ordered_steps(sequence: &Sequence) -> Vec<&SequenceStep> {
 
 /// The outcome of one step in a completed [`SequenceRun`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StepOutcome {
     /// The step's endpoint path string.
     pub endpoint: String,
@@ -606,6 +607,7 @@ pub struct StepOutcome {
 
 /// A completed sequence run: one [`StepOutcome`] per step, in run order.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SequenceRun {
     /// Per-step outcomes.
     pub steps: Vec<StepOutcome>,

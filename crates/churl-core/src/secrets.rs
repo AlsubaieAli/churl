@@ -47,6 +47,7 @@ pub enum Severity {
 /// `"vars.api_key"`) *and* the novelty key: a finding is pre-existing iff its
 /// location also appears in the baseline scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SecretFinding {
     /// Field path / var name — stable across saves so novelty compares correctly.
     pub location: String,
@@ -85,6 +86,7 @@ pub enum SecretPolicy {
 /// The outcome of [`decide`]: the findings that refuse the save, and the findings
 /// that only warn. A save proceeds iff [`refusals`](Self::refusals) is empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SecretDecision {
     /// Findings that refuse the write (new + [`Severity::Block`] under strict).
     /// Empty means the save may proceed.

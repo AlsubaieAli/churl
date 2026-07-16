@@ -23,6 +23,7 @@ mod flags;
 /// A successfully imported endpoint plus non-fatal warnings (flags accepted but
 /// ignored or remapped, e.g. `--compressed`, `-k`, `-o`, `-u`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportResult {
     /// The imported endpoint (`seq` is 0; the name derives from the URL).
     pub endpoint: Endpoint,
