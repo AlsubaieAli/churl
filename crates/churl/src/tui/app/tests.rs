@@ -6080,11 +6080,12 @@ fn new_endpoint_editor_normal_o_opens_line_below() {
 }
 
 /// FIX (P2-1) regression: every edtui `EditorState` churl constructs (curl
-/// prompt, URL popup, Body editor) must be wired to edtui's in-memory
-/// clipboard via the `new_editor_state` helper (`app/mod.rs`), not left on
-/// edtui's arboard/OS-clipboard default — that default is a single shared OS
-/// handle, and concurrent access to it from more than one live editor (e.g.
-/// this very test suite's parallel threads) has been observed to segfault.
+/// prompt, URL popup, Body editor, render-only placeholder editor) must be
+/// wired to edtui's in-memory clipboard via the `new_editor_state` helper
+/// (`app/mod.rs`), not left on edtui's arboard/OS-clipboard default — that
+/// default is a single shared OS handle, and concurrent access to it from
+/// more than one live editor (e.g. this very test suite's parallel threads)
+/// has been observed to segfault.
 ///
 /// A live yank/paste round-trip can't discriminate reverted-vs-fixed code
 /// here: `edtui::clipboard`'s arboard-backed `Default` impl silently falls
@@ -6102,6 +6103,7 @@ fn every_editor_construction_uses_internal_clipboard_helper() {
     let mod_rs = include_str!("mod.rs");
     let state_rs = include_str!("state.rs");
     let editing_rs = include_str!("handlers/editing.rs");
+    let render_rs = include_str!("render.rs");
 
     let helper_start = mod_rs
         .find("fn new_editor_state(text: &str) -> EditorState {")
@@ -6132,12 +6134,21 @@ fn every_editor_construction_uses_internal_clipboard_helper() {
         "begin_url_popup (URL popup editor) must build its editor via new_editor_state"
     );
     assert!(
+        !render_rs.contains("EditorState::new(") && !render_rs.contains("EditorState::default("),
+        "the render-only placeholder editor must build via new_editor_state, not \
+         EditorState::new/default (both open a real arboard OS-clipboard handle)"
+    );
+    assert!(
         state_rs.contains("new_editor_state(body)"),
         "EndpointBuffer::new must call new_editor_state"
     );
     assert!(
         editing_rs.contains("new_editor_state(url.as_str())"),
         "begin_url_popup must call new_editor_state"
+    );
+    assert!(
+        render_rs.contains(r#"new_editor_state("")"#),
+        "the render-only placeholder editor must call new_editor_state"
     );
 }
 

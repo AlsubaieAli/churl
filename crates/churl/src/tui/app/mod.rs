@@ -77,8 +77,10 @@ use super::theme::Theme;
 /// stray in-editor yank on any surface must not clobber the user's real
 /// clipboard, and concurrent access to it from more than one editor at once
 /// (e.g. the test suite's parallel threads) has been observed to segfault the
-/// OS clipboard backend. Terminal bracketed-paste is unaffected: it lands via
-/// `on_paste_event`/`paste`, a separate path from this vim-register clipboard.
+/// OS clipboard backend. Terminal bracketed-paste still works with this
+/// clipboard in place: edtui's paste handler writes the pasted text in
+/// (`set_text`) and then reads it straight back out (`get_text`) to insert
+/// it, and `InternalClipboard` round-trips that faithfully.
 fn new_editor_state(text: &str) -> EditorState {
     let mut editor = EditorState::new(Lines::from(text));
     editor.set_clipboard(edtui::clipboard::InternalClipboard::default());

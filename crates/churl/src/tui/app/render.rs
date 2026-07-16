@@ -204,7 +204,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .buffers
         .get_mut(active)
         .and_then(Buffer::as_endpoint_mut);
-    let mut default_editor = EditorState::default();
+    let mut default_editor = new_editor_state("");
     let mut default_tabs = RequestTabs::default();
     let default_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
 
