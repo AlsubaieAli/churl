@@ -18,7 +18,7 @@ name = "churl"
 path = "src/lib.rs"
 
 [dependencies]
-churl-core = { path = "../churl-core", version = "0.5.0" }
+churl-core = { path = "../churl-core", version = "0.6.0" }
 base64.workspace = true
 clap.workspace = true
 dirs.workspace = true

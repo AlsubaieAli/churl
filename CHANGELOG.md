@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/AlsubaieAli/churl/compare/v0.5.0...v0.6.0) - 2026-07-16
+
+### Added
+
+- quick-wins batch — non_exhaustive, response J/K nav, two-stage curl prompt ([#96](https://github.com/AlsubaieAli/churl/pull/96))
+
+### Other
+
+- sync roadmap to locked 1.0 plan; enforce Serena; tidy config ([#94](https://github.com/AlsubaieAli/churl/pull/94))
+
 ## [0.5.0](https://github.com/AlsubaieAli/churl/compare/v0.4.0...v0.5.0) - 2026-07-16
 
 ### Fixed
