@@ -212,9 +212,20 @@ impl App {
                 " · {what} captured into session var {{{{{name}}}}} (masked, this session only)"
             ));
         }
-        if !result.warnings.is_empty() {
+        // Show the warning TEXT, but drop the parser's "supply the real value via a
+        // profile/env" guidance for any secret we just captured into a session var —
+        // it reads as a contradiction next to the capture note (we DID supply it).
+        // The CLI import path keeps that warning (it has no session to capture into).
+        let captured_any = !captured.is_empty();
+        let shown: Vec<&str> = result
+            .warnings
+            .iter()
+            .map(String::as_str)
+            .filter(|w| !(captured_any && w.contains("supply the real value via a profile/env")))
+            .collect();
+        if !shown.is_empty() {
             msg.push_str(" · ");
-            msg.push_str(&result.warnings.join(" · "));
+            msg.push_str(&shown.join(" · "));
         }
         self.notify(msg);
         // Open the new endpoint as its own buffer (File target — no confirm).
