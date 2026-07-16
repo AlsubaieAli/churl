@@ -69,6 +69,57 @@ use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
 use super::theme::Theme;
 
+/// Builds an `EditorState` seeded with `text`, wired to edtui's in-memory
+/// clipboard rather than its arboard-backed OS-clipboard default. Every edtui
+/// surface in churl (curl prompt, URL popup, Body editor) shares this: vim's
+/// own yank/paste (`y`/`p`/`d`) targets the unnamed register, not the system
+/// clipboard, and edtui's arboard default is a single shared OS handle — a
+/// stray in-editor yank on any surface must not clobber the user's real
+/// clipboard, and concurrent access to it from more than one editor at once
+/// (e.g. the test suite's parallel threads) has been observed to segfault the
+/// OS clipboard backend. Terminal bracketed-paste still works with this
+/// clipboard in place: edtui's paste handler writes the pasted text in
+/// (`set_text`) and then reads it straight back out (`get_text`) to insert
+/// it, and `InternalClipboard` round-trips that faithfully.
+fn new_editor_state(text: &str) -> EditorState {
+    let mut editor = EditorState::new(Lines::from(text));
+    editor.set_clipboard(edtui::clipboard::InternalClipboard::default());
+    editor
+}
+
+/// The multi-line vim editor state for the new-endpoint prompt's expanded
+/// (curl) sub-state — the same edtui + vim_ext trio the URL popup uses, so a
+/// pasted browser curl is editable across lines before submit. Vim-faithful:
+/// Insert-mode Enter inserts a newline, Normal-mode Enter submits (newlines
+/// preserved), and a plain name still falls through to a plain endpoint.
+pub(in crate::tui::app) struct CurlPrompt {
+    pub(in crate::tui::app) editor: EditorState,
+    pub(in crate::tui::app) events: EditorEventHandler,
+    pub(in crate::tui::app) vim: VimExt,
+}
+
+impl CurlPrompt {
+    /// A fresh prompt seeded with `seed`, starting in Insert mode by default —
+    /// callers that need the multi-line editor to land in Normal mode (a
+    /// curl/multi-line paste, or a parse-failure re-open) set `editor.mode`
+    /// afterward; see [`App::open_curl_editor`]. See [`new_editor_state`] for
+    /// the clipboard rationale.
+    fn new(seed: &str) -> Self {
+        let mut editor = new_editor_state(seed);
+        editor.mode = EditorMode::Insert;
+        Self {
+            editor,
+            events: EditorEventHandler::default(),
+            vim: VimExt::default(),
+        }
+    }
+
+    /// The editor content as one `String` (logical lines joined by `\n`).
+    fn text(&self) -> String {
+        self.editor.lines.clone().into()
+    }
+}
+
 /// The whole TUI state. Constructible without a tokio runtime so snapshot
 /// tests can drive [`render`] through a `TestBackend`.
 pub struct App {
@@ -174,8 +225,19 @@ pub struct App {
     /// Monotonic tick counter (incremented every 250 ms tick); drives the spinner
     /// animation in the response pane. `pub` so snapshot tests can set it.
     pub tick_count: u64,
-    /// The text prompt's line editor while a [`Mode::Prompt`] overlay is open.
+    /// The text prompt's line editor while a single-line [`Mode::Prompt`] overlay
+    /// is open (rename, paths, new collection/sequence).
     pub prompt_editor: LineEditor,
+    /// The multi-line vim editor backing the new-endpoint prompt's expanded
+    /// sub-state. `Mode::Prompt(PromptPurpose::NewEndpoint)` has two valid
+    /// sub-states, discriminated by this field alone (no parallel enum/bool):
+    /// `None` is the default light single-line sub-state (`prompt_editor` is the
+    /// active editor, same as every other prompt purpose); `Some` is the heavy
+    /// multi-line sub-state, entered on a curl/multi-line paste or `Ctrl-e`, for
+    /// comfortably editing a pasted browser curl across lines before submit.
+    /// Every OTHER prompt purpose never sets this — only `NewEndpoint` can
+    /// transition into the `Some` sub-state.
+    pub(in crate::tui::app) curl_prompt: Option<CurlPrompt>,
     /// The endpoint-switch target deferred behind an open
     /// [`ConfirmPurpose::DiscardChanges`] overlay; resolved by `s`/`d`, dropped
     /// by `Esc`.
@@ -486,6 +548,7 @@ impl App {
             keymap_warned: false,
             tick_count: 0,
             prompt_editor: LineEditor::default(),
+            curl_prompt: None,
             pending_load: None,
             pending_close: None,
             pending_create_dir: None,
@@ -940,6 +1003,16 @@ impl App {
             .is_some_and(|e| e.mode != EditorMode::Normal)
     }
 
+    /// Whether the new-endpoint multi-line curl editor is in an insert-capable
+    /// (non-Normal) mode — the same edtui + vim_ext pairing as the URL popup, so
+    /// it needs the same paste gate: a paste routed to it in Normal mode would
+    /// trigger vim's paste-after and land one char off.
+    fn curl_prompt_non_normal(&self) -> bool {
+        self.curl_prompt
+            .as_ref()
+            .is_some_and(|c| c.editor.mode != EditorMode::Normal)
+    }
+
     /// Routes a bracketed-paste payload into the active text surface as literal
     /// characters (newlines never interpreted as submit). The routing MIRRORS the
     /// key precedence in [`Self::handle_key`] exactly, so every surface that
@@ -986,6 +1059,52 @@ impl App {
             Mode::BodySearch => {
                 let s = normalize_paste_newlines(&text);
                 self.body_search_editor.insert_str(&s);
+            }
+            Mode::Prompt(PromptPurpose::NewEndpoint) if self.curl_prompt.is_some() => {
+                // Already expanded: normalise newlines to `\n` (the curl parser
+                // keys on LF continuations). Gated on insert-capable mode exactly
+                // like the URL popup above — a second bracketed paste can arrive
+                // while the editor still sits in Normal mode (right after a
+                // curl-paste switch, or a parse-fail re-open), and routing it
+                // there would trigger vim's Normal-mode paste-after, landing one
+                // char off instead of at the cursor.
+                if self.curl_prompt_non_normal()
+                    && let Some(c) = self.curl_prompt.as_mut()
+                {
+                    let s = normalize_paste_newlines(&text);
+                    c.events.on_paste_event(s, &mut c.editor);
+                }
+            }
+            Mode::Prompt(PromptPurpose::NewEndpoint) => {
+                // Single-line sub-state: a paste expands into the multi-line
+                // editor instead of becoming part of the name, landing in Normal
+                // mode, ready to review/edit/submit. The paste is consumed here —
+                // it never also reaches `prompt_editor.insert_str` below, so
+                // there is no double-insert.
+                let s = normalize_paste_newlines(&text);
+                let trimmed = s.trim();
+                if handlers::crud::looks_like_curl(trimmed) {
+                    // The paste itself is a curl: seed with the curl ALONE,
+                    // discarding any already-typed prefix. Prepending it (as the
+                    // multi-line branch below does) would make the seed
+                    // `<prefix>curl …`, which fails `looks_like_curl` on submit
+                    // and silently degrades the import into a plain endpoint
+                    // named `<prefix>curl …` — a curl import derives its name
+                    // from the URL, so the half-typed prefix is intentionally
+                    // dropped, not merged.
+                    self.open_curl_editor(&s, EditorMode::Normal);
+                } else if s.contains('\n') {
+                    // Multi-line but not a recognized curl: this is name/notes
+                    // text typed across lines, not an import, so prior typed
+                    // text is real content — it was typed first, so it prefixes
+                    // the pasted content in the seed.
+                    let seed = format!("{}{s}", self.prompt_editor.text());
+                    self.open_curl_editor(&seed, EditorMode::Normal);
+                } else {
+                    // Short single-line non-curl paste: same as every other
+                    // prompt purpose, insert it into the name as if typed.
+                    self.prompt_editor.insert_str(&s);
+                }
             }
             Mode::Prompt(_) => {
                 let s = normalize_paste_newlines(&text);
@@ -1749,6 +1868,8 @@ impl App {
             Action::SearchPrev => self.response_search_step(false),
             Action::ToggleFold => self.response_toggle_fold(),
             Action::ToggleAllFolds => self.response_toggle_all_folds(),
+            Action::StructuralNext => self.response_structural_jump(true),
+            Action::StructuralPrev => self.response_structural_jump(false),
             Action::CopyResponse => self.response_copy_view(),
             Action::CopyLine => self.response_copy_line(),
             Action::ScrollBodyLeft => self.response_scroll_h(false),

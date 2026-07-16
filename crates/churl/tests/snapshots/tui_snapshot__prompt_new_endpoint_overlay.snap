@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 958
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -14,7 +13,7 @@ expression: snapshot(&mut app)
 │                            ││                                                │
 │              ┏ New endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓              │
 │              ┃> Update user█                                  ┃              │
-│              ┃name, or paste a curl to import                 ┃              │
+│              ┃name — paste a curl (or ctrl-e) to expand       ┃              │
 │              ┃                                                ┃──────────────┘
 │              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛──────────────┐
 │                            ││no response yet                                 │

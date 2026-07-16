@@ -3941,6 +3941,56 @@ fn load_response_fold_uses_runner_cursor() {
     );
 }
 
+/// `J`/`K` jump the runner Response cursor between collapsible JSON nodes,
+/// proving structural navigation routes through the runner surface.
+#[test]
+fn load_response_structural_jump_moves_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app_with_response(dir.path(), "{\"outer\":{\"x\":1,\"y\":2}}");
+    render_once(&mut app);
+    // Cursor starts on the root opener (row 0). `J` jumps to the first
+    // collapsible node — the `"outer": {` opener at row 1.
+    assert_eq!(app.load_runner().unwrap().geometry.cursor, 0);
+    app.handle_key(shift('J')).unwrap();
+    assert_eq!(
+        app.load_runner().unwrap().geometry.cursor,
+        1,
+        "J moved the cursor to the outer opener"
+    );
+    // `K` climbs back out to the root opener.
+    app.handle_key(shift('K')).unwrap();
+    assert_eq!(
+        app.load_runner().unwrap().geometry.cursor,
+        0,
+        "K returned to the root opener"
+    );
+}
+
+/// `J` on a non-JSON body notifies (mirroring the fold guard) instead of moving
+/// the cursor — structural navigation is JSON-only.
+#[tokio::test]
+async fn structural_jump_non_json_notifies() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.generation = 5;
+    set_active_in_flight(&mut app, 5);
+    // `response()` carries no content-type, so the body is not JSON.
+    app.on_response(5, Ok(response()), meta());
+    app.focus = Pane::Response;
+    render_once(&mut app);
+    app.handle_key(shift('J')).unwrap();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("folding: JSON responses only"),
+        "J on a non-JSON body notifies rather than moving"
+    );
+    assert_eq!(
+        app.response_cursor_logical(),
+        Some(0),
+        "the cursor did not move"
+    );
+}
+
 /// `/` opens body search over the RUNNER response, `n` steps matches, and Esc
 /// returns to the runner (NOT to Normal mode — the runner stays open).
 #[test]
@@ -5760,6 +5810,8 @@ fn leader_new_endpoint_opens_destination_picker() {
 }
 
 /// `<leader>n` → pick root → name prompt → the endpoint lands at the chosen root.
+/// The name prompt opens on the light single-line editor by default (same as
+/// every other prompt purpose) — a plain non-curl paste stays there.
 #[test]
 fn destination_picker_creates_endpoint_at_chosen_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -5769,11 +5821,13 @@ fn destination_picker_creates_endpoint_at_chosen_root() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+    assert!(app.curl_prompt.is_none(), "opens single-line by default");
     assert!(
         app.pending_create_dir.is_some(),
         "picked destination carried"
     );
-    app.prompt_editor = LineEditor::new("health");
+    app.handle_paste("health".to_string());
+    assert!(app.curl_prompt.is_none(), "a plain paste stays single-line");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(
@@ -5783,15 +5837,47 @@ fn destination_picker_creates_endpoint_at_chosen_root() {
     assert!(app.pending_create_dir.is_none(), "destination consumed");
 }
 
-/// The shared name prompt auto-detects a pasted curl: it imports + auto-names the
-/// endpoint instead of creating a blank one.
+/// `<leader>n` → single-line prompt → typing a name keystroke-by-keystroke →
+/// Enter creates the endpoint by that name (no curl involved at all).
+#[test]
+fn leader_new_endpoint_single_line_typed_name_creates_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.dispatch(Action::NewEndpointPick, None).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap(); // accept root
+    assert!(app.curl_prompt.is_none());
+    for c in "status".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app);
+    assert!(
+        dir.path().join("status.toml").exists(),
+        "typed name created a plain endpoint"
+    );
+}
+
+/// The single-line name prompt auto-detects a pasted curl: the paste expands it
+/// into the multi-line editor (Normal mode, seeded with the paste), and
+/// submitting from there imports + auto-names the endpoint instead of creating
+/// a blank one.
 #[test]
 fn name_prompt_auto_imports_pasted_curl() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
     app.begin_new_endpoint();
     assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
-    app.prompt_editor = LineEditor::new("curl https://api.test/health");
+    assert!(app.curl_prompt.is_none(), "opens single-line by default");
+    app.handle_paste("curl https://api.test/health".to_string());
+    assert!(
+        app.curl_prompt.is_some(),
+        "curl paste expands to multi-line"
+    );
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "paste-switch lands in Normal mode, ready to review/submit"
+    );
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
@@ -5814,8 +5900,10 @@ fn importing_curl_captures_bearer_token_into_session_var() {
     let mut app = workspace_fixture(dir.path());
     assert!(app.session_vars().is_empty(), "no session vars yet");
     app.begin_new_endpoint();
-    app.prompt_editor =
-        LineEditor::new("curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'");
+    app.handle_paste(
+        "curl https://api.test/me -H 'Authorization: Bearer v4.public.REALTOKEN'".to_string(),
+    );
+    // The curl paste already switched to the multi-line editor in Normal mode.
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     // Session var `token` holds the REAL value…
@@ -5836,11 +5924,11 @@ fn importing_curl_captures_bearer_token_into_session_var() {
     );
 }
 
-/// A bracketed paste routes the whole multi-line curl into the prompt editor
-/// (newlines normalised from the terminal's bare CR to LF) so the existing
-/// submit → `import_curl` path parses it — the real fix for the "unbalanced
-/// quotes / multiple URLs" bug (a per-key stream would have submitted early on
-/// the first embedded newline).
+/// A bracketed paste routes the whole multi-line curl into the multi-line
+/// new-endpoint editor (newlines normalised from the terminal's bare CR to LF)
+/// so the existing submit → `import_curl` path parses it — the real fix for
+/// the "unbalanced quotes / multiple URLs" bug (a per-key stream would have
+/// submitted early on the first embedded newline).
 #[test]
 fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     let dir = tempfile::tempdir().unwrap();
@@ -5851,7 +5939,16 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     // and curl's `\[\]` glob-escaping of an array param.
     let pasted = "curl 'https://api.test/orders?fields\\[\\]=a&fields\\[\\]=b' \\\r  -H 'accept: application/json'";
     app.handle_paste(pasted.to_string());
-    let buf = app.prompt_editor.text();
+    assert!(
+        app.curl_prompt.is_some(),
+        "curl paste expands to multi-line"
+    );
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "paste-switch lands in Normal mode"
+    );
+    let buf = app.curl_prompt.as_ref().unwrap().text();
     assert!(
         buf.contains("fields\\[\\]=a"),
         "raw buffer keeps curl's escaping until import"
@@ -5869,6 +5966,251 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     assert_eq!(
         ep.request.url, "https://api.test/orders?fields[]=a&fields[]=b",
         "continuations collapsed and brackets unescaped"
+    );
+}
+
+/// The whole point of upgrading the new-endpoint prompt to the multi-line vim
+/// editor: after a paste, the user can navigate *across lines* (`k`/`j`) and
+/// edit a value on a different line than where the paste left the cursor,
+/// then submit — the same curl-detect → import path picks up the edit.
+#[test]
+fn new_endpoint_multiline_editor_edits_across_lines_before_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    let pasted = "curl 'https://api.test/orders' \\\r  -H 'X-Custom: old'";
+    app.handle_paste(pasted.to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "curl paste-switch lands in Normal mode, ready to navigate"
+    );
+    // Walk up to the first line and back down to the header line —
+    // exercising real cross-line motion the single-line editor could never do.
+    press(&mut app, 'k'); // up to (or already at) the `curl …` line
+    press(&mut app, 'j'); // back down to the `-H 'X-Custom: old'` line
+    press(&mut app, '$'); // end of line: the closing quote
+    press(&mut app, 'h'); // 'd'
+    press(&mut app, 'h'); // 'l'
+    press(&mut app, 'h'); // 'o' — start of "old"
+    press(&mut app, 'x'); // delete o/l/d one at a time
+    press(&mut app, 'x');
+    press(&mut app, 'x');
+    press(&mut app, 'i'); // insert before the (now-adjacent) closing quote
+    for c in "new".chars() {
+        press(&mut app, c);
+    }
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("X-Custom: new"),
+        "edit landed on the header line, not the URL line: {buf:?}"
+    );
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("orders.toml");
+    assert!(file.exists(), "edited multi-line curl still imported");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    let header = ep
+        .request
+        .headers
+        .iter()
+        .find(|h| h.name == "X-Custom")
+        .expect("custom header present");
+    assert_eq!(
+        header.value, "new",
+        "in-editor edit made it into the import"
+    );
+}
+
+/// A plain (non-curl) name typed directly into the multi-line editor —
+/// keystroke by keystroke into the light single-line editor — still falls
+/// through to a plain endpoint (the everyday `<leader>n`/`n` fast path).
+#[test]
+fn new_endpoint_single_line_plain_name_falls_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(app.curl_prompt.is_none(), "opens single-line by default");
+    for c in "ping".chars() {
+        press(&mut app, c);
+    }
+    assert!(!app.prompt_buffer_is_curl(), "a plain name is not curl");
+    enter(&mut app); // single-line prompts: Enter always commits
+    let file = dir.path().join("users").join("ping.toml");
+    assert!(file.exists(), "plain name created a plain endpoint");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "", "plain endpoint has no URL to import");
+}
+
+/// A plain (non-curl) name typed into the expanded multi-line editor (reached
+/// via `Ctrl-e`) — keystroke by keystroke, not pasted — still falls through to
+/// a plain endpoint: the multi-line editor's own plain-name fallback is
+/// unchanged by the two-stage prompt.
+#[test]
+fn new_endpoint_multiline_editor_plain_name_falls_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.curl_prompt.is_some(), "ctrl-e expands to multi-line");
+    for c in "ping".chars() {
+        press(&mut app, c);
+    }
+    assert!(!app.prompt_buffer_is_curl(), "a plain name is not curl");
+    esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let file = dir.path().join("users").join("ping.toml");
+    assert!(file.exists(), "plain name created a plain endpoint");
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "", "plain endpoint has no URL to import");
+}
+
+/// Vim-faithful: Insert-mode Enter in the multi-line curl prompt is a plain
+/// newline (edtui's own Insert-mode binding), never a submit — only
+/// Normal-mode Enter commits. Distinct from the single-line prompts, where
+/// Enter always commits. Reached via `Ctrl-e`, which expands in Insert mode.
+#[test]
+fn new_endpoint_editor_insert_enter_adds_line_without_submitting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    let before = count_toml(dir.path());
+    app.begin_new_endpoint();
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "ctrl-e expands into insert mode"
+    );
+    for c in "ping".chars() {
+        press(&mut app, c);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
+        "Insert-mode Enter must not submit the prompt"
+    );
+    assert_eq!(count_toml(dir.path()), before, "no endpoint created");
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("ping") && buf.contains('\n'),
+        "Insert-mode Enter inserted a newline into the buffer: {buf:?}"
+    );
+}
+
+/// `o` in Normal mode opens a line below the cursor and switches to Insert —
+/// edtui's own default binding, exercised here through the new-endpoint
+/// prompt's key routing (nothing in `handle_curl_prompt_key` or `vim_ext`
+/// intercepts `o`, so it falls through to edtui unmodified).
+#[test]
+fn new_endpoint_editor_normal_o_opens_line_below() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/health".to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "curl paste-switch lands in Normal mode"
+    );
+    press(&mut app, 'o');
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "`o` opens a line and drops into insert mode"
+    );
+    for c in "-H 'X-New: 1'".chars() {
+        press(&mut app, c);
+    }
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.contains("curl https://api.test/health"),
+        "original line kept: {buf:?}"
+    );
+    assert!(
+        buf.contains("-H 'X-New: 1'"),
+        "text typed after `o` landed on the opened line: {buf:?}"
+    );
+    assert!(
+        buf.contains('\n'),
+        "`o` opened a genuinely new line: {buf:?}"
+    );
+}
+
+/// FIX (P2-1) regression: every edtui `EditorState` churl constructs (curl
+/// prompt, URL popup, Body editor, render-only placeholder editor) must be
+/// wired to edtui's in-memory clipboard via the `new_editor_state` helper
+/// (`app/mod.rs`), not left on edtui's arboard/OS-clipboard default — that
+/// default is a single shared OS handle, and concurrent access to it from
+/// more than one live editor (e.g. this very test suite's parallel threads)
+/// has been observed to segfault.
+///
+/// A live yank/paste round-trip can't discriminate reverted-vs-fixed code
+/// here: `edtui::clipboard`'s arboard-backed `Default` impl silently falls
+/// back to an internal, non-shared clipboard whenever no display is
+/// available, and CI runs headless — so with or without the fix, headless
+/// tests observe the same paste behaviour. `EditorState`'s clipboard field is
+/// also `pub(crate)` inside edtui, so there is no supported way to ask a
+/// constructed instance which backend it holds. Absent any environment- or
+/// introspection-based way to observe the difference at runtime, this
+/// asserts the source directly: the helper wires `InternalClipboard`, and
+/// every real construction site routes through it rather than calling
+/// `EditorState::new` on its own.
+#[test]
+fn every_editor_construction_uses_internal_clipboard_helper() {
+    let mod_rs = include_str!("mod.rs");
+    let state_rs = include_str!("state.rs");
+    let editing_rs = include_str!("handlers/editing.rs");
+    let render_rs = include_str!("render.rs");
+
+    let helper_start = mod_rs
+        .find("fn new_editor_state(text: &str) -> EditorState {")
+        .expect("new_editor_state helper must exist in app/mod.rs");
+    let helper_body = &mod_rs[helper_start..];
+    let helper_end = helper_body
+        .find("\n}\n")
+        .expect("new_editor_state helper body must be closed");
+    let helper_body = &helper_body[..helper_end];
+    assert!(
+        helper_body.contains("set_clipboard") && helper_body.contains("InternalClipboard"),
+        "new_editor_state must wire edtui's in-memory clipboard: {helper_body:?}"
+    );
+
+    // The helper's own construction is the ONLY direct `EditorState::new(` in
+    // mod.rs — every other site (there or in sibling files) must go through it.
+    assert_eq!(
+        mod_rs.matches("EditorState::new(").count(),
+        1,
+        "only new_editor_state may construct EditorState directly in app/mod.rs"
+    );
+    assert!(
+        !state_rs.contains("EditorState::new("),
+        "EndpointBuffer::new (Body editor) must build its editor via new_editor_state"
+    );
+    assert!(
+        !editing_rs.contains("EditorState::new("),
+        "begin_url_popup (URL popup editor) must build its editor via new_editor_state"
+    );
+    assert!(
+        !render_rs.contains("EditorState::new(") && !render_rs.contains("EditorState::default("),
+        "the render-only placeholder editor must build via new_editor_state, not \
+         EditorState::new/default (both open a real arboard OS-clipboard handle)"
+    );
+    assert!(
+        state_rs.contains("new_editor_state(body)"),
+        "EndpointBuffer::new must call new_editor_state"
+    );
+    assert!(
+        editing_rs.contains("new_editor_state(url.as_str())"),
+        "begin_url_popup must call new_editor_state"
+    );
+    assert!(
+        render_rs.contains(r#"new_editor_state("")"#),
+        "the render-only placeholder editor must call new_editor_state"
     );
 }
 
@@ -5930,25 +6272,44 @@ fn paste_into_picker_filter_appends_query() {
 }
 
 /// A curl that fails to parse is fail-loud: nothing is created and the prompt
-/// stays open with the buffer intact.
+/// re-opens in the multi-line editor (not the single-line default) with the
+/// buffer intact, since there's curl content to fix.
 #[test]
 fn name_prompt_curl_parse_failure_creates_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = workspace_fixture(dir.path());
     let before = count_toml(dir.path());
     app.begin_new_endpoint();
-    app.prompt_editor = LineEditor::new("curl"); // no URL → parse error
+    app.handle_paste("curl".to_string()); // no URL → parse error, but still expands (starts_with "curl")
+    assert!(
+        app.curl_prompt.is_some(),
+        "curl paste expands to multi-line"
+    );
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(
         matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
         "prompt stays open on a curl parse failure"
     );
+    assert!(
+        app.curl_prompt.is_some(),
+        "re-opens in the multi-line editor, not single-line — there's curl content to fix"
+    );
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "re-opens in Normal mode"
+    );
+    assert!(
+        app.curl_prompt.as_ref().unwrap().text().contains("curl"),
+        "buffer intact after the failed parse"
+    );
     assert_eq!(count_toml(dir.path()), before, "no endpoint created");
 }
 
 /// The retired `PasteCurl` action is now an alias that opens the unified
-/// new-endpoint prompt (which auto-detects the pasted curl).
+/// new-endpoint prompt (which auto-detects a subsequently pasted curl) — on the
+/// same light single-line default as `NewEndpoint` itself.
 #[test]
 fn paste_curl_action_opens_unified_new_endpoint_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -5958,6 +6319,256 @@ fn paste_curl_action_opens_unified_new_endpoint_prompt() {
         matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)),
         "PasteCurl aliases the unified new-endpoint prompt"
     );
+    assert!(
+        app.curl_prompt.is_none(),
+        "opens single-line by default, same as NewEndpoint"
+    );
+}
+
+/// A multi-line paste that does NOT start with `curl` still expands to the
+/// multi-line editor — the OR half of the trigger rule (curl-prefixed OR
+/// contains a newline), not just the curl-prefix half.
+#[test]
+fn paste_with_newline_but_no_curl_prefix_still_expands_to_multiline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    assert!(app.curl_prompt.is_none());
+    app.handle_paste("first line\nsecond line".to_string());
+    assert!(
+        app.curl_prompt.is_some(),
+        "a multi-line paste expands even without a `curl` prefix"
+    );
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal
+    );
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(buf.contains("first line") && buf.contains("second line"));
+}
+
+/// A plain single-line non-curl paste stays on the light single-line editor —
+/// it lands in the name as if typed, no expansion.
+#[test]
+fn paste_plain_word_stays_single_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("foo".to_string());
+    assert!(
+        app.curl_prompt.is_none(),
+        "a short non-curl single-line paste never expands"
+    );
+    assert_eq!(
+        app.prompt_editor.text(),
+        "foo",
+        "pasted word lands in the name, same as typing it"
+    );
+}
+
+/// A curl-lookalike word (no word boundary after `curl`) stays on the
+/// single-line editor, same as any other plain word — the expand trigger now
+/// shares `looks_like_curl` with the submit-time import check instead of a
+/// bare `starts_with("curl")`, so `curly`/`curl-metrics` no longer wrongly
+/// expand into the multi-line editor.
+#[test]
+fn paste_curl_lookalike_word_stays_single_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curly".to_string());
+    assert!(
+        app.curl_prompt.is_none(),
+        "a `curl`-prefixed but non-curl word never expands"
+    );
+    assert_eq!(
+        app.prompt_editor.text(),
+        "curly",
+        "pasted word lands in the name, same as typing it"
+    );
+}
+
+/// When the pasted text itself is a curl, the seed is the curl ALONE — any
+/// already-typed prefix is discarded, not prepended. Prepending it would
+/// produce `<prefix>curl …`, which fails `looks_like_curl` on submit and
+/// silently degrades the import into a plain endpoint (see
+/// `typed_prefix_then_curl_paste_still_imports_on_submit` for the submit-time
+/// proof).
+#[test]
+fn paste_switch_discards_prior_typed_prefix_when_pasted_curl() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "myapi-".chars() {
+        press(&mut app, c);
+    }
+    app.handle_paste("curl https://api.test/health".to_string());
+    assert!(app.curl_prompt.is_some());
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert_eq!(
+        buf, "curl https://api.test/health",
+        "the typed prefix is discarded, not merged into the seed: {buf:?}"
+    );
+}
+
+/// The typed-prefix-then-curl-paste sequence, taken all the way through
+/// submit: the endpoint must IMPORT (method/URL from the curl), not fall
+/// through to a plain endpoint named after the mangled `<prefix>curl …`
+/// string — the actual P2-3 regression (`paste_switch_carries_prior_typed_
+/// text_into_seed` above only ever built the buffer, it never submitted).
+#[test]
+fn typed_prefix_then_curl_paste_still_imports_on_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "myapi-".chars() {
+        press(&mut app, c);
+    }
+    app.handle_paste("curl https://api.test/health".to_string());
+    assert!(
+        app.prompt_buffer_is_curl(),
+        "buffer reads as curl despite the earlier typed prefix"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // Auto-named from the URL path, same as a prefix-free curl paste — proof
+    // the typed prefix never reached the import (a mangled seed would have
+    // failed `looks_like_curl` and created a plain `myapi-curl…` endpoint
+    // instead).
+    let file = dir.path().join("users").join("health.toml");
+    assert!(
+        file.exists(),
+        "typed prefix + curl paste still imports, not a plain endpoint"
+    );
+    let ep = persistence::load_endpoint(&file).unwrap();
+    assert_eq!(ep.request.url, "https://api.test/health");
+}
+
+/// The OTHER branch — a multi-line paste that is NOT a curl — still prefixes
+/// prior typed text (it's name/notes content, not an import): the two-branch
+/// split only changes seed-construction for the curl case.
+#[test]
+fn paste_switch_prepends_prior_typed_text_for_plain_multiline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "notes-".chars() {
+        press(&mut app, c);
+    }
+    app.handle_paste("first line\nsecond line".to_string());
+    assert!(app.curl_prompt.is_some());
+    let buf = app.curl_prompt.as_ref().unwrap().text();
+    assert!(
+        buf.starts_with("notes-first line"),
+        "prior typed text still prefixes a non-curl multi-line paste: {buf:?}"
+    );
+}
+
+/// A second bracketed paste that arrives while the multi-line curl editor
+/// still sits in Normal mode (right after the paste-switch) must not land as
+/// a vim Normal-mode paste-after one char off — gated exactly like the URL
+/// popup, so it's dropped in Normal mode and lands correctly once the editor
+/// is insert-capable.
+#[test]
+fn curl_prompt_second_paste_gated_to_insert_capable_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/orders".to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Normal,
+        "curl paste-switch lands in Normal mode"
+    );
+    let before = app.curl_prompt.as_ref().unwrap().text();
+    app.handle_paste("EXTRA".to_string());
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().text(),
+        before,
+        "a paste while still in Normal mode is dropped, not misplaced"
+    );
+    press(&mut app, 'i'); // Normal -> Insert
+    app.handle_paste("EXTRA".to_string());
+    assert!(
+        app.curl_prompt.as_ref().unwrap().text().contains("EXTRA"),
+        "once insert-capable, the paste lands at the cursor"
+    );
+}
+
+/// `Ctrl-e` in the single-line `NewEndpoint` prompt expands to the multi-line
+/// editor in Insert mode, seeded with whatever was already typed — covers the
+/// non-empty prior-text case (the empty case is covered by
+/// `new_endpoint_editor_insert_enter_adds_line_without_submitting` and
+/// `new_endpoint_multiline_editor_plain_name_falls_through`).
+#[test]
+fn ctrl_e_expands_with_prior_typed_text_as_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    for c in "orders".chars() {
+        press(&mut app, c);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.curl_prompt.is_some(), "ctrl-e expands to multi-line");
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().editor.mode,
+        EditorMode::Insert,
+        "ctrl-e expands into insert mode, ready to compose a curl by hand"
+    );
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().text(),
+        "orders",
+        "whatever was already typed seeds the multi-line buffer"
+    );
+}
+
+/// `Ctrl-e` is a no-op once the editor is already expanded — nothing to expand
+/// to, and it must not do anything surprising (e.g. it is not bound to
+/// anything in `handle_curl_prompt_key`/`vim_ext`, so it simply falls through
+/// unhandled).
+#[test]
+fn ctrl_e_is_a_noop_once_already_multiline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/health".to_string());
+    assert!(app.curl_prompt.is_some());
+    let before = app.curl_prompt.as_ref().unwrap().text();
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.curl_prompt.is_some(), "still expanded");
+    assert_eq!(
+        app.curl_prompt.as_ref().unwrap().text(),
+        before,
+        "ctrl-e does not mutate the multi-line buffer"
+    );
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::NewEndpoint)));
+}
+
+/// `Ctrl-e`'s interception is scoped ONLY to the `NewEndpoint` single-line
+/// sub-state — every other prompt purpose keeps `LineEditor`'s own `Ctrl-e` =
+/// end-of-line binding (readline-style, paired with `Ctrl-a`).
+#[test]
+fn ctrl_e_in_other_prompt_purposes_still_moves_cursor_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = workspace_fixture(dir.path());
+    app.open_prompt(PromptPurpose::Rename, "hello");
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.prompt_editor.cursor(), 0, "cursor moved off the end");
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        app.prompt_editor.cursor(),
+        "hello".chars().count(),
+        "ctrl-e still moves the cursor to end-of-line outside NewEndpoint"
+    );
+    assert!(
+        app.curl_prompt.is_none(),
+        "no expansion outside the NewEndpoint purpose"
+    );
+    assert!(matches!(app.mode, Mode::Prompt(PromptPurpose::Rename)));
 }
 
 // --- M7.12 tree CRUD wiring ---

@@ -179,6 +179,11 @@ pub enum Action {
     ToggleFold,
     /// Collapse all top-level JSON regions, or expand all.
     ToggleAllFolds,
+    /// Jump the response cursor forward/inward to the next collapsible JSON node.
+    StructuralNext,
+    /// Jump the response cursor backward/outward to the previous collapsible JSON
+    /// node.
+    StructuralPrev,
     /// Copy the current response view's full text to the clipboard.
     CopyResponse,
     /// Copy the response cursor's logical line to the clipboard.
@@ -400,6 +405,16 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::ToggleAllFolds,
         "toggle-all-folds",
         "toggle all folds",
+    ),
+    (
+        Action::StructuralNext,
+        "structural-next",
+        "next collapsible node",
+    ),
+    (
+        Action::StructuralPrev,
+        "structural-prev",
+        "previous collapsible node",
     ),
     (Action::CopyResponse, "copy-response", "copy response"),
     (Action::CopyLine, "copy-line", "copy line"),

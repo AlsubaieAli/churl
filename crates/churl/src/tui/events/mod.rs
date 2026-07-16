@@ -260,6 +260,11 @@ impl Default for KeyMap {
         overlay(PaneCtx::Response, key!(shift - n), Action::SearchPrev);
         overlay(PaneCtx::Response, key!(o), Action::ToggleFold);
         overlay(PaneCtx::Response, key!(shift - o), Action::ToggleAllFolds);
+        // `J`/`K` jump the cursor between collapsible JSON nodes (forward/inward,
+        // backward/outward), skipping leaf lines. Free in the Response overlay;
+        // the global `j`/`k` are lowercase line movement, not shadowed.
+        overlay(PaneCtx::Response, key!(shift - j), Action::StructuralNext);
+        overlay(PaneCtx::Response, key!(shift - k), Action::StructuralPrev);
         overlay(PaneCtx::Response, key!(y), Action::CopyResponse);
         overlay(PaneCtx::Response, key!(shift - y), Action::CopyLine);
         // Horizontal window pan for unwrapped long lines. `H`/`L`

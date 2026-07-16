@@ -43,6 +43,7 @@ pub enum JsonDialect {
 /// nested under (outermost first). The writer flattens this into collection
 /// names (see [`write_import`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportedRequest {
     /// Folder names from the collection root down to this request (may be empty).
     pub folder_path: Vec<String>,
@@ -53,6 +54,7 @@ pub struct ImportedRequest {
 /// The result of importing a collection: its name, every request, and any
 /// non-fatal warnings raised while mapping messy/unsupported constructs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CollectionImport {
     /// Collection name (`info.name`, or `"Imported"` when absent).
     pub name: String,
@@ -69,6 +71,7 @@ pub struct CollectionImport {
 
 /// A summary of a [`write_import`] run, for the CLI/TUI to report.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportSummary {
     /// Number of endpoints written to disk.
     pub endpoints: usize,

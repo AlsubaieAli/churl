@@ -196,6 +196,7 @@ echo service — so your first request works immediately without any sign-up.
 | Response wrap | `W` soft-wraps at pane width |
 | Response headers | `h` toggles between body and full headers |
 | JSON folding | `o`/`O` fold/unfold regions at the cursor |
+| Structural nav | `J`/`K` jump between collapsible JSON nodes (fold-aware; skips leaves) |
 | Copy to clipboard | `y` copies the view, `Y` copies the cursor line (OSC 52 — works over SSH/tmux) |
 | Request history | Every request written to SQLite; browse via the history picker |
 

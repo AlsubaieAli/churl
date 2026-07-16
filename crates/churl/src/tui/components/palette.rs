@@ -146,6 +146,8 @@ mod tests {
             Action::SearchPrev,
             Action::ToggleFold,
             Action::ToggleAllFolds,
+            Action::StructuralNext,
+            Action::StructuralPrev,
             Action::CopyResponse,
             Action::CopyLine,
         ];

@@ -204,7 +204,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .buffers
         .get_mut(active)
         .and_then(Buffer::as_endpoint_mut);
-    let mut default_editor = EditorState::default();
+    let mut default_editor = new_editor_state("");
     let mut default_tabs = RequestTabs::default();
     let default_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
 
@@ -446,15 +446,33 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         Overlay::Prompt(purpose) => {
+            // Compute the title/hint (immutable borrows) before taking the
+            // multi-line editor mutably for the new-endpoint prompt's expanded
+            // sub-state. `NewEndpoint` renders the single-line editor too, same
+            // as every other purpose, until `curl_prompt` is `Some`.
             let hint = prompt_hint(app, purpose);
-            prompt::render_prompt(
-                frame,
-                main,
-                prompt_title(app, purpose),
-                &app.prompt_editor,
-                hint.as_deref(),
-                &theme,
-            );
+            let title = prompt_title(app, purpose);
+            if purpose == PromptPurpose::NewEndpoint
+                && let Some(curl) = app.curl_prompt.as_mut()
+            {
+                prompt::render_prompt_multiline(
+                    frame,
+                    main,
+                    title,
+                    &mut curl.editor,
+                    hint.as_deref(),
+                    &theme,
+                );
+            } else {
+                prompt::render_prompt(
+                    frame,
+                    main,
+                    title,
+                    &app.prompt_editor,
+                    hint.as_deref(),
+                    &theme,
+                );
+            }
         }
         Overlay::Confirm(purpose) => {
             let (title, question, hint) = confirm_text(purpose, app.pending_close.is_some());
@@ -731,6 +749,9 @@ fn prompt_title(app: &App, purpose: PromptPurpose) -> &'static str {
 /// typed-confirm delete; none otherwise).
 fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
     match purpose {
+        PromptPurpose::NewEndpoint if app.curl_prompt.is_none() => {
+            Some("name — paste a curl (or ctrl-e) to expand".to_owned())
+        }
         PromptPurpose::NewEndpoint => Some("name, or paste a curl to import".to_owned()),
         PromptPurpose::DeleteCollectionConfirm => app
             .explorer

@@ -88,6 +88,7 @@ pub struct NewHistoryEntry {
 
 /// A stored history entry, as returned by [`HistoryStore::recent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HistoryEntry {
     /// SQLite rowid of the entry.
     pub id: i64,

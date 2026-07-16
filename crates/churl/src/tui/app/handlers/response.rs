@@ -219,6 +219,33 @@ impl App {
         }
     }
 
+    /// `J`/`K`: jump the response cursor forward/inward or backward/outward to the
+    /// next/previous collapsible JSON node, skipping leaf lines and hidden folded
+    /// subtrees. JSON body only — the same guard and notice as folding (`o`/`O`),
+    /// so a non-JSON or headers view says why instead of silently no-opping.
+    pub(in crate::tui::app) fn response_structural_jump(&mut self, forward: bool) {
+        let Some(from) = self.response_cursor_logical() else {
+            return;
+        };
+        if let Some(notice) = self.fold_unsupported_notice() {
+            self.notify(notice);
+            return;
+        }
+        // Read the surface width immutably before taking the view mutably (cursor
+        // and view live on the same surface, so they cannot be borrowed together).
+        // Resolve the target row through the view, then write the cursor back.
+        let width = self.active_response_geometry().viewport_width;
+        let Some(view) = self.response_view_mut() else {
+            return;
+        };
+        let row = view
+            .structural_target(from, forward)
+            .and_then(|logical| view.display_row_for_logical(logical, width));
+        if let Some(row) = row {
+            self.active_response_geometry_mut().cursor = row;
+        }
+    }
+
     /// `/`: open the incremental body-search input in the message-row position.
     pub(in crate::tui::app) fn open_body_search(&mut self) {
         if self.response_view_mut().is_none() {

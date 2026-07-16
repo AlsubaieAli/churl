@@ -1434,7 +1434,7 @@ fn new_endpoint_while_dirty_opens_new_buffer() {
     app.focus = Pane::Explorer;
     press(&mut app, KeyCode::Char('n'));
     type_str(&mut app, "Fresh One");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter); // single-line prompt: Enter always commits
     // The file exists AND the new endpoint is opened directly — no confirm.
     assert!(dir.path().join("users").join("fresh-one.toml").exists());
     assert!(
