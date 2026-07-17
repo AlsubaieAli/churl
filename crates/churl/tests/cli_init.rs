@@ -68,6 +68,26 @@ fn init_refuses_to_overwrite_an_existing_workspace() {
 }
 
 #[test]
+fn init_demo_into_dir_with_unrelated_file_preserves_it() {
+    // Unlike the removed `tutorial` (which demanded an empty dir), `init`
+    // scaffolds alongside existing files — but must never clobber them.
+    let dir = tempfile::tempdir().unwrap();
+    let unrelated = dir.path().join("notes.txt");
+    std::fs::write(&unrelated, "keep me").unwrap();
+
+    let output = churl_in(dir.path(), &["init", "--demo"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The unrelated file is untouched, and the workspace scaffolded around it.
+    assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "keep me");
+    assert!(dir.path().join("churl.toml").exists());
+    assert!(dir.path().join("examples").is_dir());
+}
+
+#[test]
 fn init_demo_scaffolds_workspace_with_3_endpoints() {
     let dir = tempfile::tempdir().unwrap();
     let output = churl_in(dir.path(), &["init", "--demo"]);

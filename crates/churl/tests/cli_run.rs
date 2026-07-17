@@ -122,6 +122,48 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         },
     )
     .unwrap();
+
+    // Uses {{greeting}} in the URL query so the profile scope (dev overrides
+    // greeting) is observable in the echoed request.url.
+    let greet_path = create_endpoint(root, "Greet").unwrap();
+    save_endpoint(
+        &greet_path,
+        &Endpoint {
+            seq: 0,
+            name: "Greet".to_owned(),
+            request: Request {
+                method: Method::Get,
+                url: "{{base_url}}/greet?g={{greeting}}".to_owned(),
+                headers: vec![],
+                params: vec![],
+                body: None,
+                auth: None,
+                insecure: false,
+            },
+        },
+    )
+    .unwrap();
+
+    // A secret-named query value the resolver substitutes in — must be masked
+    // in the echoed request.url.
+    let secret_path = create_endpoint(root, "Secret Query").unwrap();
+    save_endpoint(
+        &secret_path,
+        &Endpoint {
+            seq: 0,
+            name: "Secret Query".to_owned(),
+            request: Request {
+                method: Method::Get,
+                url: "{{base_url}}/data?api_key={{apikey}}".to_owned(),
+                headers: vec![],
+                params: vec![],
+                body: None,
+                auth: None,
+                insecure: false,
+            },
+        },
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -179,35 +221,101 @@ async fn run_resolves_a_root_level_endpoint() {
 
 #[tokio::test]
 async fn run_profile_overrides_collection_vars() {
-    // "Get User" doesn't use {{greeting}}, so prove the profile scope through
-    // a --var-visible echo instead: point base_url via --var, confirming cli
-    // scope outranks both profile and collection.
+    // The `Greet` endpoint's URL is `{{base_url}}/greet?g={{greeting}}`. The root
+    // collection sets greeting=hi; the `dev` profile overrides it to
+    // hi-from-dev. Passing --profile dev must win over the collection scope,
+    // observably changing the echoed request.url.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(wpath("/users/1"))
+        .and(wpath("/greet"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    scaffold_workspace(dir.path(), "http://cli-should-be-overridden.invalid");
+    scaffold_workspace(dir.path(), &server.uri());
+
+    // With --profile dev: the profile's greeting wins.
+    let with_profile = churl_in(dir.path(), &["--json", "--profile", "dev", "run", "Greet"]);
+    assert!(
+        with_profile.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&with_profile.stderr)
+    );
+    let url = envelope(&with_profile)["data"]["request"]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(url.contains("g=hi-from-dev"), "profile should win: {url}");
+
+    // Without --profile: the collection's greeting=hi is used.
+    let without = churl_in(dir.path(), &["--json", "run", "Greet"]);
+    assert!(without.status.success());
+    let url2 = envelope(&without)["data"]["request"]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(url2.contains("g=hi"), "collection scope: {url2}");
+    assert!(!url2.contains("hi-from-dev"), "no profile applied: {url2}");
+}
+
+#[tokio::test]
+async fn run_masks_secret_query_value_in_echoed_request_url() {
+    // P0-2 on the `run` surface: a {{apikey}}-substituted secret-named query
+    // value must be masked in data.request.url (the real request still sent it).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/data"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
 
     let output = churl_in(
         dir.path(),
-        &[
-            "--json",
-            "--var",
-            &format!("base_url={}", server.uri()),
-            "run",
-            "api/users/Get User",
-        ],
+        &["--json", "--var", "apikey=REALKEY", "run", "Secret Query"],
     );
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(envelope(&output)["data"]["response"]["status"], 200);
+    let echoed = envelope(&output)["data"]["request"]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !echoed.contains("REALKEY"),
+        "secret leaked in url: {echoed}"
+    );
+    assert!(echoed.contains("api_key="), "key name kept: {echoed}");
+}
+
+#[test]
+fn run_corrupt_global_config_is_exit_3_config_error_not_exit_1() {
+    // P0-1 on the `run` surface: a malformed global config surfaces a band-3
+    // envelope, never an exit-1 bubble with empty stdout.
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), "http://example.invalid");
+    let cfg = dir.path().join("bad-config.toml");
+    std::fs::write(&cfg, "redirect = \"nonsense\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_churl"))
+        .args(["--json", "run", "Ping"])
+        .current_dir(dir.path())
+        .env("CHURL_CONFIG", &cfg)
+        .output()
+        .expect("spawn churl");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "must be band 3, never exit 1"
+    );
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "config-error");
 }
 
 #[test]

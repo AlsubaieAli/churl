@@ -19,9 +19,16 @@ fn churl(args: &[&str]) -> Output {
         "churl-cli-send-test-nonexistent-config-{}.toml",
         std::process::id()
     ));
+    churl_with_config(args, &missing_config)
+}
+
+/// Runs the binary with `CHURL_CONFIG` pinned to `config` — lets a test point
+/// at a deliberately corrupt config file to exercise the pre-flight failure
+/// surface.
+fn churl_with_config(args: &[&str], config: &std::path::Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_churl"))
         .args(args)
-        .env("CHURL_CONFIG", missing_config)
+        .env("CHURL_CONFIG", config)
         .output()
         .expect("failed to spawn churl")
 }
@@ -264,11 +271,135 @@ fn send_missing_url_is_a_clap_usage_error_exit_2() {
     );
 }
 
+#[tokio::test]
+async fn send_human_mode_prints_body_on_stdout() {
+    // No --json: human mode prints the raw response body on stdout (curl-like,
+    // so `churl send URL | jq` works).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/echo"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("the-body"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/echo", server.uri());
+
+    let output = churl(&["send", &url]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "the-body");
+}
+
+// --- P0-1 pre-flight failure surface (regression) ---
+
 #[test]
-fn send_human_mode_prints_body_on_stdout() {
-    // No --json: human mode. We can't easily mock here without an async
-    // runtime, so just check the non-json/no-URL usage error path stays on
-    // stderr, keeping stdout reserved for response bodies.
-    let output = churl(&["send"]);
+fn send_corrupt_global_config_is_exit_3_config_error_not_exit_1() {
+    // A malformed global config must surface a band-3 envelope, NEVER an exit-1
+    // anyhow bubble (exit 1 is RESERVED for assertion failure) with empty
+    // stdout under --json.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, "redirect = \"not-a-valid-policy\"\n").unwrap();
+
+    let output = churl_with_config(&["--json", "send", "http://127.0.0.1:1/"], &cfg);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "must be band 3, never exit 1"
+    );
+    let env = envelope(&output); // asserts stdout carries a valid, non-empty envelope
+    assert_eq!(env["ok"], false);
+    assert!(env["data"].is_null());
+    assert_eq!(env["error"]["kind"], "config-error");
+}
+
+#[test]
+fn send_malformed_var_is_a_clap_usage_error_exit_2() {
+    // A `--var` without `=` is a clap value-parser failure → band 2, envelope-
+    // exempt, never bubbles out of main as exit 1.
+    let output = churl(&["--json", "send", "--var", "noequals", "http://127.0.0.1:1/"]);
     assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "clap usage errors print to stderr, not stdout"
+    );
+}
+
+// --- P0-2 request.url masking (success surface) ---
+
+#[tokio::test]
+async fn send_masks_userinfo_password_in_echoed_request_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    // Inject `admin:s3cr3t@` userinfo into the wiremock URL.
+    let host_port = server.uri().strip_prefix("http://").unwrap().to_owned();
+    let url = format!("http://admin:s3cr3t@{host_port}/x");
+
+    let output = churl(&["--json", "send", &url]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    let echoed = env["data"]["request"]["url"].as_str().unwrap();
+    assert!(
+        !echoed.contains("s3cr3t"),
+        "password leaked in url: {echoed}"
+    );
+    assert!(
+        echoed.contains("admin"),
+        "username should stay visible: {echoed}"
+    );
+}
+
+#[tokio::test]
+async fn send_masks_userinfo_password_in_verbose_stderr_trace() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+    let host_port = server.uri().strip_prefix("http://").unwrap().to_owned();
+    let url = format!("http://admin:s3cr3t@{host_port}/x");
+
+    // Human mode + -v prints the request line on stderr; it must be masked too.
+    let output = churl(&["send", "-v", &url]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("s3cr3t"),
+        "password leaked in -v trace: {stderr}"
+    );
+}
+
+// --- P0-3 request.url masking (failure surface) ---
+
+#[test]
+fn send_invalid_url_masks_userinfo_in_error_message_and_detail() {
+    // A non-numeric port makes reqwest's URL parse fail (InvalidUrl); the URL
+    // still carries a `user:pass@` password that must not leak into either the
+    // human message or the structured detail.
+    let output = churl(&[
+        "--json",
+        "send",
+        "http://admin:s3cr3t@host.example.com:notaport/x",
+    ]);
+    assert_eq!(output.status.code(), Some(4));
+    let env = envelope(&output);
+    assert_eq!(env["error"]["kind"], "invalid-url");
+    let message = env["error"]["message"].as_str().unwrap();
+    let detail_url = env["error"]["detail"]["url"].as_str().unwrap();
+    assert!(!message.contains("s3cr3t"), "leaked in message: {message}");
+    assert!(
+        !detail_url.contains("s3cr3t"),
+        "leaked in detail.url: {detail_url}"
+    );
 }
