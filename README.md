@@ -155,23 +155,41 @@ cargo install churl --version 0.2.0-beta.1
 
 ## Quickstart
 
-The fastest way to get started is `churl tutorial`, which scaffolds a demo workspace
-with example endpoints, a profile, and template variables:
+The fastest way to get started is `churl init --demo`, which scaffolds a demo
+workspace with example endpoints, a profile, and template variables:
 
 ```sh
-churl tutorial          # scaffolds ./churl-tutorial/
-cd churl-tutorial
+mkdir my-api && cd my-api
+churl init --demo       # scaffolds churl.toml + example endpoints in the cwd
 churl                   # opens the TUI — select an endpoint and press Ctrl-S to send
 ```
 
-Or scaffold to a custom directory:
+Or scaffold directly to a new directory:
 
 ```sh
-churl tutorial --dir ~/my-api
+churl init --demo ~/my-api
 ```
 
 The demo workspace targets [httpbingo.org](https://httpbingo.org) — a public HTTP
 echo service — so your first request works immediately without any sign-up.
+
+Prefer no scaffold at all? `churl init` (without `--demo`) writes just a blank
+`churl.toml` — handy right before `churl import`ing your first endpoint.
+
+## Headless / agent use
+
+churl also runs without the TUI, for scripts, CI, and AI agents. `churl send`
+fires an ad-hoc request from inline flags (curl-mnemonic `-X`/`-H`/`-d`/`--url`
+or churl-native `--method`/`--header`/`--body` — no workspace required);
+`churl run <endpoint>` executes a saved endpoint by its
+`collection/endpoint name` path. Add `--json` to either for a single
+machine-readable envelope on stdout with a frozen schema and stable exit codes
+— see [`docs/CLI.md`](docs/CLI.md).
+
+```sh
+churl send https://httpbingo.org/get
+churl --json run "examples/Get Anything" | jq .data.response.status
+```
 
 ---
 

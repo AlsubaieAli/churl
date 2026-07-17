@@ -52,8 +52,9 @@ use atomic::{load_value, normalize_table, save_value, sort_endpoints};
 // live in child modules (endpoints/sequences/workspace). Their public items are
 // re-exported `pub` so every `persistence::X` path is unchanged.
 pub use endpoints::{
-    create_collection, create_endpoint, delete_collection, delete_endpoint, endpoint_to_toml,
-    load_endpoint, rename_collection, rename_endpoint, save_endpoint, save_endpoint_checked,
+    create_collection, create_endpoint, create_endpoint_with, delete_collection, delete_endpoint,
+    endpoint_to_toml, load_endpoint, rename_collection, rename_endpoint, save_endpoint,
+    save_endpoint_checked,
 };
 pub use refs::retarget_sequence_steps;
 pub use relocate::{

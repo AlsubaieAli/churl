@@ -1,11 +1,19 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
+use serde::Serialize;
 
-mod tutorial;
+use output::{CliError, ErrorKind};
+
+mod headless;
+mod init;
+mod output;
+mod resolve;
+mod run_cmd;
+mod send_cmd;
 mod uninstall;
 mod update;
 
@@ -13,9 +21,10 @@ mod update;
 #[command(name = "churl", about = "Terminal HTTP client", version)]
 struct Cli {
     /// Set a template variable (repeatable): `--var key=value`. Highest-precedence
-    /// scope in the `{{var}}` resolver, above profiles and workspace vars.
-    #[arg(long = "var", value_name = "KEY=VALUE", global = true)]
-    vars: Vec<String>,
+    /// scope in the `{{var}}` resolver, above profiles and workspace vars. A
+    /// missing `=` is a usage error (parsed by clap → exit 2).
+    #[arg(long = "var", value_name = "KEY=VALUE", global = true, value_parser = parse_var)]
+    vars: Vec<(String, String)>,
     /// Activate a named profile at startup (unknown name is an error).
     #[arg(long, global = true)]
     profile: Option<String>,
@@ -33,30 +42,84 @@ struct Cli {
     /// `<leader>k`. Use with care.
     #[arg(short = 'k', long = "insecure", global = true)]
     insecure: bool,
+    /// Emit a single machine-readable JSON envelope on stdout instead of
+    /// human-readable output — for `run`/`send`/`import` (see docs/CLI.md for
+    /// the frozen schema). Disables color, spinners, prompts, and bracketed
+    /// paste. Every other subcommand ignores this flag.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Import a curl command as an endpoint (prints TOML; --out writes a file).
+    /// Import a curl command as an endpoint into the cwd workspace (`--stdout`
+    /// prints TOML instead; `--out FILE` writes an arbitrary file).
     ///
     /// Three input forms: paste the whole command as ONE quoted string
     /// (`churl import "curl 'url' -H '…'"`); paste it RAW so the shell tokenises it
     /// (`churl import curl 'url' -H '…'` — `-H` etc. are captured, not parsed as
     /// churl flags); or omit it / pass `-` to read from stdin
-    /// (`pbpaste | churl import`). Put `--name`/`--out` BEFORE the command.
+    /// (`pbpaste | churl import`). Put `--name`/`--stdout`/`--out` BEFORE the command.
     Import {
         /// Override the endpoint name derived from the URL (place before the curl)
         #[arg(long)]
         name: Option<String>,
-        /// Write the endpoint TOML to this file instead of stdout (place before the curl)
+        /// Print the endpoint TOML to stdout instead of writing it into the cwd
+        /// workspace (the pre-M8.2 default; place before the curl)
+        #[arg(long, conflicts_with = "out")]
+        stdout: bool,
+        /// Write the endpoint TOML to this file instead of the cwd workspace
+        /// (place before the curl)
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
         /// The curl command: one quoted string, raw trailing tokens, or empty/`-`
         /// to read from stdin.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         curl: Vec<String>,
+    },
+    /// Execute a saved endpoint headlessly — no TUI. Resolves `endpoint` from
+    /// the cwd workspace, applies `--var`/`--profile`, and prints the response
+    /// (body on stdout; `--json` for the full structured envelope).
+    Run {
+        /// Endpoint path: `collection/sub/endpoint name` (root-level: just the
+        /// endpoint's name). Quote it when the name has spaces.
+        endpoint: String,
+        /// Print a request/response debug trace to stderr (human mode only —
+        /// `--json` output is unaffected).
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
+    /// Send an ad-hoc one-shot request — no saved endpoint, no workspace
+    /// required. Accepts curl-mnemonic flags (`-X`/`-H`/`-d`/`--url`) and
+    /// churl-native aliases (`--method`/`--header`/`--body`); `--var` still
+    /// applies (and `--profile`/workspace vars, when the cwd happens to be one).
+    Send {
+        /// Target URL (or use `--url`)
+        #[arg(
+            value_name = "URL",
+            conflicts_with = "url",
+            required_unless_present = "url"
+        )]
+        url_pos: Option<String>,
+        /// Target URL (alternative to the positional form)
+        #[arg(long = "url", value_name = "URL")]
+        url: Option<String>,
+        /// HTTP method; curl `-X`, churl `--method` (default: GET, or POST when
+        /// `--body`/`-d` is given and no explicit method — curl semantics)
+        #[arg(short = 'X', long = "method", value_name = "METHOD", value_parser = send_cmd::parse_method)]
+        method: Option<churl_core::model::Method>,
+        /// Request header `Name: Value`; curl `-H`, churl `--header` (repeatable)
+        #[arg(short = 'H', long = "header", value_name = "NAME:VALUE", value_parser = send_cmd::parse_header)]
+        header: Vec<(String, String)>,
+        /// Request body; curl `-d`, churl `--body`
+        #[arg(short = 'd', long = "body", value_name = "BODY")]
+        body: Option<String>,
+        /// Print a request/response debug trace to stderr (human mode only —
+        /// `--json` output is unaffected).
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
@@ -65,12 +128,24 @@ enum Command {
         #[command(subcommand)]
         action: CookiesAction,
     },
-    /// Scaffold a demo workspace to get started quickly
-    Tutorial {
-        /// Directory to scaffold (default: ./churl-tutorial)
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
+    /// Scaffold a churl workspace: a blank `churl.toml` by default, or a demo
+    /// workspace with example endpoints via `--demo`.
+    Init {
+        /// Directory to scaffold (default: the current directory)
+        path: Option<PathBuf>,
+        /// Scaffold the demo workspace (example endpoints, a profile, and
+        /// template variables targeting httpbingo.org) instead of a blank one
+        #[arg(long)]
+        demo: bool,
     },
+    /// Print a shell completion script for `churl` to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print a roff(7) man page for `churl` to stdout
+    Man,
     /// Update churl in place to the latest GitHub release (verified, reversible)
     Update {
         /// Report the available version and exit without downloading or replacing
@@ -100,50 +175,137 @@ enum CookiesAction {
     Clear,
 }
 
-/// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
-fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut vars = BTreeMap::new();
-    for pair in pairs {
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| eyre!("bad --var {pair:?}: expected key=value"))?;
-        vars.insert(key.to_owned(), value.to_owned());
+/// clap value-parser for `--var key=value`. A missing `=` is a genuine clap
+/// usage error (exit 2, clap-owned — envelope-exempt per the contract's band-2
+/// carve-out), so a malformed `--var` never bubbles out of `main` as an
+/// exit-1 anyhow error under `--json`.
+fn parse_var(pair: &str) -> std::result::Result<(String, String), String> {
+    match pair.split_once('=') {
+        Some((key, value)) => Ok((key.to_owned(), value.to_owned())),
+        None => Err(format!("expected key=value, got {pair:?}")),
     }
-    Ok(vars)
+}
+
+/// Collects the clap-parsed `--var` pairs into a map (last write wins, matching
+/// the old `parse_vars` insertion order).
+fn vars_map(pairs: &[(String, String)]) -> BTreeMap<String, String> {
+    pairs.iter().cloned().collect()
+}
+
+/// Process-wide execution knobs sourced from the global config file only
+/// (never per-invocation) — resolved once per `run`/`send` invocation, so
+/// neither headless command needs its own fallible config-parsing path.
+struct RuntimeCfg {
+    timeout: std::time::Duration,
+    proxy: Option<String>,
+    insecure: bool,
+    max_body_bytes: u64,
+    redirect: churl_core::config::RedirectPolicy,
+}
+
+/// Resolves [`RuntimeCfg`] from the global config, mapping any failure to a
+/// band-3 [`ErrorKind::ConfigError`] `CliError` so it flows through
+/// [`output::emit`] as a proper envelope (never an exit-1 anyhow bubble that
+/// would collide with the RESERVED assertion-failure code and print no
+/// envelope under `--json`). A corrupt config is a pre-flight *resolution*
+/// failure, not a usage error — hence band 3, not band 2.
+fn build_runtime_cfg() -> std::result::Result<RuntimeCfg, CliError> {
+    let config = churl_core::config::load_global_config()
+        .map_err(|err| CliError::new(ErrorKind::ConfigError, err.to_string()))?;
+    let redirect = config
+        .redirect()
+        .map_err(|err| CliError::new(ErrorKind::ConfigError, err.to_string()))?;
+    Ok(RuntimeCfg {
+        timeout: config.timeout(),
+        proxy: config.proxy().map(str::to_owned),
+        insecure: config.insecure(),
+        max_body_bytes: config.max_body_bytes(),
+        redirect,
+    })
+}
+
+/// The current working directory, mapped to a band-3 [`ErrorKind::ConfigError`]
+/// `CliError` on failure so a `run`/`send` invocation in an unreadable/deleted
+/// cwd surfaces an envelope rather than an exit-1 bubble.
+fn headless_cwd() -> std::result::Result<PathBuf, CliError> {
+    std::env::current_dir().map_err(|err| {
+        CliError::new(
+            ErrorKind::ConfigError,
+            format!("cannot determine current directory: {err}"),
+        )
+    })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let json = cli.json;
 
     match cli.command {
-        Some(Command::Import { name, out, curl }) => {
-            // Dispatch on how many trailing tokens the shell handed us:
-            //   • 0 tokens (or a lone `-`) → read the whole command from stdin
-            //     (multi-line paste survives without the shell mangling it). Guard
-            //     against a hang: reading a TTY blocks forever on Ctrl-D, so refuse
-            //     with a usage hint when stdin is an interactive terminal.
-            //   • exactly 1 token → a full command STRING → `import_curl` (shlex).
-            //   • >1 tokens → the shell already tokenised the curl → parse the
-            //     tokens directly (no re-tokenising) via `import_curl_tokens`.
-            let is_stdin = curl.is_empty() || (curl.len() == 1 && curl[0] == "-");
-            let parsed = if is_stdin {
-                use std::io::IsTerminal;
-                if std::io::stdin().is_terminal() {
-                    return Err(eyre!(
-                        "no curl command given: provide it as an argument, \
-                         or pipe one in — e.g. `pbpaste | churl import -`"
-                    ));
-                }
-                let mut buf = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                churl_core::import::import_curl(&buf)
-            } else if curl.len() == 1 {
-                churl_core::import::import_curl(&curl[0])
-            } else {
-                churl_core::import::import_curl_tokens(curl)
-            };
-            run_import(parsed, name, out)?;
+        Some(Command::Import {
+            name,
+            stdout,
+            out,
+            curl,
+        }) => {
+            std::process::exit(run_import(curl, name, stdout, out, json));
+        }
+        Some(Command::Run { endpoint, verbose }) => {
+            // Every fallible pre-flight step (config, cwd, resolution, execution)
+            // funnels into one `Result<ExecData, CliError>` so `emit` owns the
+            // stdout/stderr/exit-code triad — nothing bubbles out of `main` as an
+            // exit-1 anyhow error that would carry no envelope under `--json`.
+            let cli_vars = vars_map(&cli.vars);
+            let result = async {
+                let runtime = build_runtime_cfg()?;
+                let cwd = headless_cwd()?;
+                let args = run_cmd::RunArgs {
+                    endpoint_path: endpoint,
+                    cli_vars,
+                    profile: cli.profile.clone(),
+                    proxy: cli.proxy.clone(),
+                    insecure: cli.insecure,
+                    verbose,
+                };
+                run_cmd::run(args, &cwd, &runtime).await
+            }
+            .await;
+            let code = output::emit("run", json, result, |data| {
+                headless::print_human(data, verbose)
+            });
+            std::process::exit(code);
+        }
+        Some(Command::Send {
+            url_pos,
+            url,
+            method,
+            header,
+            body,
+            verbose,
+        }) => {
+            let cli_vars = vars_map(&cli.vars);
+            let result = async {
+                let runtime = build_runtime_cfg()?;
+                let cwd = headless_cwd()?;
+                let args = send_cmd::SendArgs {
+                    url: url_pos
+                        .or(url)
+                        .expect("clap enforces exactly one of url_pos/url"),
+                    method,
+                    headers: header,
+                    body,
+                    cli_vars,
+                    profile: cli.profile.clone(),
+                    proxy: cli.proxy.clone(),
+                    insecure: cli.insecure,
+                };
+                send_cmd::run(args, &cwd, &runtime).await
+            }
+            .await;
+            let code = output::emit("send", json, result, |data| {
+                headless::print_human(data, verbose)
+            });
+            std::process::exit(code);
         }
         Some(Command::Keymaps) => {
             run_keymaps()?;
@@ -151,8 +313,17 @@ async fn main() -> Result<()> {
         Some(Command::Cookies { action }) => {
             run_cookies(action)?;
         }
-        Some(Command::Tutorial { dir }) => {
-            tutorial::run_tutorial(dir)?;
+        Some(Command::Init { path, demo }) => {
+            init::run_init(path, demo)?;
+        }
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_owned();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+        }
+        Some(Command::Man) => {
+            let cmd = Cli::command();
+            clap_mangen::Man::new(cmd).render(&mut std::io::stdout())?;
         }
         Some(Command::Update { check, yes }) => {
             update::run_update(check, yes).await?;
@@ -161,7 +332,7 @@ async fn main() -> Result<()> {
             uninstall::run_uninstall(purge, yes)?;
         }
         None => {
-            let vars = parse_vars(&cli.vars)?;
+            let vars = vars_map(&cli.vars);
             // Import into the cwd workspace *before* the TUI launches (fail loudly
             // on a bad file — never launch a half-imported TUI silently).
             if let Some(file) = &cli.import_collection {
@@ -362,42 +533,168 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// `churl import`: take an already-parsed import result, print the endpoint's
-/// TOML to stdout (warnings on stderr), or write it through the persistence save
-/// with `--out`. A parse failure prints the error on stderr and exits non-zero.
+/// Where `churl import` landed the endpoint — the `written` field of the
+/// import envelope's `data`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WrittenTo {
+    /// `--stdout`: the endpoint TOML, not written to disk.
+    Stdout { toml: String },
+    /// `--out FILE`: written to an arbitrary path outside any workspace.
+    File { path: String },
+    /// Default: written into the cwd workspace via the normal endpoint CRUD
+    /// seam (auto-slugged, collision-suffixed filename).
+    Workspace { path: String },
+}
+
+/// The `data` payload of a successful `import` envelope.
+#[derive(Debug, Serialize)]
+struct ImportData {
+    name: String,
+    method: String,
+    url: String,
+    warnings: Vec<String>,
+    written: WrittenTo,
+}
+
+/// Maps a curl-parse failure onto the frozen `not-a-curl-command` slug (band
+/// 5) — every [`churl_core::import::ImportError`] variant is, from the
+/// caller's point of view, "the input you gave me is not a curl command I can
+/// import."
+fn from_import_error(err: churl_core::import::ImportError) -> CliError {
+    CliError::new(ErrorKind::NotACurlCommand, err.to_string())
+}
+
+/// `churl import`: parses `curl_input` (trailing tokens from the CLI — either
+/// zero/`-` for stdin, one quoted string, or several raw shell-tokenised
+/// args), then writes the resulting endpoint per `stdout`/`out`/the cwd
+/// workspace default, and prints/emits the result. Returns the process exit
+/// code.
 ///
 /// The CLI has no live session, so any placeholdered secret (`{{token}}` /
 /// `{{password}}`) stays a placeholder — the `no secrets in workspace files`
 /// warning already tells the user to bind it via a profile/env. The real secret
-/// value in `captured_secrets` is deliberately NOT printed (stdout/`--out` land
-/// on disk).
+/// value in `captured_secrets` is deliberately NOT printed or emitted.
 fn run_import(
-    parsed: Result<churl_core::import::ImportResult, churl_core::import::ImportError>,
+    curl_input: Vec<String>,
     name: Option<String>,
+    stdout: bool,
     out: Option<PathBuf>,
-) -> Result<()> {
-    let result = match parsed {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!("error: {err}");
-            std::process::exit(1);
+    json: bool,
+) -> i32 {
+    // Dispatch on how many trailing tokens the shell handed us:
+    //   • 0 tokens (or a lone `-`) → read the whole command from stdin
+    //     (multi-line paste survives without the shell mangling it). Guard
+    //     against a hang: reading a TTY blocks forever on Ctrl-D, so refuse
+    //     with a usage hint when stdin is an interactive terminal — never
+    //     block waiting for input that will never come (non-interactive
+    //     guarantee).
+    //   • exactly 1 token → a full command STRING → `import_curl` (shlex).
+    //   • >1 tokens → the shell already tokenised the curl → parse the
+    //     tokens directly (no re-tokenising) via `import_curl_tokens`.
+    let is_stdin = curl_input.is_empty() || (curl_input.len() == 1 && curl_input[0] == "-");
+    let parsed: Result<churl_core::import::ImportResult, CliError> = if is_stdin {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            Err(CliError::new(
+                ErrorKind::NotACurlCommand,
+                "no curl command given: provide it as an argument, or pipe one in — \
+                 e.g. `pbpaste | churl import -`",
+            ))
+        } else {
+            let mut buf = String::new();
+            match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+                Ok(_) => churl_core::import::import_curl(&buf).map_err(from_import_error),
+                Err(err) => Err(CliError::new(
+                    ErrorKind::NotACurlCommand,
+                    format!("failed to read stdin: {err}"),
+                )),
+            }
         }
+    } else if curl_input.len() == 1 {
+        churl_core::import::import_curl(&curl_input[0]).map_err(from_import_error)
+    } else {
+        churl_core::import::import_curl_tokens(curl_input).map_err(from_import_error)
     };
-    let mut endpoint = result.endpoint;
-    if let Some(name) = name {
-        endpoint.name = name;
-    }
-    for warning in &result.warnings {
-        eprintln!("warning: {warning}");
-    }
-    match out {
-        Some(path) => {
-            churl_core::persistence::save_endpoint(&path, &endpoint)?;
-            eprintln!("wrote {}", path.display());
+
+    let result: Result<ImportData, CliError> = parsed.and_then(|parsed| {
+        let mut endpoint = parsed.endpoint;
+        if let Some(name) = name {
+            endpoint.name = name;
         }
-        None => print!("{}", churl_core::persistence::endpoint_to_toml(&endpoint)?),
-    }
-    Ok(())
+        let mut warnings = parsed.warnings;
+
+        let written = if stdout {
+            let toml = churl_core::persistence::endpoint_to_toml(&endpoint)
+                .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
+            WrittenTo::Stdout { toml }
+        } else if let Some(path) = out {
+            churl_core::persistence::save_endpoint(&path, &endpoint)
+                .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
+            WrittenTo::File {
+                path: path.display().to_string(),
+            }
+        } else {
+            let cwd = std::env::current_dir()
+                .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
+            let workspace = churl::tui::app::open_workspace(&cwd)
+                .map_err(|err| CliError::new(ErrorKind::NoWorkspace, err.to_string()))?
+                .ok_or_else(|| {
+                    CliError::new(
+                        ErrorKind::NoWorkspace,
+                        format!(
+                            "no churl workspace at {} (no churl.toml) — run `churl init` \
+                             first, or use --stdout/--out",
+                            cwd.display()
+                        ),
+                    )
+                })?;
+            // Single atomic claim+save: a refused literal secret or a disk error
+            // leaves the workspace unchanged (no orphaned placeholder). On a
+            // filename collision `create_endpoint_with` bumps the stem AND sets
+            // the saved `name` to it, so both endpoints stay addressable.
+            let requested_slug = churl_core::persistence::slug_of(&endpoint.name);
+            let claimed =
+                churl_core::persistence::create_endpoint_with(workspace.root(), &endpoint)
+                    .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
+            let claimed_stem = claimed
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if claimed_stem != requested_slug {
+                // The name was bumped to avoid a collision — reflect the saved,
+                // addressable name in the envelope + warn (loud, never silent).
+                warnings.push(format!(
+                    "named {claimed_stem:?} to avoid a filename collision with {:?}",
+                    endpoint.name
+                ));
+                endpoint.name = claimed_stem.to_owned();
+            }
+            WrittenTo::Workspace {
+                path: claimed.display().to_string(),
+            }
+        };
+
+        Ok(ImportData {
+            name: endpoint.name.clone(),
+            method: endpoint.request.method.to_string(),
+            url: endpoint.request.url.clone(),
+            warnings,
+            written,
+        })
+    });
+
+    output::emit("import", json, result, |data| {
+        for warning in &data.warnings {
+            eprintln!("warning: {warning}");
+        }
+        match &data.written {
+            WrittenTo::Stdout { toml } => print!("{toml}"),
+            WrittenTo::File { path } | WrittenTo::Workspace { path } => {
+                eprintln!("wrote {path}")
+            }
+        }
+    })
 }
 
 /// Install color-eyre panic and error hooks that restore the terminal before
@@ -449,6 +746,13 @@ mod tests {
         let bare = Cli::try_parse_from(["churl"]).unwrap();
         assert!(bare.proxy.is_none());
         assert!(!bare.insecure);
+        assert!(!bare.json);
+    }
+
+    #[test]
+    fn cli_parses_json_flag() {
+        let cli = Cli::try_parse_from(["churl", "--json", "run", "ep"]).unwrap();
+        assert!(cli.json);
     }
 
     #[test]
@@ -479,6 +783,72 @@ mod tests {
             Some(std::path::Path::new("coll.json"))
         );
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_send_requires_a_url() {
+        // Neither positional nor --url: clap's own usage error (exit 2 band).
+        assert!(Cli::try_parse_from(["churl", "send"]).is_err());
+        // Exactly one is fine, either form.
+        assert!(Cli::try_parse_from(["churl", "send", "https://x.test"]).is_ok());
+        assert!(Cli::try_parse_from(["churl", "send", "--url", "https://x.test"]).is_ok());
+        // Both at once is a usage error too.
+        assert!(
+            Cli::try_parse_from(["churl", "send", "https://x.test", "--url", "https://y.test"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_send_parses_curl_mnemonic_and_churl_native_flags() {
+        let cli = Cli::try_parse_from([
+            "churl",
+            "send",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            "{}",
+            "https://x.test",
+        ])
+        .unwrap();
+        let Some(Command::Send {
+            method,
+            header,
+            body,
+            url_pos,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected Send");
+        };
+        assert_eq!(method, Some(churl_core::model::Method::Post));
+        assert_eq!(
+            header,
+            vec![("Content-Type".to_owned(), "application/json".to_owned())]
+        );
+        assert_eq!(body.as_deref(), Some("{}"));
+        assert_eq!(url_pos.as_deref(), Some("https://x.test"));
+
+        let native = Cli::try_parse_from([
+            "churl",
+            "send",
+            "--method",
+            "PUT",
+            "--header",
+            "X-A: b",
+            "--body",
+            "hi",
+            "--url",
+            "https://x.test",
+        ])
+        .unwrap();
+        let Some(Command::Send { method, header, .. }) = native.command else {
+            panic!("expected Send");
+        };
+        assert_eq!(method, Some(churl_core::model::Method::Put));
+        assert_eq!(header, vec![("X-A".to_owned(), "b".to_owned())]);
     }
 
     #[test]

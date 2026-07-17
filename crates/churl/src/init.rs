@@ -1,5 +1,10 @@
-//! `churl tutorial` — scaffolds a demo workspace so a first-time user can
-//! send a request in under a minute.
+//! `churl init [path] [--demo]` — scaffolds a churl workspace.
+//!
+//! Plain `init` writes just a blank root manifest (`churl.toml`, no
+//! collections/endpoints) into the cwd or `[path]`. `init --demo` additionally
+//! scaffolds the same three-endpoint demo collection the old `churl tutorial`
+//! subcommand used to (that subcommand is gone — hard-removed, no alias — see
+//! DECISIONS.md).
 //!
 //! The scaffold uses the real persistence seams (`create_collection`,
 //! `create_endpoint`, `save_endpoint`, `save_collection_meta`,
@@ -19,33 +24,75 @@ use churl_core::persistence::{
     save_workspace_manifest,
 };
 
-/// Runs `churl tutorial [--dir DIR]`.
+/// Runs `churl init [path] [--demo]`.
 ///
-/// Scaffolds a demo workspace at `dir` (default: `./churl-tutorial`).
-/// Refuses to overwrite a non-empty existing directory — the user must
-/// delete it first or pass a different `--dir`.
-pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
-    let root = dir.unwrap_or_else(|| PathBuf::from("churl-tutorial"));
+/// Target directory: `path` if given, else the current directory (like `git
+/// init` — unlike the old `tutorial`, which always created a fresh
+/// `./churl-tutorial` subdirectory). Refuses only when a `churl.toml` already
+/// exists at the target (never demands the whole directory be empty — `init`
+/// in an existing project directory, alongside unrelated files, is the normal
+/// case).
+pub fn run_init(dir: Option<PathBuf>, demo: bool) -> Result<()> {
+    let root = dir.unwrap_or_else(|| PathBuf::from("."));
 
-    // Refuse to overwrite a non-empty directory.
-    if root.exists() {
-        let is_empty = root
-            .read_dir()
-            .with_context(|| format!("cannot read {}", root.display()))?
-            .next()
-            .is_none();
-        if !is_empty {
-            bail!(
-                "{} already exists and is not empty — delete it first or use --dir to choose a different location",
-                root.display()
-            );
-        }
-    } else {
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("cannot create {}", root.display()))?;
+    std::fs::create_dir_all(&root).with_context(|| format!("cannot create {}", root.display()))?;
+
+    let manifest_path = root.join("churl.toml");
+    if manifest_path.exists() {
+        bail!(
+            "a churl workspace already exists at {} (churl.toml present)",
+            root.display()
+        );
     }
 
-    // --- workspace manifest (churl.toml) ---
+    let name = workspace_name(&root);
+
+    if demo {
+        scaffold_demo(&root, &name)?;
+    } else {
+        save_workspace_manifest(
+            &root,
+            &Workspace {
+                name,
+                ..Default::default()
+            },
+        )
+        .with_context(|| format!("failed to write {}/churl.toml", root.display()))?;
+    }
+
+    let display = root.display();
+    println!("Initialized churl workspace at {display}");
+    println!();
+    println!("Next steps:");
+    if root != Path::new(".") {
+        println!("  cd {display}");
+    }
+    println!("  churl                    # open the TUI");
+    println!("  churl run <endpoint>     # or send an endpoint headlessly");
+    if demo {
+        println!();
+        println!("Select an endpoint in the explorer and press Ctrl-S (or <leader>s) to send it.");
+        println!("Press ? to open the help overlay and see all keybindings.");
+    }
+
+    Ok(())
+}
+
+/// Derives a workspace display name from the target directory: its final path
+/// component, or `"workspace"` when none can be determined (e.g. `init` at a
+/// filesystem root).
+fn workspace_name(root: &Path) -> String {
+    root.canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "workspace".to_owned())
+}
+
+/// Scaffolds the demo workspace: manifest with `base_url`/`greeting` vars and
+/// a `dev` profile, an `examples` collection, and three endpoints hitting
+/// [httpbingo.org](https://httpbingo.org) — carried over verbatim from the old
+/// `churl tutorial` scaffold.
+fn scaffold_demo(root: &Path, name: &str) -> Result<()> {
     let mut ws_vars = BTreeMap::new();
     ws_vars.insert("base_url".to_owned(), "https://httpbingo.org".to_owned());
     ws_vars.insert("greeting".to_owned(), "hello".to_owned());
@@ -56,7 +103,7 @@ pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
     dev_vars.insert("greeting".to_owned(), "hello-from-dev".to_owned());
 
     let ws = Workspace {
-        name: "churl-tutorial".to_owned(),
+        name: name.to_owned(),
         vars: ws_vars,
         profiles: vec![Profile {
             name: "dev".to_owned(),
@@ -64,41 +111,22 @@ pub fn run_tutorial(dir: Option<PathBuf>) -> Result<()> {
         }],
         ..Default::default()
     };
-    save_workspace_manifest(&root, &ws)
+    save_workspace_manifest(root, &ws)
         .with_context(|| format!("failed to write {}/churl.toml", root.display()))?;
 
-    // --- collection directory ---
-    let coll_dir = create_collection(&root, "examples", &root)
+    let coll_dir = create_collection(root, "examples", root)
         .with_context(|| "failed to create 'examples' collection")?;
 
     // Write a default (empty-vars) folder.toml.
     save_collection_meta(&coll_dir, &Default::default())
         .with_context(|| "failed to write examples/folder.toml")?;
 
-    // --- endpoints ---
-    scaffold_endpoints(&coll_dir)?;
-
-    // --- next steps ---
-    let display = root.display();
-    println!("Created tutorial workspace at {display}");
-    println!();
-    println!("Next steps:");
-    if root == Path::new("churl-tutorial") {
-        println!("  cd churl-tutorial");
-    } else {
-        println!("  cd {display}");
-    }
-    println!("  churl");
-    println!();
-    println!("Select an endpoint in the explorer and press Ctrl-S (or <leader>s) to send it.");
-    println!("Press ? to open the help overlay and see all keybindings.");
-
-    Ok(())
+    scaffold_demo_endpoints(&coll_dir)
 }
 
-/// Writes the three tutorial endpoints into `coll_dir` using only real
+/// Writes the three demo endpoints into `coll_dir` using only real
 /// persistence seams — never hand-written TOML strings.
-fn scaffold_endpoints(coll_dir: &Path) -> Result<()> {
+fn scaffold_demo_endpoints(coll_dir: &Path) -> Result<()> {
     // 1. Get Anything — GET {{base_url}}/anything?name=churl
     {
         let path = create_endpoint(coll_dir, "Get Anything")

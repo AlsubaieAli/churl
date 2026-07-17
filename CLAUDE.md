@@ -124,9 +124,17 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k, subcommands (import, keymaps,
-                           #   cookies list|clear, tutorial, update, uninstall) | TUI; #[tokio::main]
-      tutorial.rs          # churl tutorial subcommand: scaffold demo workspace via real persistence seams
+      main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k/--json, subcommands (run, send,
+                           #   import, init [--demo], keymaps, cookies list|clear, completions, man, update,
+                           #   uninstall) | TUI; #[tokio::main] (M8.2 CLI & headless — see docs/CLI.md)
+      output.rs            # M8.2 machine-output contract: `{schema_version,ok,command,data,error}` JSON envelope,
+                           #   closed ErrorKind slug set banded 1:1 to exit codes (3/4/5), emit() print+exit seam
+      headless.rs          # run_execution: the ONE seam run/send share — substitute {{var}} scopes, refuse an
+                           #   unresolved placeholder, drive the SAME churl_core::http::execute, shape the payload
+      resolve.rs           # `collection/.../endpoint name` path resolution vs churl_core::persistence; --profile validation
+      run_cmd.rs           # churl run <endpoint>: resolve a saved endpoint + its collection var chain, execute headless
+      send_cmd.rs          # churl send: ad-hoc one-shot from curl-mnemonic (-X/-H/-d/--url) or churl-native flags
+      init.rs              # churl init [--demo]: scaffold a blank (or demo) workspace via real persistence seams
       update.rs            # churl update: verified self-replace from GitHub releases (self_replace crate);
                            #   pure target→asset/version-compare/checksum fns, network+swap bin-only
       uninstall.rs         # churl uninstall: binary by default, config+state behind --purge (pure removal_plan)
@@ -180,11 +188,14 @@ crates/
                            #     buffer_unordered launcher + load_abort + generation guard + [load] guardrail)
     tests/
       tui_snapshot.rs      # insta snapshots via TestBackend: panes, overlays, empty state, truncated status line
-      cli_import.rs        # `churl import` integration tests against the real binary
+      cli_import.rs        # `churl import` integration tests: write-default/--stdout/--out, no-workspace, collision, --json
       cli_m6.rs            # CLI integration tests: churl keymaps, --var, --profile
-      cli_tutorial.rs      # `churl tutorial` integration tests: scaffold, refuse-overwrite, workspace load
+      cli_init.rs          # `churl init` integration tests: blank/--demo scaffold, refuse-existing, tutorial-removed
+      cli_run.rs           # `churl run` integration tests (wiremock): envelope bytes + exit codes, nested/root resolution
+      cli_send.rs          # `churl send` integration tests (wiremock): envelope bytes + exit codes, flag styles, masking
 docs/
   ARCHITECTURE.md
+  CLI.md                   # M8.2 frozen CLI & headless contract: --json envelope, exit codes, error.kind mapping
   DECISIONS.md
   ROADMAP.md
 README.md                  # install, quickstart, feature matrix, screenshot placeholder, license

@@ -272,3 +272,57 @@ fn new_file_every_block_finding_is_new() {
     );
     assert_eq!(d.refusals.len(), 2);
 }
+
+// --- URL masking (mask_url) ---
+
+#[test]
+fn mask_url_redacts_userinfo_password() {
+    assert_eq!(
+        mask_url("https://admin:s3cr3t@host.example.com/x"),
+        format!("https://admin:{SECRET_MASK}@host.example.com/x")
+    );
+    // Username kept, password gone.
+    assert!(!mask_url("https://admin:s3cr3t@host/x").contains("s3cr3t"));
+    assert!(mask_url("https://admin:s3cr3t@host/x").contains("admin"));
+}
+
+#[test]
+fn mask_url_leaves_placeholder_password_untouched() {
+    // A `{{var}}` password is not a literal secret — the resolver may not have
+    // filled it (send would refuse an unresolved one anyway).
+    let url = "https://admin:{{password}}@host/x";
+    assert_eq!(mask_url(url), url);
+}
+
+#[test]
+fn mask_url_redacts_secret_named_query_value() {
+    assert_eq!(
+        mask_url("https://host/x?api_key=REALKEY&page=2"),
+        format!("https://host/x?api_key={SECRET_MASK}&page=2")
+    );
+    // Innocent pairs survive verbatim.
+    assert!(mask_url("https://host/x?api_key=REALKEY&page=2").contains("page=2"));
+}
+
+#[test]
+fn mask_url_redacts_secret_shaped_query_value_under_innocent_key() {
+    // Stripe-style token under a non-secret key name → value-anchor fires.
+    let masked = mask_url("https://host/x?ref=sk-abc123DEF456ghi789JKlmno");
+    assert!(!masked.contains("sk-abc123DEF456ghi789JKlmno"), "{masked}");
+    assert!(masked.contains(&format!("ref={SECRET_MASK}")), "{masked}");
+}
+
+#[test]
+fn mask_url_preserves_fragment_and_placeholder_query_value() {
+    // A templated query value stays; the fragment is untouched.
+    let url = "https://host/x?token={{tok}}&q=hi#frag";
+    assert_eq!(mask_url(url), url);
+}
+
+#[test]
+fn mask_url_no_secret_is_byte_identical() {
+    let url = "https://host.example.com/path?page=2&sort=asc";
+    assert_eq!(mask_url(url), url);
+    // No query, no userinfo.
+    assert_eq!(mask_url("https://host/plain"), "https://host/plain");
+}
