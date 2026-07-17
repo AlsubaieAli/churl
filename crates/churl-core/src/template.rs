@@ -155,18 +155,18 @@ impl Resolver {
     /// The traced twin of [`Resolver::substitute`]: identical replacement via
     /// the shared [`substitute_with`] scan (so the returned string is
     /// byte-identical to `substitute`'s), plus a [`crate::debug::VarStep`]
-    /// pushed to `sink` for every placeholder that resolves. The recorded
-    /// value is masked via [`crate::secrets::looks_like_secret_value`] —
-    /// display-only; the substitution itself always uses the real value.
+    /// pushed to `sink` for every placeholder that resolves. The recorded value
+    /// is masked with the same name+value dual anchor headers use
+    /// ([`crate::secrets::mask_header_value`]): a secret-*named* var
+    /// (`{{api_key}}`, `{{password}}`) is masked even when its value is short /
+    /// low-entropy, and any secret-*shaped* value is masked under any name.
+    /// Masking is display-only; the substitution itself always uses the real
+    /// value.
     fn substitute_traced(&self, input: &str, sink: &mut Vec<crate::debug::VarStep>) -> String {
         substitute_with(input, |name| {
             let resolved = self.resolve_with_scope(name);
             if let Some((scope, value)) = &resolved {
-                let value_masked = if crate::secrets::looks_like_secret_value(value) {
-                    crate::secrets::SECRET_MASK.to_owned()
-                } else {
-                    value.clone()
-                };
+                let value_masked = crate::secrets::mask_header_value(name, value);
                 sink.push(crate::debug::VarStep {
                     name: name.to_owned(),
                     scope: *scope,
@@ -553,6 +553,33 @@ mod tests {
             }
         }
         assert!(traced.url.contains("sk-live-abcdefghijklmnopqrstuvwx"));
+    }
+
+    #[test]
+    fn substitute_traced_masks_secret_named_var_with_low_entropy_value() {
+        // `api_key` and `password` are secret-NAMED; their values are short /
+        // low-entropy, so a value-shape-only mask would miss them. The name
+        // anchor must fire regardless.
+        let resolver = Resolver::new(vec![scope(
+            "cli",
+            &[
+                ("api_key", "hunter2"),
+                ("password", "letmein"),
+                ("page", "2"),
+            ],
+        )]);
+        let mut req = req_with_url("https://h/x?k={{api_key}}&p={{password}}&page={{page}}");
+        let mut steps = Vec::new();
+        resolver.substitute_request_traced(&mut req, &mut steps);
+
+        let step = |n: &str| steps.iter().find(|s| s.name == n).expect("recorded");
+        assert_eq!(step("api_key").value_masked, crate::secrets::SECRET_MASK);
+        assert_eq!(step("password").value_masked, crate::secrets::SECRET_MASK);
+        // A non-secret var is shown as-is (no over-masking).
+        assert_eq!(step("page").value_masked, "2");
+        // The real values are still substituted onto the wire.
+        assert!(req.url.contains("k=hunter2"));
+        assert!(req.url.contains("p=letmein"));
     }
 
     /// A helper: a plain request whose only templatable content is `url`.

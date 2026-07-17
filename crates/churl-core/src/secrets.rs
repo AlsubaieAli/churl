@@ -364,6 +364,61 @@ pub fn mask_header_value(name: &str, value: &str) -> String {
     }
 }
 
+/// Replaces every secret-*shaped* token in free text with [`SECRET_MASK`],
+/// preserving all delimiters and structure so the surrounding shape stays
+/// readable. A body has no name anchor (it is not a `key: value` line), so only
+/// the value-shape signal ([`looks_like_secret_value`]) applies — the same
+/// heuristic that shape-anchors header VALUES.
+///
+/// Tokenization follows the body-scan seam ([`looks_like_secret_value_in_text`])
+/// and extends it with the form/array delimiters: the text is split on
+/// whitespace and the common JSON/form delimiters
+/// (`"`, `'`, `,`, `;`, `:`, `{`, `}`, `[`, `]`, `=`, `&`), a secret-shaped token
+/// is swapped for the mask, and every delimiter is re-emitted verbatim — so
+/// `{"token":"sk-live-…"}` becomes `{"token":"••••••"}` with structure intact
+/// and no wholesale redaction. Used to redact a *resolved* request body before
+/// echoing it (the copy-as-resolved-curl path); a `{{placeholder}}` is never
+/// secret-shaped, so an unresolved body is untouched.
+///
+/// Residual gap (documented follow-up): a LOW-ENTROPY body secret that is
+/// neither secret-shaped nor delimited as its own token — e.g.
+/// `{"password":"hunter2"}` — is not caught, since the body carries no name
+/// anchor to key off. The future reveal-gated real-curl handles reproducible
+/// exact bodies.
+pub fn mask_secret_tokens(body: &str) -> String {
+    const DELIMS: &[char] = &['"', '\'', ',', ';', ':', '{', '}', '[', ']', '=', '&'];
+    let is_boundary = |c: char| c.is_whitespace() || DELIMS.contains(&c);
+
+    let mut out = String::with_capacity(body.len());
+    let mut token_start: Option<usize> = None;
+    // Walk char boundaries; flush a token whenever a boundary char is hit, then
+    // re-emit the boundary char verbatim.
+    for (i, ch) in body.char_indices() {
+        if is_boundary(ch) {
+            if let Some(start) = token_start.take() {
+                push_masked_token(&mut out, &body[start..i]);
+            }
+            out.push(ch);
+        } else if token_start.is_none() {
+            token_start = Some(i);
+        }
+    }
+    if let Some(start) = token_start {
+        push_masked_token(&mut out, &body[start..]);
+    }
+    out
+}
+
+/// Appends `token` to `out`, replacing it with [`SECRET_MASK`] when it is
+/// secret-shaped ([`looks_like_secret_value`]).
+fn push_masked_token(out: &mut String, token: &str) {
+    if looks_like_secret_value(token) {
+        out.push_str(SECRET_MASK);
+    } else {
+        out.push_str(token);
+    }
+}
+
 /// Returns `url` with every embedded secret span replaced by [`SECRET_MASK`]:
 /// the `user:PASSWORD@` userinfo password (a literal, non-placeholder password)
 /// and each secret query value — a secret-*named* key's literal value, or a

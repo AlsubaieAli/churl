@@ -216,12 +216,14 @@ impl DebugTrace {
     /// [`apply_auth`], both unmasked). The rendered command is never the raw
     /// resolved request (see the module docs, "never leak").
     ///
-    /// Scope note: the request **body**, if present, is exported verbatim —
-    /// `churl-core` has no body-content masking primitive (only header and
-    /// URL span masking exist). A body carrying a resolved `{{secret}}` is
-    /// not masked here; this mirrors `resolved_display`'s `body_present`-only
-    /// policy but is a real gap for a body-embedded secret and is flagged as
-    /// follow-up, not an oversight.
+    /// Scope note: the request **body**, if present, is redacted token-wise by
+    /// [`secrets::mask_secret_tokens`] — every secret-*shaped* token
+    /// (`sk-live-…`, JWTs, high-entropy runs) is masked while the body's
+    /// structure and non-secret values stay readable. The residual gap is a
+    /// LOW-ENTROPY body secret that is neither secret-shaped nor caught by the
+    /// heuristic (e.g. `{"password":"hunter2"}`) — the body carries no name
+    /// anchor to key off, so it is left for the future reveal-gated real-curl
+    /// (documented follow-up, not an oversight).
     pub fn masked_curl(&self) -> String {
         let mut masked = self.resolved_raw.clone();
 
@@ -250,6 +252,9 @@ impl DebugTrace {
                 enabled: header.enabled,
             })
             .collect();
+        if let Some(body) = masked.body.as_mut() {
+            body.content = secrets::mask_secret_tokens(&body.content);
+        }
 
         let endpoint = Endpoint {
             seq: 0,
@@ -379,5 +384,39 @@ mod tests {
         });
         let trace = DebugTrace::from_request(&request);
         assert!(trace.resolved_display.body_present);
+    }
+
+    #[test]
+    fn masked_curl_masks_secret_shaped_body_token() {
+        let mut request = get("https://example.com/x");
+        request.method = Method::Post;
+        request.body = Some(Body {
+            kind: BodyKind::Json,
+            content: r#"{"token":"sk-live-abcdefghijklmnopqrstuvwx"}"#.to_owned(),
+        });
+        let trace = DebugTrace::from_request(&request);
+        let curl = trace.masked_curl();
+        assert!(
+            !curl.contains("sk-live-abcdefghijklmnopqrstuvwx"),
+            "body secret leaked into masked_curl: {curl}"
+        );
+        assert!(curl.contains(secrets::SECRET_MASK));
+    }
+
+    #[test]
+    fn masked_curl_preserves_structural_body() {
+        let mut request = get("https://example.com/x");
+        request.method = Method::Post;
+        request.body = Some(Body {
+            kind: BodyKind::Json,
+            content: r#"{"page":1,"q":"orders"}"#.to_owned(),
+        });
+        let trace = DebugTrace::from_request(&request);
+        let curl = trace.masked_curl();
+        // No secret-shaped token → the body survives verbatim inside the curl.
+        assert!(
+            curl.contains(r#"{"page":1,"q":"orders"}"#),
+            "structural body over-masked: {curl}"
+        );
     }
 }
