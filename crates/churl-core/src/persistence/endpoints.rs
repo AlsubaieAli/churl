@@ -128,6 +128,7 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
     let endpoint = Endpoint {
         seq: next_seq(dir),
         name: name.trim().to_owned(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: String::new(),

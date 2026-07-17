@@ -317,6 +317,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             name: item_name
                 .map(str::to_owned)
                 .unwrap_or_else(|| derive_name(url)),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: url.to_owned(),
@@ -360,6 +361,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
     Endpoint {
         seq: 0,
         name,
+        assertions: Vec::new(),
         request: Request {
             method,
             url,

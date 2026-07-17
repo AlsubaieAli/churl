@@ -72,6 +72,7 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         &Endpoint {
             seq: 0,
             name: "Get User".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/users/1".to_owned(),
@@ -91,6 +92,7 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         &Endpoint {
             seq: 0,
             name: "Ping".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/ping".to_owned(),
@@ -110,6 +112,7 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         &Endpoint {
             seq: 0,
             name: "Broken".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/x?token={{missing_var}}".to_owned(),
@@ -131,6 +134,7 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         &Endpoint {
             seq: 0,
             name: "Greet".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/greet?g={{greeting}}".to_owned(),
@@ -152,6 +156,7 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
         &Endpoint {
             seq: 0,
             name: "Secret Query".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/data?api_key={{apikey}}".to_owned(),

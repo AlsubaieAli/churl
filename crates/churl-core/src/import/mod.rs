@@ -256,6 +256,7 @@ impl Parser {
             endpoint: Endpoint {
                 seq: 0,
                 name: derive_name(&url),
+                assertions: Vec::new(),
                 request: Request {
                     method,
                     url,
