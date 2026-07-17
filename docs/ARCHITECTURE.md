@@ -9,6 +9,7 @@ Zero TUI dependencies — ever. This constraint is enforced by code review and C
 | Module | Responsibility |
 |---|---|
 | `model` | Core types: `Method`, `Endpoint`, `Request`, `Response`, `Header`, `Param`, `Auth`/`ApiKeyPlacement` (M5: internally-tagged `[request.auth]`) |
+| `assert` | Response assertion model + evaluator (M8.4, UI-free): `Assertion { target, op, value }` — `target` reuses `sequence::extract_value` verbatim (same extraction grammar); `AssertOp` (`Eq`/`Ne`/`Contains`/`Exists`/`Absent`/`Lt`/`Gt`/`Le`/`Ge`) serializes as its canonical string (`==`, `contains`, …), never the variant name. `Assertion::parse` reads the human `"<target> <op> <value>"` syntax (`docs/CLI.md`). `evaluate`/`run_assertions` produce a serializable `AssertionReport` the CLI drops straight into the JSON envelope's `data.assertions` |
 | `auth` | `apply_auth(&Auth) -> AuthWire` — THE single dispatch point on auth kinds (M9 plugin guardrail); resolves basic/bearer/apikey to a `Header` or `Query` wire effect that `execute`/`export` apply without ever matching on `Auth` |
 | `persistence` | TOML round-trip via `toml_edit` (format-preserving, deletion-pruning `merge_tables`; arrays-of-tables merge **element-wise regardless of length** via `merge_arrays_of_tables` — survivors keep their decor on grow/shrink, R1 D3); lazy collection loading. `Collection::endpoints()` is strict; `endpoints_lenient() -> CollectionLoad { endpoints, warnings }` degrades one unparseable file to a warning (TUI load path). Both skip `folder.toml` **and** `churl.toml` (a nested-workspace manifest is not an endpoint). Sequences (M7.4): `SEQUENCES_DIRNAME` reserved dir (excluded from `collections()`); `OpenWorkspace::sequences() -> SequenceLoad { sequences, warnings }` (lenient); `load/save/create/rename/delete_sequence` CRUD seams. **Reserved-name guards (R1 D1)**: create/rename disambiguate a slug colliding with a reserved *file* stem (`RESERVED_FILE_STEMS = churl/folder`, via `unique_endpoint_path`) or reserved *dir* name (`RESERVED_DIR_NAMES = sequences`, via `collection_dir_name`) — `churl` → `churl-2.toml`, never overwriting the manifest/folder/sequences; display `name` preserved, final stem surfaced by the caller (`slug_of` helper). A directory module (`persistence/`, M7.11 PR 6): **`mod.rs`** holds the CRUD/load/save seams + `OpenWorkspace`/`Collection`; child **`persistence/merge`** the format-preserving TOML merge cluster (`merge_tables` + recursive `merge_items`/`merge_arrays_of_tables`/`values_equal`); child **`persistence/naming`** the slug/reserved-name derivation (`slugify`, `slug_of`, `RESERVED_*`, `is_reserved_*`, `unique_endpoint_path`, `collection_dir_name`) — both re-exported so the public surface and all `use` paths are unchanged |
 | `sequence` | Request-sequence run engine (M7.4, UI-free): dependency-free extraction subset (`extract_value`: `status` / `header:<Name>` / JSON-path `$.a.b[0].c`) over `serde_json`; run primitives shared by tests and the live TUI — `prepare_step` (resolver with the `extracted` scope prepended highest, then `session` — note #6), `extract_step`, `classify_step` (the single classify+extract seam), `ordered_steps`; `run_sequence` wiremock-tested convenience. `RunScopes` carries the in-memory `session` map (note #6). Rejects `..`/absolute step endpoints; never panics |
@@ -171,6 +172,14 @@ content = '{"q": true}'
 type = "basic"              # secret values must be {{var}} placeholders —
 username = "alice"          # save_endpoint/endpoint_to_toml refuse literals
 password = "{{password}}"
+
+[[assertions]]               # optional (M8.4); top-level, sibling of [request] —
+target = "status"            # a property of the saved invocation, like a
+op = "=="                    # sequence step's [step.extract], not of the
+value = "200"                # wire-shaping request itself
+[[assertions]]
+target = "$.data.id"          # `value` omitted on disk for exists/absent
+op = "exists"
 ```
 
 Saves are format-preserving: comments and ordering in hand-edited files survive a churl round-trip (see DECISIONS.md for merge semantics and edge cases). Every save is also **atomic and durable** (R0): the single write in `save_value` funnels through `persistence::atomic_write` (temp sibling file → fsync → atomic `rename` → parent-dir fsync), so a crash mid-write can never tear the source-of-truth file. The error contract is unchanged (`PersistenceError::Write`).
@@ -242,10 +251,10 @@ The scaffold writes through the real `churl-core::persistence` seams — no hand
 
 `crates/churl/src/{output,headless,resolve,run_cmd,send_cmd}.rs` — the headless execution surface: `churl run <endpoint>` and `churl send` drive the exact same `churl_core::http::execute`/`Resolver`/persistence seams the TUI uses (no forked request logic), then shape the result into the frozen `--json` envelope. Full contract (schema, error-kind → exit-code mapping, both commands' payload shape): [`docs/CLI.md`](CLI.md).
 
-- `output.rs` — the `Envelope`/`ErrorKind`/`CliError` machinery every headless command funnels through via `output::emit`, so stdout/stderr/exit-code stay consistent across `run`/`send`/`import`.
-- `headless.rs` — `run_execution`: resolver substitution → unresolved-`{{var}}` refusal → `build_client_with` → `execute` → envelope payload shaping (secret-masked headers, utf8/base64 body).
+- `output.rs` — the `Envelope`/`ErrorKind`/`CliError` machinery every headless command funnels through via `output::emit`, so stdout/stderr/exit-code stay consistent across `run`/`send`/`import`. `output::emit`'s generic bound also carries the M8.4 `SuccessExitCode` trait — the seam that lets a successful `run`/`send` still exit 1 when its assertions failed, without touching `ErrorKind`.
+- `headless.rs` — `run_execution`: resolver substitution → unresolved-`{{var}}` refusal → `build_client_with` → `execute` → assertion evaluation (M8.4, `churl_core::assert::run_assertions` against the response) → envelope payload shaping (secret-masked headers, utf8/base64 body).
 - `resolve.rs` — `collection/.../endpoint name` path resolution against `churl_core::persistence` directly (no live `ExplorerState` tree in a one-shot process), plus `--profile` validation shared with `send`.
-- `run_cmd.rs` / `send_cmd.rs` — CLI-argument-to-execution glue: `run` resolves a saved endpoint and its collection var-scope chain; `send` builds an ad-hoc `Request` from curl-mnemonic/churl-native flags (`-X`/`-H`/`-d`/`--url` vs `--method`/`--header`/`--body`), no saved endpoint or workspace required.
+- `run_cmd.rs` / `send_cmd.rs` — CLI-argument-to-execution glue: `run` resolves a saved endpoint and its collection var-scope chain, then merges its persisted `[[assertions]]` with any `--assert` flags (M8.4, append); `send` builds an ad-hoc `Request` from curl-mnemonic/churl-native flags (`-X`/`-H`/`-d`/`--url` vs `--method`/`--header`/`--body`), no saved endpoint or workspace required, and its `--assert` flags are the whole assertion set.
 
 ## Release pipeline
 

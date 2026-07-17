@@ -90,8 +90,10 @@ CLI, real testing, and the polish to launch — grouped by target release.
 ### 0.8 — Debugging & testing ⏳
 - [ ] Debug inspector — resolved request, redirect / variable / auth traces,
       copy-as-resolved-curl, logs, and a session traffic feed (opt-in, off by default).
-- [ ] Assertions & tests — status / header / body-JSONPath pass-fail checks that make churl a
-      real testing tool, with machine-readable results for CI and agents.
+- [x] Assertions & tests — status / header / body-JSONPath pass-fail checks (`--assert`,
+      persisted `[[assertions]]`) with machine-readable results (`data.assertions`, exit 1 on
+      failure) for CI and agents. Frozen contract: [`docs/CLI.md`](CLI.md), "Assertions". Regex
+      `matches` deferred — see `docs/DECISIONS.md`'s Backlog section.
 
 ### 0.9 — Coverage & settings ⏳
 - [ ] Centralized settings panel.

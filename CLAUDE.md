@@ -43,10 +43,15 @@ crates/
   churl-core/              # pure library — zero TUI deps, ever
     src/
       lib.rs               # pub const VERSION + module exports
-      model.rs             # Method, Endpoint, Request (incl. durable per-endpoint insecure: bool, M8.1),
+      model.rs             # Method, Endpoint (incl. assertions: Vec<Assertion>, M8.4, top-level
+                           #   [[assertions]]), Request (incl. durable per-endpoint insecure: bool, M8.1),
                            #   Response, Header, Param, Profile, Workspace,
                            #   Auth/ApiKeyPlacement (internally-tagged [request.auth]);
                            #   Sequence/SequenceStep/OnError — request-chain execution
+      assert.rs            # M8.4 response assertions (UI-free): Assertion { target, op, value } — target
+                           #   reuses sequence::extract_value verbatim; AssertOp serializes as its canonical
+                           #   string (==, contains, ...); Assertion::parse reads "<target> <op> <value>";
+                           #   evaluate/run_assertions -> serializable AssertionReport for the CLI envelope
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge; atomic_write: temp→fsync→rename→dir-fsync), lazy OpenWorkspace/Collection;
@@ -124,16 +129,23 @@ crates/
   churl/                   # binary crate + thin lib for integration tests
     src/
       lib.rs               # pub mod tui (re-export for tests)
-      main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k/--json, subcommands (run, send,
-                           #   import, init [--demo], keymaps, cookies list|clear, completions, man, update,
-                           #   uninstall) | TUI; #[tokio::main] (M8.2 CLI & headless — see docs/CLI.md)
+      main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k/--json, subcommands (run, send —
+                           #   both with a repeatable --assert EXPR, M8.4 — import, init [--demo], keymaps,
+                           #   cookies list|clear, completions, man, update, uninstall) | TUI; #[tokio::main]
+                           #   (M8.2 CLI & headless, M8.4 assertions — see docs/CLI.md)
       output.rs            # M8.2 machine-output contract: `{schema_version,ok,command,data,error}` JSON envelope,
-                           #   closed ErrorKind slug set banded 1:1 to exit codes (3/4/5), emit() print+exit seam
+                           #   closed ErrorKind slug set banded 1:1 to exit codes (3/4/5, +invalid-assertion M8.4),
+                           #   emit() print+exit seam — its T: SuccessExitCode bound (M8.4) lets a successful
+                           #   run/send still exit 1 on a failed assertion set without touching ErrorKind
       headless.rs          # run_execution: the ONE seam run/send share — substitute {{var}} scopes, refuse an
-                           #   unresolved placeholder, drive the SAME churl_core::http::execute, shape the payload
+                           #   unresolved placeholder, drive the SAME churl_core::http::execute, evaluate assertions
+                           #   (M8.4, churl_core::assert::run_assertions) against the response, shape the payload;
+                           #   parse_cli_assertions: --assert strings -> Vec<Assertion>, invalid-assertion on error
       resolve.rs           # `collection/.../endpoint name` path resolution vs churl_core::persistence; --profile validation
-      run_cmd.rs           # churl run <endpoint>: resolve a saved endpoint + its collection var chain, execute headless
-      send_cmd.rs          # churl send: ad-hoc one-shot from curl-mnemonic (-X/-H/-d/--url) or churl-native flags
+      run_cmd.rs           # churl run <endpoint>: resolve a saved endpoint + its collection var chain, merge its
+                           #   persisted assertions with --assert flags (M8.4, append), execute headless
+      send_cmd.rs          # churl send: ad-hoc one-shot from curl-mnemonic (-X/-H/-d/--url) or churl-native flags;
+                           #   --assert flags are the whole assertion set (M8.4, no persisted endpoint)
       init.rs              # churl init [--demo]: scaffold a blank (or demo) workspace via real persistence seams
       update.rs            # churl update: verified self-replace from GitHub releases (self_replace crate);
                            #   pure target→asset/version-compare/checksum fns, network+swap bin-only

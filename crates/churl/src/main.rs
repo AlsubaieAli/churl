@@ -90,6 +90,13 @@ enum Command {
         /// `--json` output is unaffected).
         #[arg(short = 'v', long)]
         verbose: bool,
+        /// Assert a response value (repeatable): `"<target> <op> <value>"`,
+        /// e.g. `--assert 'status == 200'`, `--assert '$.data.id exists'`.
+        /// Runs AFTER the endpoint's own persisted `[[assertions]]` (append).
+        /// A failing assertion set exits 1 even though the request itself
+        /// succeeded — see `docs/CLI.md`, "Assertions".
+        #[arg(long = "assert", value_name = "EXPR")]
+        assert: Vec<String>,
     },
     /// Send an ad-hoc one-shot request — no saved endpoint, no workspace
     /// required. Accepts curl-mnemonic flags (`-X`/`-H`/`-d`/`--url`) and
@@ -120,6 +127,13 @@ enum Command {
         /// `--json` output is unaffected).
         #[arg(short = 'v', long)]
         verbose: bool,
+        /// Assert a response value (repeatable): `"<target> <op> <value>"`,
+        /// e.g. `--assert 'status == 200'`, `--assert 'header:Content-Type
+        /// contains json'`. `send` has no persisted endpoint, so these are
+        /// the whole assertion set. A failing set exits 1 even though the
+        /// request itself succeeded — see `docs/CLI.md`, "Assertions".
+        #[arg(long = "assert", value_name = "EXPR")]
+        assert: Vec<String>,
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
@@ -250,7 +264,11 @@ async fn main() -> Result<()> {
         }) => {
             std::process::exit(run_import(curl, name, stdout, out, json));
         }
-        Some(Command::Run { endpoint, verbose }) => {
+        Some(Command::Run {
+            endpoint,
+            verbose,
+            assert,
+        }) => {
             // Every fallible pre-flight step (config, cwd, resolution, execution)
             // funnels into one `Result<ExecData, CliError>` so `emit` owns the
             // stdout/stderr/exit-code triad — nothing bubbles out of `main` as an
@@ -266,6 +284,7 @@ async fn main() -> Result<()> {
                     proxy: cli.proxy.clone(),
                     insecure: cli.insecure,
                     verbose,
+                    cli_asserts: assert,
                 };
                 run_cmd::run(args, &cwd, &runtime).await
             }
@@ -282,6 +301,7 @@ async fn main() -> Result<()> {
             header,
             body,
             verbose,
+            assert,
         }) => {
             let cli_vars = vars_map(&cli.vars);
             let result = async {
@@ -298,6 +318,7 @@ async fn main() -> Result<()> {
                     profile: cli.profile.clone(),
                     proxy: cli.proxy.clone(),
                     insecure: cli.insecure,
+                    cli_asserts: assert,
                 };
                 send_cmd::run(args, &cwd, &runtime).await
             }
@@ -556,6 +577,10 @@ struct ImportData {
     warnings: Vec<String>,
     written: WrittenTo,
 }
+
+/// `import` has no assertions to fail on — always exit 0 on success (the
+/// `SuccessExitCode` default).
+impl output::SuccessExitCode for ImportData {}
 
 /// Maps a curl-parse failure onto the frozen `not-a-curl-command` slug (band
 /// 5) — every [`churl_core::import::ImportError`] variant is, from the

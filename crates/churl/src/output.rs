@@ -87,6 +87,12 @@ pub enum ErrorKind {
     /// The curl command parsed, but writing the resulting endpoint failed
     /// (e.g. a newly-authored literal secret was refused, or a disk error).
     ImportWriteFailed,
+    /// A `--assert` flag did not parse (unknown operator, missing value for a
+    /// value-op, empty target) — a usage/input mistake, not a request
+    /// failure, hence band 5 alongside the other input-shape errors. Additive
+    /// (M8.4): a schema-compatible new closed-enum variant, per the module
+    /// docs' "new `ErrorKind` variants are additive" rule.
+    InvalidAssertion,
 }
 
 impl ErrorKind {
@@ -99,8 +105,23 @@ impl ErrorKind {
             | ErrorKind::UnknownProfile
             | ErrorKind::ConfigError => 3,
             ErrorKind::InvalidUrl | ErrorKind::Timeout | ErrorKind::TransportError => 4,
-            ErrorKind::NotACurlCommand | ErrorKind::ImportWriteFailed => 5,
+            ErrorKind::NotACurlCommand
+            | ErrorKind::ImportWriteFailed
+            | ErrorKind::InvalidAssertion => 5,
         }
+    }
+}
+
+/// A successful payload's process exit code — almost always `0`, matching
+/// the documented "`ok` mirrors the exit code" rule. [`crate::headless::ExecData`]
+/// is the sole exception: a request that executed fine but whose assertions
+/// failed still prints success-shaped JSON (`ok: true`, `data` populated) yet
+/// exits **1** (see `docs/CLI.md`, "Assertions" and "Exit codes"). Every other
+/// success payload (`ImportData`, …) uses the default.
+pub trait SuccessExitCode {
+    /// The process exit code for a *successful* result. Defaults to `0`.
+    fn success_exit_code(&self) -> i32 {
+        0
     }
 }
 
@@ -198,7 +219,11 @@ pub fn from_http_error(err: churl_core::http::HttpError) -> CliError {
 /// - Human mode: calls `human_ok` on success (the subcommand's own
 ///   human-readable rendering); on failure prints `error: <message>` to
 ///   stderr. Never prints both JSON and human output for the same run.
-pub fn emit<T: Serialize>(
+///
+/// A successful result's exit code comes from [`T::success_exit_code`]
+/// ([`SuccessExitCode`]) — `0` for every payload except a `run`/`send` whose
+/// assertions failed (see the trait docs).
+pub fn emit<T: Serialize + SuccessExitCode>(
     command: &str,
     json: bool,
     result: Result<T, CliError>,
@@ -206,6 +231,8 @@ pub fn emit<T: Serialize>(
 ) -> i32 {
     match result {
         Ok(data) => {
+            // Computed before `data` is moved into the envelope below.
+            let code = data.success_exit_code();
             if json {
                 print_envelope(Envelope {
                     schema_version: SCHEMA_VERSION,
@@ -217,7 +244,7 @@ pub fn emit<T: Serialize>(
             } else {
                 human_ok(&data);
             }
-            0
+            code
         }
         Err(err) => {
             let code = err.kind.exit_code();

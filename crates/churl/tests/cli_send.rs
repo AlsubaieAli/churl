@@ -431,3 +431,124 @@ fn send_transport_error_masks_secret_query_in_error_message_and_detail() {
         );
     }
 }
+
+// ---- M8.4: assertions ------------------------------------------------------
+
+#[tokio::test]
+async fn send_assert_flag_passes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&["--json", "send", &url, "--assert", "status == 200"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["data"]["assertions"]["passed"], true);
+    assert_eq!(env["data"]["assertions"]["total"], 1);
+}
+
+#[tokio::test]
+async fn send_multiple_assert_flags_all_evaluated() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/data"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/data", server.uri());
+    let output = churl(&[
+        "--json",
+        "send",
+        &url,
+        "--assert",
+        "status == 200",
+        "--assert",
+        "header:Content-Type contains json",
+        "--assert",
+        "$.id == 42",
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["data"]["assertions"]["total"], 3);
+    assert_eq!(env["data"]["assertions"]["passed"], true);
+}
+
+#[tokio::test]
+async fn send_assert_flag_failure_exits_1_but_stays_success_shaped() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&["--json", "send", &url, "--assert", "status == 500"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed assertion set must exit 1"
+    );
+    let env = envelope(&output);
+    assert_eq!(env["ok"], true, "request succeeded — {env}");
+    assert!(!env["data"].is_null());
+    assert_eq!(env["data"]["assertions"]["passed"], false);
+    assert_eq!(env["data"]["assertions"]["results"][0]["actual"], "200");
+}
+
+#[test]
+fn send_invalid_assert_flag_is_exit_5_invalid_assertion() {
+    let output = churl(&[
+        "--json",
+        "send",
+        "http://example.invalid/x",
+        "--assert",
+        "status ?? 200",
+    ]);
+    assert_eq!(output.status.code(), Some(5));
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "invalid-assertion");
+}
+
+#[tokio::test]
+async fn send_human_mode_prints_assertion_checklist_to_stderr_and_exits_1() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&[
+        "send",
+        &url,
+        "--assert",
+        "status == 200",
+        "--assert",
+        "status == 500",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    // stdout stays exactly the response body (curl-like) — the checklist is
+    // stderr-only, never mixed into a script's piped stdout.
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "pong");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains('✓'), "{stderr}");
+    assert!(stderr.contains('✗'), "{stderr}");
+    assert!(stderr.contains("1 passed, 1 failed"), "{stderr}");
+}

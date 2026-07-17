@@ -373,3 +373,134 @@ fn run_without_a_workspace_is_exit_3_no_workspace() {
     let env = envelope(&output);
     assert_eq!(env["error"]["kind"], "no-workspace");
 }
+
+// ---- M8.4: assertions ------------------------------------------------------
+
+#[tokio::test]
+async fn run_assertion_free_call_keeps_assertions_null() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(dir.path(), &["--json", "run", "Ping"]);
+    assert!(output.status.success());
+    assert!(
+        envelope(&output)["data"]["assertions"].is_null(),
+        "M8.2 back-compat: no assertions given must keep the key null"
+    );
+}
+
+#[tokio::test]
+async fn run_assert_flag_passes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "--assert", "status == 200"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["assertions"]["passed"], true);
+    assert_eq!(env["data"]["assertions"]["total"], 1);
+    assert_eq!(env["data"]["assertions"]["failed"], 0);
+}
+
+#[tokio::test]
+async fn run_assert_flag_failure_exits_1_but_stays_success_shaped() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "--assert", "status == 500"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed assertion set must exit 1"
+    );
+    let env = envelope(&output);
+    // The request itself succeeded — `ok`/`data` stay success-shaped, the
+    // sole documented exception to "ok mirrors the exit code" (docs/CLI.md).
+    assert_eq!(env["ok"], true, "{env}");
+    assert!(!env["data"].is_null());
+    assert!(env["error"].is_null());
+    assert_eq!(env["data"]["assertions"]["passed"], false);
+    assert_eq!(env["data"]["assertions"]["failed"], 1);
+}
+
+#[test]
+fn run_invalid_assert_flag_is_exit_5_invalid_assertion() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), "http://example.invalid");
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "--assert", "status ?? 200"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unparseable --assert is a usage/input error, never a request failure"
+    );
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert!(env["data"].is_null());
+    assert_eq!(env["error"]["kind"], "invalid-assertion");
+}
+
+#[tokio::test]
+async fn run_persisted_assertions_run_before_cli_assert_flags() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    // Persist one passing assertion directly onto the root-level Ping endpoint.
+    let ping_path = dir.path().join("ping.toml");
+    let mut ep = churl_core::persistence::load_endpoint(&ping_path).unwrap();
+    ep.assertions = vec![churl_core::assert::Assertion {
+        target: "status".to_owned(),
+        op: churl_core::assert::AssertOp::Eq,
+        value: Some("200".to_owned()),
+    }];
+    churl_core::persistence::save_endpoint(&ping_path, &ep).unwrap();
+
+    // The CLI flag appends a second, failing assertion.
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "--assert", "$.missing exists"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let env = envelope(&output);
+    assert_eq!(env["data"]["assertions"]["total"], 2);
+    assert_eq!(env["data"]["assertions"]["results"][0]["pass"], true);
+    assert_eq!(env["data"]["assertions"]["results"][1]["pass"], false);
+}

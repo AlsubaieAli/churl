@@ -9,11 +9,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 
+use churl_core::assert::{Assertion, AssertionReport, run_assertions};
 use churl_core::http::{ClientConfig, ExecuteOptions};
 use churl_core::model::Request;
 use churl_core::template::{Resolver, Scope};
 
-use crate::output::{CliError, ErrorKind, mask_header_value};
+use crate::output::{CliError, ErrorKind, SuccessExitCode, mask_header_value};
 
 /// One request/response header line in the envelope.
 #[derive(Debug, Serialize)]
@@ -57,9 +58,27 @@ pub struct ResponseSummary {
 pub struct ExecData {
     pub request: RequestSummary,
     pub response: ResponseSummary,
-    /// RESERVED for M8.4 assertions — always `null` in M8.2. Shipping the key
-    /// now avoids a schema-version bump when assertions land.
-    pub assertions: Option<serde_json::Value>,
+    /// `null` when no assertions were given (the M8.2 reserved shape,
+    /// unchanged for an assertion-free call); populated with the
+    /// [`AssertionReport`] otherwise. `report.passed == false` is a
+    /// *successful* request/response — `ok`/`data` stay success-shaped — but
+    /// still exits 1, the sole exception to "`ok` mirrors the exit code"
+    /// (see [`SuccessExitCode`] and `docs/CLI.md`, "Assertions").
+    pub assertions: Option<AssertionReport>,
+}
+
+impl SuccessExitCode for ExecData {
+    /// Exit 1 iff assertions were given and at least one failed; 0 otherwise
+    /// (including the assertion-free case) — the request itself already
+    /// succeeded by the time `ExecData` exists (a transport/resolution error
+    /// short-circuits earlier as a [`CliError`], so no assertions ever run
+    /// against a response that doesn't exist).
+    fn success_exit_code(&self) -> i32 {
+        match &self.assertions {
+            Some(report) if !report.passed => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// Knobs that shape the client + execution, resolved by the caller from CLI
@@ -71,15 +90,37 @@ pub struct ExecInputs {
     pub exec_opts: ExecuteOptions,
 }
 
+/// Parses every `--assert` flag via [`Assertion::parse`], mapping the first
+/// failure onto [`ErrorKind::InvalidAssertion`] (band 5 — a bad `--assert` is
+/// a usage/input mistake, never a runtime request failure). Shared by `run`
+/// (appended after the endpoint's persisted set) and `send` (its only
+/// source of assertions).
+pub fn parse_cli_assertions(exprs: &[String]) -> Result<Vec<Assertion>, CliError> {
+    exprs
+        .iter()
+        .map(|expr| {
+            Assertion::parse(expr).map_err(|err| {
+                CliError::with_detail(
+                    ErrorKind::InvalidAssertion,
+                    format!("invalid --assert {expr:?}: {err}"),
+                    serde_json::json!({ "assert": expr }),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Resolves `{{var}}` placeholders over `scopes` (highest precedence first,
 /// env implicit last — see [`Resolver`]), refuses an unresolved placeholder,
-/// executes via the shared core executor, and shapes the result into the
-/// frozen envelope payload. `scopes` excludes the TUI's "session" scope (no
-/// live multi-request session exists in a one-shot headless process).
+/// executes via the shared core executor, evaluates `assertions` against the
+/// response, and shapes the result into the frozen envelope payload. `scopes`
+/// excludes the TUI's "session" scope (no live multi-request session exists
+/// in a one-shot headless process).
 pub async fn run_execution(
     mut request: Request,
     scopes: Vec<Scope>,
     inputs: ExecInputs,
+    assertions: &[Assertion],
 ) -> Result<ExecData, CliError> {
     let resolver = Resolver::new(scopes);
     resolver.substitute_request(&mut request);
@@ -124,6 +165,16 @@ pub async fn run_execution(
         .await
         .map_err(crate::output::from_http_error)?;
 
+    // Evaluated here — the last point `response` is still owned whole, before
+    // its body is consumed into the (lossy-decoded) envelope projection below.
+    // An empty set stays `None` (the M8.2 back-compat contract for an
+    // assertion-free call), never a vacuously-passing empty report object.
+    let assertion_report = if assertions.is_empty() {
+        None
+    } else {
+        Some(run_assertions(assertions, &response))
+    };
+
     let (body, body_encoding) = match String::from_utf8(response.body.clone()) {
         // Deterministic decoding for agents: valid UTF-8 ships as text, never
         // `to_string_lossy` (which would silently mangle non-UTF-8 bytes).
@@ -150,13 +201,14 @@ pub async fn run_execution(
                 total: response.timing.total.as_millis(),
             },
         },
-        assertions: None,
+        assertions: assertion_report,
     })
 }
 
 /// Prints a compact human-mode rendering of a successful [`ExecData`]: the
 /// response body on stdout (curl-like, so `churl send URL | jq` works), with
-/// a request/response debug trace on stderr when `verbose`.
+/// a request/response debug trace on stderr when `verbose`, followed by an
+/// assertions checklist on stderr when any were given.
 pub fn print_human(data: &ExecData, verbose: bool) {
     if verbose {
         eprintln!("> {} {}", data.request.method, data.request.url);
@@ -178,4 +230,26 @@ pub fn print_human(data: &ExecData, verbose: bool) {
         );
     }
     print!("{}", data.response.body);
+
+    // The assertions checklist is a distinct, always-stderr surface (never
+    // mixed into the stdout body an agent/script may be piping) — printed
+    // whenever any assertion ran, `verbose` or not.
+    if let Some(report) = &data.assertions {
+        for r in &report.results {
+            let mark = if r.pass { "✓" } else { "✗" };
+            let mut line = format!("{mark} {} {}", r.target, r.op);
+            if let Some(expected) = &r.expected {
+                line.push_str(&format!(" {expected}"));
+            }
+            if let Some(err) = &r.error {
+                line.push_str(&format!(" — {err}"));
+            }
+            eprintln!("{line}");
+        }
+        eprintln!(
+            "{} passed, {} failed",
+            report.total - report.failed,
+            report.failed
+        );
+    }
 }
