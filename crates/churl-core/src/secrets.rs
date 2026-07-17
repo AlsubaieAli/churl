@@ -337,6 +337,33 @@ fn url_authority(url: &str) -> Option<&str> {
 /// TUI's own secret mask so redaction reads consistently across surfaces.
 pub const SECRET_MASK: &str = "••••••";
 
+/// Masks a header value when its **name** is a known auth-bearing name
+/// (`authorization`, `cookie`) or otherwise looks secret-named
+/// ([`looks_like_secret_name`]), or when its **value** looks secret-shaped
+/// ([`looks_like_secret_value`]).
+///
+/// Mirrors the redirect-strip dual-anchor policy (see DECISIONS.md,
+/// "Cross-origin redirect policy") applied to any REQUEST-header display
+/// surface — the M8.2 headless JSON envelope's echoed `request.headers`, the
+/// M8.3 debug trace / Inspector, and copy-as-resolved-curl — so a resolved
+/// `{{token}}`/session-captured value never round-trips back out to a
+/// display surface, even though the real outgoing request sent it. The URL is
+/// masked by its own twin, [`mask_url`]; a request body has no name anchor and
+/// is not masked by this function.
+pub fn mask_header_value(name: &str, value: &str) -> String {
+    const ALWAYS_AUTH_NAMES: [&str; 2] = ["authorization", "cookie"];
+    let name_hit = ALWAYS_AUTH_NAMES
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name))
+        || looks_like_secret_name(name);
+    let value_hit = looks_like_secret_value(value);
+    if name_hit || value_hit {
+        SECRET_MASK.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 /// Returns `url` with every embedded secret span replaced by [`SECRET_MASK`]:
 /// the `user:PASSWORD@` userinfo password (a literal, non-placeholder password)
 /// and each secret query value — a secret-*named* key's literal value, or a

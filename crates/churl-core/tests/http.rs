@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use churl_core::config::RedirectPolicy;
 use churl_core::cookies::ChurlCookieJar;
+use churl_core::debug::DebugTrace;
 use churl_core::http::{
     ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, HttpError, build_client, build_client_with,
-    execute, follow_all_warned,
+    execute, execute_traced, follow_all_warned,
 };
 use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Header, Method, Param, Request};
 use wiremock::matchers::{body_string, header, method, path, query_param};
@@ -1214,4 +1215,202 @@ async fn cookie_survives_same_origin_redirect() {
         response.body, b"landed",
         "cookie must cross the same-origin hop"
     );
+}
+
+// --- M8.3 debug trace capture: off-path zero-capture, masking, redirect hops ---
+
+/// `execute` (the `sink: None` wrapper) and `execute_traced(..., None)` must
+/// send and return identically — proving `execute` really is just the
+/// zero-overhead shorthand, not a diverging code path.
+#[tokio::test]
+async fn execute_wrapper_matches_execute_traced_with_no_sink() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-total", "7")
+                .set_body_string("hello world"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let request = get(format!("{}/ping", server.uri()));
+
+    let via_wrapper = execute(&client, &request, &ExecuteOptions::default())
+        .await
+        .unwrap();
+    let via_traced = execute_traced(&client, &request, &ExecuteOptions::default(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(via_wrapper.status, via_traced.status);
+    assert_eq!(via_wrapper.body, via_traced.body);
+    assert_eq!(via_wrapper.headers, via_traced.headers);
+    assert_eq!(via_wrapper.truncated, via_traced.truncated);
+}
+
+/// A request carrying an `Authorization: Bearer <secret>` header, a
+/// secret-*named* header, and a header whose *value* looks secret-shaped must
+/// never surface any of the three raw values in the trace's masked display,
+/// var-resolution steps, or the masked curl export — the #1 adversarial-review
+/// target for M8.3.
+#[tokio::test]
+async fn traced_execute_never_leaks_secrets_in_display_or_curl() {
+    const BEARER_SECRET: &str = "supersecret123456789012345";
+    const SHAPED_SECRET: &str = "sk-live-abcdefghijklmnopqrstuvwxyz012345";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/secure"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/secure", server.uri()));
+    request.auth = Some(Auth::Bearer {
+        token: BEARER_SECRET.to_owned(),
+    });
+    request.headers.push(Header {
+        name: "X-Api-Token".to_owned(), // secret-NAMED
+        value: "abc".to_owned(),
+        enabled: true,
+    });
+    request.headers.push(Header {
+        name: "X-Weird".to_owned(), // secret-SHAPED value, innocent name
+        value: SHAPED_SECRET.to_owned(),
+        enabled: true,
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let mut trace = DebugTrace::from_request(&request);
+    let response = execute_traced(
+        &client,
+        &request,
+        &ExecuteOptions::default(),
+        Some(&mut trace),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, 200);
+
+    let display_debug = format!("{:?}", trace.resolved_display);
+    assert!(
+        !display_debug.contains(BEARER_SECRET),
+        "bearer token leaked into resolved_display: {display_debug}"
+    );
+    assert!(
+        !display_debug.contains("abc"),
+        "secret-named header value leaked into resolved_display: {display_debug}"
+    );
+    assert!(
+        !display_debug.contains(SHAPED_SECRET),
+        "secret-shaped header value leaked into resolved_display: {display_debug}"
+    );
+
+    let curl = trace.masked_curl();
+    assert!(
+        !curl.contains(BEARER_SECRET),
+        "bearer token leaked into masked_curl: {curl}"
+    );
+    assert!(
+        !curl.contains("abc"),
+        "secret-named header value leaked into masked_curl: {curl}"
+    );
+    assert!(
+        !curl.contains(SHAPED_SECRET),
+        "secret-shaped header value leaked into masked_curl: {curl}"
+    );
+
+    // The raw copy is untouched — masking never mutates the actual request
+    // (and the real, unmasked value really was sent — the send path is never
+    // gated by masking).
+    assert_eq!(trace.resolved_raw.auth, request.auth);
+}
+
+/// A `DebugTrace` sink attached to a cross-origin redirect records one
+/// `RedirectHop` with the stripped auth-header names — captured from
+/// `strip_auth_headers`'s return value, so the trace and the actual strip can
+/// never disagree.
+#[tokio::test]
+async fn traced_execute_records_redirect_hop_with_stripped_headers() {
+    let origin_a = MockServer::start().await;
+    let origin_b = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/dest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&origin_b)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/dest", origin_b.uri())),
+        )
+        .mount(&origin_a)
+        .await;
+
+    let request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let mut trace = DebugTrace::from_request(&request);
+    let response = execute_traced(
+        &client,
+        &request,
+        &ExecuteOptions::default(),
+        Some(&mut trace),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(trace.redirect_hops.len(), 1, "exactly one hop followed");
+    let hop = &trace.redirect_hops[0];
+    assert_eq!(hop.status, 302);
+    assert!(hop.cross_origin);
+    assert!(hop.method_change.is_none(), "GET stays GET on a 302");
+    let mut stripped = hop.stripped_headers.clone();
+    stripped.sort();
+    assert_eq!(
+        stripped,
+        vec!["authorization", "cookie", "x-api-key"],
+        "the trace names exactly what strip_auth_headers actually removed"
+    );
+}
+
+/// The off-path (`sink: None`) proof at the `run_load`/`execute_traced` call
+/// site: a `DebugTrace` sink attached to a normal (non-redirecting) send
+/// captures the resolved request, decisions, and no error/redirect noise.
+#[tokio::test]
+async fn traced_execute_captures_auth_injection_decision() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = get(format!("{}/x", server.uri()));
+    request.auth = Some(Auth::Bearer {
+        token: "tok".to_owned(),
+    });
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let mut trace = DebugTrace::from_request(&request);
+    execute_traced(
+        &client,
+        &request,
+        &ExecuteOptions::default(),
+        Some(&mut trace),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        trace.decisions.auth_injected.as_deref(),
+        Some("Authorization")
+    );
+    assert!(trace.redirect_hops.is_empty());
+    assert!(trace.error.is_none());
 }

@@ -662,6 +662,7 @@ async fn sequence_transition_matches_core() {
             &sequence,
             &RunScopes::default(),
             &ExecuteOptions::default(),
+            None,
         )
         .await;
         let core_results: Vec<_> = core_run

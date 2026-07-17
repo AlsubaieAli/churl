@@ -50,6 +50,7 @@ async fn fires_exactly_total_copies_with_timings() {
         &request,
         &cfg(20, 5, 0),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -131,6 +132,7 @@ async fn bounded_concurrency_never_exceeds_the_cap() {
         &request,
         &cfg(24, concurrency, 0),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -164,6 +166,7 @@ async fn failures_are_classified_and_counted() {
         &request,
         &cfg(10, 3, 0),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -189,7 +192,14 @@ async fn transport_error_is_errored_without_timing() {
     let client = build_client(Duration::from_millis(300)).unwrap();
     // Reserved TEST-NET-1 address (RFC 5737) — refuses / times out fast.
     let request = get("http://192.0.2.1:9/never".to_owned());
-    let outcomes = run_load(&client, &request, &cfg(3, 3, 0), &ExecuteOptions::default()).await;
+    let outcomes = run_load(
+        &client,
+        &request,
+        &cfg(3, 3, 0),
+        &ExecuteOptions::default(),
+        None,
+    )
+    .await;
 
     assert_eq!(outcomes.len(), 3);
     assert!(
@@ -226,6 +236,7 @@ async fn interval_pacing_spreads_the_wall_clock() {
         &request,
         &cfg(6, 2, interval_ms),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
     let elapsed = start.elapsed();
@@ -242,9 +253,48 @@ async fn interval_pacing_spreads_the_wall_clock() {
 async fn total_zero_is_a_no_op() {
     let client = build_client(DEFAULT_TIMEOUT).unwrap();
     let request = get("http://192.0.2.1/unused".to_owned());
-    let outcomes = run_load(&client, &request, &cfg(0, 4, 0), &ExecuteOptions::default()).await;
+    let outcomes = run_load(
+        &client,
+        &request,
+        &cfg(0, 4, 0),
+        &ExecuteOptions::default(),
+        None,
+    )
+    .await;
     assert!(outcomes.is_empty(), "total=0 fires nothing");
     let s = stats(&outcomes);
     assert_eq!(s.ok, 0);
     assert_eq!(s.min, None);
+}
+
+#[tokio::test]
+async fn sink_some_captures_one_trace_per_copy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let request = get(format!("{}/ping", server.uri()));
+    let mut traces = Vec::new();
+    let outcomes = run_load(
+        &client,
+        &request,
+        &cfg(5, 2, 0),
+        &ExecuteOptions::default(),
+        Some(&mut traces),
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 5);
+    assert_eq!(
+        traces.len(),
+        5,
+        "one DebugTrace per copy when the sink is attached"
+    );
+    for trace in &traces {
+        assert_eq!(trace.resolved_display.url, request.url);
+    }
 }

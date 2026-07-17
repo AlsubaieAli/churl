@@ -146,6 +146,13 @@ pub struct Config {
     /// overrides it upward. Resolved via [`Config::cookies`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cookies: bool,
+    /// Master debug toggle (M8.3): opt-in, persisted, default off. `false`
+    /// unless set. Gates the Inspector overlay, Log panel, Traffic feed, and
+    /// debug-only advanced settings (later waves); OFF means zero
+    /// trace-capture overhead (`crate::debug`/`crate::http::execute_traced`'s
+    /// `sink: None` path).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
 }
 
 /// The `[load]` config table: optional per-field overrides of the load-run

@@ -1,7 +1,7 @@
 //! Concurrent load / throttle runner.
 //!
 //! Fires **N copies** of one *already-resolved* [`Request`] through the single
-//! [`execute`] HTTP chokepoint with **bounded concurrency** and optional launch
+//! [`execute_traced`] HTTP chokepoint with **bounded concurrency** and optional launch
 //! **pacing**, capturing each request's outcome + timing so honest latency stats
 //! can be computed. This module is UI-free: [`run_load`] is the wiremock-tested
 //! source of truth for run semantics, and the live TUI launcher mirrors it (a
@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use futures::stream::StreamExt;
 
-use crate::http::{ExecuteOptions, HttpError, execute};
+use crate::debug::DebugTrace;
+use crate::http::{ExecuteOptions, HttpError, execute_traced};
 use crate::model::{Request, Response};
 
 /// A load run's knobs: how many copies to fire, how many may be in flight at
@@ -233,7 +234,7 @@ fn percentile(sorted: &[Duration], p: f64) -> Option<Duration> {
     Some(sorted[index])
 }
 
-/// Fires `cfg.total` copies of `request` through [`execute`], bounded to
+/// Fires `cfg.total` copies of `request` through [`execute_traced`], bounded to
 /// `cfg.concurrency` in flight at once and paced by `cfg.interval` between
 /// launches. Returns one `(outcome, timing)` per request, **in request-index
 /// order** (0..total), so the caller can line results up with copies.
@@ -241,13 +242,21 @@ fn percentile(sorted: &[Duration], p: f64) -> Option<Duration> {
 /// This is the run-semantics source of truth: the same `buffer_unordered` +
 /// absolute-target pacing the TUI launcher uses for its live stream. The request
 /// is cloned per copy (it is already resolved — no re-resolution) and driven
-/// through the single `execute` chokepoint. `cfg.total == 0` returns an empty
-/// vec without touching the network.
+/// through the single `execute_traced` chokepoint. `cfg.total == 0` returns an
+/// empty vec without touching the network.
+///
+/// When `sink` is `Some`, every copy captures its own [`DebugTrace`] (an
+/// independent, owned trace per copy — concurrent copies cannot share one
+/// `&mut DebugTrace`); traces are appended into `sink` in request-index order
+/// once every copy has finished. `sink: None` costs nothing extra per copy —
+/// no `DebugTrace` is ever built. Unused (always `None`) until a later wave
+/// wires the caller up; the signature is frozen here so that wave is bin-only.
 pub async fn run_load(
     client: &reqwest::Client,
     request: &Request,
     cfg: &LoadConfig,
     options: &ExecuteOptions,
+    mut sink: Option<&mut Vec<DebugTrace>>,
 ) -> Vec<(ReqOutcome, Option<Duration>)> {
     if cfg.total == 0 {
         return Vec::new();
@@ -255,8 +264,18 @@ pub async fn run_load(
     let concurrency = cfg.concurrency.max(1);
     let interval = cfg.interval;
     let start = Instant::now();
+    // A plain `bool`, not `sink` itself, is what each concurrent copy captures
+    // below — `sink` is a unique `&mut`, and `buffer_unordered` polls every
+    // copy's future concurrently, so it cannot be shared into N futures at
+    // once. Each copy instead builds its own owned `DebugTrace` when `capture`
+    // is set; the traces are appended into `sink`, in request-index order,
+    // only after every copy has finished (see below) — sequential, so no
+    // aliasing. When `capture` is `false` (the `sink: None` — off — path),
+    // `debug.then(...)` never runs its closure: zero `DebugTrace` allocation
+    // per copy, matching every other capture site's off-path guarantee.
+    let capture = sink.is_some();
 
-    let mut indexed: Vec<(usize, ReqOutcome, Option<Duration>)> =
+    let mut indexed: Vec<(usize, ReqOutcome, Option<Duration>, Option<DebugTrace>)> =
         futures::stream::iter(0..cfg.total)
             .map(|i| {
                 let client = client.clone();
@@ -273,9 +292,10 @@ pub async fn run_load(
                             tokio::time::sleep(target - elapsed).await;
                         }
                     }
-                    let result = execute(&client, &request, &options).await;
+                    let mut trace = capture.then(|| DebugTrace::from_request(&request));
+                    let result = execute_traced(&client, &request, &options, trace.as_mut()).await;
                     let timing = result.as_ref().ok().map(|response| response.timing.total);
-                    (i, classify(&result), timing)
+                    (i, classify(&result), timing, trace)
                 }
             })
             .buffer_unordered(concurrency)
@@ -283,10 +303,16 @@ pub async fn run_load(
             .await;
 
     indexed.sort_by_key(|(index, ..)| *index);
-    indexed
-        .into_iter()
-        .map(|(_, outcome, timing)| (outcome, timing))
-        .collect()
+    let mut outcomes = Vec::with_capacity(indexed.len());
+    for (_, outcome, timing, trace) in indexed {
+        if let Some(trace) = trace
+            && let Some(sink) = sink.as_deref_mut()
+        {
+            sink.push(trace);
+        }
+        outcomes.push((outcome, timing));
+    }
+    outcomes
 }
 
 #[cfg(test)]

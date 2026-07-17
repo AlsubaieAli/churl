@@ -146,6 +146,7 @@ async fn three_step_chain_feeds_extracted_values_downstream() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -214,6 +215,7 @@ async fn halt_on_failure_skips_the_rest() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -267,6 +269,7 @@ async fn continue_on_failure_runs_the_rest() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -315,6 +318,7 @@ async fn extraction_error_halts() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -382,6 +386,7 @@ async fn extracted_var_beats_workspace_var() {
         &sequence,
         &scopes,
         &ExecuteOptions::default(),
+        None,
     )
     .await;
 
@@ -781,6 +786,7 @@ async fn empty_sequence_produces_no_outcomes() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
     assert!(run.steps.is_empty());
@@ -821,8 +827,69 @@ async fn step_with_body_runs() {
         &sequence,
         &RunScopes::default(),
         &ExecuteOptions::default(),
+        None,
     )
     .await;
     assert_eq!(run.steps[0].result, StepResult::Ok { status: 201 });
     assert_eq!(run.steps[0].extracted.get("id").unwrap(), "new");
+}
+
+/// A `Some` sink accumulates one `DebugTrace` per step that actually sends a
+/// request, in step order; `None` (every other test in this file) costs
+/// nothing extra.
+#[tokio::test]
+async fn sink_some_captures_one_trace_per_sent_step() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/a"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/b"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_manifest(root, &[]);
+    write_endpoint(
+        root,
+        "s/a.toml",
+        &get_endpoint("a", &format!("{}/a", server.uri())),
+    );
+    write_endpoint(
+        root,
+        "s/b.toml",
+        &get_endpoint("b", &format!("{}/b", server.uri())),
+    );
+
+    let sequence = Sequence {
+        seq: 0,
+        name: "two steps".into(),
+        on_error: OnError::Halt,
+        steps: vec![step("s/a.toml", &[]), step("s/b.toml", &[])],
+    };
+
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let mut traces = Vec::new();
+    let run = run_sequence(
+        &client,
+        root,
+        &sequence,
+        &RunScopes::default(),
+        &ExecuteOptions::default(),
+        Some(&mut traces),
+    )
+    .await;
+
+    assert_eq!(run.steps.len(), 2);
+    assert_eq!(
+        traces.len(),
+        2,
+        "one DebugTrace per step that actually sent a request"
+    );
+    assert!(traces[0].resolved_display.url.ends_with("/a"));
+    assert!(traces[1].resolved_display.url.ends_with("/b"));
 }

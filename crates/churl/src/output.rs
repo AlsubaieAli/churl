@@ -280,27 +280,6 @@ fn print_envelope<T: Serialize>(envelope: Envelope<T>) {
     }
 }
 
-/// Masks a header value when its **name** is a known auth-bearing name
-/// (`authorization`, `cookie`) or otherwise looks secret-named
-/// ([`churl_core::config::looks_like_secret_name`]), or when its **value**
-/// looks secret-shaped ([`churl_core::secrets::looks_like_secret_value`]).
-///
-/// Mirrors the redirect-strip dual-anchor policy (see DECISIONS.md, "Cross-origin
-/// redirect policy") applied to the echoed `request.headers` in the JSON
-/// envelope: a resolved `{{token}}`/session-captured value must never round-trip
-/// back out over stdout, even though the real outgoing request sent it. The URL
-/// is masked by its own twin, [`churl_core::secrets::mask_url`]; the request
-/// body is not echoed at all (only `body_present`).
 pub fn mask_header_value(name: &str, value: &str) -> String {
-    const ALWAYS_AUTH_NAMES: [&str; 2] = ["authorization", "cookie"];
-    let name_hit = ALWAYS_AUTH_NAMES
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case(name))
-        || churl_core::config::looks_like_secret_name(name);
-    let value_hit = churl_core::secrets::looks_like_secret_value(value);
-    if name_hit || value_hit {
-        "••••••".to_owned()
-    } else {
-        value.to_owned()
-    }
+    churl_core::secrets::mask_header_value(name, value)
 }
