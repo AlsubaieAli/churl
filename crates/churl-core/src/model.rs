@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::assert::Assertion;
+
 /// HTTP request method. Covers the standard REST methods; CONNECT/TRACE can be
 /// added later if needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -248,6 +250,13 @@ pub struct Endpoint {
     pub name: String,
     /// The request this endpoint executes.
     pub request: Request,
+    /// Assertions to run against this endpoint's response on `churl run`
+    /// (M8.4), persisted as `[[assertions]]`. `churl run` evaluates the
+    /// persisted set followed by any CLI `--assert` flags (append); `churl
+    /// send` has no persisted endpoint, so it only ever sees CLI flags.
+    /// Omitted from serialized output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<Assertion>,
 }
 
 /// A named set of template variables, selectable at request time.

@@ -287,6 +287,7 @@ fn prepare_step_session_scope_precedence() {
     let ep = Endpoint {
         seq: 0,
         name: "e".into(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "{{x}}".into(),

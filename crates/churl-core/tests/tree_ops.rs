@@ -194,6 +194,7 @@ fn reorder_endpoints_normalizes_legacy_zero_seq() {
         let ep = churl_core::model::Endpoint {
             seq: 0,
             name: name.to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: String::new(),

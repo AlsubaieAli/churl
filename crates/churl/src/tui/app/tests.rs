@@ -75,6 +75,7 @@ fn open_bare_endpoint(app: &mut App) {
     let endpoint = Endpoint {
         seq: 0,
         name: "test".to_owned(),
+        assertions: Vec::new(),
         request: Request {
             method: churl_core::model::Method::Get,
             url: "https://api.test/x".to_owned(),
@@ -4723,6 +4724,7 @@ fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
         endpoint: Endpoint {
             seq: 0,
             name: "ep".to_owned(),
+            assertions: Vec::new(),
             request: Request {
                 method: churl_core::model::Method::Get,
                 url: "https://api.test/x".to_owned(),

@@ -26,6 +26,9 @@ pub struct RunArgs {
     /// before executing (human mode only — `headless::print_human` covers
     /// the rest of the request/response trace).
     pub verbose: bool,
+    /// Raw `--assert` flag strings, parsed and appended after the resolved
+    /// endpoint's own persisted `[[assertions]]`.
+    pub cli_asserts: Vec<String>,
 }
 
 /// Opens the cwd workspace, resolves `args.endpoint_path`, builds the
@@ -92,5 +95,10 @@ pub async fn run(args: RunArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exec
         },
     };
 
-    run_execution(resolved.endpoint.request, scopes, inputs).await
+    // Effective set: the endpoint's own persisted assertions, THEN the CLI
+    // `--assert` flags (append) — see `docs/CLI.md`, "Assertions".
+    let mut assertions = resolved.endpoint.assertions;
+    assertions.extend(crate::headless::parse_cli_assertions(&args.cli_asserts)?);
+
+    run_execution(resolved.endpoint.request, scopes, inputs, &assertions).await
 }

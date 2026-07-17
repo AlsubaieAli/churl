@@ -1129,6 +1129,7 @@ mod tests {
         let endpoint = |auth: Option<Auth>| Endpoint {
             seq: 0,
             name: "t".into(),
+            assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "https://e.com/".into(),

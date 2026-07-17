@@ -32,6 +32,9 @@ pub struct SendArgs {
     pub profile: Option<String>,
     pub proxy: Option<String>,
     pub insecure: bool,
+    /// Raw `--assert` flag strings — `send` has no persisted endpoint, so
+    /// these are the whole assertion set.
+    pub cli_asserts: Vec<String>,
 }
 
 pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<ExecData, CliError> {
@@ -104,7 +107,8 @@ pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exe
         },
     };
 
-    run_execution(request, scopes, inputs).await
+    let assertions = crate::headless::parse_cli_assertions(&args.cli_asserts)?;
+    run_execution(request, scopes, inputs, &assertions).await
 }
 
 /// Parses a `-H`/`--header` value as `NAME:VALUE` (curl shape), trimming

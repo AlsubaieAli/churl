@@ -42,7 +42,7 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 - `response.headers` are echoed **verbatim, unmasked** — including `Set-Cookie`. This is intentional: response data is the whole point of showing the response (matches `curl -i`). Only the *request* echo is redacted (it can carry a resolved credential the caller supplied); the response is what the server chose to send back.
 - `response.body_encoding` is `"utf8"` when the response body is valid UTF-8, else `"base64"` (`body` is then base64-encoded). Never lossy — deterministic decoding for an agent.
 - `response.truncated` mirrors the body-size cap flag.
-- `assertions` is always `null` in M8.2 — **reserved** for M8.4 assertions. Shipping the key now avoids a schema-version bump when they land.
+- `assertions` is `null` when no assertions were given (unchanged since M8.2 — the reserved shape shipped early to avoid a schema-version bump); otherwise it holds the populated `AssertionReport` object described in "Assertions" below.
 - Multi-request runs (sequences/load) are out of scope for M8.2 and will stream NDJSON (one JSON object per line) rather than reuse this single-object envelope — that's a distinct, future contract; a `run`/`send` invocation is always exactly one request, one object.
 
 ## Exit codes (frozen forever)
@@ -50,13 +50,13 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | assertion failure — **RESERVED**, not used in M8.2 |
+| 1 | assertion failure — a `run`/`send` whose request succeeded but whose assertions did not (see "Assertions" below) |
 | 2 | usage error — owned entirely by clap's own parser (missing/conflicting/unknown flags to `churl` itself). This module never constructs a JSON envelope for a band-2 failure, even under `--json` — "clap default, don't remap." |
 | 3 | workspace/resolution error |
 | 4 | request/transport error |
 | 5 | input/import error |
 
-Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **except** band 2 (clap's own usage errors print clap's own text to stderr and are envelope-free by design).
+Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **except** band 2 (clap's own usage errors print clap's own text to stderr and are envelope-free by design) **and band 1** (an assertion failure is the sole exception: the request succeeded, so the envelope stays `ok: true` with `data` populated — branch on `data.assertions.passed`, never on `ok`, to detect it).
 
 ## `error.kind` → exit code
 
@@ -72,8 +72,92 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 | `transport-error` | 4 | Any other transport failure (DNS, connect, TLS, protocol) — message + `detail.url` are secret-masked |
 | `not-a-curl-command` | 5 | `import`'s input didn't parse as a curl command — covers a tokenize failure, a missing/duplicate URL, an unknown flag, an unsupported construct, an invalid `-X` method, **and** the non-interactive stdin guard (no curl given and stdin isn't piped) |
 | `import-write-failed` | 5 | The curl command parsed, but writing the endpoint failed (e.g. a newly-authored literal secret was refused, or a disk error) |
+| `invalid-assertion` | 5 | A `--assert` flag did not parse: an unknown operator, a value-requiring operator (everything but `exists`/`absent`) with no value, or an empty target (M8.4) |
 
 Implementation: `crates/churl/src/output.rs` (`ErrorKind::exit_code`).
+
+## Assertions
+
+`run`/`send` accept a repeatable `--assert <EXPR>` flag that checks a value in the response and, on any failure, exits **1** (see "Exit codes" above) while still printing the normal success envelope.
+
+### Syntax
+
+```
+<target> <op> <value>      # e.g. status == 200
+<target> exists|absent     # no value
+```
+
+- **`target`** is an extraction expression — the same grammar `sequence.rs`/`docs/ARCHITECTURE.md` documents for sequence-step extraction rules: `status` (the numeric HTTP status), `header:<Name>` (case-insensitive), or a JSON path (`$.a.b[0]`, leading `$.` optional). It is always a single whitespace-free token.
+- **`value`** is everything after the operator token, including embedded spaces (e.g. `$.data.msg contains hello world` compares against `"hello world"`). `exists`/`absent` take no value.
+
+### Operators
+
+| Op | Aliases | Meaning |
+|---|---|---|
+| `==` | `eq` | Exact string equality |
+| `!=` | `ne` | Exact string inequality |
+| `contains` | | Substring match |
+| `exists` | | The target extracts successfully (a `null` leaf or a missing header/key/index does **not** count as existing) |
+| `absent` | | The target's extraction fails with a not-found reason (missing header/key/index, or a `null` leaf) — a malformed expression or non-JSON body does **not** count as absent |
+| `<`, `>`, `<=`, `>=` | | Numeric comparison; both sides are parsed as `f64` — a non-numeric side fails the assertion with a clear reason rather than falling back to string comparison |
+
+A target that fails to extract (e.g. a missing header) fails every value-comparing operator (`==`/`!=`/`contains`/`<`/`>`/`<=`/`>=`) with the extractor's own error surfaced as the reason — never a fabricated empty-string/zero comparison.
+
+### Effective assertion set
+
+- `churl run <endpoint>`: the endpoint's persisted `[[assertions]]` (below), **then** its `--assert` flags, in that order (append, never replace).
+- `churl send`: no persisted endpoint, so `--assert` flags are the whole set.
+
+An empty set (no persisted assertions, no `--assert` flags) is unchanged M8.2 behaviour: exit 0, `data.assertions` stays `null`.
+
+### Populated `data.assertions` shape
+
+```json
+{
+  "passed": false,
+  "total": 2,
+  "failed": 1,
+  "results": [
+    { "target": "status", "op": "==", "expected": "200", "actual": "200", "pass": true },
+    { "target": "$.data.id", "op": "exists", "pass": false, "error": "extract \"$.data.id\": no such key \"id\"" }
+  ]
+}
+```
+
+`op` is always the canonical operator string (`==`, `contains`, `exists`, …), never the Rust variant name. `expected`/`actual` are omitted (not `null`) when not applicable (`expected` for `exists`/`absent`; either when extraction failed). `error` is present only on a failed result.
+
+### Persisted endpoint assertions
+
+An endpoint TOML file may carry a top-level `[[assertions]]` array-of-tables (sibling of `[request]`):
+
+```toml
+[[assertions]]
+target = "status"
+op = "=="
+value = "200"
+
+[[assertions]]
+target = "$.data.id"
+op = "exists"
+```
+
+`op` round-trips as its canonical string; `value` is omitted on disk for `exists`/`absent`.
+
+### Invalid `--assert`
+
+A flag that fails to parse (unknown operator, a value-requiring operator with no value, or an empty target) is `error.kind: "invalid-assertion"`, exit **5** — a usage/input mistake caught before any request runs, distinct from an assertion that ran and failed (exit 1).
+
+### Human (non-`--json`) mode
+
+After the usual response echo, a checklist prints to **stderr** — one line per assertion (`✓`/`✗` + `target op [value]`, with the failure reason appended after `✗`) — followed by a summary line, then the process exits 1 if any failed:
+
+```
+✓ status == 200
+✗ $.data.id exists — extract "$.data.id": no such key "id"
+1 passed, 1 failed
+```
+
+`--json` mode never prints this — the checklist is a human-only rendering of the same `data.assertions` object.
 
 ## Secret masking (request echo)
 

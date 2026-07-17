@@ -130,6 +130,7 @@ fn apikey_auth_round_trips_wire_equivalent_not_structural() {
     let endpoint = |auth: Auth| Endpoint {
         seq: 0,
         name: "things".to_owned(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com/things".to_owned(),

@@ -6,6 +6,7 @@ fn endpoint(auth: Option<Auth>) -> Endpoint {
     Endpoint {
         seq: 0,
         name: "e".to_owned(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://example.com".to_owned(),

@@ -147,6 +147,7 @@ fn headers_render_as_array_of_tables() {
     let endpoint = Endpoint {
         seq: 3,
         name: "fresh".into(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Post,
             url: "https://api.example.com".into(),
@@ -182,6 +183,67 @@ fn headers_render_as_array_of_tables() {
     assert_eq!(load_endpoint(&path).unwrap(), endpoint);
 }
 
+#[test]
+fn assertions_render_as_array_of_tables_and_round_trip() {
+    use churl_core::assert::{AssertOp, Assertion};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("asserted.toml");
+    let endpoint = Endpoint {
+        seq: 0,
+        name: "asserted".into(),
+        assertions: vec![
+            Assertion {
+                target: "status".into(),
+                op: AssertOp::Eq,
+                value: Some("200".into()),
+            },
+            Assertion {
+                target: "$.data.id".into(),
+                op: AssertOp::Exists,
+                value: None,
+            },
+        ],
+        request: Request {
+            method: Method::Get,
+            url: "https://api.example.com".into(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+            insecure: false,
+        },
+    };
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("[[assertions]]"),
+        "assertions must be array-of-tables:\n{text}"
+    );
+    assert!(
+        text.contains(r#"op = "==""#),
+        "op must serialize canonically:\n{text}"
+    );
+    assert!(
+        text.contains(r#"op = "exists""#),
+        "exists must serialize canonically, with no `value` key:\n{text}"
+    );
+    assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+
+    // An assertion-free endpoint stays byte-minimal: the key is omitted entirely.
+    let bare = Endpoint {
+        assertions: Vec::new(),
+        ..endpoint_with_headers("bare", 0)
+    };
+    let bare_path = dir.path().join("bare.toml");
+    save_endpoint(&bare_path, &bare).unwrap();
+    let bare_text = fs::read_to_string(&bare_path).unwrap();
+    assert!(
+        !bare_text.contains("assertions"),
+        "empty assertions must be omitted:\n{bare_text}"
+    );
+}
+
 // ---- R1 D3: array-of-tables comment preservation on length change ---------
 
 /// Helper: an endpoint with `n` headers `H0..H{n-1}` (all enabled), no auth.
@@ -189,6 +251,7 @@ fn endpoint_with_headers(name: &str, n: usize) -> Endpoint {
     Endpoint {
         seq: 0,
         name: name.into(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com".into(),
@@ -312,6 +375,7 @@ fn literal_secret_endpoint() -> Endpoint {
     Endpoint {
         seq: 0,
         name: "leaky".into(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com/x".into(),
@@ -1471,6 +1535,7 @@ fn endpoint_with(
     Endpoint {
         seq: 0,
         name: "e".into(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: url.into(),

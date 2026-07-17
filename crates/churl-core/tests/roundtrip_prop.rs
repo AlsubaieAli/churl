@@ -85,6 +85,7 @@ fn endpoint() -> impl Strategy<Value = Endpoint> {
             |(seq, name, method, url, headers, params, body, auth)| Endpoint {
                 seq,
                 name,
+                assertions: Vec::new(),
                 request: Request {
                     method,
                     url,

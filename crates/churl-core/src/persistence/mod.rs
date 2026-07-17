@@ -348,6 +348,7 @@ mod tests {
             let ep = Endpoint {
                 seq: 0,
                 name: "Ping".into(),
+                assertions: Vec::new(),
                 request: Request {
                     method: Method::Get,
                     url: String::new(),

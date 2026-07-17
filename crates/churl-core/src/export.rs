@@ -126,6 +126,7 @@ mod tests {
         Endpoint {
             seq: 0,
             name: "test".to_owned(),
+            assertions: Vec::new(),
             request,
         }
     }

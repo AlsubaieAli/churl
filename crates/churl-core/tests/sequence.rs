@@ -23,6 +23,7 @@ fn get_endpoint(name: &str, url: &str) -> Endpoint {
     Endpoint {
         seq: 0,
         name: name.to_owned(),
+        assertions: Vec::new(),
         request: Request {
             method: Method::Get,
             url: url.to_owned(),
