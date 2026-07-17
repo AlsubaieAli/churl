@@ -63,6 +63,12 @@ pub enum ErrorKind {
     UnresolvedVar,
     /// `--profile NAME` named a profile the workspace manifest does not define.
     UnknownProfile,
+    /// The global config file could not be loaded or parsed (unreadable,
+    /// malformed TOML, or an invalid knob value such as `redirect`), or the
+    /// current working directory could not be determined. Pre-flight resolution
+    /// that fails before the request is even shaped — grouped with the other
+    /// resolution failures in band 3.
+    ConfigError,
 
     // --- band 4: request/transport error (from `churl_core::http::HttpError`) ---
     /// The request URL could not be parsed.
@@ -90,7 +96,8 @@ impl ErrorKind {
             ErrorKind::NoWorkspace
             | ErrorKind::EndpointNotFound
             | ErrorKind::UnresolvedVar
-            | ErrorKind::UnknownProfile => 3,
+            | ErrorKind::UnknownProfile
+            | ErrorKind::ConfigError => 3,
             ErrorKind::InvalidUrl | ErrorKind::Timeout | ErrorKind::TransportError => 4,
             ErrorKind::NotACurlCommand | ErrorKind::ImportWriteFailed => 5,
         }
@@ -143,11 +150,17 @@ impl std::error::Error for CliError {}
 pub fn from_http_error(err: churl_core::http::HttpError) -> CliError {
     use churl_core::http::HttpError;
     match err {
-        HttpError::InvalidUrl { url, reason } => CliError::with_detail(
-            ErrorKind::InvalidUrl,
-            format!("invalid URL {url:?}: {reason}"),
-            serde_json::json!({ "url": url, "reason": reason }),
-        ),
+        HttpError::InvalidUrl { url, reason } => {
+            // Mask any embedded secret before it lands in the message + detail —
+            // a malformed URL can still carry `user:pass@` / `?api_key=…`, and
+            // the failure surface must not leak what the success surface masks.
+            let masked = churl_core::secrets::mask_url(&url);
+            CliError::with_detail(
+                ErrorKind::InvalidUrl,
+                format!("invalid URL {masked:?}: {reason}"),
+                serde_json::json!({ "url": masked, "reason": reason }),
+            )
+        }
         HttpError::Timeout => CliError::new(ErrorKind::Timeout, "request timed out"),
         HttpError::Request(source) => CliError::new(
             ErrorKind::TransportError,
@@ -229,9 +242,9 @@ fn print_envelope<T: Serialize>(envelope: Envelope<T>) {
 /// Mirrors the redirect-strip dual-anchor policy (see DECISIONS.md, "Cross-origin
 /// redirect policy") applied to the echoed `request.headers` in the JSON
 /// envelope: a resolved `{{token}}`/session-captured value must never round-trip
-/// back out over stdout, even though the real outgoing request sent it. Applying
-/// only to headers (not `url`/body) is a deliberate M8.2 scope cut — see the
-/// build report.
+/// back out over stdout, even though the real outgoing request sent it. The URL
+/// is masked by its own twin, [`churl_core::secrets::mask_url`]; the request
+/// body is not echoed at all (only `body_present`).
 pub fn mask_header_value(name: &str, value: &str) -> String {
     const ALWAYS_AUTH_NAMES: [&str; 2] = ["authorization", "cookie"];
     let name_hit = ALWAYS_AUTH_NAMES

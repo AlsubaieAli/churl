@@ -102,7 +102,10 @@ pub async fn run_execution(
     let body_present = request.body.is_some();
     let request_summary = RequestSummary {
         method: request.method.to_string(),
-        url: request.url.clone(),
+        // Mask any secret the resolver substituted into the URL (userinfo
+        // password, secret-named/secret-shaped query value) before it is echoed
+        // back — the real request below still uses the unmasked `request.url`.
+        url: churl_core::secrets::mask_url(&request.url),
         headers: request
             .headers
             .iter()

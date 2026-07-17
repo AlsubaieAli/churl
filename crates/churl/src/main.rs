@@ -21,9 +21,10 @@ mod update;
 #[command(name = "churl", about = "Terminal HTTP client", version)]
 struct Cli {
     /// Set a template variable (repeatable): `--var key=value`. Highest-precedence
-    /// scope in the `{{var}}` resolver, above profiles and workspace vars.
-    #[arg(long = "var", value_name = "KEY=VALUE", global = true)]
-    vars: Vec<String>,
+    /// scope in the `{{var}}` resolver, above profiles and workspace vars. A
+    /// missing `=` is a usage error (parsed by clap → exit 2).
+    #[arg(long = "var", value_name = "KEY=VALUE", global = true, value_parser = parse_var)]
+    vars: Vec<(String, String)>,
     /// Activate a named profile at startup (unknown name is an error).
     #[arg(long, global = true)]
     profile: Option<String>,
@@ -174,26 +175,26 @@ enum CookiesAction {
     Clear,
 }
 
-/// Parses `--var key=value` pairs into a map. A missing `=` is a hard error.
-fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut vars = BTreeMap::new();
-    for pair in pairs {
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| eyre!("bad --var {pair:?}: expected key=value"))?;
-        vars.insert(key.to_owned(), value.to_owned());
+/// clap value-parser for `--var key=value`. A missing `=` is a genuine clap
+/// usage error (exit 2, clap-owned — envelope-exempt per the contract's band-2
+/// carve-out), so a malformed `--var` never bubbles out of `main` as an
+/// exit-1 anyhow error under `--json`.
+fn parse_var(pair: &str) -> std::result::Result<(String, String), String> {
+    match pair.split_once('=') {
+        Some((key, value)) => Ok((key.to_owned(), value.to_owned())),
+        None => Err(format!("expected key=value, got {pair:?}")),
     }
-    Ok(vars)
+}
+
+/// Collects the clap-parsed `--var` pairs into a map (last write wins, matching
+/// the old `parse_vars` insertion order).
+fn vars_map(pairs: &[(String, String)]) -> BTreeMap<String, String> {
+    pairs.iter().cloned().collect()
 }
 
 /// Process-wide execution knobs sourced from the global config file only
-/// (never per-invocation) — resolved once in `main` before dispatch, shared by
-/// `run`/`send` so neither headless command needs its own fallible
-/// config-parsing path. A malformed global config is a pre-flight failure
-/// here (bubbles via `?`, exit 1) exactly like it already is for the TUI
-/// (`tui::run`'s identical `config.redirect()?` at startup) — the M8.2 frozen
-/// exit-code table governs `run`/`send`/`import`'s *own* failure modes, not
-/// global-config corruption, which is a pre-existing (pre-M8.2) failure mode.
+/// (never per-invocation) — resolved once per `run`/`send` invocation, so
+/// neither headless command needs its own fallible config-parsing path.
 struct RuntimeCfg {
     timeout: std::time::Duration,
     proxy: Option<String>,
@@ -202,14 +203,36 @@ struct RuntimeCfg {
     redirect: churl_core::config::RedirectPolicy,
 }
 
-fn build_runtime_cfg() -> Result<RuntimeCfg> {
-    let config = churl_core::config::load_global_config()?;
+/// Resolves [`RuntimeCfg`] from the global config, mapping any failure to a
+/// band-3 [`ErrorKind::ConfigError`] `CliError` so it flows through
+/// [`output::emit`] as a proper envelope (never an exit-1 anyhow bubble that
+/// would collide with the RESERVED assertion-failure code and print no
+/// envelope under `--json`). A corrupt config is a pre-flight *resolution*
+/// failure, not a usage error — hence band 3, not band 2.
+fn build_runtime_cfg() -> std::result::Result<RuntimeCfg, CliError> {
+    let config = churl_core::config::load_global_config()
+        .map_err(|err| CliError::new(ErrorKind::ConfigError, err.to_string()))?;
+    let redirect = config
+        .redirect()
+        .map_err(|err| CliError::new(ErrorKind::ConfigError, err.to_string()))?;
     Ok(RuntimeCfg {
         timeout: config.timeout(),
         proxy: config.proxy().map(str::to_owned),
         insecure: config.insecure(),
         max_body_bytes: config.max_body_bytes(),
-        redirect: config.redirect()?,
+        redirect,
+    })
+}
+
+/// The current working directory, mapped to a band-3 [`ErrorKind::ConfigError`]
+/// `CliError` on failure so a `run`/`send` invocation in an unreadable/deleted
+/// cwd surfaces an envelope rather than an exit-1 bubble.
+fn headless_cwd() -> std::result::Result<PathBuf, CliError> {
+    std::env::current_dir().map_err(|err| {
+        CliError::new(
+            ErrorKind::ConfigError,
+            format!("cannot determine current directory: {err}"),
+        )
     })
 }
 
@@ -228,18 +251,25 @@ async fn main() -> Result<()> {
             std::process::exit(run_import(curl, name, stdout, out, json));
         }
         Some(Command::Run { endpoint, verbose }) => {
-            let runtime = build_runtime_cfg()?;
-            let cli_vars = parse_vars(&cli.vars)?;
-            let cwd = std::env::current_dir()?;
-            let args = run_cmd::RunArgs {
-                endpoint_path: endpoint,
-                cli_vars,
-                profile: cli.profile.clone(),
-                proxy: cli.proxy.clone(),
-                insecure: cli.insecure,
-                verbose,
-            };
-            let result = run_cmd::run(args, &cwd, &runtime).await;
+            // Every fallible pre-flight step (config, cwd, resolution, execution)
+            // funnels into one `Result<ExecData, CliError>` so `emit` owns the
+            // stdout/stderr/exit-code triad — nothing bubbles out of `main` as an
+            // exit-1 anyhow error that would carry no envelope under `--json`.
+            let cli_vars = vars_map(&cli.vars);
+            let result = async {
+                let runtime = build_runtime_cfg()?;
+                let cwd = headless_cwd()?;
+                let args = run_cmd::RunArgs {
+                    endpoint_path: endpoint,
+                    cli_vars,
+                    profile: cli.profile.clone(),
+                    proxy: cli.proxy.clone(),
+                    insecure: cli.insecure,
+                    verbose,
+                };
+                run_cmd::run(args, &cwd, &runtime).await
+            }
+            .await;
             let code = output::emit("run", json, result, |data| {
                 headless::print_human(data, verbose)
             });
@@ -253,22 +283,25 @@ async fn main() -> Result<()> {
             body,
             verbose,
         }) => {
-            let runtime = build_runtime_cfg()?;
-            let cli_vars = parse_vars(&cli.vars)?;
-            let cwd = std::env::current_dir()?;
-            let args = send_cmd::SendArgs {
-                url: url_pos
-                    .or(url)
-                    .expect("clap enforces exactly one of url_pos/url"),
-                method,
-                headers: header,
-                body,
-                cli_vars,
-                profile: cli.profile.clone(),
-                proxy: cli.proxy.clone(),
-                insecure: cli.insecure,
-            };
-            let result = send_cmd::run(args, &cwd, &runtime).await;
+            let cli_vars = vars_map(&cli.vars);
+            let result = async {
+                let runtime = build_runtime_cfg()?;
+                let cwd = headless_cwd()?;
+                let args = send_cmd::SendArgs {
+                    url: url_pos
+                        .or(url)
+                        .expect("clap enforces exactly one of url_pos/url"),
+                    method,
+                    headers: header,
+                    body,
+                    cli_vars,
+                    profile: cli.profile.clone(),
+                    proxy: cli.proxy.clone(),
+                    insecure: cli.insecure,
+                };
+                send_cmd::run(args, &cwd, &runtime).await
+            }
+            .await;
             let code = output::emit("send", json, result, |data| {
                 headless::print_human(data, verbose)
             });
@@ -299,7 +332,7 @@ async fn main() -> Result<()> {
             uninstall::run_uninstall(purge, yes)?;
         }
         None => {
-            let vars = parse_vars(&cli.vars)?;
+            let vars = vars_map(&cli.vars);
             // Import into the cwd workspace *before* the TUI launches (fail loudly
             // on a bad file — never launch a half-imported TUI silently).
             if let Some(file) = &cli.import_collection {
@@ -589,6 +622,7 @@ fn run_import(
         if let Some(name) = name {
             endpoint.name = name;
         }
+        let mut warnings = parsed.warnings;
 
         let written = if stdout {
             let toml = churl_core::persistence::endpoint_to_toml(&endpoint)
@@ -615,11 +649,27 @@ fn run_import(
                         ),
                     )
                 })?;
+            // Single atomic claim+save: a refused literal secret or a disk error
+            // leaves the workspace unchanged (no orphaned placeholder). On a
+            // filename collision `create_endpoint_with` bumps the stem AND sets
+            // the saved `name` to it, so both endpoints stay addressable.
+            let requested_slug = churl_core::persistence::slug_of(&endpoint.name);
             let claimed =
-                churl_core::persistence::create_endpoint(workspace.root(), &endpoint.name)
+                churl_core::persistence::create_endpoint_with(workspace.root(), &endpoint)
                     .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
-            churl_core::persistence::save_endpoint(&claimed, &endpoint)
-                .map_err(|err| CliError::new(ErrorKind::ImportWriteFailed, err.to_string()))?;
+            let claimed_stem = claimed
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if claimed_stem != requested_slug {
+                // The name was bumped to avoid a collision — reflect the saved,
+                // addressable name in the envelope + warn (loud, never silent).
+                warnings.push(format!(
+                    "named {claimed_stem:?} to avoid a filename collision with {:?}",
+                    endpoint.name
+                ));
+                endpoint.name = claimed_stem.to_owned();
+            }
             WrittenTo::Workspace {
                 path: claimed.display().to_string(),
             }
@@ -629,7 +679,7 @@ fn run_import(
             name: endpoint.name.clone(),
             method: endpoint.request.method.to_string(),
             url: endpoint.request.url.clone(),
-            warnings: parsed.warnings,
+            warnings,
             written,
         })
     });
