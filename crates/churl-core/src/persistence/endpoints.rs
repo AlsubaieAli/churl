@@ -142,6 +142,53 @@ pub fn create_endpoint(dir: &Path, name: &str) -> Result<PathBuf, PersistenceErr
     Ok(claim.commit())
 }
 
+/// Creates a new endpoint file in `dir` holding `endpoint`'s real content
+/// (method/url/headers/body/auth), claiming `slug(endpoint.name)` and saving
+/// the real endpoint under a **single** claim guard — the guard commits only
+/// after the save succeeds, so a refused literal secret ([`PersistenceError::SecretsInAuth`]/
+/// [`SecretsRefused`](PersistenceError::SecretsRefused)) or a disk error leaves
+/// **no** file behind. This is the atomic alternative to `create_endpoint` +
+/// a separate overwriting `save_endpoint`, which would commit a placeholder
+/// first and orphan it if the overwrite failed.
+///
+/// `seq` is reassigned to append past the collection's current max (the
+/// caller's `endpoint.seq` is ignored, matching [`create_endpoint`]). On a
+/// filename collision the claim bumps to `<slug>-N.toml` and the saved
+/// endpoint's `name` is set to that bumped stem, so the new endpoint stays
+/// addressable by its display path — two files in a collection never share a
+/// `name`. Returns the created file's path; a caller wanting to surface the
+/// rename compares its stem against [`slug_of`]`(&endpoint.name)`.
+///
+/// An empty name is [`PersistenceError::EmptyName`].
+pub fn create_endpoint_with(dir: &Path, endpoint: &Endpoint) -> Result<PathBuf, PersistenceError> {
+    if endpoint.name.trim().is_empty() {
+        return Err(PersistenceError::EmptyName);
+    }
+    let slug = slugify(&endpoint.name);
+    let claim = claim_endpoint_path(dir, &slug).map_err(|source| PersistenceError::Write {
+        path: dir.to_owned(),
+        source,
+    })?;
+    // The claimed stem may have been bumped (`-2`, … on collision, or off a
+    // reserved name); keep the on-disk `name` in sync so the endpoint is
+    // addressable by its display path rather than silently unreachable.
+    let claimed_stem = claim
+        .path()
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&slug)
+        .to_owned();
+    let mut to_save = endpoint.clone();
+    to_save.seq = next_seq(dir);
+    if claimed_stem != slug {
+        to_save.name = claimed_stem;
+    }
+    // The guard is still armed here: a save failure drops it → the claimed
+    // placeholder is removed, leaving the workspace exactly as it was.
+    save_endpoint(claim.path(), &to_save)?;
+    Ok(claim.commit())
+}
+
 /// Renames the endpoint at `path`: updates its `name` (via the format-preserving
 /// merge save) *and* renames the file to a fresh slug of `new_name` in the same
 /// directory. Both changes happen or neither — the file is written under the old

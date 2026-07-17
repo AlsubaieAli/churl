@@ -332,6 +332,74 @@ fn url_authority(url: &str) -> Option<&str> {
     })
 }
 
+/// The token substituted for a detected secret span when redacting text for
+/// display (the M8.2 headless request-echo path). Six bullets, matching the
+/// TUI's own secret mask so redaction reads consistently across surfaces.
+pub const SECRET_MASK: &str = "••••••";
+
+/// Returns `url` with every embedded secret span replaced by [`SECRET_MASK`]:
+/// the `user:PASSWORD@` userinfo password (a literal, non-placeholder password)
+/// and each secret query value — a secret-*named* key's literal value, or a
+/// secret-*shaped* value under any key. Non-secret spans are left byte-identical.
+///
+/// This is the redaction twin of [`scan_url`]: it mirrors that scanner's exact
+/// detection spans, so what `scan_url` would flag as a secret is precisely what
+/// this masks. It exists for echoing a *resolved* request URL back to a caller
+/// (the `churl send`/`run` `--json` envelope + `-v` trace) without leaking a
+/// secret that `{{var}}` substitution wrote into the URL (`user:pass@` or
+/// `?api_key={{secret}}` → the real value). A `{{placeholder}}` span (never a
+/// secret) and any non-secret query value are untouched.
+pub fn mask_url(url: &str) -> String {
+    let mut out = url.to_owned();
+
+    // Userinfo password: `scheme://user:PASSWORD@host`. Mask a literal
+    // (non-placeholder) password span, keeping the username + host visible.
+    if let Some(authority) = url_authority(url)
+        && let Some((userinfo, host)) = authority.split_once('@')
+        && let Some((user, pass)) = userinfo.split_once(':')
+        && !pass.is_empty()
+        && !contains_placeholder(pass)
+    {
+        // `out` still equals `url` here (query masking runs after), so the
+        // authority substring matches; it appears before the path, so the first
+        // occurrence is the right one.
+        out = out.replacen(authority, &format!("{user}:{SECRET_MASK}@{host}"), 1);
+    }
+
+    // Query string: mask each secret pair's value, preserving key order,
+    // separators, and any trailing `#fragment`.
+    if let Some(qpos) = out.find('?') {
+        let (head, rest) = out.split_at(qpos);
+        let query_and_frag = &rest[1..];
+        let (query, frag) = match query_and_frag.split_once('#') {
+            Some((q, f)) => (q, Some(f)),
+            None => (query_and_frag, None),
+        };
+        let masked_query = query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                if key.is_empty() || value.is_empty() || contains_placeholder(value) {
+                    pair.to_owned()
+                } else if looks_like_secret_name(key) || looks_like_secret_value(value) {
+                    format!("{key}={SECRET_MASK}")
+                } else {
+                    pair.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut rebuilt = format!("{head}?{masked_query}");
+        if let Some(frag) = frag {
+            rebuilt.push('#');
+            rebuilt.push_str(frag);
+        }
+        out = rebuilt;
+    }
+
+    out
+}
+
 /// Whether any whitespace-delimited token in free text is secret-shaped. Used for
 /// request bodies, where there is no name anchor — a single high-confidence token
 /// anywhere warns.
