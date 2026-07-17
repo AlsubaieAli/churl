@@ -166,6 +166,18 @@ pub enum AssertParseError {
         /// The operator's canonical string.
         op: &'static str,
     },
+    /// A value-less operator (`exists`/`absent`) was followed by trailing
+    /// text — rejected rather than silently ignored, so a mistyped operator
+    /// (e.g. `id exists == 200`) can't degrade into an always-passing check.
+    #[error("assertion {expr:?}: operator {op} takes no value (unexpected {trailing:?})")]
+    UnexpectedValue {
+        /// The full input string.
+        expr: String,
+        /// The operator's canonical string.
+        op: &'static str,
+        /// The unexpected trailing text after the operator.
+        trailing: String,
+    },
 }
 
 /// One assertion: check `target` (an extraction expression, see
@@ -186,10 +198,10 @@ pub struct Assertion {
 impl Assertion {
     /// Parses `"<target> <op> <value>"`. `target` is the first whitespace-run
     /// token (the extraction grammar is itself whitespace-free); `op` is the
-    /// next token; everything after that — spaces included — is `value`
-    /// (`None` when the operator is `exists`/`absent`, in which case any
-    /// trailing text is also rejected as unexpected... actually **is
-    /// ignored**: only whitespace-delimited target+op are required for those).
+    /// next token; everything after that — spaces included — is `value`.
+    /// `value` is `None` for `exists`/`absent`, and those ops reject any
+    /// trailing text (rather than dropping it) so a mistyped operator can't
+    /// silently become an always-passing check.
     pub fn parse(s: &str) -> Result<Assertion, AssertParseError> {
         let trimmed = s.trim();
         if trimmed.is_empty() {
@@ -220,6 +232,13 @@ impl Assertion {
             }
             Some(value_rest.to_owned())
         } else {
+            if !value_rest.is_empty() {
+                return Err(AssertParseError::UnexpectedValue {
+                    expr: s.to_owned(),
+                    op: op.canonical(),
+                    trailing: value_rest.to_owned(),
+                });
+            }
             None
         };
 
@@ -540,6 +559,22 @@ mod tests {
         assert!(matches!(
             Assertion::parse("status =="),
             Err(AssertParseError::MissingValue { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_trailing_text_after_value_less_op() {
+        // A mistyped operator must not degrade into an always-passing check:
+        // `id exists == 200` is a user who meant equality, not existence.
+        let err = Assertion::parse("$.data.id exists == 200").unwrap_err();
+        assert!(matches!(
+            err,
+            AssertParseError::UnexpectedValue { op, trailing, .. }
+                if op == "exists" && trailing == "== 200"
+        ));
+        assert!(matches!(
+            Assertion::parse("$.data.id absent junk"),
+            Err(AssertParseError::UnexpectedValue { .. })
         ));
     }
 

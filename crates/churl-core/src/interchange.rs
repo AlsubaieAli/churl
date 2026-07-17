@@ -317,6 +317,9 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             name: item_name
                 .map(str::to_owned)
                 .unwrap_or_else(|| derive_name(url)),
+            // Foreign formats carry no assertion concept — import seeds an empty
+            // set (export likewise omits it). Assertions round-trip only through
+            // native TOML persistence.
             assertions: Vec::new(),
             request: Request {
                 method: Method::Get,
