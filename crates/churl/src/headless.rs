@@ -10,6 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 
 use churl_core::assert::{Assertion, AssertionReport, run_assertions};
+use churl_core::debug::DebugTrace;
 use churl_core::http::{ClientConfig, ExecuteOptions};
 use churl_core::model::Request;
 use churl_core::template::{Resolver, Scope};
@@ -65,6 +66,15 @@ pub struct ExecData {
     /// still exits 1, the sole exception to "`ok` mirrors the exit code"
     /// (see [`SuccessExitCode`] and `docs/CLI.md`, "Assertions").
     pub assertions: Option<AssertionReport>,
+    /// The per-exchange debug trace, `Some` only when `-v/--verbose` was
+    /// given (see [`run_execution`]'s `capture` flag). `None` on every
+    /// ordinary invocation, and omitted from `--json` output entirely (never
+    /// emitted as `"trace": null`) in that case, so the non-verbose envelope
+    /// stays byte-identical to before this field existed. Additive per the
+    /// `SCHEMA_VERSION` bump rule (`docs/CLI.md`, `output.rs` module docs):
+    /// an omitted-when-absent optional field never bumps the schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<DebugTrace>,
 }
 
 impl SuccessExitCode for ExecData {
@@ -116,14 +126,31 @@ pub fn parse_cli_assertions(exprs: &[String]) -> Result<Vec<Assertion>, CliError
 /// response, and shapes the result into the frozen envelope payload. `scopes`
 /// excludes the TUI's "session" scope (no live multi-request session exists
 /// in a one-shot headless process).
+///
+/// `capture` gates a per-exchange [`DebugTrace`]: `true` only when
+/// `-v/--verbose` was given on this invocation (independent of the
+/// persisted `config.debug` knob — see `docs/CLI.md`). `false` takes the
+/// exact pre-M8.3 path (`substitute_request` + `execute`, no `DebugTrace`
+/// ever built); `true` swaps in the traced twins
+/// (`substitute_request_traced` + `execute_traced`) and fills
+/// `ExecData::trace`.
 pub async fn run_execution(
     mut request: Request,
     scopes: Vec<Scope>,
     inputs: ExecInputs,
     assertions: &[Assertion],
+    capture: bool,
 ) -> Result<ExecData, CliError> {
     let resolver = Resolver::new(scopes);
-    resolver.substitute_request(&mut request);
+
+    // A capture sink is built only when `capture` asked for one — the
+    // non-verbose path never constructs a `DebugTrace` at all, matching the
+    // zero-overhead discipline `churl_core::http::execute_traced` documents.
+    let mut trace = capture.then(|| DebugTrace::from_request(&request));
+    match trace.as_mut() {
+        Some(trace) => resolver.substitute_request_traced(&mut request, &mut trace.var_steps),
+        None => resolver.substitute_request(&mut request),
+    }
 
     // Fail loud (mirrors `App::send_request`): a literal `{{name}}` left in
     // the wire request is always a bug in the caller's vars, never something
@@ -161,9 +188,23 @@ pub async fn run_execution(
 
     let client = churl_core::http::build_client_with(&inputs.client_cfg)
         .map_err(crate::output::from_http_error)?;
-    let response = churl_core::http::execute(&client, &request, &inputs.exec_opts)
-        .await
-        .map_err(crate::output::from_http_error)?;
+    let response =
+        churl_core::http::execute_traced(&client, &request, &inputs.exec_opts, trace.as_mut())
+            .await
+            .map_err(crate::output::from_http_error)?;
+
+    // `execute_traced` has no access to the `ClientConfig` used to build
+    // `client` (see `AuthCookieProxyDecisions`'s docs) — this is the one
+    // place both the trace and `inputs.client_cfg` are in scope, so the
+    // cookie/proxy decisions are filled in here, after a successful send.
+    if let Some(trace) = trace.as_mut() {
+        trace.decisions.cookie_used = inputs.client_cfg.cookies.is_some();
+        trace.decisions.proxy = inputs
+            .client_cfg
+            .proxy
+            .as_deref()
+            .map(churl_core::secrets::mask_url);
+    }
 
     // Evaluated here — the last point `response` is still owned whole, before
     // its body is consumed into the (lossy-decoded) envelope projection below.
@@ -202,6 +243,7 @@ pub async fn run_execution(
             },
         },
         assertions: assertion_report,
+        trace,
     })
 }
 

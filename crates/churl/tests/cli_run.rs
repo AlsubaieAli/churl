@@ -504,3 +504,85 @@ async fn run_persisted_assertions_run_before_cli_assert_flags() {
     assert_eq!(env["data"]["assertions"]["results"][0]["pass"], true);
     assert_eq!(env["data"]["assertions"]["results"][1]["pass"], false);
 }
+
+// ---- M8.3: debug trace (-v --json) -----------------------------------------
+
+#[tokio::test]
+async fn run_non_verbose_json_has_no_trace_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(dir.path(), &["--json", "run", "Ping"]);
+    assert!(output.status.success());
+    let env = envelope(&output);
+    let data = env["data"].as_object().expect("data is an object");
+    assert!(
+        !data.contains_key("trace"),
+        "non-verbose data must omit `trace` entirely: {env}"
+    );
+}
+
+#[tokio::test]
+async fn run_verbose_json_includes_trace_with_masked_secret_query() {
+    // Reuses the `Secret Query` fixture endpoint ({{apikey}}-substituted
+    // secret-named query value) to prove `run`'s -v --json trace masks the
+    // same way `data.request` already does, on the `run` (persisted-
+    // endpoint) surface rather than `send`'s ad-hoc one.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/data"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(
+        dir.path(),
+        &[
+            "--json",
+            "--var",
+            "apikey=REALKEY",
+            "run",
+            "Secret Query",
+            "-v",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["schema_version"], 1);
+    let trace = &env["data"]["trace"];
+    assert!(
+        !trace.is_null(),
+        "trace must be present under -v --json: {env}"
+    );
+
+    let var_steps = trace["var_steps"].as_array().expect("var_steps array");
+    let step = var_steps
+        .iter()
+        .find(|s| s["name"] == "apikey")
+        .expect("apikey var step recorded");
+    assert_eq!(step["value_masked"], "••••••", "secret-named var must mask");
+
+    let echoed_url = trace["resolved_display"]["url"].as_str().unwrap();
+    assert!(
+        !echoed_url.contains("REALKEY"),
+        "secret leaked in trace resolved_display.url: {echoed_url}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("REALKEY"),
+        "secret leaked anywhere in the envelope: {stdout}"
+    );
+}

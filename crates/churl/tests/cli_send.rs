@@ -552,3 +552,175 @@ async fn send_human_mode_prints_assertion_checklist_to_stderr_and_exits_1() {
     assert!(stderr.contains('✗'), "{stderr}");
     assert!(stderr.contains("1 passed, 1 failed"), "{stderr}");
 }
+
+// ---- M8.3: debug trace (-v --json) -----------------------------------------
+
+#[tokio::test]
+async fn send_non_verbose_json_has_no_trace_key() {
+    // The non-verbose envelope must be byte-identical to pre-M8.3: `trace` is
+    // entirely absent from `data` (never emitted as `"trace":null`), so an
+    // existing agent/script parsing the M8.2 shape sees no new key.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/ping", server.uri());
+
+    let output = churl(&["--json", "send", &url]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    let data = env["data"].as_object().expect("data is an object");
+    assert!(
+        !data.contains_key("trace"),
+        "non-verbose data must omit `trace` entirely: {env}"
+    );
+}
+
+#[tokio::test]
+async fn send_verbose_json_trace_shape_has_resolved_display_var_steps_redirects_decisions() {
+    let server = MockServer::start().await;
+    // A same-origin redirect hop so `redirect_hops` is populated too — the
+    // `-v --json` shape test covers every documented field of `data.trace` in
+    // one exchange.
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/end"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/end"))
+        .and(header("x-custom", "hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/start", server.uri());
+
+    let output = churl(&[
+        "--json",
+        "send",
+        "-v",
+        "-H",
+        "X-Custom: {{myvar}}",
+        "--var",
+        "myvar=hello",
+        &url,
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["schema_version"], 1, "additive field, no schema bump");
+    assert_eq!(env["data"]["response"]["status"], 200);
+    assert_eq!(env["data"]["response"]["body"], "landed");
+
+    let trace = &env["data"]["trace"];
+    assert!(
+        !trace.is_null(),
+        "trace must be present under -v --json: {env}"
+    );
+    assert_eq!(trace["resolved_display"]["method"], "GET");
+    assert_eq!(trace["resolved_display"]["body_present"], false);
+
+    let var_steps = trace["var_steps"].as_array().expect("var_steps array");
+    assert!(
+        var_steps
+            .iter()
+            .any(|s| s["name"] == "myvar" && s["value_masked"] == "hello" && s["scope"] == "cli"),
+        "{var_steps:?}"
+    );
+
+    let hops = trace["redirect_hops"]
+        .as_array()
+        .expect("redirect_hops array");
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0]["status"], 302);
+    assert_eq!(hops[0]["cross_origin"], false);
+
+    assert!(trace["decisions"].is_object());
+    assert_eq!(trace["decisions"]["cookie_used"], false);
+}
+
+#[tokio::test]
+async fn send_verbose_json_masking_adversarial_no_raw_secrets_anywhere() {
+    // The #1 adversarial-review target (M8.3-PLAN ruling 3): a bearer secret,
+    // a secret-NAMED header, and a secret-SHAPED value in the body — grep the
+    // WHOLE emitted envelope string, not just `data.request`, so a leak via
+    // the new `data.trace` surface would be caught too.
+    let server = MockServer::start().await;
+    let bearer = "Bearer supersecretbearervalue1234567890abcdef";
+    let secret_header_value = "definitely-a-secret-value-1234567890abcdef";
+    let body = r#"{"token":"sk-live-abcdefghijklmnopqrstuvwx"}"#;
+
+    Mock::given(method("POST"))
+        .and(path("/secure"))
+        // The REAL outgoing request must still carry every real value —
+        // masking is display-only, never a wire-level mutation.
+        .and(header("authorization", bearer))
+        .and(header("x-api-token", secret_header_value))
+        .and(body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/secure", server.uri());
+
+    let output = churl(&[
+        "--json",
+        "send",
+        "-v",
+        "-X",
+        "POST",
+        "-H",
+        &format!("Authorization: {bearer}"),
+        "-H",
+        &format!("X-Api-Token: {secret_header_value}"),
+        "-d",
+        body,
+        &url,
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // wiremock only matches (200) if the real, unmasked values went out.
+    let env = envelope(&output);
+    assert_eq!(env["data"]["response"]["status"], 200);
+
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    for secret in [
+        bearer,
+        secret_header_value,
+        "sk-live-abcdefghijklmnopqrstuvwx",
+    ] {
+        assert!(
+            !stdout.contains(secret),
+            "raw secret {secret:?} leaked into the envelope:\n{stdout}"
+        );
+    }
+
+    // Sanity: the trace actually captured the headers (masked) — proves the
+    // loop above isn't vacuously passing because the trace was empty/absent.
+    let headers = env["data"]["trace"]["resolved_display"]["headers"]
+        .as_array()
+        .expect("headers captured in the trace");
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["name"] == "Authorization" && h["value"] == "••••••"),
+        "{headers:?}"
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["name"] == "X-Api-Token" && h["value"] == "••••••"),
+        "{headers:?}"
+    );
+}

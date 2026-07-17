@@ -86,8 +86,11 @@ enum Command {
         /// Endpoint path: `collection/sub/endpoint name` (root-level: just the
         /// endpoint's name). Quote it when the name has spaces.
         endpoint: String,
-        /// Print a request/response debug trace to stderr (human mode only —
-        /// `--json` output is unaffected).
+        /// Print a request/response debug trace to stderr in human mode; under
+        /// `--json`, additionally adds a `data.trace` object to the envelope
+        /// (resolved request, var-resolution steps, redirect hops, auth/
+        /// cookie/proxy decisions — secrets masked throughout). See
+        /// `docs/CLI.md`, "Debug trace (`-v`)".
         #[arg(short = 'v', long)]
         verbose: bool,
         /// Assert a response value (repeatable): `"<target> <op> <value>"`,
@@ -123,8 +126,11 @@ enum Command {
         /// Request body; curl `-d`, churl `--body`
         #[arg(short = 'd', long = "body", value_name = "BODY")]
         body: Option<String>,
-        /// Print a request/response debug trace to stderr (human mode only —
-        /// `--json` output is unaffected).
+        /// Print a request/response debug trace to stderr in human mode; under
+        /// `--json`, additionally adds a `data.trace` object to the envelope
+        /// (resolved request, var-resolution steps, redirect hops, auth/
+        /// cookie/proxy decisions — secrets masked throughout). See
+        /// `docs/CLI.md`, "Debug trace (`-v`)".
         #[arg(short = 'v', long)]
         verbose: bool,
         /// Assert a response value (repeatable): `"<target> <op> <value>"`,
@@ -318,6 +324,7 @@ async fn main() -> Result<()> {
                     profile: cli.profile.clone(),
                     proxy: cli.proxy.clone(),
                     insecure: cli.insecure,
+                    verbose,
                     cli_asserts: assert,
                 };
                 send_cmd::run(args, &cwd, &runtime).await
