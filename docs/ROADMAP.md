@@ -80,11 +80,12 @@ CLI, real testing, and the polish to launch — grouped by target release.
 - [x] Response structural navigation — jump between collapsible nodes in the response viewer.
 - [x] Editable paste-curl — review and adjust a pasted curl before importing.
 
-### 0.7 — CLI & headless (agent-first) ⏳
-- [ ] `churl send` / `churl run <endpoint>` — headless execution for scripting, CI, and agents,
-      with structured JSON output, clean exit codes, and no interactive prompts.
-- [ ] `churl init`, refined `--help`, shell completions, and man pages.
-- [ ] Import redesign — `churl import` creates an endpoint in the current workspace by default.
+### 0.7 — CLI & headless (agent-first) ✅
+- [x] `churl send` / `churl run <endpoint>` — headless execution for scripting, CI, and agents,
+      with structured JSON output, clean exit codes, and no interactive prompts. Frozen contract:
+      [`docs/CLI.md`](CLI.md).
+- [x] `churl init`, refined `--help`, shell completions, and man pages.
+- [x] Import redesign — `churl import` creates an endpoint in the current workspace by default.
 
 ### 0.8 — Debugging & testing ⏳
 - [ ] Debug inspector — resolved request, redirect / variable / auth traces,

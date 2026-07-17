@@ -225,18 +225,27 @@ Render-side caches (line-offset index, wrap layout, viewport-only syntect highli
 
 No HTTP-semantic caching by design — churl is a development tool; stale responses are a footgun. History covers recall.
 
-## Tutorial scaffold (`churl tutorial`)
+## Init scaffold (`churl init`)
 
-`crates/churl/src/tutorial.rs` — the `Tutorial` subcommand scaffolds a demo workspace so a first-time user can send a request in under a minute.
+`crates/churl/src/init.rs` — the `Init` subcommand scaffolds a workspace in the cwd (or `[path]`) so a first-time user can send a request in under a minute. Plain `init` writes only a blank root manifest; `init --demo` additionally scaffolds the three-endpoint demo collection the removed `churl tutorial` subcommand used to (M8.2 hard-removed `tutorial` — no alias; see DECISIONS.md). Refuses only when a `churl.toml` already exists at the target — unlike the old `tutorial`, it does not require the whole directory to be empty (running `init` inside an existing project directory, alongside unrelated files, is the normal case).
 
 The scaffold writes through the real `churl-core::persistence` seams — no hand-written TOML strings for endpoint or folder files:
 
-1. `save_workspace_manifest(root, &ws)` — writes `churl.toml` with `name`, `vars` (`base_url`), and a `dev` profile.
-2. `create_collection(root, "examples")` — creates the collection directory.
-3. `save_collection_meta(coll_dir, &Default::default())` — writes `examples/folder.toml` (empty vars).
-4. Three `create_endpoint(coll_dir, name)` + `save_endpoint(path, &ep)` calls — writes the endpoints through the format-preserving merge serializer.
+1. `save_workspace_manifest(root, &ws)` — writes `churl.toml` (blank: just `name`; `--demo`: adds `vars` (`base_url`) and a `dev` profile).
+2. `--demo` only: `create_collection(root, "examples")` — creates the collection directory.
+3. `--demo` only: `save_collection_meta(coll_dir, &Default::default())` — writes `examples/folder.toml` (empty vars).
+4. `--demo` only: three `create_endpoint(coll_dir, name)` + `save_endpoint(path, &ep)` calls — writes the endpoints through the format-preserving merge serializer.
 
-Endpoints target [httpbingo.org](https://httpbingo.org): Get Anything (GET `/anything?name=churl`), Post JSON (POST `/post` with JSON body), Bearer Auth (GET `/bearer` with `{{token}}` placeholder auth). The scaffold refuses a non-empty directory.
+`--demo` endpoints target [httpbingo.org](https://httpbingo.org): Get Anything (GET `/anything?name=churl`), Post JSON (POST `/post` with JSON body), Bearer Auth (GET `/bearer` with `{{token}}` placeholder auth).
+
+## CLI & headless (M8.2)
+
+`crates/churl/src/{output,headless,resolve,run_cmd,send_cmd}.rs` — the headless execution surface: `churl run <endpoint>` and `churl send` drive the exact same `churl_core::http::execute`/`Resolver`/persistence seams the TUI uses (no forked request logic), then shape the result into the frozen `--json` envelope. Full contract (schema, error-kind → exit-code mapping, both commands' payload shape): [`docs/CLI.md`](CLI.md).
+
+- `output.rs` — the `Envelope`/`ErrorKind`/`CliError` machinery every headless command funnels through via `output::emit`, so stdout/stderr/exit-code stay consistent across `run`/`send`/`import`.
+- `headless.rs` — `run_execution`: resolver substitution → unresolved-`{{var}}` refusal → `build_client_with` → `execute` → envelope payload shaping (secret-masked headers, utf8/base64 body).
+- `resolve.rs` — `collection/.../endpoint name` path resolution against `churl_core::persistence` directly (no live `ExplorerState` tree in a one-shot process), plus `--profile` validation shared with `send`.
+- `run_cmd.rs` / `send_cmd.rs` — CLI-argument-to-execution glue: `run` resolves a saved endpoint and its collection var-scope chain; `send` builds an ad-hoc `Request` from curl-mnemonic/churl-native flags (`-X`/`-H`/`-d`/`--url` vs `--method`/`--header`/`--body`), no saved endpoint or workspace required.
 
 ## Release pipeline
 
