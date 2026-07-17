@@ -1,0 +1,247 @@
+//! M8.2 machine-output contract: the frozen JSON envelope every headless
+//! subcommand (`run`, `send`, `import`) emits on `--json`, plus the closed
+//! `ErrorKind` slug set and its 1:1 exit-code mapping.
+//!
+//! **The envelope is a compatibility surface — treat it like an on-disk
+//! format.** [`SCHEMA_VERSION`] bumps ONLY on a breaking change (a field
+//! removed, renamed, or its meaning changed); adding a new optional field or a
+//! new [`ErrorKind`] variant never bumps it. `ok` always mirrors the process
+//! exit code exactly (`ok: true` ⟺ exit 0). `data` is `null` on any hard
+//! failure. `error.kind` is the stable slug an agent branches on;
+//! `error.message` is free text for humans and must never be parsed.
+//!
+//! Exit codes (frozen forever): `0` success · `1` assertion failure (RESERVED,
+//! unused until M8.4) · `2` usage error — owned entirely by clap's own parser
+//! (missing/conflicting args, unknown flags to `churl` itself); this module
+//! never constructs an envelope for a band-2 failure, matching "clap default —
+//! don't remap" · `3` workspace/resolution error · `4` request/transport error
+//! · `5` input/import error.
+//!
+//! stdout carries ONLY the envelope in `--json` mode — every log, warning, and
+//! human nicety goes to stderr (see each subcommand's human-mode printing).
+
+use serde::Serialize;
+
+/// Current envelope schema version. See the module docs for the bump rule.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// The one JSON object a `--json` invocation prints to stdout.
+#[derive(Debug, Serialize)]
+pub struct Envelope<'a, T: Serialize> {
+    pub schema_version: u32,
+    pub ok: bool,
+    pub command: &'a str,
+    pub data: Option<T>,
+    pub error: Option<EnvelopeError>,
+}
+
+/// The `error` object of a failed envelope.
+#[derive(Debug, Serialize)]
+pub struct EnvelopeError {
+    pub kind: ErrorKind,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+/// Closed set of stable failure slugs. Agents branch on `kind`, never on
+/// `message`. Each variant maps 1:1 to an exit-code band via
+/// [`ErrorKind::exit_code`]; new variants may be added later (additive, no
+/// schema bump) but existing ones never change their band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ErrorKind {
+    // --- band 3: workspace/resolution error ---
+    /// No `churl.toml` workspace found at the current directory (or an
+    /// ancestor scan is not performed — churl workspaces are cwd-rooted).
+    NoWorkspace,
+    /// A `collection/.../endpoint name` path did not resolve to an endpoint
+    /// file in the open workspace.
+    EndpointNotFound,
+    /// The resolved request still carries one or more `{{var}}` placeholders
+    /// after substitution — refused rather than shipping a literal `{{...}}`.
+    UnresolvedVar,
+    /// `--profile NAME` named a profile the workspace manifest does not define.
+    UnknownProfile,
+
+    // --- band 4: request/transport error (from `churl_core::http::HttpError`) ---
+    /// The request URL could not be parsed.
+    InvalidUrl,
+    /// The request timed out.
+    Timeout,
+    /// The request failed for any other transport reason (DNS, connect, TLS,
+    /// protocol).
+    TransportError,
+
+    // --- band 5: input/import error ---
+    /// The given input could not be parsed as a curl command (includes: no
+    /// input given on a non-piped stdin, tokenize failure, missing/duplicate
+    /// URL, unknown flag, unsupported construct, invalid `-X` method).
+    NotACurlCommand,
+    /// The curl command parsed, but writing the resulting endpoint failed
+    /// (e.g. a newly-authored literal secret was refused, or a disk error).
+    ImportWriteFailed,
+}
+
+impl ErrorKind {
+    /// The exit-code band this `kind` belongs to (frozen — see module docs).
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            ErrorKind::NoWorkspace
+            | ErrorKind::EndpointNotFound
+            | ErrorKind::UnresolvedVar
+            | ErrorKind::UnknownProfile => 3,
+            ErrorKind::InvalidUrl | ErrorKind::Timeout | ErrorKind::TransportError => 4,
+            ErrorKind::NotACurlCommand | ErrorKind::ImportWriteFailed => 5,
+        }
+    }
+}
+
+/// A headless-subcommand failure: an [`ErrorKind`] slug, a human message, and
+/// optional structured detail. Every headless command builds a
+/// `Result<T, CliError>` and hands it to [`emit`] to print (JSON or human) and
+/// resolve the process exit code — the single seam so every subcommand's
+/// stdout/stderr/exit-code triad stays consistent with the frozen contract.
+#[derive(Debug)]
+pub struct CliError {
+    pub kind: ErrorKind,
+    pub message: String,
+    pub detail: Option<serde_json::Value>,
+}
+
+impl CliError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(
+        kind: ErrorKind,
+        message: impl Into<String>,
+        detail: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            detail: Some(detail),
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for CliError {}
+
+/// Maps a core [`churl_core::http::HttpError`] onto a [`CliError`] (band 4).
+pub fn from_http_error(err: churl_core::http::HttpError) -> CliError {
+    use churl_core::http::HttpError;
+    match err {
+        HttpError::InvalidUrl { url, reason } => CliError::with_detail(
+            ErrorKind::InvalidUrl,
+            format!("invalid URL {url:?}: {reason}"),
+            serde_json::json!({ "url": url, "reason": reason }),
+        ),
+        HttpError::Timeout => CliError::new(ErrorKind::Timeout, "request timed out"),
+        HttpError::Request(source) => CliError::new(
+            ErrorKind::TransportError,
+            format!("request failed: {source}"),
+        ),
+        // `HttpError` is `#[non_exhaustive]`: any future variant still lands
+        // in the transport band rather than failing to compile.
+        other => CliError::new(ErrorKind::TransportError, other.to_string()),
+    }
+}
+
+/// Prints the result of a headless command and returns the process exit code.
+///
+/// - `--json`: prints exactly one [`Envelope`] to stdout (success or failure),
+///   nothing else on stdout.
+/// - Human mode: calls `human_ok` on success (the subcommand's own
+///   human-readable rendering); on failure prints `error: <message>` to
+///   stderr. Never prints both JSON and human output for the same run.
+pub fn emit<T: Serialize>(
+    command: &str,
+    json: bool,
+    result: Result<T, CliError>,
+    human_ok: impl FnOnce(&T),
+) -> i32 {
+    match result {
+        Ok(data) => {
+            if json {
+                print_envelope(Envelope {
+                    schema_version: SCHEMA_VERSION,
+                    ok: true,
+                    command,
+                    data: Some(data),
+                    error: None,
+                });
+            } else {
+                human_ok(&data);
+            }
+            0
+        }
+        Err(err) => {
+            let code = err.kind.exit_code();
+            if json {
+                print_envelope(Envelope::<()> {
+                    schema_version: SCHEMA_VERSION,
+                    ok: false,
+                    command,
+                    data: None,
+                    error: Some(EnvelopeError {
+                        kind: err.kind,
+                        message: err.message,
+                        detail: err.detail,
+                    }),
+                });
+            } else {
+                eprintln!("error: {}", err.message);
+            }
+            code
+        }
+    }
+}
+
+fn print_envelope<T: Serialize>(envelope: Envelope<T>) {
+    match serde_json::to_string(&envelope) {
+        Ok(json) => println!("{json}"),
+        Err(err) => {
+            // Serialization of our own well-typed envelope should never fail;
+            // if it somehow does, fail loud on stderr rather than emit a
+            // truncated/invalid JSON line on stdout.
+            eprintln!("error: failed to serialize output envelope: {err}");
+        }
+    }
+}
+
+/// Masks a header value when its **name** is a known auth-bearing name
+/// (`authorization`, `cookie`) or otherwise looks secret-named
+/// ([`churl_core::config::looks_like_secret_name`]), or when its **value**
+/// looks secret-shaped ([`churl_core::secrets::looks_like_secret_value`]).
+///
+/// Mirrors the redirect-strip dual-anchor policy (see DECISIONS.md, "Cross-origin
+/// redirect policy") applied to the echoed `request.headers` in the JSON
+/// envelope: a resolved `{{token}}`/session-captured value must never round-trip
+/// back out over stdout, even though the real outgoing request sent it. Applying
+/// only to headers (not `url`/body) is a deliberate M8.2 scope cut — see the
+/// build report.
+pub fn mask_header_value(name: &str, value: &str) -> String {
+    const ALWAYS_AUTH_NAMES: [&str; 2] = ["authorization", "cookie"];
+    let name_hit = ALWAYS_AUTH_NAMES
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name))
+        || churl_core::config::looks_like_secret_name(name);
+    let value_hit = churl_core::secrets::looks_like_secret_value(value);
+    if name_hit || value_hit {
+        "••••••".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
