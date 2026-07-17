@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-17
+
+- feat: CLI & headless (agent-first, human-second) — M8.2 (#97)
+
 ## [0.6.0](https://github.com/AlsubaieAli/churl/compare/v0.5.0...v0.6.0) - 2026-07-16
 
 ### Added
