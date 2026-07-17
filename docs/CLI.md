@@ -37,8 +37,9 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 }
 ```
 
-- `request.url` is the request's resolved `url` field (after `{{var}}` substitution) — it does **not** include enabled query params or a query-placement auth effect appended by `churl_core::http::execute` (those are wire-only effects the current schema doesn't echo; a future schema version may add a dedicated `params` field).
-- `request.headers` lists only *enabled* headers (a disabled header is never sent, so it's never echoed) — **with masking**: a header is replaced with `"••••••"` when its name is `authorization`/`cookie` or otherwise looks secret-named (`churl_core::config::looks_like_secret_name`), or when its value looks secret-shaped (`churl_core::secrets::looks_like_secret_value`). This is the same dual-anchor policy the cross-origin redirect `strip` policy uses (see DECISIONS.md) — a resolved `{{token}}`/session-captured secret must never round-trip back out over stdout, even though the real outgoing request carried it. **Scope cut:** masking applies to headers only, not `url`/body — see "Deliberate scope cuts" below.
+- `request.url` is the request's resolved `url` field (after `{{var}}` substitution), **with secrets masked** (see "Secret masking" below) — it does **not** include enabled query params or a query-placement auth effect appended by `churl_core::http::execute` (those are wire-only effects the current schema doesn't echo; a future schema version may add a dedicated `params` field).
+- `request.headers` lists only *enabled* headers (a disabled header is never sent, so it's never echoed), **with secrets masked**.
+- `response.headers` are echoed **verbatim, unmasked** — including `Set-Cookie`. This is intentional: response data is the whole point of showing the response (matches `curl -i`). Only the *request* echo is redacted (it can carry a resolved credential the caller supplied); the response is what the server chose to send back.
 - `response.body_encoding` is `"utf8"` when the response body is valid UTF-8, else `"base64"` (`body` is then base64-encoded). Never lossy — deterministic decoding for an agent.
 - `response.truncated` mirrors the body-size cap flag.
 - `assertions` is always `null` in M8.2 — **reserved** for M8.4 assertions. Shipping the key now avoids a schema-version bump when they land.
@@ -65,13 +66,25 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 | `endpoint-not-found` | 3 | A `run` endpoint path didn't resolve in the open workspace |
 | `unresolved-var` | 3 | The resolved request still carries a `{{var}}` placeholder no scope (nor the process env) resolved — refused rather than shipped literally |
 | `unknown-profile` | 3 | `--profile NAME` named a profile the workspace manifest doesn't define |
-| `invalid-url` | 4 | The request URL couldn't be parsed |
+| `config-error` | 3 | The global config couldn't be loaded/parsed (unreadable, malformed TOML, or an invalid knob value such as `redirect`), or the current working directory couldn't be determined — a pre-flight resolution failure that occurs before the request is shaped |
+| `invalid-url` | 4 | The request URL couldn't be parsed (message + `detail.url` are secret-masked) |
 | `timeout` | 4 | The request timed out |
 | `transport-error` | 4 | Any other transport failure (DNS, connect, TLS, protocol) |
 | `not-a-curl-command` | 5 | `import`'s input didn't parse as a curl command — covers a tokenize failure, a missing/duplicate URL, an unknown flag, an unsupported construct, an invalid `-X` method, **and** the non-interactive stdin guard (no curl given and stdin isn't piped) |
 | `import-write-failed` | 5 | The curl command parsed, but writing the endpoint failed (e.g. a newly-authored literal secret was refused, or a disk error) |
 
 Implementation: `crates/churl/src/output.rs` (`ErrorKind::exit_code`).
+
+## Secret masking (request echo)
+
+The echoed `request` is redacted before it reaches stdout/stderr, so a resolved `{{secret}}` (or a caller-supplied credential) never round-trips back out even though the real outgoing request carried it. Two surfaces, both masked:
+
+- **`request.headers`** — a header value is replaced with `••••••` when its *name* is `authorization`/`cookie` or looks secret-named (`churl_core::config::looks_like_secret_name`), or when its *value* looks secret-shaped (`churl_core::secrets::looks_like_secret_value`). Same dual-anchor policy as the cross-origin redirect `strip` policy (DECISIONS.md).
+- **`request.url`** — masked by `churl_core::secrets::mask_url` (the redaction twin of the `scan_url` scanner): the `user:PASSWORD@` userinfo password and each secret query value (a secret-*named* key's literal value, or a secret-*shaped* value under any key). A `{{placeholder}}` span and non-secret pairs are untouched.
+
+Both the **success** surface (`data.request` in the envelope, and the `-v` stderr trace) and the **failure** surface (the `invalid-url` `error.message` + `error.detail.url`) apply this masking.
+
+**Known limitation (best-effort, not a guarantee).** This is heuristic redaction shared with R3's codebase-wide secret detection: an opaque header/query *name* whose *value* is low-entropy enough to trip neither the name anchor nor the value-shape anchor still echoes. Closing that fully needs value-*provenance* tracking (which resolved value came from a `{{secret}}`) — a codebase-wide change beyond M8.2, not a masking bug here. `response.headers` (incl. `Set-Cookie`) are echoed unmasked **intentionally** — response data is the point of showing the response (`curl -i`).
 
 ## Non-interactive guarantees
 
@@ -81,7 +94,6 @@ Implementation: `crates/churl/src/output.rs` (`ErrorKind::exit_code`).
 
 Recorded here so a later milestone can pick them back up deliberately rather than rediscover them:
 
-- **Header-only secret masking.** `url`/body aren't scanned for embedded secret-shaped substrings — churl-core doesn't yet track *which* resolved value came from a `{{var}}` placeholder (the same provenance gap DECISIONS.md's redirect-`strip` section files as an "R3 follow-up"); scanning `url`/body would need that provenance or a noisier whole-string heuristic. Headers cover the primary leak vector (`Authorization`, session-captured bearer tokens).
 - **`request.url` excludes appended query params/auth-query effects.** The frozen payload has no separate `params` field; adding one is additive and can land in a later schema version without breaking `1`.
 - **`-X`/`--method` is validated against churl's closed `Method` enum** (`GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS`), unlike curl's own free-form `-X` (any string). An unsupported value is a clap usage error (exit 2).
 - **No cookie jar for `run`/`send`.** A one-shot headless process builds exactly one client and exits; the persistent per-workspace jar (`churl cookies list|clear`) is a separate, already-headless surface.
