@@ -18,6 +18,10 @@ color-eyre = "0.6"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+# Shell completions + man-page generation for the `completions`/`man` subcommands
+# (churl bin only; never churl-core).
+clap_complete = "4"
+clap_mangen = "0.3"
 
 # TUI
 ratatui = "0.30"

@@ -276,7 +276,11 @@ impl Parser {
 /// with `{`/`[` or an explicit JSON `Content-Type` is present; form when it
 /// looks like `k=v&k2=v2` and no non-form `Content-Type` says otherwise; text
 /// otherwise.
-fn derive_body_kind(content: &str, headers: &[Header]) -> BodyKind {
+///
+/// `pub` (M8.2): the headless `churl send` ad-hoc path reuses this exact
+/// heuristic for its `-d`/`--body` flag, so curl-mnemonic and churl-native
+/// sends derive the same default `Content-Type` as an imported endpoint would.
+pub fn derive_body_kind(content: &str, headers: &[Header]) -> BodyKind {
     let content_type = headers
         .iter()
         .find(|header| header.name.eq_ignore_ascii_case("content-type"))
