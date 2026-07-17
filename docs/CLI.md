@@ -69,7 +69,7 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 | `config-error` | 3 | The global config couldn't be loaded/parsed (unreadable, malformed TOML, or an invalid knob value such as `redirect`), or the current working directory couldn't be determined — a pre-flight resolution failure that occurs before the request is shaped |
 | `invalid-url` | 4 | The request URL couldn't be parsed (message + `detail.url` are secret-masked) |
 | `timeout` | 4 | The request timed out |
-| `transport-error` | 4 | Any other transport failure (DNS, connect, TLS, protocol) |
+| `transport-error` | 4 | Any other transport failure (DNS, connect, TLS, protocol) — message + `detail.url` are secret-masked |
 | `not-a-curl-command` | 5 | `import`'s input didn't parse as a curl command — covers a tokenize failure, a missing/duplicate URL, an unknown flag, an unsupported construct, an invalid `-X` method, **and** the non-interactive stdin guard (no curl given and stdin isn't piped) |
 | `import-write-failed` | 5 | The curl command parsed, but writing the endpoint failed (e.g. a newly-authored literal secret was refused, or a disk error) |
 
@@ -82,9 +82,9 @@ The echoed `request` is redacted before it reaches stdout/stderr, so a resolved 
 - **`request.headers`** — a header value is replaced with `••••••` when its *name* is `authorization`/`cookie` or looks secret-named (`churl_core::config::looks_like_secret_name`), or when its *value* looks secret-shaped (`churl_core::secrets::looks_like_secret_value`). Same dual-anchor policy as the cross-origin redirect `strip` policy (DECISIONS.md).
 - **`request.url`** — masked by `churl_core::secrets::mask_url` (the redaction twin of the `scan_url` scanner): the `user:PASSWORD@` userinfo password and each secret query value (a secret-*named* key's literal value, or a secret-*shaped* value under any key). A `{{placeholder}}` span and non-secret pairs are untouched.
 
-Both the **success** surface (`data.request` in the envelope, and the `-v` stderr trace) and the **failure** surface (the `invalid-url` `error.message` + `error.detail.url`) apply this masking.
+Both the **success** surface (`data.request` in the envelope, and the `-v` stderr trace) and the **failure** surface apply this masking: the `invalid-url` `error.message` + `error.detail.url`, **and** the `transport-error` message + `detail.url` (a connection/DNS/TLS failure is the common case, and the underlying client's error text embeds the request URL — query string included).
 
-**Known limitation (best-effort, not a guarantee).** This is heuristic redaction shared with R3's codebase-wide secret detection: an opaque header/query *name* whose *value* is low-entropy enough to trip neither the name anchor nor the value-shape anchor still echoes. Closing that fully needs value-*provenance* tracking (which resolved value came from a `{{secret}}`) — a codebase-wide change beyond M8.2, not a masking bug here. `response.headers` (incl. `Set-Cookie`) are echoed unmasked **intentionally** — response data is the point of showing the response (`curl -i`).
+**Known limitation (best-effort, not a guarantee).** This is heuristic redaction shared with R3's codebase-wide secret detection: an opaque header/query *name* whose *value* is low-entropy enough to trip neither the name anchor nor the value-shape anchor still echoes. `mask_url` mirrors `scan_url`'s spans exactly — **userinfo password + query values** — so a secret placed in a **path segment** (`…/tokens/ghp_…`) or a **`#fragment`** is *not* masked (paths and fragments aren't a known credential position; masking high-entropy path segments would also clobber ordinary resource IDs / UUIDs, degrading the echo agents rely on). Closing the name/value gap fully needs value-*provenance* tracking (which resolved value came from a `{{secret}}`) — a codebase-wide change beyond M8.2, not a masking bug here. `response.headers` (incl. `Set-Cookie`) are echoed unmasked **intentionally** — response data is the point of showing the response (`curl -i`).
 
 ## Non-interactive guarantees
 

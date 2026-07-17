@@ -403,3 +403,31 @@ fn send_invalid_url_masks_userinfo_in_error_message_and_detail() {
         "leaked in detail.url: {detail_url}"
     );
 }
+
+#[test]
+fn send_transport_error_masks_secret_query_in_error_message_and_detail() {
+    // Connection-refused (port 1) is the *common* failure mode. reqwest's error
+    // `Display` embeds the full URL — query string included — so a secret-named
+    // `?api_key=…` must be masked on the transport-error surface exactly as it
+    // is on the success and InvalidUrl surfaces. Guards the gap where the fix
+    // originally masked only the InvalidUrl arm.
+    let output = churl(&[
+        "--json",
+        "send",
+        "http://127.0.0.1:1/x?api_key=REALKEY123abc",
+    ]);
+    assert_eq!(output.status.code(), Some(4));
+    let env = envelope(&output);
+    assert_eq!(env["error"]["kind"], "transport-error");
+    let message = env["error"]["message"].as_str().unwrap();
+    assert!(
+        !message.contains("REALKEY123abc"),
+        "secret leaked in transport error message: {message}"
+    );
+    if let Some(detail_url) = env["error"]["detail"]["url"].as_str() {
+        assert!(
+            !detail_url.contains("REALKEY123abc"),
+            "secret leaked in transport error detail.url: {detail_url}"
+        );
+    }
+}

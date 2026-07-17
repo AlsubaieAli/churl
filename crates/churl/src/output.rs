@@ -162,10 +162,29 @@ pub fn from_http_error(err: churl_core::http::HttpError) -> CliError {
             )
         }
         HttpError::Timeout => CliError::new(ErrorKind::Timeout, "request timed out"),
-        HttpError::Request(source) => CliError::new(
-            ErrorKind::TransportError,
-            format!("request failed: {source}"),
-        ),
+        HttpError::Request(source) => {
+            // reqwest's `Display` embeds the request URL (query string included),
+            // so mask any secret in it before it reaches `message`/`detail`. A
+            // connection/DNS/TLS failure is the *common* failure mode, and it
+            // must not leak what the success + `InvalidUrl` surfaces already mask
+            // (`?api_key=…`). reqwest strips userinfo from the URL it retains, so
+            // the query is the live vector here.
+            let mut message = format!("request failed: {source}");
+            let detail = if let Some(u) = source.url() {
+                let raw = u.as_str();
+                let masked = churl_core::secrets::mask_url(raw);
+                if masked != raw {
+                    message = message.replace(raw, &masked);
+                }
+                Some(serde_json::json!({ "url": masked }))
+            } else {
+                None
+            };
+            match detail {
+                Some(d) => CliError::with_detail(ErrorKind::TransportError, message, d),
+                None => CliError::new(ErrorKind::TransportError, message),
+            }
+        }
         // `HttpError` is `#[non_exhaustive]`: any future variant still lands
         // in the transport band rather than failing to compile.
         other => CliError::new(ErrorKind::TransportError, other.to_string()),
