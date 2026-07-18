@@ -288,6 +288,8 @@ fn prepare_step_session_scope_precedence() {
         seq: 0,
         name: "e".into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "{{x}}".into(),
@@ -358,6 +360,8 @@ fn prepare_step_carries_endpoint_assertions() {
     let ep = Endpoint {
         seq: 0,
         name: "e".into(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         assertions: assertions.clone(),
         request: Request {
             method: Method::Get,

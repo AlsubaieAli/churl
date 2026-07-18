@@ -257,6 +257,29 @@ pub struct Endpoint {
     /// Omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<Assertion>,
+    /// Endpoint-level extraction rules `variable name → expression` (U3),
+    /// persisted as `[extract]`. After a **standalone TUI send** completes, each
+    /// rule is run against the response via [`crate::sequence::extract_value`] —
+    /// the SAME engine sequence steps use — and every rule whose name is listed
+    /// in `persist` writes its captured value into the in-memory Session scope, so
+    /// a login endpoint can capture a token that a later standalone request reuses
+    /// without a sequence. Same field shape/semantics as [`SequenceStep::extract`].
+    ///
+    /// TUI-only by design: headless `send`/`run` never carry a Session scope across
+    /// processes, so endpoint-level extraction is inert there and the frozen M8.2
+    /// headless output contract is unaffected. Omitted from serialized output when
+    /// empty, so an existing endpoint file without `[extract]` round-trips
+    /// byte-identically.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extract: BTreeMap<String, String>,
+    /// Names of `extract` rules whose captured value is written into the in-memory
+    /// Session store after a standalone TUI send. Rules not listed are inert for a
+    /// standalone send (no sequence run to chain them into). Same shape/semantics
+    /// as [`SequenceStep::persist`]: the Session store is process-lifetime,
+    /// in-memory, and NEVER written to disk — only the rule *name* is persisted
+    /// here, never the captured value. Omitted from serialized output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub persist: Vec<String>,
 }
 
 /// A named set of template variables, selectable at request time.

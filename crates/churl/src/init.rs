@@ -136,6 +136,8 @@ fn scaffold_demo_endpoints(coll_dir: &Path) -> Result<()> {
             seq: 0,
             name: "Get Anything".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/anything".to_owned(),
@@ -169,6 +171,8 @@ fn scaffold_demo_endpoints(coll_dir: &Path) -> Result<()> {
             seq: 1,
             name: "Post JSON".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Post,
                 url: "{{base_url}}/post".to_owned(),
@@ -198,6 +202,8 @@ fn scaffold_demo_endpoints(coll_dir: &Path) -> Result<()> {
             seq: 2,
             name: "Bearer Auth".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/bearer".to_owned(),

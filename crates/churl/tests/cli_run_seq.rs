@@ -64,6 +64,8 @@ fn ep(name: &str, request: Request, assertions: Vec<Assertion>) -> Endpoint {
         seq: 0,
         name: name.to_owned(),
         assertions,
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request,
     }
 }

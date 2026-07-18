@@ -349,6 +349,8 @@ mod tests {
                 seq: 0,
                 name: "Ping".into(),
                 assertions: Vec::new(),
+                extract: std::collections::BTreeMap::new(),
+                persist: Vec::new(),
                 request: Request {
                     method: Method::Get,
                     url: String::new(),

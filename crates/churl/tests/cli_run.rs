@@ -73,6 +73,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Get User".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/users/1".to_owned(),
@@ -93,6 +95,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Ping".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/ping".to_owned(),
@@ -113,6 +117,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Broken".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/x?token={{missing_var}}".to_owned(),
@@ -135,6 +141,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Greet".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/greet?g={{greeting}}".to_owned(),
@@ -157,6 +165,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Secret Query".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/data?api_key={{apikey}}".to_owned(),
@@ -585,4 +595,107 @@ async fn run_verbose_json_includes_trace_with_masked_secret_query() {
         !stdout.contains("REALKEY"),
         "secret leaked anywhere in the envelope: {stdout}"
     );
+}
+
+/// U3 headless contract: `churl run` NEVER performs endpoint-level extraction. A
+/// single headless process cannot carry a Session var to a later one, so an
+/// endpoint's `extract`/`persist` rules are inert on the headless path. An
+/// endpoint that carries capture rules produces a `data` envelope identical to a
+/// rule-free twin (same `schema_version`, same response, no new keys). Pins the
+/// frozen M8.2 output contract against U3.
+#[tokio::test]
+async fn run_ignores_endpoint_extract_rules_headless() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":{"token":"S3cr3t"}}"#))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    save_workspace_manifest(
+        root,
+        &Workspace {
+            name: "fx".to_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let url = format!("{}/login", server.uri());
+    let req = || Request {
+        method: Method::Get,
+        url: url.clone(),
+        headers: vec![],
+        params: vec![],
+        body: None,
+        auth: None,
+        insecure: false,
+    };
+
+    // Endpoint carrying capture rules.
+    let mut extract = BTreeMap::new();
+    extract.insert("token".to_owned(), "$.data.token".to_owned());
+    let with_rules = create_endpoint(root, "With Rules").unwrap();
+    save_endpoint(
+        &with_rules,
+        &Endpoint {
+            seq: 0,
+            name: "With Rules".to_owned(),
+            assertions: Vec::new(),
+            extract,
+            persist: vec!["token".to_owned()],
+            request: req(),
+        },
+    )
+    .unwrap();
+
+    // Rule-free twin hitting the same URL.
+    let no_rules = create_endpoint(root, "No Rules").unwrap();
+    save_endpoint(
+        &no_rules,
+        &Endpoint {
+            seq: 0,
+            name: "No Rules".to_owned(),
+            assertions: Vec::new(),
+            extract: BTreeMap::new(),
+            persist: Vec::new(),
+            request: req(),
+        },
+    )
+    .unwrap();
+
+    let with = churl_in(root, &["--json", "run", "With Rules"]);
+    let without = churl_in(root, &["--json", "run", "No Rules"]);
+    assert!(
+        with.status.success() && without.status.success(),
+        "stderr: {} / {}",
+        String::from_utf8_lossy(&with.stderr),
+        String::from_utf8_lossy(&without.stderr)
+    );
+
+    let ew = envelope(&with);
+    let eo = envelope(&without);
+    assert_eq!(ew["schema_version"], 1, "schema_version stays frozen at 1");
+    assert_eq!(ew["command"], "run");
+    // The rule-bearing endpoint's response envelope matches the rule-free twin:
+    // extraction never runs headless, so nothing changes and nothing is captured.
+    assert_eq!(ew["data"]["response"]["status"], 200);
+    // Compare the deterministic response fields (timing_ms and the Date header
+    // vary run-to-run): the rule-bearing and rule-free envelopes must match.
+    for field in ["status", "body", "body_encoding", "truncated"] {
+        assert_eq!(
+            ew["data"]["response"][field], eo["data"]["response"][field],
+            "extract rules must not alter the headless response {field}"
+        );
+    }
+    // No extraction/session artifact leaks into the headless `data` object.
+    let data = ew["data"].as_object().expect("data is an object");
+    for forbidden in ["extract", "persist", "captured", "session"] {
+        assert!(
+            !data.contains_key(forbidden),
+            "headless data must not carry a {forbidden:?} key: {ew}"
+        );
+    }
 }

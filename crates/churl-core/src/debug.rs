@@ -276,6 +276,8 @@ impl DebugTrace {
             name: String::new(),
             request: masked,
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
         };
         export::export_curl(&endpoint)
     }

@@ -24,6 +24,8 @@ fn get_endpoint(name: &str, url: &str) -> Endpoint {
         seq: 0,
         name: name.to_owned(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: url.to_owned(),

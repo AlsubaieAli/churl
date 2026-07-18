@@ -131,6 +131,8 @@ fn apikey_auth_round_trips_wire_equivalent_not_structural() {
         seq: 0,
         name: "things".to_owned(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com/things".to_owned(),

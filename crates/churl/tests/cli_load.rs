@@ -57,6 +57,8 @@ fn scaffold_workspace(root: &Path, base_url: &str) {
             seq: 0,
             name: "Hit".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "{{base_url}}/hit".to_owned(),

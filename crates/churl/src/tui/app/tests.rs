@@ -76,6 +76,8 @@ fn open_bare_endpoint(app: &mut App) {
         seq: 0,
         name: "test".to_owned(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: churl_core::model::Method::Get,
             url: "https://api.test/x".to_owned(),
@@ -891,6 +893,111 @@ fn session_value_never_written_to_disk() {
             entry.display()
         );
     }
+}
+
+/// U3: builds a workspace with a single `login` endpoint carrying its OWN
+/// `extract` rules (two rules; only `token` is persisted), opens it into a
+/// standalone buffer, and leaves an in-flight send pending on generation 7.
+fn standalone_extract_app(root: &Path) -> App {
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = root.join("api");
+    std::fs::create_dir(&coll).unwrap();
+    // `persist` (a top-level array) must precede the `[extract]` table header.
+    std::fs::write(
+        coll.join("login.toml"),
+        "seq = 0\nname = \"login\"\npersist = [\"token\"]\n\n[extract]\ntoken = \"$.data.token\"\nrequest_id = \"$.data.request_id\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/login\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let file = coll.join("login.toml");
+    app.open_or_focus_buffer(dummy_selected(&file));
+    app.generation = 7;
+    set_active_in_flight(&mut app, 7);
+    app
+}
+
+/// U3 core: a STANDALONE send runs the endpoint's own `extract` rules on the
+/// response and writes the `persist`-listed captures into the Session store — no
+/// sequence involved. The non-persisted rule stays run-only (dropped, since a
+/// standalone send has no run to chain it into). The captured secret is
+/// unconditionally masked in the Session var UI (the Session group masks EVERY
+/// row — proven by the env-editor `session_group_shows_masked_values` test — so a
+/// send-captured secret is masked identically to a step-captured one).
+#[tokio::test]
+async fn standalone_send_captures_persisted_extract_into_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut app = standalone_extract_app(root);
+    assert!(
+        app.session_vars().is_empty(),
+        "nothing captured before the send"
+    );
+
+    let endpoint_path = root.join("api/login.toml");
+    let endpoint_before = std::fs::read_to_string(&endpoint_path).unwrap();
+
+    let body = r#"{"data":{"token":"S3cr3t-TOKEN","request_id":"req-42"}}"#;
+    app.on_response(7, Ok(ok_resp(200, body)), meta(), None);
+
+    // The persisted, secret-named rule lands in the in-memory Session store.
+    assert_eq!(
+        app.session_vars().get("token").map(String::as_str),
+        Some("S3cr3t-TOKEN"),
+        "a standalone send captures its endpoint's persisted extract rule"
+    );
+    // The non-persisted rule is inert for a standalone send.
+    assert!(
+        !app.session_vars().contains_key("request_id"),
+        "a non-persisted endpoint rule must not touch the session store"
+    );
+    // A standalone `{{token}}` now resolves from the capture (the whole point).
+    let resolver = app.build_resolver(&dummy_selected(&endpoint_path));
+    assert_eq!(
+        resolver.substitute("Bearer {{token}}"),
+        "Bearer S3cr3t-TOKEN"
+    );
+    // R3 posture: the captured value never touches disk — the endpoint file is
+    // byte-identical (only the rule name/expression were ever persisted).
+    assert_eq!(
+        std::fs::read_to_string(&endpoint_path).unwrap(),
+        endpoint_before,
+        "capturing must not rewrite the endpoint file"
+    );
+}
+
+/// A standalone send whose endpoint has extract rules but NONE persisted writes
+/// nothing to the Session store (mirrors a run-only sequence rule).
+#[tokio::test]
+async fn standalone_send_run_only_extract_does_not_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = root.join("api");
+    std::fs::create_dir(&coll).unwrap();
+    // Extract rule present, but no `persist` list ⇒ run-only.
+    std::fs::write(
+        coll.join("login.toml"),
+        "seq = 0\nname = \"login\"\n\n[extract]\ntoken = \"$.data.token\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/login\"\n",
+    )
+    .unwrap();
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let file = coll.join("login.toml");
+    app.open_or_focus_buffer(dummy_selected(&file));
+    app.generation = 3;
+    set_active_in_flight(&mut app, 3);
+
+    app.on_response(
+        3,
+        Ok(ok_resp(200, r#"{"data":{"token":"T"}}"#)),
+        meta(),
+        None,
+    );
+    assert!(
+        app.session_vars().is_empty(),
+        "a run-only endpoint rule must not write to the session store"
+    );
 }
 
 /// Recursively lists every file under `root` (test-only, small trees).
@@ -5300,6 +5407,8 @@ fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
             seq: 0,
             name: "ep".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: churl_core::model::Method::Get,
                 url: "https://api.test/x".to_owned(),

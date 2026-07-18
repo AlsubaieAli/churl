@@ -148,6 +148,8 @@ fn headers_render_as_array_of_tables() {
         seq: 3,
         name: "fresh".into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Post,
             url: "https://api.example.com".into(),
@@ -192,6 +194,8 @@ fn assertions_render_as_array_of_tables_and_round_trip() {
     let endpoint = Endpoint {
         seq: 0,
         name: "asserted".into(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         assertions: vec![
             Assertion {
                 target: "status".into(),
@@ -233,6 +237,8 @@ fn assertions_render_as_array_of_tables_and_round_trip() {
     // An assertion-free endpoint stays byte-minimal: the key is omitted entirely.
     let bare = Endpoint {
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         ..endpoint_with_headers("bare", 0)
     };
     let bare_path = dir.path().join("bare.toml");
@@ -244,6 +250,81 @@ fn assertions_render_as_array_of_tables_and_round_trip() {
     );
 }
 
+#[test]
+fn endpoint_extract_and_persist_round_trip_and_back_compat() {
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("login.toml");
+
+    // U3: an endpoint carrying its own capture rules. Two rules, one persisted.
+    let mut extract = BTreeMap::new();
+    extract.insert("token".to_owned(), "$.data.token".into());
+    extract.insert("request_id".to_owned(), "header X-Request-Id".into());
+    let endpoint = Endpoint {
+        seq: 0,
+        name: "login".into(),
+        assertions: Vec::new(),
+        extract,
+        persist: vec!["token".to_owned()],
+        request: Request {
+            method: Method::Post,
+            url: "https://api.example.com/login".into(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            auth: None,
+            insecure: false,
+        },
+    };
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("[extract]"),
+        "extract rules must render as a table:\n{text}"
+    );
+    assert!(
+        text.contains("persist = [\"token\"]") || text.contains("persist = [ \"token\" ]"),
+        "persist must render as an array of the persisted rule name:\n{text}"
+    );
+    // The captured VALUE is never written to disk — only the rule expression and
+    // the persisted rule NAME (R3 secret posture).
+    assert_eq!(
+        load_endpoint(&path).unwrap(),
+        endpoint,
+        "extract/persist must round-trip losslessly"
+    );
+
+    // Back-compat: a legacy endpoint file WITHOUT extract/persist parses (fields
+    // default to empty) and, re-serialized, stays byte-minimal — neither key
+    // appears, so existing endpoint TOML round-trips unchanged.
+    let legacy = "\
+seq = 0
+name = \"legacy\"
+
+[request]
+method = \"GET\"
+url = \"https://api.example.com/legacy\"
+";
+    let legacy_path = dir.path().join("legacy.toml");
+    fs::write(&legacy_path, legacy).unwrap();
+    let parsed = load_endpoint(&legacy_path).unwrap();
+    assert!(
+        parsed.extract.is_empty(),
+        "absent [extract] must default empty"
+    );
+    assert!(
+        parsed.persist.is_empty(),
+        "absent persist must default empty"
+    );
+    save_endpoint(&legacy_path, &parsed).unwrap();
+    let round = fs::read_to_string(&legacy_path).unwrap();
+    assert!(
+        !round.contains("extract") && !round.contains("persist"),
+        "empty extract/persist must be omitted — legacy TOML stays unchanged:\n{round}"
+    );
+}
+
 // ---- R1 D3: array-of-tables comment preservation on length change ---------
 
 /// Helper: an endpoint with `n` headers `H0..H{n-1}` (all enabled), no auth.
@@ -252,6 +333,8 @@ fn endpoint_with_headers(name: &str, n: usize) -> Endpoint {
         seq: 0,
         name: name.into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com".into(),
@@ -376,6 +459,8 @@ fn literal_secret_endpoint() -> Endpoint {
         seq: 0,
         name: "leaky".into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://api.example.com/x".into(),
@@ -1536,6 +1621,8 @@ fn endpoint_with(
         seq: 0,
         name: "e".into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: url.into(),

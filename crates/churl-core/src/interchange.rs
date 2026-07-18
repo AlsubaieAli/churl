@@ -321,6 +321,8 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             // set (export likewise omits it). Assertions round-trip only through
             // native TOML persistence.
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: url.to_owned(),
@@ -365,6 +367,8 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
         seq: 0,
         name,
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method,
             url,

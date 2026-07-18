@@ -6,6 +6,42 @@
 
 use super::super::*;
 
+/// Runs an endpoint's OWN `extract` rules against a standalone-send response and
+/// returns the `(name, value)` pairs to write into the in-memory Session scope
+/// (U3). Mirrors a sequence step's capture semantics exactly
+/// ([`churl_core::sequence::extract_step`] + the `persist` filter):
+///
+/// * uses the SAME extraction engine steps use — [`churl_core::sequence::extract_value`];
+/// * all-or-nothing — if ANY rule fails to extract, nothing is captured, so a
+///   partial/failed re-login never overwrites a prior Session value with half a
+///   set (matches `extract_step` returning `Err` on the first failing rule);
+/// * only rules whose name is listed in `endpoint.persist` are returned; the rest
+///   are inert for a standalone send (there is no sequence run to chain them into).
+///
+/// Empty `extract` short-circuits to an empty `Vec`, so this costs nothing for the
+/// overwhelming majority of endpoints that carry no capture rules. Pure (no
+/// `&self`), keeping the `write_session_var` write loop in `on_response` free of a
+/// borrow tangle with the buffer it reads the rules from.
+fn capture_endpoint_session_vars(
+    endpoint: &Endpoint,
+    response: &Response,
+) -> Vec<(String, String)> {
+    if endpoint.extract.is_empty() {
+        return Vec::new();
+    }
+    let mut extracted: Vec<(String, String)> = Vec::with_capacity(endpoint.extract.len());
+    for (name, expr) in &endpoint.extract {
+        match churl_core::sequence::extract_value(response, expr) {
+            Ok(value) => extracted.push((name.clone(), value)),
+            Err(_) => return Vec::new(),
+        }
+    }
+    extracted
+        .into_iter()
+        .filter(|(name, _)| endpoint.persist.iter().any(|p| p == name))
+        .collect()
+}
+
 impl App {
     /// Sends the selected endpoint's request with the live edtui body text.
     /// Spawns the execution task, keeps its `AbortHandle`, and moves the response
@@ -275,8 +311,19 @@ impl App {
         b.geometry.scroll = 0;
         b.geometry.cursor = 0;
         b.pending_highlight = None;
+        // U3: a standalone send runs the endpoint's OWN `extract` rules against
+        // the response and captures the `persist`-listed values into the Session
+        // scope — the same extraction engine and Session store a sequence step's
+        // persist uses, so a captured secret is masked in the Session var UI
+        // identically. Writes are collected here (while `b` is borrowed) and
+        // applied after the borrow is released, since `write_session_var` needs
+        // `&mut self`. Only the TUI single-send path reaches here — headless
+        // `send`/`run` never carry a Session scope, so they never capture (the
+        // frozen M8.2 output contract is untouched).
+        let mut session_writes: Vec<(String, String)> = Vec::new();
         match outcome {
             Ok(response) => {
+                session_writes = capture_endpoint_session_vars(&b.endpoint.endpoint, &response);
                 b.response = ResponseState::Done {
                     view: ResponseView::build(&response, generation),
                 };
@@ -284,6 +331,12 @@ impl App {
             Err(error) => {
                 b.response = ResponseState::Failed { error, meta };
             }
+        }
+        // Apply the Session captures (create/overwrite — a re-login refreshes the
+        // token). Never touches disk. No-op when the endpoint has no rules or none
+        // are persisted, so this is free for the overwhelming majority of sends.
+        for (name, value) in session_writes {
+            self.write_session_var(name, value);
         }
         // A send may have stored `Set-Cookie`s in the jar; persist it so cookies
         // survive a restart. Best-effort and cheap (a tiny blob, one row).

@@ -257,6 +257,8 @@ impl Parser {
                 seq: 0,
                 name: derive_name(method, &url, "curl"),
                 assertions: Vec::new(),
+                extract: std::collections::BTreeMap::new(),
+                persist: Vec::new(),
                 request: Request {
                     method,
                     url,
