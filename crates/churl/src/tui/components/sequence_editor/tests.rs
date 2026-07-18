@@ -27,7 +27,12 @@ fn editor() -> SequenceEditorState {
         "Flow".to_owned(),
         PathBuf::from("sequences/flow.toml"),
         &seq(),
-        vec!["a/one.toml".to_owned(), "c/three.toml".to_owned()],
+        // `(identifier, label)`: the stored path vs. the display name shown in
+        // the picker — deliberately distinct to prove the picker labels by name.
+        vec![
+            ("a/one.toml".to_owned(), "one".to_owned()),
+            ("c/three.toml".to_owned(), "three".to_owned()),
+        ],
     )
 }
 
@@ -136,6 +141,50 @@ fn add_step_via_picker() {
     assert!(ed.picker.is_none());
     assert_eq!(ed.steps.len(), 3);
     assert_eq!(ed.steps[2].endpoint, "c/three.toml");
+}
+
+#[test]
+fn add_step_picker_labels_by_name_and_supports_ctrl_nav() {
+    // U1: the add-step picker now rides the shared `PickerState`. Two things it
+    // did NOT do before: label rows by the endpoint display NAME (not the raw
+    // stored `.toml` path), and honour the Ctrl-j/k vim nav (the #23 shared-picker
+    // fix). Accepting still stores the unchanged path IDENTIFIER.
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    let mut ed = editor();
+    ed.handle_key(key(KeyCode::Char('a'))); // open the shared picker
+    let picker = ed.picker.as_ref().expect("picker open");
+    assert_eq!(
+        picker.items,
+        vec!["one".to_owned(), "three".to_owned()],
+        "rows are labeled by endpoint name, not the raw stored path"
+    );
+    assert!(
+        !picker.items.iter().any(|l| l.contains(".toml")),
+        "no raw file path leaks into the labels"
+    );
+    assert_eq!(picker.current(), Some(0));
+    // Ctrl-j / Ctrl-k drive the shared nav — for free now that this is one picker.
+    ed.handle_key(ctrl('j'));
+    assert_eq!(
+        ed.picker.as_ref().unwrap().current(),
+        Some(1),
+        "Ctrl-j moves down"
+    );
+    ed.handle_key(ctrl('k'));
+    assert_eq!(
+        ed.picker.as_ref().unwrap().current(),
+        Some(0),
+        "Ctrl-k moves up"
+    );
+    // Accept the second row → the STORED reference is the identifier (path).
+    ed.handle_key(ctrl('j'));
+    ed.handle_key(key(KeyCode::Enter));
+    assert!(ed.picker.is_none());
+    assert_eq!(
+        ed.steps.last().unwrap().endpoint,
+        "c/three.toml",
+        "the stored step reference is the unchanged path identifier"
+    );
 }
 
 #[test]
@@ -262,7 +311,7 @@ fn persist_seeds_from_loaded_step_and_shows_session_marker() {
         "Flow".to_owned(),
         PathBuf::from("sequences/flow.toml"),
         &sequence,
-        vec!["auth/login.toml".to_owned()],
+        vec![("auth/login.toml".to_owned(), "login".to_owned())],
     );
     assert_eq!(ed.steps[0].persist, vec![true]);
     // Focus the rules pane so the row renders, then assert the marker shows.

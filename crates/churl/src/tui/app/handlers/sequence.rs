@@ -649,9 +649,9 @@ impl App {
                     };
                     match persistence::load_sequence(&path) {
                         Ok(sequence) => {
-                            // `endpoint_rel_paths` takes `&mut self`; call it (no
+                            // `endpoint_choices` takes `&mut self`; call it (no
                             // sequence borrow live) before writing the editor back.
-                            let endpoints = self.endpoint_rel_paths();
+                            let endpoints = self.endpoint_choices();
                             let built = SequenceEditorState::new(
                                 sequence.name.clone(),
                                 path,
@@ -763,19 +763,24 @@ impl App {
         self.open_prompt(PromptPurpose::NewSequence, "");
     }
 
-    /// Workspace-relative endpoint paths for the editor's add-step picker.
-    pub(in crate::tui::app) fn endpoint_rel_paths(&mut self) -> Vec<String> {
+    /// Choices for the editor's add-step picker: `(identifier, label)` per
+    /// endpoint. The identifier is the workspace-relative logical path STORED in
+    /// the `SequenceStep` (unchanged wire format — e.g. `auth/login.toml`); the
+    /// label is the `collection/…/name` display path shown in the picker,
+    /// matching the search overlay and the explorer tree (was: the raw path).
+    pub(in crate::tui::app) fn endpoint_choices(&mut self) -> Vec<(String, String)> {
         let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
             return Vec::new();
         };
         self.explorer
-            .all_endpoint_files()
+            .all_endpoint_choices()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|path| {
-                path.strip_prefix(&root)
+            .filter_map(|(file, label)| {
+                file.strip_prefix(&root)
                     .ok()
                     .map(crate::tui::app::rel_to_logical)
+                    .map(|id| (id, label))
             })
             .collect()
     }
@@ -787,7 +792,7 @@ impl App {
         file: PathBuf,
         sequence: &churl_core::model::Sequence,
     ) {
-        let endpoints = self.endpoint_rel_paths();
+        let endpoints = self.endpoint_choices();
         // Construct the surface INTO the mode — Edit face, editor built,
         // no runner yet (the run face is entered lazily on the first Ctrl-R flip).
         self.mode = Mode::Sequence {

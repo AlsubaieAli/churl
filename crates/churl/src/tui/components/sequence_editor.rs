@@ -4,8 +4,11 @@
 //!
 //! Reuses the env-editor patterns: an ordered working copy, derived dirty
 //! state, a discard-on-close guard, and a shared [`LineEditor`] for field edits.
-//! Adding a step picks from the workspace's endpoints via a small self-contained
-//! substring picker (no cross-modal dependency on the app's fuzzy overlay).
+//! Adding a step picks from the workspace's endpoints through the SAME shared
+//! [`PickerState`](super::picker::PickerState) the search overlay and command
+//! palette use — so the vim nav keys (Ctrl-j/k &c.) work here for free and a
+//! picker fix lands in one place. The picker STORES the endpoint's identifier
+//! but LABELS each row by its display name (matching the explorer).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,7 +22,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::line_editor::LineEditor;
+use super::picker::{PickerKey, PickerState};
 use super::prompt;
+use crate::tui::events::FuzzyFinder;
 use crate::tui::theme::Theme;
 
 /// A step in the editor's working copy: an endpoint path plus ordered extraction
@@ -67,15 +72,6 @@ struct FieldEdit {
     fresh: bool,
 }
 
-/// The self-contained add-step endpoint picker (substring filter, no fuzzy dep).
-#[derive(Debug)]
-struct AddStepPicker {
-    query: LineEditor,
-    /// Indices into [`SequenceEditorState::endpoints`] matching the query.
-    filtered: Vec<usize>,
-    selected: usize,
-}
-
 /// What a key press asks the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorOutcome {
@@ -104,9 +100,18 @@ pub struct SequenceEditorState {
     focus: Focus,
     selected_rule: usize,
     edit: Option<FieldEdit>,
-    picker: Option<AddStepPicker>,
-    /// Available endpoint paths (workspace-relative) for the add-step picker.
-    endpoints: Vec<String>,
+    /// The add-step overlay, when open: the SAME shared [`PickerState`] the rest
+    /// of the app uses. Its `items` are the display labels of `endpoints`
+    /// (index-aligned), so [`PickerState::current`] resolves straight back into
+    /// `endpoints`.
+    picker: Option<PickerState>,
+    /// Selectable endpoints for the add-step picker as `(identifier, label)`:
+    /// `.0` is the workspace-relative logical path STORED in the `SequenceStep`
+    /// (unchanged wire format); `.1` is the display label shown in the picker.
+    endpoints: Vec<(String, String)>,
+    /// Fuzzy matcher backing the add-step picker's filter (owned so the editor
+    /// needs no cross-modal borrow of the app's finder).
+    finder: FuzzyFinder,
     /// True while the discard-changes confirm is showing.
     pending_close: bool,
     /// Snapshot for dirty derivation.
@@ -115,8 +120,13 @@ pub struct SequenceEditorState {
 
 impl SequenceEditorState {
     /// Builds the editor from a loaded sequence and the workspace's endpoint
-    /// paths (for the add-step picker).
-    pub fn new(name: String, path: PathBuf, sequence: &Sequence, endpoints: Vec<String>) -> Self {
+    /// choices (`(identifier, label)` pairs) for the add-step picker.
+    pub fn new(
+        name: String,
+        path: PathBuf,
+        sequence: &Sequence,
+        endpoints: Vec<(String, String)>,
+    ) -> Self {
         let steps: Vec<StepEdit> = churl_core::sequence::ordered_steps(sequence)
             .into_iter()
             .map(|step| {
@@ -151,6 +161,7 @@ impl SequenceEditorState {
             edit: None,
             picker: None,
             endpoints,
+            finder: FuzzyFinder::new(),
             pending_close: false,
             snapshot,
         }
@@ -319,8 +330,7 @@ impl SequenceEditorState {
             return false;
         }
         if let Some(picker) = self.picker.as_mut() {
-            picker.query.insert_str(text);
-            self.refilter_picker();
+            picker.push_str(text, &mut self.finder);
             return true;
         }
         if let Some(edit) = self.edit.as_mut() {
@@ -558,56 +568,38 @@ impl SequenceEditorState {
         if self.endpoints.is_empty() {
             return;
         }
-        let filtered = (0..self.endpoints.len()).collect();
-        self.picker = Some(AddStepPicker {
-            query: LineEditor::new(""),
-            filtered,
-            selected: 0,
-        });
-    }
-
-    fn refilter_picker(&mut self) {
-        let Some(picker) = self.picker.as_mut() else {
-            return;
-        };
-        let query = picker.query.text().to_lowercase();
-        picker.filtered = self
+        // The picker's items are the display labels; `PickerState::current`
+        // returns an index straight back into `self.endpoints`, whose `.0` is
+        // the identifier stored on the step.
+        let labels = self
             .endpoints
             .iter()
-            .enumerate()
-            .filter(|(_, path)| query.is_empty() || path.to_lowercase().contains(&query))
-            .map(|(i, _)| i)
+            .map(|(_, label)| label.clone())
             .collect();
-        picker.selected = picker.selected.min(picker.filtered.len().saturating_sub(1));
+        self.picker = Some(PickerState::new(" Add step ", labels));
     }
 
     fn handle_picker_key(&mut self, key: KeyEvent) {
-        let Some(picker) = self.picker.as_mut() else {
+        // Own the picker for the duration so the shared handler can borrow the
+        // editor's finder without a field-borrow conflict; put it back only when
+        // the key was consumed (Accept/Cancel close the overlay).
+        let Some(mut picker) = self.picker.take() else {
             return;
         };
-        match key.code {
-            KeyCode::Esc => self.picker = None,
-            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
-            KeyCode::Down => {
-                if picker.selected + 1 < picker.filtered.len() {
-                    picker.selected += 1;
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(&idx) = picker.filtered.get(picker.selected) {
-                    let endpoint = self.endpoints[idx].clone();
+        match picker.handle_key(key, &mut self.finder) {
+            PickerKey::Consumed => self.picker = Some(picker),
+            PickerKey::Cancel => {}
+            PickerKey::Accept => {
+                if let Some(idx) = picker.current() {
+                    // `.0` is the stored identifier (unchanged wire format); the
+                    // label (`.1`) is display-only.
+                    let endpoint = self.endpoints[idx].0.clone();
                     self.steps.push(StepEdit {
                         endpoint,
                         rules: Vec::new(),
                         persist: Vec::new(),
                     });
                     self.selected_step = self.steps.len() - 1;
-                }
-                self.picker = None;
-            }
-            _ => {
-                if picker.query.handle_key(key) {
-                    self.refilter_picker();
                 }
             }
         }
@@ -682,7 +674,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SequenceEditorState, theme:
     render_footer(frame, footer, state, theme);
 
     if let Some(picker) = &state.picker {
-        render_picker(frame, modal, picker, &state.endpoints, theme);
+        render_picker(frame, modal, picker, theme);
     } else if state.pending_close {
         prompt::render_confirm(
             frame,
@@ -838,13 +830,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SequenceEditorState, the
     );
 }
 
-fn render_picker(
-    frame: &mut Frame,
-    area: Rect,
-    picker: &AddStepPicker,
-    endpoints: &[String],
-    theme: &Theme,
-) {
+fn render_picker(frame: &mut Frame, area: Rect, picker: &PickerState, theme: &Theme) {
     let [pop] = Layout::horizontal([Constraint::Percentage(70)])
         .flex(Flex::Center)
         .areas(area);
@@ -855,13 +841,15 @@ fn render_picker(
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(format!(" Add step · {} ", picker.query.text()))
+        .title(format!(" Add step · {} ", picker.query))
         .title_style(theme.title);
     let inner = block.inner(pop);
     frame.render_widget(block, pop);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    // Each filtered entry is an index into `picker.items` (the endpoint display
+    // labels) — the name-matching-the-explorer, not the raw stored path.
     let lines: Vec<Line> = picker
         .filtered
         .iter()
@@ -869,7 +857,7 @@ fn render_picker(
         .enumerate()
         .map(|(row, &idx)| {
             let marker = if row == picker.selected { "> " } else { "  " };
-            let mut line = Line::from(format!("{marker}{}", endpoints[idx]));
+            let mut line = Line::from(format!("{marker}{}", picker.items[idx]));
             if row == picker.selected {
                 line = line.style(theme.selection);
             }

@@ -2484,19 +2484,13 @@ impl App {
             self.close_overlay();
             return Ok(());
         };
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Esc => self.close_overlay(),
-            KeyCode::Enter => return self.accept_overlay(),
-            KeyCode::Up => picker.move_up(),
-            KeyCode::Down => picker.move_down(),
-            KeyCode::Char('p') if ctrl => picker.move_up(),
-            KeyCode::Char('n') if ctrl => picker.move_down(),
-            KeyCode::Char('k') if ctrl => picker.move_up(),
-            KeyCode::Char('j') if ctrl => picker.move_down(),
-            KeyCode::Backspace => picker.backspace(&mut self.finder),
-            KeyCode::Char(c) if !ctrl => picker.push_char(c, &mut self.finder),
-            _ => {}
+        // Navigation + query editing live in the shared `PickerState::handle_key`
+        // (one home for the Ctrl-j/k vim aliases &c.); only the accept/cancel
+        // signals come back here for the app-level follow-ups.
+        match picker.handle_key(key, &mut self.finder) {
+            picker::PickerKey::Accept => return self.accept_overlay(),
+            picker::PickerKey::Cancel => self.close_overlay(),
+            picker::PickerKey::Consumed => {}
         }
         Ok(())
     }

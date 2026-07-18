@@ -2144,7 +2144,12 @@ fn sequence_editor_modal() {
         "Auth flow".to_owned(),
         std::path::PathBuf::from("sequences/auth-flow.toml"),
         &sequence,
-        vec!["auth/login.toml".to_owned(), "users/me.toml".to_owned()],
+        // `(identifier, label)` pairs; the picker is closed in this snapshot, so
+        // the labels don't render — the steps list shows the stored identifiers.
+        vec![
+            ("auth/login.toml".to_owned(), "login".to_owned()),
+            ("users/me.toml".to_owned(), "me".to_owned()),
+        ],
     );
     let backend = TestBackend::new(90, 24);
     let mut terminal = Terminal::new(backend).unwrap();

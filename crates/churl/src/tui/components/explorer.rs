@@ -615,6 +615,25 @@ impl ExplorerState {
         Ok(out)
     }
 
+    /// Every endpoint as `(file path, display path)` in tree display order — the
+    /// sequence add-step picker STORES the file-derived identifier (unchanged
+    /// wire format) but LABELS each row by the same `collection/…/name` display
+    /// path the search overlay and the tree show, so the picker matches what the
+    /// user sees elsewhere. Pairs [`all_endpoints`]' order + display-path
+    /// derivation with each endpoint's on-disk file.
+    pub fn all_endpoint_choices(&mut self) -> Result<Vec<(PathBuf, String)>, PersistenceError> {
+        let items = self.all_endpoints()?;
+        let mut out = Vec::with_capacity(items.len());
+        for (display, ci, ei) in items {
+            if let Some(endpoints) = self.collections[ci].endpoints.as_ref()
+                && let Some((file, _)) = endpoints.get(ei)
+            {
+                out.push((file.clone(), display));
+            }
+        }
+        Ok(out)
+    }
+
     /// Fully materialises the tree: parses every collection's endpoints and
     /// discovers every sub-collection, depth-first from the root. After this,
     /// `self.collections` holds every node and each node's `endpoints`/`children`
