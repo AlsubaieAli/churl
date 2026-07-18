@@ -3039,6 +3039,150 @@ fn copy_as_curl_prefers_loaded_over_hover() {
     );
 }
 
+/// A workspace like `hover_fallback_ws` but each endpoint's URL carries a
+/// DISTINCT unresolved `{{var}}` (no profile resolves it). A send's fail-loud
+/// "unresolved variable(s): <name>" message then names which endpoint the
+/// request was built from — the discriminator the U2 targeting tests need.
+fn hover_unresolved_ws(root: &Path) -> App {
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = root.join("api");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+            coll.join("a.toml"),
+            "seq = 0\nname = \"alpha\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{{alphavar}}\"\n",
+        )
+        .unwrap();
+    std::fs::write(
+            coll.join("b.toml"),
+            "seq = 1\nname = \"beta\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{{betavar}}\"\n",
+        )
+        .unwrap();
+    let ws = open_workspace(root).unwrap();
+    App::new(ws, KeyMap::default()).unwrap()
+}
+
+/// U2: with NOTHING loaded, `send_request` (ctrl-s) falls back to the HOVERED
+/// endpoint — the request is built from it, proven by the fail-loud message
+/// naming that endpoint's unresolved variable. No buffer goes in flight.
+#[test]
+fn send_falls_back_to_hovered_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "no buffer loaded");
+    assert!(app.hovered_endpoint().is_some(), "cursor hovers alpha");
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("unresolved variable(s): alphavar — set them in a profile/env or via CLI"),
+        "send built its request from the hovered endpoint (alpha)"
+    );
+    // The hovered endpoint was OPENED into the active buffer before the request
+    // was built (that's how the send reached alpha's URL). Here the fail-loud
+    // unresolved guard then refused it, so nothing went in flight — the
+    // buffer-awaits-the-response path is covered live in
+    // `send_hovered_opens_a_buffer_that_awaits_the_response`.
+    assert!(
+        app.active_endpoint_buffer().is_some_and(|b| b
+            .endpoint
+            .endpoint
+            .request
+            .url
+            .contains("alphavar")
+            && b.in_flight.is_none()),
+        "hovered endpoint opened as the active buffer; refused send left it out of flight"
+    );
+}
+
+/// U2: a hovered-send with NOTHING loaded OPENS the hovered endpoint into the
+/// active buffer and the buffer then awaits the send's generation — so
+/// `on_response` routes the reply back for display instead of dropping it
+/// (the earlier footgun where a hovered send fired but showed no response).
+#[tokio::test]
+async fn send_hovered_opens_a_buffer_that_awaits_the_response() {
+    use churl_core::http::{DEFAULT_TIMEOUT, build_client};
+    let dir = tempfile::tempdir().unwrap();
+    // `hover_fallback_ws` URLs are fully resolved, so the send clears the
+    // unresolved guard; a real client lets it reach the in-flight tail.
+    let mut app = hover_fallback_ws(dir.path());
+    app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "nothing loaded before the send");
+    app.send_request();
+    let b = app
+        .active_endpoint_buffer()
+        .expect("the hovered endpoint was opened into the active buffer");
+    assert!(
+        b.endpoint.endpoint.request.url.contains("api.test/alpha"),
+        "the buffer holds the hovered endpoint (alpha): {}",
+        b.endpoint.endpoint.request.url
+    );
+    let in_flight = b
+        .in_flight
+        .as_ref()
+        .expect("the opened buffer awaits the send (response would render, not drop)");
+    assert_eq!(
+        in_flight.generation, app.generation,
+        "buffer awaits THIS send's generation, so `on_response` routes the reply to it"
+    );
+}
+
+/// U2: with an endpoint LOADED, `send_request` still targets the loaded one even
+/// when the explorer cursor hovers a DIFFERENT endpoint — no surprise for the
+/// common case. Proven by the message naming the loaded endpoint's var, not the
+/// hover's.
+#[test]
+fn send_prefers_loaded_over_hover() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    let alpha = app.explorer.select().unwrap().expect("alpha selected");
+    app.load_endpoint(alpha);
+    assert!(app.selected().is_some(), "alpha loaded");
+    app.set_focus(Pane::Explorer);
+    app.explorer.move_down(); // hover "beta"
+    assert!(
+        app.hovered_endpoint()
+            .is_some_and(|h| h.endpoint.request.url.contains("betavar")),
+        "cursor now hovers beta"
+    );
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("unresolved variable(s): alphavar — set them in a profile/env or via CLI"),
+        "send targets the LOADED endpoint (alpha), not the hover (beta)"
+    );
+}
+
+/// U2 edge: nothing loaded AND nothing hovered (cursor on the collection row) →
+/// the same safe no-op as before — a message, no panic, no request built.
+#[test]
+fn send_with_no_load_and_no_hover_is_safe_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap(); // cursor rests on the "api" collection row
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "nothing loaded");
+    assert!(
+        app.hovered_endpoint().is_none(),
+        "cursor is on a collection, not an endpoint"
+    );
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("no endpoint selected — nothing to send"),
+    );
+    assert!(
+        app.active_endpoint_buffer().is_none(),
+        "no endpoint hovered → nothing opened, no request built"
+    );
+}
+
 /// m1 regression: `<leader>s o` picking a sequence moves the sub-pane cursor
 /// onto it, so a later run/edit acts on the PICKED sequence, not #0.
 #[test]
