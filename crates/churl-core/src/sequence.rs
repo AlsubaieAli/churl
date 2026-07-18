@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use crate::assert::Assertion;
 use crate::debug::DebugTrace;
 use crate::http::{ExecuteOptions, HttpError, execute_traced};
 use crate::model::{Method, OnError, Response, Sequence, SequenceStep, Timing};
@@ -308,8 +309,9 @@ pub struct RunScopes {
 }
 
 /// A step resolved and ready to [`execute`]: the endpoint file it came from plus
-/// its fully-substituted request.
+/// its fully-substituted request and its persisted assertions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PreparedStep {
     /// The endpoint file this step runs.
     pub endpoint_path: PathBuf,
@@ -319,6 +321,11 @@ pub struct PreparedStep {
     pub method: Method,
     /// The resolved request URL (mirrors `request.url` for convenience).
     pub url: String,
+    /// The endpoint's persisted `[[assertions]]` (M8.4), carried through so a
+    /// headless sequence run can gate each step against its own endpoint's
+    /// checks without re-loading the file. The live TUI runner ignores this
+    /// field (it does not yet evaluate sequence assertions).
+    pub assertions: Vec<Assertion>,
 }
 
 /// Error preparing a sequence step (path resolution / endpoint load). The step
@@ -481,6 +488,7 @@ pub fn prepare_step(
         method: request.method,
         url: request.url.clone(),
         request,
+        assertions: endpoint.assertions.clone(),
     })
 }
 

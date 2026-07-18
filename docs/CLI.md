@@ -7,6 +7,7 @@ churl's CLI treats an AI agent / CI pipeline as a first-class consumer, on equal
 - `churl run <endpoint>` — executes a saved endpoint from the cwd workspace. `<endpoint>` is a `collection/sub/endpoint name` display path (root-level: just the endpoint's name) — the same addressing the TUI explorer shows, so what you see there is what you type here. Quote the argument when the endpoint name has spaces.
 - `churl send [-X METHOD] [-H 'Name: Value']... [-d BODY] <URL>` — an ad-hoc one-shot request from inline flags. No saved endpoint, no workspace required. Accepts curl-mnemonic flags (`-X`/`-H`/`-d`/`--url`) and churl-native aliases (`--method`/`--header`/`--body`) — they're the same field, just two names, so either flag style works.
 - `churl import <curl-command>` — parses a curl command into an endpoint. Default: writes it into the cwd workspace (`churl init` first if there isn't one yet). `--stdout` prints the endpoint TOML instead (the pre-M8.2 default). `--out FILE` writes an arbitrary file, bypassing the workspace entirely.
+- `churl run-seq <name>` — runs a saved request sequence (`sequences/<name>.toml`) end-to-end from the cwd workspace, with no TUI. Each step runs an endpoint, values extracted from one step feed later ones (in one process — no shell-script re-injection), and every step is gated on its endpoint's persisted `[[assertions]]`. `<name>` is the sequence file's stem. Unlike the single-object `run`/`send` envelope, `--json run-seq` streams **NDJSON** — see "Sequence runs (`run-seq`)" below.
 
 Global flags that apply to `run`/`send` (and the rest of the CLI): `--var k=v` (repeatable), `--profile NAME`, `--proxy URL`, `-k`/`--insecure`, and `--json` (switches to the machine envelope described below).
 
@@ -45,7 +46,7 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 - `response.body_encoding` is `"utf8"` when the response body is valid UTF-8, else `"base64"` (`body` is then base64-encoded). Never lossy — deterministic decoding for an agent.
 - `response.truncated` mirrors the body-size cap flag.
 - `assertions` is `null` when no assertions were given (unchanged since M8.2 — the reserved shape shipped early to avoid a schema-version bump); otherwise it holds the populated `AssertionReport` object described in "Assertions" below.
-- Multi-request runs (sequences/load) are out of scope for M8.2 and will stream NDJSON (one JSON object per line) rather than reuse this single-object envelope — that's a distinct, future contract; a `run`/`send` invocation is always exactly one request, one object.
+- Multi-request runs (sequences via `run-seq`; load, later) stream NDJSON (one JSON object per line) rather than reuse this single-object envelope — see "Sequence runs (`run-seq`)" below. A `run`/`send` invocation is always exactly one request, one object.
 
 ## Exit codes (frozen forever)
 
@@ -64,7 +65,8 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 
 | `kind` | Band | Meaning |
 |---|---|---|
-| `no-workspace` | 3 | No `churl.toml` at the cwd (`run`'s only mode; `import`'s default write mode; `send`'s workspace-read I/O failure) |
+| `no-workspace` | 3 | No `churl.toml` at the cwd (`run`'s only mode; `import`'s default write mode; `send`'s workspace-read I/O failure; `run-seq`'s workspace) |
+| `sequence-not-found` | 3 | `run-seq <name>` found no `sequences/<name>.toml` in the open workspace (M8.4.1) |
 | `endpoint-not-found` | 3 | A `run` endpoint path didn't resolve in the open workspace |
 | `unresolved-var` | 3 | The resolved request still carries a `{{var}}` placeholder no scope (nor the process env) resolved — refused rather than shipped literally |
 | `unknown-profile` | 3 | `--profile NAME` named a profile the workspace manifest doesn't define |
@@ -160,6 +162,59 @@ After the usual response echo, a checklist prints to **stderr** — one line per
 ```
 
 `--json` mode never prints this — the checklist is a human-only rendering of the same `data.assertions` object.
+
+## Sequence runs (`run-seq`)
+
+`churl run-seq <name>` runs a saved sequence (`sequences/<name>.toml`) headlessly. `<name>` is the sequence file's **stem** (`run-seq checkout` → `sequences/checkout.toml`) — the stable identifier, addressed the same way regardless of the sequence's human display name. It reuses the exact engine the TUI's sequence runner drives: each step runs an endpoint by path, values captured by a step's `extract` rules chain into later steps through the resolver (highest-precedence `extracted` scope), and each step is gated on its endpoint's persisted `[[assertions]]`. Because it is **one process**, the extracted-value chain lives in memory and never touches disk — replacing the fragile shell-script pattern of `jq`-extracting a token and re-injecting it via `--var` on every hop.
+
+Global `--var`/`--profile`/`--proxy`/`-k` apply as they do to `run`; each step additionally honours its own endpoint's durable `insecure` flag. There is **no cookie jar** — chaining is via extracted values, not cookies (a login step returns a token in its body, a later step sends it as a header); the persistent per-workspace jar stays a TUI/`churl cookies` concern.
+
+### The NDJSON stream (`--json`)
+
+`--json run-seq` prints **one JSON object per line** to stdout (NDJSON), flushed as each step completes so a consumer sees progress live. Every line is self-contained (independently parseable) and carries the same top-level `{ schema_version, ok, command, data, error }` shape as a single-request envelope, plus a `type` discriminator.
+
+**Step line** — one per step, `"type": "step"`:
+
+```json
+{ "schema_version": 1, "type": "step", "command": "run-seq", "seq": 1, "endpoint": "auth/login.toml",
+  "ok": true, "data": { ...ExecData... }, "error": null }
+```
+
+- `data` is the **identical frozen `run`/`send` payload** (`request`/`response`/`assertions`, plus `trace` under `-v`) — a sequence step and a standalone `run` of the same endpoint emit byte-identical `data` (modulo the server's `Date` header and measured timing). `assertions` follows the same rule as single-request: `null` when the endpoint has none, otherwise the populated `AssertionReport`.
+- `ok` mirrors the single-request rule exactly: `true` for **any completed request** — an HTTP error *status* (4xx/5xx) is still `ok: true` (assert `status < 400` to gate it); `false` only for a transport/resolution error (`data: null`, `error` populated) or a halted-tail skip.
+- `skipped` (present as `true` only when set) — the step never ran because an earlier step halted the sequence (`on_error: halt`, the default). `data`/`error` are both `null`.
+- `extract_error` (present only when set) — the request completed (`ok: true`, `data` populated) but one of the step's `extract` rules found nothing, so the chain is broken. Distinct from `error` (a transport failure): the request succeeded, but a downstream step needing the captured value could never resolve it, so the run fails (see exit codes).
+
+**Summary line** — the single terminal line, `"type": "summary"`:
+
+```json
+{ "schema_version": 1, "type": "summary", "command": "run-seq", "ok": false, "sequence": "checkout",
+  "steps": { "total": 4, "ran": 3, "skipped": 1, "failed": 1 },
+  "assertions": { "total": 9, "passed": 8, "failed": 1 } }
+```
+
+- `ok` — `true` ⟺ exit `0`: no hard step error, no failed assertion, no broken extraction chain.
+- `steps.ran` — steps that were attempted (not halted-tail-skipped); `steps.failed` — attempted steps that did not cleanly succeed (a transport/resolution error, a broken extraction, or a completed HTTP error status), the same notion the engine's own step classification uses. `steps.failed` is a **diagnostic tally**, not the exit trigger — an unasserted 4xx/5xx counts here but does not by itself fail the run.
+- `assertions` — the totals aggregated across every step's assertion report.
+
+### Exit codes
+
+Mirrors the single-request precedence ("request/transport errors still win"):
+
+1. **First hard step error's band (3/4/5)** if any step failed to prepare/resolve or send (`sequence-not-found`, `unresolved-var`, `endpoint-not-found`, `transport-error`, …). A pre-flight failure (no workspace, sequence not found) emits a single ordinary error envelope instead of a stream, then exits.
+2. Otherwise **1** if any assertion failed **or** any step's extraction chain broke.
+3. Else **0**.
+
+An assertion or extraction failure never flips a step's `ok` (the request completed) — only the exit code, exactly as a failed assertion does for single-request `run`. A completed HTTP error *status* is not itself an exit trigger; assert on it to gate it (in a `on_error: halt` sequence a ≥400 status also halts, so the tail is `skipped` and visible in the stream).
+
+### Human mode (non-`--json`)
+
+Prints a compact per-step checklist and a `PASS`/`FAIL` summary to **stderr** (stdout stays empty — a multi-step run has no single body to emit), mirroring the single-request assertion checklist.
+
+### Deliberate scope (M8.4.1)
+
+- **Sequence addressing is by file stem, not display name** — the stem is the stable, script-friendly identifier a CI job pins.
+- **No per-step CLI `--assert` override yet.** A step is gated by its endpoint's persisted `[[assertions]]`; a step-qualified CLI flag (e.g. `--assert 'login: $.token exists'`) would need a new step-addressing grammar and is deferred rather than frozen half-designed — the persisted-assertions path already covers the motivating CI gate. See `docs/DECISIONS.md`.
 
 ## Debug trace (`-v`)
 

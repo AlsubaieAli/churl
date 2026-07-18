@@ -332,6 +332,55 @@ fn prepare_step_session_scope_precedence() {
 }
 
 #[test]
+fn prepare_step_carries_endpoint_assertions() {
+    // M8.4.1: a prepared step must surface its endpoint's persisted
+    // `[[assertions]]` so the headless sequence runner can gate each step
+    // without re-loading the file. A standalone `prepare_step` loads the
+    // endpoint anyway — the assertions ride along for free.
+    use crate::assert::{AssertOp, Assertion};
+    use crate::model::{Endpoint, Method, Request};
+    use crate::persistence::save_endpoint;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let assertions = vec![
+        Assertion {
+            target: "status".into(),
+            op: AssertOp::Eq,
+            value: Some("200".into()),
+        },
+        Assertion {
+            target: "$.token".into(),
+            op: AssertOp::Exists,
+            value: None,
+        },
+    ];
+    let ep = Endpoint {
+        seq: 0,
+        name: "e".into(),
+        assertions: assertions.clone(),
+        request: Request {
+            method: Method::Get,
+            url: "https://example.test/".into(),
+            headers: vec![],
+            params: vec![],
+            body: None,
+            auth: None,
+            insecure: false,
+        },
+    };
+    save_endpoint(&root.join("e.toml"), &ep).unwrap();
+    let step = SequenceStep {
+        seq: 0,
+        endpoint: "e.toml".into(),
+        extract: BTreeMap::new(),
+        persist: Vec::new(),
+    };
+    let prepared = prepare_step(root, &step, &BTreeMap::new(), &RunScopes::default()).unwrap();
+    assert_eq!(prepared.assertions, assertions);
+}
+
+#[test]
 fn classify_step_extract_error() {
     let mut step_extract = BTreeMap::new();
     step_extract.insert("v".to_owned(), "$.missing".to_owned());
