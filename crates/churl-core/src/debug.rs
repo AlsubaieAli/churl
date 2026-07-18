@@ -252,6 +252,21 @@ impl DebugTrace {
                 enabled: header.enabled,
             })
             .collect();
+        // Structured query params are appended verbatim to the query string by
+        // `export::url_with_params`, so a resolved secret in one (`api_key =
+        // {{secret}}`) would leak raw to the clipboard. Mask by the SAME
+        // query-pair rule the URL masking (`secrets::mask_url`) applies to
+        // inline `?key=value` pairs — name-anchor ∪ secret-shaped value — so a
+        // secret in a param and the same secret in the URL mask identically.
+        // The auth-injected param pushed above already carries `SECRET_MASK`,
+        // so it is inert here.
+        for param in &mut masked.params {
+            if crate::config::looks_like_secret_name(&param.name)
+                || secrets::looks_like_secret_value(&param.value)
+            {
+                param.value = secrets::SECRET_MASK.to_owned();
+            }
+        }
         if let Some(body) = masked.body.as_mut() {
             body.content = secrets::mask_secret_tokens(&body.content);
         }
@@ -335,6 +350,45 @@ mod tests {
 
         assert!(!curl.contains("supersecret123456789012345"));
         assert!(curl.contains("Authorization"));
+    }
+
+    #[test]
+    fn masked_curl_never_leaks_secret_query_params() {
+        let mut request = get("https://example.com/x");
+        // A secret-SHAPED value under a non-secret name.
+        request.params.push(Param {
+            name: "api_key".to_owned(),
+            value: "sk-live-abcdefghijklmnopqrstuvwx".to_owned(),
+            enabled: true,
+        });
+        // A low-entropy secret under a secret-NAMED param (only the name
+        // anchor catches this — the value alone would not).
+        request.params.push(Param {
+            name: "token".to_owned(),
+            value: "hunter2".to_owned(),
+            enabled: true,
+        });
+        // A plain non-secret param must survive verbatim.
+        request.params.push(Param {
+            name: "page".to_owned(),
+            value: "1".to_owned(),
+            enabled: true,
+        });
+        let trace = DebugTrace::from_request(&request);
+        let curl = trace.masked_curl();
+
+        assert!(
+            !curl.contains("sk-live-abcdefghijklmnopqrstuvwx"),
+            "secret-shaped query param leaked: {curl}"
+        );
+        assert!(
+            !curl.contains("hunter2"),
+            "secret-named query param leaked: {curl}"
+        );
+        assert!(
+            curl.contains("page") && curl.contains('1'),
+            "non-secret param must be preserved: {curl}"
+        );
     }
 
     #[test]
