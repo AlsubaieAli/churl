@@ -94,6 +94,12 @@ CLI, real testing, and the polish to launch — grouped by target release.
       persisted `[[assertions]]`) with machine-readable results (`data.assertions`, exit 1 on
       failure) for CI and agents. Frozen contract: [`docs/CLI.md`](CLI.md), "Assertions". Regex
       `matches` deferred — see `docs/DECISIONS.md`'s Backlog section.
+- [x] Headless sequence runs — `run-seq <name>` runs a saved sequence end-to-end with no TUI,
+      chaining extracted values step-to-step in one process and gating each step on its
+      endpoint's persisted `[[assertions]]`. Under `--json` it streams NDJSON (one object per
+      step + a terminal summary line); exit 1 on any failed assertion or broken extraction
+      chain, a transport/resolution band (3/4/5) winning over it. Frozen contract:
+      [`docs/CLI.md`](CLI.md), "Sequence runs (`run-seq`)".
 
 ### 0.9 — Coverage & settings ⏳
 - [ ] Centralized settings panel.

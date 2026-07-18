@@ -58,6 +58,10 @@ pub enum ErrorKind {
     /// A `collection/.../endpoint name` path did not resolve to an endpoint
     /// file in the open workspace.
     EndpointNotFound,
+    /// A `run-seq <name>` argument did not resolve to a `sequences/<name>.toml`
+    /// file in the open workspace (M8.4.1). Additive per the module docs'
+    /// "new `ErrorKind` variants are additive" rule.
+    SequenceNotFound,
     /// The resolved request still carries one or more `{{var}}` placeholders
     /// after substitution — refused rather than shipping a literal `{{...}}`.
     UnresolvedVar,
@@ -101,6 +105,7 @@ impl ErrorKind {
         match self {
             ErrorKind::NoWorkspace
             | ErrorKind::EndpointNotFound
+            | ErrorKind::SequenceNotFound
             | ErrorKind::UnresolvedVar
             | ErrorKind::UnknownProfile
             | ErrorKind::ConfigError => 3,
@@ -246,26 +251,34 @@ pub fn emit<T: Serialize + SuccessExitCode>(
             }
             code
         }
-        Err(err) => {
-            let code = err.kind.exit_code();
-            if json {
-                print_envelope(Envelope::<()> {
-                    schema_version: SCHEMA_VERSION,
-                    ok: false,
-                    command,
-                    data: None,
-                    error: Some(EnvelopeError {
-                        kind: err.kind,
-                        message: err.message,
-                        detail: err.detail,
-                    }),
-                });
-            } else {
-                eprintln!("error: {}", err.message);
-            }
-            code
-        }
+        Err(err) => emit_error(command, json, err),
     }
+}
+
+/// Prints a single failure envelope (`--json`) or `error: <message>` (human
+/// mode) and returns its exit-code band. Factored out of [`emit`] so a
+/// streaming command (`run-seq`) can surface a *pre-flight* failure — one that
+/// occurs before its NDJSON stream starts (no workspace, sequence not found) —
+/// as the very same single-object error envelope every other headless command
+/// emits. A per-step failure rides the stream instead (see `crate::seq_cmd`).
+pub fn emit_error(command: &str, json: bool, err: CliError) -> i32 {
+    let code = err.kind.exit_code();
+    if json {
+        print_envelope(Envelope::<()> {
+            schema_version: SCHEMA_VERSION,
+            ok: false,
+            command,
+            data: None,
+            error: Some(EnvelopeError {
+                kind: err.kind,
+                message: err.message,
+                detail: err.detail,
+            }),
+        });
+    } else {
+        eprintln!("error: {}", err.message);
+    }
+    code
 }
 
 fn print_envelope<T: Serialize>(envelope: Envelope<T>) {

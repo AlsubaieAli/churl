@@ -73,9 +73,10 @@ crates/
                            #   SEQUENCES_DIRNAME (excluded from collections()), OpenWorkspace::sequences() →
                            #   SequenceLoad (lenient), load/save/create/rename/delete/duplicate_sequence
       sequence.rs          # run engine (UI-free): extract_value (status/header:/JSON-path subset, no
-                           #   jsonpath dep), prepare_step (resolver + prepended extracted scope), extract_step,
-                           #   classify_step (single classify+extract seam), ordered_steps, run_sequence
-                           #   (wiremock-tested); rejects ../absolute step endpoints, never panics
+                           #   jsonpath dep), prepare_step (resolver + prepended extracted scope; returns PreparedStep
+                           #   incl. the endpoint's persisted [[assertions]] — M8.4.1, so the headless run-seq runner
+                           #   gates each step without a 2nd load), extract_step, classify_step (single classify+extract
+                           #   seam), ordered_steps, run_sequence (wiremock-tested); rejects ../absolute steps, never panics
       load.rs              # concurrent-load runner (UI-free): run_load (N copies through execute(),
                            #   bounded by futures' buffer_unordered + absolute-target pacing), classify (single
                            #   Ok/Failed/Error seam), pure stats (nearest-rank percentiles), check_config/LoadCaps
@@ -130,17 +131,26 @@ crates/
     src/
       lib.rs               # pub mod tui (re-export for tests)
       main.rs              # Cli (clap derive): global --var/--profile/--proxy/-k/--json, subcommands (run, send —
-                           #   both with a repeatable --assert EXPR, M8.4 — import, init [--demo], keymaps,
-                           #   cookies list|clear, completions, man, update, uninstall) | TUI; #[tokio::main]
-                           #   (M8.2 CLI & headless, M8.4 assertions — see docs/CLI.md)
+                           #   both with a repeatable --assert EXPR, M8.4 — run-seq <name> (M8.4.1 headless sequence),
+                           #   import, init [--demo], keymaps, cookies list|clear, completions, man, update,
+                           #   uninstall) | TUI; #[tokio::main] (M8.2 CLI & headless, M8.4 assertions — see docs/CLI.md)
       output.rs            # M8.2 machine-output contract: `{schema_version,ok,command,data,error}` JSON envelope,
-                           #   closed ErrorKind slug set banded 1:1 to exit codes (3/4/5, +invalid-assertion M8.4),
-                           #   emit() print+exit seam — its T: SuccessExitCode bound (M8.4) lets a successful
-                           #   run/send still exit 1 on a failed assertion set without touching ErrorKind
+                           #   closed ErrorKind slug set banded 1:1 to exit codes (3/4/5, +invalid-assertion M8.4,
+                           #   +sequence-not-found M8.4.1), emit() print+exit seam — its T: SuccessExitCode bound (M8.4)
+                           #   lets a successful run/send still exit 1 on a failed assertion set without touching
+                           #   ErrorKind; emit_error() (factored out) prints the single failure envelope (reused by run-seq)
       headless.rs          # run_execution: the ONE seam run/send share — substitute {{var}} scopes, refuse an
-                           #   unresolved placeholder, drive the SAME churl_core::http::execute, evaluate assertions
-                           #   (M8.4, churl_core::assert::run_assertions) against the response, shape the payload;
+                           #   unresolved placeholder, drive the SAME churl_core::http::execute, then delegate to
+                           #   shape_exec_data(request,response,assertions,trace): the pure single-source-of-truth for the
+                           #   per-request `data` shape (secret-masked echo, utf8/base64 body, M8.4 run_assertions) —
+                           #   ALSO called per-step by seq_cmd so a sequence step's data is byte-identical to a run's;
                            #   parse_cli_assertions: --assert strings -> Vec<Assertion>, invalid-assertion on error
+      seq_cmd.rs           # churl run-seq <name> (M8.4.1): headless sequence runner. Resolve sequences/<name>.toml by
+                           #   file stem (enumerate real files — traversal-safe), loop the core engine (ordered_steps →
+                           #   prepare_step → execute_traced → classify_step → should_halt) chaining extracted values
+                           #   in-process, gate each step on its endpoint's [[assertions]] via shape_exec_data. Owns its
+                           #   stdout/exit (a STREAM): NDJSON step line per step + terminal summary line; exit = first
+                           #   hard error's band (3/4/5), else 1 on any failed assertion OR broken extraction chain, else 0
       resolve.rs           # `collection/.../endpoint name` path resolution vs churl_core::persistence; --profile validation
       run_cmd.rs           # churl run <endpoint>: resolve a saved endpoint + its collection var chain, merge its
                            #   persisted assertions with --assert flags (M8.4, append), execute headless
@@ -212,6 +222,9 @@ crates/
       cli_init.rs          # `churl init` integration tests: blank/--demo scaffold, refuse-existing, tutorial-removed
       cli_run.rs           # `churl run` integration tests (wiremock): envelope bytes + exit codes, nested/root resolution
       cli_send.rs          # `churl send` integration tests (wiremock): envelope bytes + exit codes, flag styles, masking
+      cli_run_seq.rs       # `churl run-seq` integration tests (wiremock, M8.4.1): NDJSON step+summary lines, value
+                           #   chaining, per-step-data==run-data, assertion/extraction-failure exit 1, halt/continue,
+                           #   sequence-not-found/no-workspace exit 3, human-mode stderr checklist
 docs/
   ARCHITECTURE.md
   CLI.md                   # M8.2 frozen CLI & headless contract: --json envelope, exit codes, error.kind mapping

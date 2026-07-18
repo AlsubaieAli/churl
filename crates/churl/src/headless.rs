@@ -12,7 +12,7 @@ use serde::Serialize;
 use churl_core::assert::{Assertion, AssertionReport, run_assertions};
 use churl_core::debug::DebugTrace;
 use churl_core::http::{ClientConfig, ExecuteOptions};
-use churl_core::model::Request;
+use churl_core::model::{Request, Response};
 use churl_core::template::{Resolver, Scope};
 
 use crate::output::{CliError, ErrorKind, SuccessExitCode, mask_header_value};
@@ -167,25 +167,6 @@ pub async fn run_execution(
         ));
     }
 
-    let body_present = request.body.is_some();
-    let request_summary = RequestSummary {
-        method: request.method.to_string(),
-        // Mask any secret the resolver substituted into the URL (userinfo
-        // password, secret-named/secret-shaped query value) before it is echoed
-        // back — the real request below still uses the unmasked `request.url`.
-        url: churl_core::secrets::mask_url(&request.url),
-        headers: request
-            .headers
-            .iter()
-            .filter(|h| h.enabled)
-            .map(|h| HeaderPair {
-                name: h.name.clone(),
-                value: mask_header_value(&h.name, &h.value),
-            })
-            .collect(),
-        body_present,
-    };
-
     let client = churl_core::http::build_client_with(&inputs.client_cfg)
         .map_err(crate::output::from_http_error)?;
     let response =
@@ -206,14 +187,52 @@ pub async fn run_execution(
             .map(churl_core::secrets::mask_url);
     }
 
-    // Evaluated here — the last point `response` is still owned whole, before
-    // its body is consumed into the (lossy-decoded) envelope projection below.
+    Ok(shape_exec_data(&request, &response, assertions, trace))
+}
+
+/// Shapes a completed exchange into the frozen `data` payload: the masked
+/// request echo, the response projection (UTF-8 text or base64), the
+/// assertion report (`None` for an empty set — the M8.2 back-compat contract,
+/// never a vacuously-passing empty object), and the optional `-v` debug
+/// trace. Pure — no IO, no async.
+///
+/// The single source of truth for the per-request envelope shape: both the
+/// single-request `run`/`send` path ([`run_execution`]) and the per-step
+/// headless sequence runner ([`crate::seq_cmd`]) call it, so a step of a
+/// sequence and a standalone `run` of the same endpoint emit byte-identical
+/// `data`. Keeping the request-echo secret masking here (not duplicated per
+/// caller) is deliberate: it is a security surface (`docs/CLI.md`, "Secret
+/// masking").
+pub fn shape_exec_data(
+    request: &Request,
+    response: &Response,
+    assertions: &[Assertion],
+    trace: Option<DebugTrace>,
+) -> ExecData {
+    let request_summary = RequestSummary {
+        method: request.method.to_string(),
+        // Mask any secret the resolver substituted into the URL (userinfo
+        // password, secret-named/secret-shaped query value) before it is echoed
+        // back — the real request that was sent used the unmasked `request.url`.
+        url: churl_core::secrets::mask_url(&request.url),
+        headers: request
+            .headers
+            .iter()
+            .filter(|h| h.enabled)
+            .map(|h| HeaderPair {
+                name: h.name.clone(),
+                value: mask_header_value(&h.name, &h.value),
+            })
+            .collect(),
+        body_present: request.body.is_some(),
+    };
+
     // An empty set stays `None` (the M8.2 back-compat contract for an
     // assertion-free call), never a vacuously-passing empty report object.
     let assertion_report = if assertions.is_empty() {
         None
     } else {
-        Some(run_assertions(assertions, &response))
+        Some(run_assertions(assertions, response))
     };
 
     let (body, body_encoding) = match String::from_utf8(response.body.clone()) {
@@ -223,7 +242,7 @@ pub async fn run_execution(
         Err(_) => (BASE64.encode(&response.body), "base64"),
     };
 
-    Ok(ExecData {
+    ExecData {
         request: request_summary,
         response: ResponseSummary {
             status: response.status,
@@ -244,7 +263,7 @@ pub async fn run_execution(
         },
         assertions: assertion_report,
         trace,
-    })
+    }
 }
 
 /// Prints a compact human-mode rendering of a successful [`ExecData`]: the

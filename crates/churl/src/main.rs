@@ -14,6 +14,7 @@ mod output;
 mod resolve;
 mod run_cmd;
 mod send_cmd;
+mod seq_cmd;
 mod uninstall;
 mod update;
 
@@ -100,6 +101,23 @@ enum Command {
         /// succeeded — see `docs/CLI.md`, "Assertions".
         #[arg(long = "assert", value_name = "EXPR")]
         assert: Vec<String>,
+    },
+    /// Run a saved request sequence headlessly — no TUI. Resolves
+    /// `sequences/<name>.toml` in the cwd workspace, runs each step end-to-end
+    /// (values extracted from one step feed later ones), and gates each step on
+    /// its endpoint's persisted `[[assertions]]`. Under `--json` it streams
+    /// NDJSON: one object per step plus a terminal summary line. Any failed
+    /// assertion exits 1; a transport/resolution error wins with its own band
+    /// (3/4/5). See `docs/CLI.md`, "Sequence & load runs".
+    #[command(name = "run-seq")]
+    RunSeq {
+        /// Sequence file stem: `run-seq checkout` runs `sequences/checkout.toml`.
+        name: String,
+        /// Add a `data.trace` object to each step's envelope under `--json`
+        /// (resolved request, redirect hops, auth/cookie/proxy decisions —
+        /// secrets masked); prints a per-step trace to stderr in human mode.
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
     /// Send an ad-hoc one-shot request — no saved endpoint, no workspace
     /// required. Accepts curl-mnemonic flags (`-X`/`-H`/`-d`/`--url`) and
@@ -298,6 +316,30 @@ async fn main() -> Result<()> {
             let code = output::emit("run", json, result, |data| {
                 headless::print_human(data, verbose)
             });
+            std::process::exit(code);
+        }
+        Some(Command::RunSeq { name, verbose }) => {
+            // Streaming command: it owns its stdout/stderr/exit-code directly
+            // (pre-flight errors emit a single envelope, per-step results ride
+            // the NDJSON stream), so it does not funnel through `emit`.
+            let cli_vars = vars_map(&cli.vars);
+            let code = match build_runtime_cfg() {
+                Ok(runtime) => match headless_cwd() {
+                    Ok(cwd) => {
+                        let args = seq_cmd::SeqArgs {
+                            name,
+                            cli_vars,
+                            profile: cli.profile.clone(),
+                            proxy: cli.proxy.clone(),
+                            insecure: cli.insecure,
+                            verbose,
+                        };
+                        seq_cmd::run(args, &cwd, &runtime, json).await
+                    }
+                    Err(err) => output::emit_error("run-seq", json, err),
+                },
+                Err(err) => output::emit_error("run-seq", json, err),
+            };
             std::process::exit(code);
         }
         Some(Command::Send {
