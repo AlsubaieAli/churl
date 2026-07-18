@@ -53,7 +53,7 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | assertion failure — a `run`/`send` whose request succeeded but whose assertions did not (see "Assertions" below) |
+| 1 | assertion failure — a `run`/`send` whose request succeeded but whose assertions did not, or a `load` run whose `stats.*` assertions did not (see "Assertions" and "Load runs" below) |
 | 2 | usage error — owned entirely by clap's own parser (missing/conflicting/unknown flags to `churl` itself). This module never constructs a JSON envelope for a band-2 failure, even under `--json` — "clap default, don't remap." |
 | 3 | workspace/resolution error |
 | 4 | request/transport error |
@@ -76,7 +76,8 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 | `transport-error` | 4 | Any other transport failure (DNS, connect, TLS, protocol) — message + `detail.url` are secret-masked |
 | `not-a-curl-command` | 5 | `import`'s input didn't parse as a curl command — covers a tokenize failure, a missing/duplicate URL, an unknown flag, an unsupported construct, an invalid `-X` method, **and** the non-interactive stdin guard (no curl given and stdin isn't piped) |
 | `import-write-failed` | 5 | The curl command parsed, but writing the endpoint failed (e.g. a newly-authored literal secret was refused, or a disk error) |
-| `invalid-assertion` | 5 | A `--assert` flag did not parse: an unknown operator, a value-requiring operator (everything but `exists`/`absent`) with no value, or an empty target (M8.4) |
+| `invalid-assertion` | 5 | A `--assert` flag did not parse: an unknown operator, a value-requiring operator (everything but `exists`/`absent`) with no value, or an empty target (M8.4); for `load`, also a target that is not a known `stats.<field>` name (M8.4.2) |
+| `load-cap-exceeded` | 5 | A `churl load` run's `--total`/`--concurrency` exceeded the `[load]` hard cap — refused pre-flight before any request is fired (M8.4.2). Raise `[load] max_total`/`max_concurrency` to allow it |
 
 Implementation: `crates/churl/src/output.rs` (`ErrorKind::exit_code`).
 
@@ -215,6 +216,81 @@ Prints a compact per-step checklist and a `PASS`/`FAIL` summary to **stderr** (s
 
 - **Sequence addressing is by file stem, not display name** — the stem is the stable, script-friendly identifier a CI job pins.
 - **No per-step CLI `--assert` override yet.** A step is gated by its endpoint's persisted `[[assertions]]`; a step-qualified CLI flag (e.g. `--assert 'login: $.token exists'`) would need a new step-addressing grammar and is deferred rather than frozen half-designed — the persisted-assertions path already covers the motivating CI gate. See `docs/DECISIONS.md`.
+
+## Load runs (`load`)
+
+`churl load <endpoint>` fires **N concurrent copies** of a saved endpoint headlessly and asserts on the **aggregate** stats — closing the third scope of the one-assertion-model story (response → flow → aggregate). The endpoint is resolved from the cwd workspace exactly like `run` (same path grammar, collection var chain, `--var`/`--profile`/`--proxy`/`-k` plumbing, `{{var}}` refusal, and per-endpoint `insecure` honouring). The request is resolved **once** and each copy is fired through the same `churl_core::load::run_load` engine the TUI load runner drives.
+
+```
+churl load <endpoint> [--total N] [--concurrency C] [--gap MS] [--assert 'stats.<field> <op> <value>']
+```
+
+- `--total N` — total request copies to fire (default 10).
+- `--concurrency C` — maximum requests in flight at once (default 5).
+- `--gap MS` — minimum delay between successive launches, milliseconds (default 0 = burst); maps to the TUI load config's min-gap / `LoadConfig.interval`.
+
+**Guardrail caps.** `load` enforces the same hard ceiling the TUI does: a `--total`/`--concurrency` above the `[load]` `max_total`/`max_concurrency` (defaults 10 000 / 200) is **refused pre-flight** — `error.kind: "load-cap-exceeded"`, exit **5**, before a single request is fired — so a CI typo (`--total 100000`) can't turn a test aid into a load-cannon against a real target. Raise `[load] max_total`/`max_concurrency` in the global config to lift the ceiling deliberately (the refusal message says so). The TUI's *warn* tier (a soft threshold below the hard cap) has no TTY to confirm at headlessly, so it instead prints a `warning:` line to stderr and proceeds — the caller chose the numbers.
+
+Only the CLI `stats.*` `--assert` flags gate a `load` run; an endpoint's persisted `[[assertions]]` (which check a single *response*) are **not** applied — a load run has no single response, only the aggregate.
+
+### The single aggregate envelope (`--json`)
+
+A load run is **one aggregate result**, so — unlike `run-seq`'s per-step NDJSON — it emits a **single** `{ schema_version, ok, command, data, error }` envelope (reusing the exact `run`/`send` seam; per-request NDJSON would flood with thousands of lines). `command` is `"load"`.
+
+```json
+{ "schema_version": 1, "ok": true, "command": "load", "error": null,
+  "data": {
+    "config": { "total": 50, "concurrency": 10, "gap_ms": 0 },
+    "stats": {
+      "count": 50, "ok": 44, "failed": 6, "errored": 0,
+      "success_rate": 0.88, "error_rate": 0.12,
+      "min_ms": 12, "p50_ms": 45, "p95_ms": 120, "max_ms": 210, "mean_ms": 78,
+      "rps": 812.4
+    },
+    "assertions": { "passed": true, "total": 2, "failed": 0, "results": [ … ] }
+  } }
+```
+
+**Frozen `stats` block — units (freeze-once):**
+
+| Field | Type | Units / meaning |
+|---|---|---|
+| `count` | integer | Requests **attempted** = `ok + failed + errored` (every fired copy). |
+| `ok` | integer | Completed with a success status (`< 400`). |
+| `failed` | integer | Completed with an HTTP error status (`>= 400`). |
+| `errored` | integer | Could not be sent (transport / TLS / timeout). |
+| `success_rate` | float `0..1` \| null | `ok / count`; `null` only when `count == 0`. |
+| `error_rate` | float `0..1` \| null | `(failed + errored) / count`; `null` only when `count == 0`. |
+| `min_ms` / `p50_ms` / `p95_ms` / `max_ms` / `mean_ms` | integer ms \| null | Latency over **completed** requests only (nearest-rank percentiles); `null` when nothing completed (an all-errored batch). |
+| `rps` | float \| null | **Attempted** requests per second over the run's wall-clock; `null` when nothing was attempted or the run took no measurable time. |
+
+Every key is always present (a `null` value, never omitted) so the shape is stable for a machine consumer. Latencies are **integer milliseconds** — the same rounding an assertion sees, so a `*_ms` field always equals the value a `stats.*` assertion compared against.
+
+### `stats.*` assertions
+
+`--assert` on `load` uses the **exact same** `<target> <op> <value>` grammar and operator set as response assertions (see "Assertions" above) — only the **target vocabulary** differs: a `stats.<field>` namespace resolving against the aggregate, since a load run has no single response. Targets:
+
+`stats.count` `stats.ok` `stats.failed` `stats.errored` `stats.success_rate` `stats.error_rate` `stats.p50` (alias `stats.median`) `stats.p95` `stats.min` `stats.max` `stats.mean` `stats.rps`
+
+Values follow the units table above — latencies in **milliseconds**, rates as `0..1` floats, `rps` as a float, counts as integers — so `--assert 'stats.p95 < 500'`, `--assert 'stats.error_rate <= 0.01'`, `--assert 'stats.count == 50'`. Numeric operators (`<`/`>`/`<=`/`>=`) parse both sides as `f64` (the response evaluator, reused verbatim). `exists`/`absent` test whether a stat is **defined** (`stats.p95 exists` asserts at least one request completed); a value-op against an undefined stat (a latency over an all-errored run) fails with a clear reason. A failed `stats.*` assertion → **exit 1** with a success-shaped envelope (the run completed — `ok: true`, `data` populated; branch on `data.assertions.passed`), the same exception `run`/`send` document. An empty set keeps `data.assertions` `null`.
+
+### Exit codes
+
+Reuses the frozen bands: `no-workspace`/`endpoint-not-found`/`unresolved-var`/`unknown-profile`/`config-error` → **3**; a transport failure building the client → **4**; a bad `--assert` (unparseable grammar, or a target that is not a known `stats.<field>`) → **5** `invalid-assertion`, or a `--total`/`--concurrency` over the hard cap → **5** `load-cap-exceeded`, both caught pre-flight before any request runs; a failed `stats.*` assertion → **1**; clean → **0**. Note a **per-request** transport failure is not a command error — it lands in `stats.errored` (the aggregate is still a successful result); only a failure to *build* the client is band 4.
+
+### Human mode (non-`--json`)
+
+Prints a readable stats summary + the assertion checklist to **stderr** (stdout stays empty — a load run has no single body to emit), mirroring the single-request checklist:
+
+```
+load run: total=50 concurrency=10 gap=0ms
+  50 attempted · 44 ok · 6 failed · 0 errored
+  success 88.0% · error 12.0%
+  latency min/p50/p95/max 12/45/120/210ms · mean 78ms
+  812.4 req/s
+✓ stats.p95 < 500
+1 passed, 0 failed
+```
 
 ## Debug trace (`-v`)
 

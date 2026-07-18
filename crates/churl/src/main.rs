@@ -10,6 +10,7 @@ use output::{CliError, ErrorKind};
 
 mod headless;
 mod init;
+mod load_cmd;
 mod output;
 mod resolve;
 mod run_cmd;
@@ -43,10 +44,11 @@ struct Cli {
     /// `<leader>k`. Use with care.
     #[arg(short = 'k', long = "insecure", global = true)]
     insecure: bool,
-    /// Emit a single machine-readable JSON envelope on stdout instead of
-    /// human-readable output — for `run`/`send`/`import` (see docs/CLI.md for
-    /// the frozen schema). Disables color, spinners, prompts, and bracketed
-    /// paste. Every other subcommand ignores this flag.
+    /// Emit machine-readable JSON on stdout instead of human-readable output —
+    /// for `run`/`send`/`import`/`load` (a single envelope) and `run-seq` (an
+    /// NDJSON stream); see docs/CLI.md for the frozen schema. Disables color,
+    /// spinners, prompts, and bracketed paste. Every other subcommand ignores
+    /// this flag.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -118,6 +120,35 @@ enum Command {
         /// secrets masked); prints a per-step trace to stderr in human mode.
         #[arg(short = 'v', long)]
         verbose: bool,
+    },
+    /// Run a headless load test against a saved endpoint — no TUI. Resolves
+    /// `endpoint` from the cwd workspace exactly like `run`, fires N concurrent
+    /// copies, and reports aggregate stats (counts, latency percentiles,
+    /// throughput). `--assert 'stats.<field> <op> <value>'` gates the run on
+    /// the aggregate (e.g. `stats.p95 < 500`, `stats.error_rate <= 0.01`); a
+    /// failing assertion exits 1. Under `--json` the run is a single aggregate
+    /// envelope. See `docs/CLI.md`, "Load runs (`load`)".
+    Load {
+        /// Endpoint path: `collection/sub/endpoint name` (root-level: just the
+        /// endpoint's name). Quote it when the name has spaces.
+        endpoint: String,
+        /// Total number of request copies to fire (default: 10).
+        #[arg(long)]
+        total: Option<usize>,
+        /// Maximum number of requests in flight at once (default: 5).
+        #[arg(long)]
+        concurrency: Option<usize>,
+        /// Minimum delay between successive launches, milliseconds (default: 0
+        /// = burst as fast as concurrency permits).
+        #[arg(long = "gap", value_name = "MS")]
+        gap: Option<u64>,
+        /// Assert on an aggregate stat (repeatable):
+        /// `"stats.<field> <op> <value>"`, e.g. `--assert 'stats.p95 < 500'`,
+        /// `--assert 'stats.error_rate <= 0.01'`. A failing assertion exits 1
+        /// even though the run itself completed — see `docs/CLI.md`,
+        /// "Load runs".
+        #[arg(long = "assert", value_name = "EXPR")]
+        assert: Vec<String>,
     },
     /// Send an ad-hoc one-shot request — no saved endpoint, no workspace
     /// required. Accepts curl-mnemonic flags (`-X`/`-H`/`-d`/`--url`) and
@@ -239,6 +270,9 @@ struct RuntimeCfg {
     insecure: bool,
     max_body_bytes: u64,
     redirect: churl_core::config::RedirectPolicy,
+    /// The `[load]` guardrail caps — used by `churl load` to refuse a headless
+    /// run above the hard ceiling (`run`/`send` ignore it).
+    load_caps: churl_core::load::LoadCaps,
 }
 
 /// Resolves [`RuntimeCfg`] from the global config, mapping any failure to a
@@ -259,6 +293,7 @@ fn build_runtime_cfg() -> std::result::Result<RuntimeCfg, CliError> {
         insecure: config.insecure(),
         max_body_bytes: config.max_body_bytes(),
         redirect,
+        load_caps: config.load_caps(),
     })
 }
 
@@ -340,6 +375,38 @@ async fn main() -> Result<()> {
                 },
                 Err(err) => output::emit_error("run-seq", json, err),
             };
+            std::process::exit(code);
+        }
+        Some(Command::Load {
+            endpoint,
+            total,
+            concurrency,
+            gap,
+            assert,
+        }) => {
+            // Same funnel as `run`: every fallible pre-flight step lands in one
+            // `Result<LoadData, CliError>` so `emit` owns the
+            // stdout/stderr/exit-code triad (a single aggregate envelope, not a
+            // stream).
+            let cli_vars = vars_map(&cli.vars);
+            let result = async {
+                let runtime = build_runtime_cfg()?;
+                let cwd = headless_cwd()?;
+                let args = load_cmd::LoadArgs {
+                    endpoint_path: endpoint,
+                    total,
+                    concurrency,
+                    gap_ms: gap,
+                    cli_vars,
+                    profile: cli.profile.clone(),
+                    proxy: cli.proxy.clone(),
+                    insecure: cli.insecure,
+                    cli_asserts: assert,
+                };
+                load_cmd::run(args, &cwd, &runtime).await
+            }
+            .await;
+            let code = output::emit("load", json, result, load_cmd::print_human);
             std::process::exit(code);
         }
         Some(Command::Send {

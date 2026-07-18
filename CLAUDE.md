@@ -51,7 +51,9 @@ crates/
       assert.rs            # M8.4 response assertions (UI-free): Assertion { target, op, value } — target
                            #   reuses sequence::extract_value verbatim; AssertOp serializes as its canonical
                            #   string (==, contains, ...); Assertion::parse reads "<target> <op> <value>";
-                           #   evaluate/run_assertions -> serializable AssertionReport for the CLI envelope
+                           #   evaluate/run_assertions -> serializable AssertionReport for the CLI envelope.
+                           #   parse_stats_assertion/run_stats_assertions (M8.4.2): reuse the SAME grammar+ops
+                           #   for load stats.<field> targets (new resolver arm), same AssertionReport shape
       auth.rs              # apply_auth(&Auth) -> AuthWire: the single dispatch point on auth kinds
                            #   (plugin guardrail); execute/export apply effects, never match Auth
       persistence.rs       # toml_edit load/save (format-preserving, deletion-pruning merge; atomic_write: temp→fsync→rename→dir-fsync), lazy OpenWorkspace/Collection;
@@ -80,7 +82,9 @@ crates/
       load.rs              # concurrent-load runner (UI-free): run_load (N copies through execute(),
                            #   bounded by futures' buffer_unordered + absolute-target pacing), classify (single
                            #   Ok/Failed/Error seam), pure stats (nearest-rank percentiles), check_config/LoadCaps
-                           #   guardrail; run_load is the wiremock-tested twin the TUI launcher mirrors
+                           #   guardrail; run_load is the wiremock-tested twin the TUI launcher mirrors.
+                           #   LoadStats::attempted/success_rate/error_rate (single-source rate defs, TUI + headless
+                           #   both call); StatTarget (closed stats.<field> vocab: parse + resolve to ms/rate/rps, M8.4.2)
       template.rs          # {{var}} Resolver: ordered Scope list + env fallback (the single plugin seam);
                            #   substitute / substitute_request; sequences prepend a highest-precedence
                            #   `extracted` scope — resolution never forked; unresolved_placeholders
@@ -144,7 +148,13 @@ crates/
                            #   shape_exec_data(request,response,assertions,trace): the pure single-source-of-truth for the
                            #   per-request `data` shape (secret-masked echo, utf8/base64 body, M8.4 run_assertions) —
                            #   ALSO called per-step by seq_cmd so a sequence step's data is byte-identical to a run's;
-                           #   parse_cli_assertions: --assert strings -> Vec<Assertion>, invalid-assertion on error
+                           #   parse_cli_assertions: --assert strings -> Vec<Assertion>, invalid-assertion on error.
+                           #   print_assertion_checklist: shared human ✓/✗ stderr rendering (run/send + load call it)
+      load_cmd.rs          # churl load <endpoint> (M8.4.2): headless load runner. Resolve like run, substitute/refuse
+                           #   {{var}} once, one client, fire churl_core::load::run_load; measure wall-clock around it for
+                           #   rps (core signature un-widened). ONE aggregate envelope (not a stream): data.{config,stats,
+                           #   assertions}. stats.<field> --assert via parse_stats_assertion/run_stats_assertions; failed
+                           #   stats assertion → exit 1 (SuccessExitCode), success-shaped, like run
       seq_cmd.rs           # churl run-seq <name> (M8.4.1): headless sequence runner. Resolve sequences/<name>.toml by
                            #   file stem (enumerate real files — traversal-safe), loop the core engine (ordered_steps →
                            #   prepare_step → execute_traced → classify_step → should_halt) chaining extracted values
@@ -225,6 +235,9 @@ crates/
       cli_run_seq.rs       # `churl run-seq` integration tests (wiremock, M8.4.1): NDJSON step+summary lines, value
                            #   chaining, per-step-data==run-data, assertion/extraction-failure exit 1, halt/continue,
                            #   sequence-not-found/no-workspace exit 3, human-mode stderr checklist
+      cli_load.rs          # `churl load` integration tests (wiremock, M8.4.2): aggregate envelope, --total/--concurrency/
+                           #   --gap plumbing, mixed-status rate math, passing/failing stats.* assert (exit 0/1),
+                           #   unknown-target exit 5, no-workspace/endpoint-not-found exit 3, human-mode stderr
 docs/
   ARCHITECTURE.md
   CLI.md                   # M8.2 frozen CLI & headless contract: --json envelope, exit codes, error.kind mapping

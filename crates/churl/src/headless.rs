@@ -296,21 +296,30 @@ pub fn print_human(data: &ExecData, verbose: bool) {
     // mixed into the stdout body an agent/script may be piping) — printed
     // whenever any assertion ran, `verbose` or not.
     if let Some(report) = &data.assertions {
-        for r in &report.results {
-            let mark = if r.pass { "✓" } else { "✗" };
-            let mut line = format!("{mark} {} {}", r.target, r.op);
-            if let Some(expected) = &r.expected {
-                line.push_str(&format!(" {expected}"));
-            }
-            if let Some(err) = &r.error {
-                line.push_str(&format!(" — {err}"));
-            }
-            eprintln!("{line}");
-        }
-        eprintln!(
-            "{} passed, {} failed",
-            report.total - report.failed,
-            report.failed
-        );
+        print_assertion_checklist(report);
     }
+}
+
+/// Prints an assertion report as a human checklist on **stderr**: one `✓`/`✗`
+/// line per result (`target op [expected]`, with the failure reason appended
+/// after `✗`), then a `N passed, M failed` summary. Shared by every headless
+/// command that surfaces assertions in human mode — `run`/`send` (via
+/// [`print_human`]) and `load` — so their assertion rendering can't drift.
+pub fn print_assertion_checklist(report: &AssertionReport) {
+    for r in &report.results {
+        let mark = if r.pass { "✓" } else { "✗" };
+        let mut line = format!("{mark} {} {}", r.target, r.op);
+        if let Some(expected) = &r.expected {
+            line.push_str(&format!(" {expected}"));
+        }
+        if let Some(err) = &r.error {
+            line.push_str(&format!(" — {err}"));
+        }
+        eprintln!("{line}");
+    }
+    eprintln!(
+        "{} passed, {} failed",
+        report.total - report.failed,
+        report.failed
+    );
 }
