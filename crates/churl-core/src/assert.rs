@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::load::{LoadStats, StatTarget};
 use crate::model::Response;
 use crate::sequence::{ExtractError, extract_value};
 
@@ -457,6 +458,163 @@ pub fn run_assertions(assertions: &[Assertion], response: &Response) -> Assertio
     }
 }
 
+/// A load-run assertion: a `stats.<field>` [`StatTarget`] paired with an
+/// [`AssertOp`] and optional expected value. Constructed only via
+/// [`parse_stats_assertion`], which validates the target names a real stat — so
+/// an unresolvable `stats.foo` can never reach evaluation (illegal-states-
+/// unrepresentable: holding a `StatAssertion` guarantees a known target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatAssertion {
+    /// The resolved aggregate-stat target.
+    pub target: StatTarget,
+    /// The original `stats.<field>` token, echoed verbatim into the report's
+    /// `target` field so `median`/`p50` read back exactly as the user wrote them.
+    pub raw_target: String,
+    /// The comparison operator.
+    pub op: AssertOp,
+    /// The expected value; `None` for `exists`/`absent`.
+    pub value: Option<String>,
+}
+
+/// Error parsing a `churl load --assert` expression: either the shared
+/// `<target> <op> <value>` grammar rejected it, or the target does not name a
+/// load stat. Both are, at the CLI boundary, a band-5 `invalid-assertion`
+/// usage mistake caught before any request is fired.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StatAssertError {
+    /// The `<target> <op> <value>` grammar itself didn't parse.
+    #[error(transparent)]
+    Grammar(#[from] AssertParseError),
+    /// The expression parsed, but its target is not a `stats.<field>` name.
+    #[error(
+        "assertion {expr:?}: unknown load-stat target {target:?} (expected one of: stats.count, stats.ok, stats.failed, stats.errored, stats.success_rate, stats.error_rate, stats.p50/stats.median, stats.p95, stats.min, stats.max, stats.mean, stats.rps)"
+    )]
+    UnknownTarget {
+        /// The full input expression.
+        expr: String,
+        /// The offending target token.
+        target: String,
+    },
+}
+
+/// Parses one `churl load --assert` expression into a [`StatAssertion`],
+/// reusing the exact [`Assertion::parse`] grammar (same `<target> <op> <value>`
+/// syntax and [`AssertOp`] set as a response assertion) and then validating the
+/// target is a `stats.<field>` name via [`StatTarget::parse`]. The grammar is
+/// shared verbatim — only the *target vocabulary* differs (aggregate stats vs.
+/// a response's status/header/JSON-path), matching the "one assertion model,
+/// three scopes" story (`docs/DECISIONS.md`).
+pub fn parse_stats_assertion(expr: &str) -> Result<StatAssertion, StatAssertError> {
+    let parsed = Assertion::parse(expr)?;
+    let target =
+        StatTarget::parse(&parsed.target).ok_or_else(|| StatAssertError::UnknownTarget {
+            expr: expr.to_owned(),
+            target: parsed.target.clone(),
+        })?;
+    Ok(StatAssertion {
+        target,
+        raw_target: parsed.target,
+        op: parsed.op,
+        value: parsed.value,
+    })
+}
+
+/// Runs every [`StatAssertion`] against a completed load run's `stats` and its
+/// measured `rps`, producing the identical [`AssertionReport`] shape a response
+/// assertion set does — so the `data.assertions` envelope field is the same
+/// whether it came from a response (`run`/`send`/`run-seq`) or an aggregate
+/// (`load`). Numeric comparisons reuse the response evaluator
+/// ([`evaluate_value_op`]) verbatim; only target *resolution* differs.
+pub fn run_stats_assertions(
+    assertions: &[StatAssertion],
+    stats: &LoadStats,
+    rps: Option<f64>,
+) -> AssertionReport {
+    let results: Vec<AssertResult> = assertions
+        .iter()
+        .map(|assertion| {
+            let resolved = assertion.target.resolve(stats, rps);
+            let outcome = evaluate_stat(assertion.op, assertion.value.as_deref(), resolved);
+            AssertResult {
+                target: assertion.raw_target.clone(),
+                op: assertion.op,
+                expected: assertion.value.clone(),
+                actual: outcome.actual,
+                pass: outcome.pass,
+                error: outcome.error,
+            }
+        })
+        .collect();
+    let failed = results.iter().filter(|r| !r.pass).count();
+    AssertionReport {
+        passed: failed == 0,
+        total: results.len(),
+        failed,
+        results,
+    }
+}
+
+/// Evaluates one operator against a `stats.<field>` value already resolved to a
+/// number (`None` when the stat is undefined — a latency with no completed
+/// request, or a rate over a zero-attempted run). Value-comparing operators
+/// reuse the response evaluator's [`evaluate_value_op`] verbatim after
+/// formatting the number; `exists`/`absent` test whether the stat is *defined*
+/// (a natural fit — `stats.p95 exists` asserts at least one request completed).
+fn evaluate_stat(op: AssertOp, expected: Option<&str>, resolved: Option<f64>) -> AssertOutcome {
+    const UNDEFINED: &str = "stat is undefined (no completed requests)";
+    match op {
+        AssertOp::Exists => match resolved {
+            Some(value) => AssertOutcome {
+                pass: true,
+                actual: Some(format_stat(value)),
+                error: None,
+            },
+            None => AssertOutcome {
+                pass: false,
+                actual: None,
+                error: Some(UNDEFINED.to_owned()),
+            },
+        },
+        AssertOp::Absent => match resolved {
+            None => AssertOutcome {
+                pass: true,
+                actual: None,
+                error: None,
+            },
+            Some(value) => AssertOutcome {
+                pass: false,
+                actual: Some(format_stat(value)),
+                error: Some("value is present".to_owned()),
+            },
+        },
+        op => match resolved {
+            None => AssertOutcome {
+                pass: false,
+                actual: None,
+                error: Some(UNDEFINED.to_owned()),
+            },
+            // `expected` is always `Some` for a value-op (parse refuses one
+            // without a value); `unwrap_or_default` keeps the type total.
+            Some(value) => evaluate_value_op(op, &format_stat(value), expected.unwrap_or_default()),
+        },
+    }
+}
+
+/// Formats a resolved stat number for comparison and the report's `actual`
+/// field: an integer-valued float prints without a decimal point (`5`, not
+/// `5.0`) so a count/latency reads naturally and an `== 5` check holds, while a
+/// fractional value (a rate, an rps) keeps its shortest round-tripping form.
+/// Numeric operators re-parse this back to `f64`, so the exact spelling only
+/// matters for the string operators (`==`/`!=`/`contains`).
+fn format_stat(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,5 +903,116 @@ mod tests {
             let expected = format!("{:?}", op.canonical());
             assert_eq!(json, expected);
         }
+    }
+
+    // --- load-run (aggregate stats) assertions ---
+
+    use crate::load::{LoadStats, StatTarget};
+
+    #[test]
+    fn parse_stats_assertion_reuses_grammar_and_validates_target() {
+        let a = parse_stats_assertion("stats.p95 < 500").unwrap();
+        assert_eq!(a.target, StatTarget::P95);
+        assert_eq!(a.raw_target, "stats.p95");
+        assert_eq!(a.op, AssertOp::Lt);
+        assert_eq!(a.value.as_deref(), Some("500"));
+        // The `median` alias resolves to p50 but echoes the user's spelling.
+        let m = parse_stats_assertion("stats.median <= 100").unwrap();
+        assert_eq!(m.target, StatTarget::P50);
+        assert_eq!(m.raw_target, "stats.median");
+    }
+
+    #[test]
+    fn parse_stats_assertion_rejects_unknown_and_non_stats_targets() {
+        assert!(matches!(
+            parse_stats_assertion("stats.bogus < 1"),
+            Err(StatAssertError::UnknownTarget { .. })
+        ));
+        // A response target (no `stats.` prefix) is not a load stat.
+        assert!(matches!(
+            parse_stats_assertion("status == 200"),
+            Err(StatAssertError::UnknownTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_stats_assertion_surfaces_shared_grammar_errors() {
+        assert!(matches!(
+            parse_stats_assertion("stats.p95"),
+            Err(StatAssertError::Grammar(
+                AssertParseError::MissingOperator { .. }
+            ))
+        ));
+        assert!(matches!(
+            parse_stats_assertion("stats.p95 ?? 5"),
+            Err(StatAssertError::Grammar(AssertParseError::UnknownOp { .. }))
+        ));
+    }
+
+    #[test]
+    fn run_stats_assertions_numeric_pass_and_fail() {
+        // ok=3 failed=1 → attempted 4, error_rate 0.25 (exact in f64).
+        let s = LoadStats {
+            ok: 3,
+            failed: 1,
+            ..LoadStats::default()
+        };
+        let pass = [
+            parse_stats_assertion("stats.error_rate <= 0.25").unwrap(),
+            parse_stats_assertion("stats.count == 4").unwrap(),
+            parse_stats_assertion("stats.ok == 3").unwrap(),
+        ];
+        let report = run_stats_assertions(&pass, &s, Some(10.0));
+        assert!(report.passed, "{report:?}");
+        assert_eq!(report.total, 3);
+        assert_eq!(report.failed, 0);
+
+        let fail = [parse_stats_assertion("stats.error_rate < 0.25").unwrap()];
+        let report = run_stats_assertions(&fail, &s, Some(10.0));
+        assert!(!report.passed);
+        assert_eq!(report.failed, 1);
+        // The report echoes the resolved rate as `actual`.
+        assert_eq!(report.results[0].actual.as_deref(), Some("0.25"));
+    }
+
+    #[test]
+    fn run_stats_assertions_undefined_latency_fails_value_op() {
+        // All errored → no completed request → p95 is undefined.
+        let s = LoadStats {
+            errored: 3,
+            ..LoadStats::default()
+        };
+        let a = [parse_stats_assertion("stats.p95 < 500").unwrap()];
+        let report = run_stats_assertions(&a, &s, None);
+        assert!(!report.passed);
+        assert!(
+            report.results[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("undefined")
+        );
+        assert!(report.results[0].actual.is_none());
+    }
+
+    #[test]
+    fn run_stats_assertions_exists_absent_track_definedness() {
+        let defined = LoadStats {
+            ok: 1,
+            p95: Some(std::time::Duration::from_millis(120)),
+            ..LoadStats::default()
+        };
+        let a = [parse_stats_assertion("stats.p95 exists").unwrap()];
+        assert!(run_stats_assertions(&a, &defined, Some(5.0)).passed);
+
+        let undefined = LoadStats {
+            errored: 1,
+            ..LoadStats::default()
+        };
+        let a = [parse_stats_assertion("stats.p95 absent").unwrap()];
+        assert!(run_stats_assertions(&a, &undefined, None).passed);
+        // A count is always defined → `absent` must fail on it.
+        let a = [parse_stats_assertion("stats.count absent").unwrap()];
+        assert!(!run_stats_assertions(&a, &undefined, None).passed);
     }
 }

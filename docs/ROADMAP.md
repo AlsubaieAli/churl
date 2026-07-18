@@ -100,6 +100,12 @@ CLI, real testing, and the polish to launch — grouped by target release.
       step + a terminal summary line); exit 1 on any failed assertion or broken extraction
       chain, a transport/resolution band (3/4/5) winning over it. Frozen contract:
       [`docs/CLI.md`](CLI.md), "Sequence runs (`run-seq`)".
+- [x] Headless load runs — `load <endpoint>` fires N concurrent copies of a saved endpoint with
+      no TUI and asserts on the **aggregate** stats (`--assert 'stats.p95 < 500'`,
+      `stats.error_rate <= 0.01`), closing the third assertion scope (response → flow →
+      aggregate). Under `--json` it emits a single aggregate envelope (counts, rates,
+      latency percentiles in ms, throughput); a failed `stats.*` assertion exits 1. Frozen
+      contract: [`docs/CLI.md`](CLI.md), "Load runs (`load`)".
 
 ### 0.9 — Coverage & settings ⏳
 - [ ] Centralized settings panel.

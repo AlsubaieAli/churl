@@ -176,6 +176,36 @@ pub struct LoadStats {
     pub mean: Option<Duration>,
 }
 
+impl LoadStats {
+    /// Total requests that produced an outcome: `ok + failed + errored`. Every
+    /// fired copy lands in exactly one of those buckets, so this is the honest
+    /// denominator for the success/error rates — distinct from a run's
+    /// *configured* `total`, which counts copies not yet completed while a live
+    /// run is still in flight.
+    pub fn attempted(&self) -> usize {
+        self.ok + self.failed + self.errored
+    }
+
+    /// Fraction of attempted requests that completed with a success status
+    /// (`ok / attempted`), in `0.0..=1.0`; `None` when nothing was attempted (an
+    /// empty run has no meaningful rate). The single definition both the TUI
+    /// presentation and the headless `stats.success_rate` assertion/JSON derive
+    /// from, so the two surfaces can never disagree on what "success rate" means.
+    pub fn success_rate(&self) -> Option<f64> {
+        let attempted = self.attempted();
+        (attempted > 0).then(|| self.ok as f64 / attempted as f64)
+    }
+
+    /// Fraction of attempted requests that did not succeed
+    /// (`(failed + errored) / attempted`), in `0.0..=1.0`; `None` when nothing
+    /// was attempted. The exact complement of [`Self::success_rate`] over a
+    /// non-empty run — same single-source-of-truth rationale.
+    pub fn error_rate(&self) -> Option<f64> {
+        let attempted = self.attempted();
+        (attempted > 0).then(|| (self.failed + self.errored) as f64 / attempted as f64)
+    }
+}
+
 /// Computes [`LoadStats`] over `outcomes` (pure). Percentiles use the
 /// **nearest-rank** method on a sorted copy of the completed-request timings;
 /// `median` is the nearest-rank p50. Empty / all-errored input yields zero
@@ -232,6 +262,92 @@ fn percentile(sorted: &[Duration], p: f64) -> Option<Duration> {
     let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
     let index = rank.saturating_sub(1).min(sorted.len() - 1);
     Some(sorted[index])
+}
+
+/// A resolvable aggregate-stat target for a headless load assertion — the
+/// `stats.<field>` namespace `churl load --assert` checks against. A closed
+/// enum so an unknown `stats.foo` is a parse-time rejection (a band-5
+/// `invalid-assertion`) rather than a check that silently never matches. The
+/// vocabulary AND its units are a freeze-once contract (`docs/CLI.md`,
+/// "Load runs"): latencies resolve to milliseconds, rates to `0..1`, `rps` to
+/// requests/sec, counts to integers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatTarget {
+    /// `stats.count` — requests attempted (`ok + failed + errored`).
+    Count,
+    /// `stats.ok` — requests that completed with a success status (< 400).
+    Ok,
+    /// `stats.failed` — requests that completed with an HTTP error status (>= 400).
+    Failed,
+    /// `stats.errored` — requests that could not be sent (transport failure).
+    Errored,
+    /// `stats.success_rate` — `ok / count`, in `0..1`.
+    SuccessRate,
+    /// `stats.error_rate` — `(failed + errored) / count`, in `0..1`.
+    ErrorRate,
+    /// `stats.p50` / `stats.median` — median completed-request latency (ms).
+    P50,
+    /// `stats.p95` — 95th-percentile completed-request latency (ms).
+    P95,
+    /// `stats.min` — minimum completed-request latency (ms).
+    Min,
+    /// `stats.max` — maximum completed-request latency (ms).
+    Max,
+    /// `stats.mean` — mean completed-request latency (ms).
+    Mean,
+    /// `stats.rps` — requests attempted per second over the run's wall-clock.
+    Rps,
+}
+
+impl StatTarget {
+    /// Parses a `stats.<field>` target token. The `stats.` namespace prefix is
+    /// required — a bare `p95`, or a response target such as `status`, is not a
+    /// load stat and yields `None` (the caller turns that into an
+    /// `invalid-assertion`). `median` is an accepted alias for `p50`.
+    pub fn parse(target: &str) -> Option<StatTarget> {
+        let field = target.strip_prefix("stats.")?;
+        Some(match field {
+            "count" => StatTarget::Count,
+            "ok" => StatTarget::Ok,
+            "failed" => StatTarget::Failed,
+            "errored" => StatTarget::Errored,
+            "success_rate" => StatTarget::SuccessRate,
+            "error_rate" => StatTarget::ErrorRate,
+            "p50" | "median" => StatTarget::P50,
+            "p95" => StatTarget::P95,
+            "min" => StatTarget::Min,
+            "max" => StatTarget::Max,
+            "mean" => StatTarget::Mean,
+            "rps" => StatTarget::Rps,
+            _ => return None,
+        })
+    }
+
+    /// Resolves this target against a completed run's `stats` and its measured
+    /// throughput `rps` (requests/sec, computed by the caller from the run's
+    /// wall-clock — the one measurement `LoadStats` doesn't carry). Latencies
+    /// resolve to **integer milliseconds**, the same rounding the `*_ms`
+    /// envelope fields use, so an asserted value equals the reported one and the
+    /// two can't drift. `None` when the stat is undefined: a latency with no
+    /// completed request, or a rate/`rps` over a zero-attempted run (counts stay
+    /// defined — `stats.count == 0` is a legitimate assertion).
+    pub fn resolve(self, stats: &LoadStats, rps: Option<f64>) -> Option<f64> {
+        let ms = |d: Option<Duration>| d.map(|d| d.as_millis() as f64);
+        match self {
+            StatTarget::Count => Some(stats.attempted() as f64),
+            StatTarget::Ok => Some(stats.ok as f64),
+            StatTarget::Failed => Some(stats.failed as f64),
+            StatTarget::Errored => Some(stats.errored as f64),
+            StatTarget::SuccessRate => stats.success_rate(),
+            StatTarget::ErrorRate => stats.error_rate(),
+            StatTarget::P50 => ms(stats.median),
+            StatTarget::P95 => ms(stats.p95),
+            StatTarget::Min => ms(stats.min),
+            StatTarget::Max => ms(stats.max),
+            StatTarget::Mean => ms(stats.mean),
+            StatTarget::Rps => rps,
+        }
+    }
 }
 
 /// Fires `cfg.total` copies of `request` through [`execute_traced`], bounded to
@@ -441,6 +557,70 @@ mod tests {
         assert_eq!(s.p95, None);
         assert_eq!(s.max, None);
         assert_eq!(s.mean, None);
+    }
+
+    #[test]
+    fn rate_methods_over_mixed_run() {
+        // 2 ok, 1 failed, 1 errored → attempted 4 (fractions exact in f64).
+        let s = stats(&[ok(10), ok(20), failed(40), errored()]);
+        assert_eq!(s.attempted(), 4);
+        assert_eq!(s.success_rate(), Some(0.5)); // 2/4
+        assert_eq!(s.error_rate(), Some(0.5)); // (1+1)/4
+        // The two rates are exact complements over a non-empty run.
+        assert_eq!(s.success_rate().unwrap() + s.error_rate().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn rate_methods_zero_attempted_is_none() {
+        let s = stats(&[]);
+        assert_eq!(s.attempted(), 0);
+        assert_eq!(s.success_rate(), None);
+        assert_eq!(s.error_rate(), None);
+    }
+
+    #[test]
+    fn rate_methods_all_errored_is_defined_and_all_error() {
+        // A zero-*completed* but non-zero-*attempted* run still has rates.
+        let s = stats(&[errored(), errored(), errored()]);
+        assert_eq!(s.attempted(), 3);
+        assert_eq!(s.success_rate(), Some(0.0));
+        assert_eq!(s.error_rate(), Some(1.0));
+    }
+
+    #[test]
+    fn stat_target_parse_vocabulary_and_alias() {
+        assert_eq!(StatTarget::parse("stats.count"), Some(StatTarget::Count));
+        assert_eq!(StatTarget::parse("stats.p95"), Some(StatTarget::P95));
+        // median is an alias for p50.
+        assert_eq!(StatTarget::parse("stats.median"), Some(StatTarget::P50));
+        assert_eq!(StatTarget::parse("stats.p50"), Some(StatTarget::P50));
+        assert_eq!(StatTarget::parse("stats.rps"), Some(StatTarget::Rps));
+        // The namespace prefix is mandatory; unknown fields and response
+        // targets are not load stats.
+        assert_eq!(StatTarget::parse("p95"), None);
+        assert_eq!(StatTarget::parse("status"), None);
+        assert_eq!(StatTarget::parse("stats.bogus"), None);
+    }
+
+    #[test]
+    fn stat_target_resolve_units() {
+        // 3 ok, 1 failed → attempted 4 (rates exact in f64).
+        let s = stats(&[ok(10), ok(20), ok(30), failed(40)]);
+        let rps = Some(50.0);
+        assert_eq!(StatTarget::Count.resolve(&s, rps), Some(4.0));
+        assert_eq!(StatTarget::Ok.resolve(&s, rps), Some(3.0));
+        assert_eq!(StatTarget::Failed.resolve(&s, rps), Some(1.0));
+        assert_eq!(StatTarget::Errored.resolve(&s, rps), Some(0.0));
+        assert_eq!(StatTarget::SuccessRate.resolve(&s, rps), Some(0.75));
+        assert_eq!(StatTarget::ErrorRate.resolve(&s, rps), Some(0.25));
+        // Completed timings sorted 10,20,30,40 → latencies resolve to integer ms.
+        assert_eq!(StatTarget::Min.resolve(&s, rps), Some(10.0));
+        assert_eq!(StatTarget::Max.resolve(&s, rps), Some(40.0));
+        assert_eq!(StatTarget::Rps.resolve(&s, rps), Some(50.0));
+        // A latency over a no-completed run is undefined; rps passes through.
+        let all_errored = stats(&[errored()]);
+        assert_eq!(StatTarget::P95.resolve(&all_errored, None), None);
+        assert_eq!(StatTarget::Rps.resolve(&all_errored, None), None);
     }
 
     #[test]
