@@ -316,7 +316,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             seq: 0,
             name: item_name
                 .map(str::to_owned)
-                .unwrap_or_else(|| derive_name(url)),
+                .unwrap_or_else(|| crate::import::derive_name(Method::Get, url)),
             // Foreign formats carry no assertion concept — import seeds an empty
             // set (export likewise omits it). Assertions round-trip only through
             // native TOML persistence.
@@ -359,7 +359,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
 
     let name = item_name
         .map(str::to_owned)
-        .unwrap_or_else(|| derive_name(&url));
+        .unwrap_or_else(|| crate::import::derive_name(method, &url));
 
     Endpoint {
         seq: 0,
@@ -574,28 +574,6 @@ fn placeholderize(raw: &str, placeholder: &str, label: &str, ctx: &mut ImportCtx
              supply the real value via a profile/env"
         ));
         placeholder.to_owned()
-    }
-}
-
-/// Derives an endpoint name from a URL: the last non-empty path segment, else
-/// the host, else `"endpoint"`.
-fn derive_name(url: &str) -> String {
-    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let without_query = without_scheme
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(without_scheme);
-    let mut segments = without_query.split('/');
-    let host = segments.next().unwrap_or("");
-    let last = segments
-        .rev()
-        .find(|segment| !segment.is_empty())
-        .unwrap_or("");
-    let pick = if last.is_empty() { host } else { last };
-    if pick.is_empty() {
-        "endpoint".to_owned()
-    } else {
-        pick.to_owned()
     }
 }
 

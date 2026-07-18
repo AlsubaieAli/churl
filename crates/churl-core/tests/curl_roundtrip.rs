@@ -92,7 +92,7 @@ fn stripe_style_form_post_imports_faithfully() {
         })
     );
     assert!(request.headers.is_empty());
-    assert_eq!(result.endpoint.name, "charges");
+    assert_eq!(result.endpoint.name, "POST v1 charges curl");
 }
 
 #[test]

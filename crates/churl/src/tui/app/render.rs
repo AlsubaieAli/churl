@@ -810,5 +810,10 @@ fn confirm_text(
             "Save changes before switching?",
             "s save · d discard · esc stay",
         ),
+        ConfirmPurpose::ImportCollision => (
+            "Name collision",
+            "An endpoint with this name already exists.",
+            "n new · o overwrite · esc cancel",
+        ),
     }
 }

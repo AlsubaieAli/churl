@@ -174,8 +174,16 @@ impl App {
 
     /// Imports a pasted curl into a new endpoint under `dir`, seeding
     /// method/URL/headers/body and auto-naming from the parsed request (reuses the
-    /// M4 `import_curl` parser). Returns whether an endpoint was created (`false` =
-    /// nothing written). On success the new endpoint is opened as its own buffer.
+    /// M4 `import_curl` parser). Returns whether the paste was consumed (`false` =
+    /// nothing written AND the curl editor should re-open for a fix — i.e. a parse
+    /// failure). On success the new endpoint is opened as its own buffer.
+    ///
+    /// U6 collision policy (TUI only): when the derived name collides with an
+    /// existing endpoint, this parks the parsed import and opens the New/Overwrite/
+    /// Cancel modal ([`ConfirmPurpose::ImportCollision`]) instead of silently
+    /// bumping — returning `true` (the paste parsed fine; the modal owns the rest).
+    /// The headless `churl import` path has no live session and never reaches here:
+    /// it stays non-interactive and defaults to New/bump.
     pub(in crate::tui::app) fn create_endpoint_from_curl(
         &mut self,
         dir: &Path,
@@ -188,6 +196,33 @@ impl App {
                 return Ok(false);
             }
         };
+        // U6: does the derived name already occupy `<slug>.toml` here? If so, ask
+        // (New/Overwrite/Cancel) rather than silently bumping the stem.
+        let slug = persistence::slug_of(&result.endpoint.name);
+        let existing = dir.join(format!("{slug}.toml"));
+        if existing.exists() {
+            self.pending_curl_import = Some(PendingCurlImport {
+                dir: dir.to_owned(),
+                existing,
+                result,
+            });
+            self.mode = Mode::Confirm(ConfirmPurpose::ImportCollision);
+            // The paste parsed cleanly — the modal now owns the outcome, so the
+            // curl editor must NOT re-open (that path is for parse failures only).
+            return Ok(true);
+        }
+        // No collision → create anew (the historical New/bump behaviour).
+        self.finish_curl_import_new(dir, result)
+    }
+
+    /// U6 New: creates a fresh endpoint file for `result` under `dir`, bumping the
+    /// stem (`-2`, …) if the claim races a collision, then fills it. This is the
+    /// historical import behaviour (and the default when there is no collision).
+    fn finish_curl_import_new(
+        &mut self,
+        dir: &Path,
+        result: churl_core::import::ImportResult,
+    ) -> Result<bool> {
         let path = match persistence::create_endpoint(dir, &result.endpoint.name) {
             Ok(path) => path,
             Err(err) => {
@@ -195,8 +230,30 @@ impl App {
                 return Ok(false);
             }
         };
-        // Overwrite the default endpoint with the import, keeping the
-        // collection-assigned seq.
+        self.finish_curl_import(path, result)
+    }
+
+    /// U6 Overwrite: replaces the EXISTING file's content in place (same filename,
+    /// no bump), preserving that file's `seq`.
+    fn finish_curl_import_overwrite(
+        &mut self,
+        path: PathBuf,
+        result: churl_core::import::ImportResult,
+    ) -> Result<bool> {
+        self.finish_curl_import(path, result)
+    }
+
+    /// Shared tail of both import outcomes: writes `result`'s endpoint to `path`
+    /// (keeping the on-disk `seq` — a freshly-claimed placeholder already carries
+    /// the next seq, an overwritten file keeps its own), captures any placeholdered
+    /// secret into a session var, surfaces warnings, and opens the endpoint.
+    fn finish_curl_import(
+        &mut self,
+        path: PathBuf,
+        result: churl_core::import::ImportResult,
+    ) -> Result<bool> {
+        // Overwrite the (placeholder or existing) endpoint with the import, keeping
+        // the file's assigned seq.
         let mut endpoint = result.endpoint;
         endpoint.seq = persistence::load_endpoint(&path)
             .map(|e| e.seq)
@@ -770,6 +827,34 @@ impl App {
                 KeyCode::Esc => {
                     self.mode = Mode::Normal;
                     self.pending_load = None;
+                }
+                _ => {}
+            },
+            // U6 curl-import name collision: New (`n`, bump) / Overwrite (`o`,
+            // replace in place) / Cancel (`c`/`Esc`, nothing written). TUI-only —
+            // the headless import path never enters this mode.
+            ConfirmPurpose::ImportCollision => match key.code {
+                KeyCode::Char('n') => {
+                    self.mode = Mode::Normal;
+                    if let Some(pending) = self.pending_curl_import.take() {
+                        // `-N` bump: create a fresh, non-colliding file (the
+                        // historical default). Result is already surfaced/notified.
+                        self.finish_curl_import_new(&pending.dir, pending.result)?;
+                    }
+                }
+                KeyCode::Char('o') => {
+                    self.mode = Mode::Normal;
+                    if let Some(pending) = self.pending_curl_import.take() {
+                        // Replace the EXISTING file's content (same filename, no
+                        // bump); its `seq` is preserved by `finish_curl_import`.
+                        self.finish_curl_import_overwrite(pending.existing, pending.result)?;
+                    }
+                }
+                KeyCode::Char('c') | KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    // Cancel: drop the parked import — NO file is written.
+                    self.pending_curl_import = None;
+                    self.notify("import cancelled");
                 }
                 _ => {}
             },

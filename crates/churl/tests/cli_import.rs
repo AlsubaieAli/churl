@@ -30,7 +30,7 @@ fn import_stdout_prints_endpoint_toml() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#"name = "users""#), "{stdout}");
+    assert!(stdout.contains(r#"name = "POST users curl""#), "{stdout}");
     assert!(stdout.contains(r#"method = "POST""#), "{stdout}");
     assert!(
         stdout.contains(r#"url = "https://api.example.com/users""#),
@@ -87,7 +87,7 @@ fn import_out_writes_a_loadable_endpoint_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     let endpoint = churl_core::persistence::load_endpoint(&path).unwrap();
-    assert_eq!(endpoint.name, "health");
+    assert_eq!(endpoint.name, "GET health curl");
     assert_eq!(endpoint.request.url, "https://api.example.com/health");
 }
 
@@ -194,8 +194,9 @@ fn import_default_writes_into_the_cwd_workspace() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // Written straight into the workspace root (no --out/--stdout given).
-    let widget = dir.path().join("widgets.toml");
+    // Written straight into the workspace root (no --out/--stdout given). The
+    // filename is a slug of the U6-derived name `GET widgets curl`.
+    let widget = dir.path().join("get-widgets-curl.toml");
     assert!(widget.exists(), "missing {}", widget.display());
     let endpoint = churl_core::persistence::load_endpoint(&widget).unwrap();
     assert_eq!(endpoint.request.url, "https://api.example.com/widgets");
@@ -286,16 +287,17 @@ fn import_same_url_twice_yields_two_distinct_addressable_endpoints() {
         String::from_utf8_lossy(&second.stderr)
     );
 
-    // Both files exist with distinct names.
-    let first_file = dir.path().join("thing.toml");
-    let second_file = dir.path().join("thing-2.toml");
+    // Both files exist with distinct names. The filename is a slug of the
+    // U6-derived name `GET thing curl`; the collision bumps the stem to `-2`.
+    let first_file = dir.path().join("get-thing-curl.toml");
+    let second_file = dir.path().join("get-thing-curl-2.toml");
     assert!(first_file.exists(), "first import missing");
     assert!(second_file.exists(), "collision-bumped file missing");
     let ep1 = churl_core::persistence::load_endpoint(&first_file).unwrap();
     let ep2 = churl_core::persistence::load_endpoint(&second_file).unwrap();
-    assert_eq!(ep1.name, "thing");
+    assert_eq!(ep1.name, "GET thing curl");
     assert_eq!(
-        ep2.name, "thing-2",
+        ep2.name, "get-thing-curl-2",
         "bumped file must carry the addressable name"
     );
     // The second import warned about the rename (stderr).
@@ -305,8 +307,9 @@ fn import_same_url_twice_yields_two_distinct_addressable_endpoints() {
         "expected a rename warning: {stderr2}"
     );
 
-    // `run thing-2` RESOLVES (band 4 transport, not band-3 endpoint-not-found).
-    let run2 = churl_in_isolated(dir.path(), &["--json", "run", "thing-2"]);
+    // `run get-thing-curl-2` RESOLVES (band 4 transport, not band-3
+    // endpoint-not-found) — proving the bumped name stays addressable.
+    let run2 = churl_in_isolated(dir.path(), &["--json", "run", "get-thing-curl-2"]);
     assert_eq!(
         run2.status.code(),
         Some(4),

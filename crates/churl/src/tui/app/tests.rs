@@ -6458,14 +6458,113 @@ fn name_prompt_auto_imports_pasted_curl() {
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
-    // Lands in the cursor's collection (the `users` row), auto-named `/health`.
-    let file = dir.path().join("users").join("health.toml");
+    // Lands in the cursor's collection (the `users` row), U6-named `GET health
+    // curl` → slug `get-health-curl`.
+    let file = dir.path().join("users").join("get-health-curl.toml");
     assert!(
         file.exists(),
         "curl imported + auto-named from the URL path"
     );
     let ep = persistence::load_endpoint(&file).unwrap();
     assert_eq!(ep.request.url, "https://api.test/health");
+}
+
+/// U6 collision policy (TUI): seeds an endpoint file whose slug the derived name
+/// collides with, then drives a paste-curl import. Returns the app parked on the
+/// New/Overwrite/Cancel modal plus the two candidate on-disk paths (existing,
+/// bumped). The seeded file carries a marker URL + a distinct seq so later
+/// assertions can tell overwrite from bump.
+fn collision_import_fixture(root: &Path) -> (App, std::path::PathBuf, std::path::PathBuf) {
+    let mut app = workspace_fixture(root);
+    let coll = root.join("users");
+    // `curl https://api.test/health` (GET) derives `GET health curl` → slug
+    // `get-health-curl`; seed that exact file so the next import collides.
+    let existing = coll.join("get-health-curl.toml");
+    std::fs::write(
+        &existing,
+        "seq = 7\nname = \"GET health curl\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://old.example/seeded\"\n",
+    )
+    .unwrap();
+    let bumped = coll.join("get-health-curl-2.toml");
+
+    app.begin_new_endpoint();
+    app.handle_paste("curl https://api.test/health".to_string());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    // The import parsed cleanly but the name collides → the modal is up, nothing
+    // written yet (both would-be outcomes still resolve to the seeded content).
+    assert!(
+        matches!(app.mode, Mode::Confirm(ConfirmPurpose::ImportCollision)),
+        "a name collision opens the New/Overwrite/Cancel modal"
+    );
+    assert!(!bumped.exists(), "no file written until the modal resolves");
+    let seeded = persistence::load_endpoint(&existing).unwrap();
+    assert_eq!(seeded.request.url, "https://old.example/seeded");
+    (app, existing, bumped)
+}
+
+/// New (`n`): `-N`-bumps to a fresh file holding the import; the colliding file
+/// is left untouched (both endpoints survive).
+#[test]
+fn curl_import_collision_new_bumps_and_keeps_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, existing, bumped) = collision_import_fixture(dir.path());
+    press(&mut app, 'n');
+    // The bumped file holds the freshly-imported URL…
+    assert!(bumped.exists(), "New writes a `-2` file");
+    let ep_new = persistence::load_endpoint(&bumped).unwrap();
+    assert_eq!(ep_new.request.url, "https://api.test/health");
+    // …and the original is untouched.
+    let ep_old = persistence::load_endpoint(&existing).unwrap();
+    assert_eq!(ep_old.request.url, "https://old.example/seeded");
+    assert!(app.pending_curl_import.is_none(), "parked import consumed");
+}
+
+/// Overwrite (`o`): replaces the EXISTING file's content in place (same filename,
+/// no bump), preserving its `seq`; no `-2` file appears.
+#[test]
+fn curl_import_collision_overwrite_replaces_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, existing, bumped) = collision_import_fixture(dir.path());
+    press(&mut app, 'o');
+    assert!(!bumped.exists(), "Overwrite must NOT create a `-2` file");
+    let ep = persistence::load_endpoint(&existing).unwrap();
+    assert_eq!(
+        ep.request.url, "https://api.test/health",
+        "existing file's content is replaced by the import"
+    );
+    assert_eq!(ep.seq, 7, "the overwritten file keeps its own seq");
+    assert!(app.pending_curl_import.is_none(), "parked import consumed");
+}
+
+/// Cancel (`Esc`): aborts with NO file written — the seeded file is untouched and
+/// no `-2` appears.
+#[test]
+fn curl_import_collision_cancel_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, existing, bumped) = collision_import_fixture(dir.path());
+    esc(&mut app);
+    assert!(matches!(app.mode, Mode::Normal), "Esc closes the modal");
+    assert!(!bumped.exists(), "Cancel writes no `-2` file");
+    let ep = persistence::load_endpoint(&existing).unwrap();
+    assert_eq!(
+        ep.request.url, "https://old.example/seeded",
+        "the colliding file is left exactly as it was"
+    );
+    assert!(app.pending_curl_import.is_none(), "parked import dropped");
+}
+
+/// Cancel via `c` behaves identically to `Esc` (both abort, nothing written).
+#[test]
+fn curl_import_collision_cancel_via_c_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, existing, bumped) = collision_import_fixture(dir.path());
+    press(&mut app, 'c');
+    assert!(matches!(app.mode, Mode::Normal));
+    assert!(!bumped.exists());
+    let ep = persistence::load_endpoint(&existing).unwrap();
+    assert_eq!(ep.request.url, "https://old.example/seeded");
+    assert!(app.pending_curl_import.is_none());
 }
 
 /// Importing a curl with a real Bearer token captures it into a RAM-only Session
@@ -6490,7 +6589,7 @@ fn importing_curl_captures_bearer_token_into_session_var() {
         "real token captured into the session store"
     );
     // …but the persisted endpoint keeps only the placeholder.
-    let file = dir.path().join("users").join("me.toml");
+    let file = dir.path().join("users").join("get-me-curl.toml");
     let ep = persistence::load_endpoint(&file).unwrap();
     assert_eq!(
         ep.request.auth,
@@ -6537,7 +6636,7 @@ fn handle_paste_fills_prompt_and_imports_multiline_curl() {
     assert!(app.prompt_buffer_is_curl(), "buffer reads as curl");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
-    let file = dir.path().join("users").join("orders.toml");
+    let file = dir.path().join("users").join("get-orders-curl.toml");
     assert!(file.exists(), "multi-line curl imported to an endpoint");
     let ep = persistence::load_endpoint(&file).unwrap();
     assert_eq!(
@@ -6585,7 +6684,7 @@ fn new_endpoint_multiline_editor_edits_across_lines_before_submit() {
     esc(&mut app); // Insert -> Normal: only Normal-mode Enter submits
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
-    let file = dir.path().join("users").join("orders.toml");
+    let file = dir.path().join("users").join("get-orders-curl.toml");
     assert!(file.exists(), "edited multi-line curl still imported");
     let ep = persistence::load_endpoint(&file).unwrap();
     let header = ep
@@ -7012,7 +7111,7 @@ fn typed_prefix_then_curl_paste_still_imports_on_submit() {
     // the typed prefix never reached the import (a mangled seed would have
     // failed `looks_like_curl` and created a plain `myapi-curl…` endpoint
     // instead).
-    let file = dir.path().join("users").join("health.toml");
+    let file = dir.path().join("users").join("get-health-curl.toml");
     assert!(
         file.exists(),
         "typed prefix + curl paste still imports, not a plain endpoint"

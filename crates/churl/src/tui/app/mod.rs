@@ -299,6 +299,12 @@ pub struct App {
     /// path, resolved by `s`/`d`, aborted by `Esc`. Mutually exclusive with
     /// `pending_load` — only one is `Some` while the confirm is up.
     pending_close: Option<PendingClose>,
+    /// A pasted-curl import whose derived name collides with an existing endpoint,
+    /// parked behind an open [`ConfirmPurpose::ImportCollision`] overlay (U6).
+    /// Resolved New/Overwrite/Cancel; dropped (nothing written) on Cancel. TUI
+    /// only — the headless `churl import` path is non-interactive and never sets
+    /// this.
+    pending_curl_import: Option<PendingCurlImport>,
     /// The destination directory chosen in a `<leader>n`/`<leader>N` create
     /// gesture's destination picker, carried into the following name prompt. When
     /// `Some`, the create commits into it; when `None` (a cursor-context `n`/`N`),
@@ -618,6 +624,7 @@ impl App {
             curl_prompt: None,
             pending_load: None,
             pending_close: None,
+            pending_curl_import: None,
             pending_create_dir: None,
             zoom: None,
             explorer_hidden: false,
@@ -2738,7 +2745,8 @@ mod state;
 // module-private types keep their crate-internal visibility via a plain `use`.
 use state::{
     APP_CHANNEL_CAPACITY, Buffer, DestPurpose, EndpointBuffer, InFlightRequest, PendingClose,
-    PendingCopy, PendingLoad, Picker, ResponseSurface, fold_body_text, overwrite_body_text,
+    PendingCopy, PendingCurlImport, PendingLoad, Picker, ResponseSurface, fold_body_text,
+    overwrite_body_text,
 };
 pub use state::{
     AppMsg, ConfirmPurpose, LeaderState, LeftPane, Mode, Pane, PromptPurpose, SeqView, ZoomPane,

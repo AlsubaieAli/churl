@@ -255,7 +255,7 @@ impl Parser {
         Ok(ImportResult {
             endpoint: Endpoint {
                 seq: 0,
-                name: derive_name(&url),
+                name: derive_name(method, &url),
                 assertions: Vec::new(),
                 request: Request {
                     method,
@@ -310,10 +310,20 @@ pub fn derive_body_kind(content: &str, headers: &[Header]) -> BodyKind {
     BodyKind::Text
 }
 
-/// Derives an endpoint name from the URL: the last non-empty path segment,
-/// else the host, sanitised to a filename-safe slug (`"endpoint"` as the last
-/// resort).
-fn derive_name(url: &str) -> String {
+/// Derives an endpoint name from the request `method` + URL using the curl-import
+/// naming standard (U6): `<METHOD> <last ≤3 non-empty path segments> curl`,
+/// space-joined. The literal trailing `curl` token marks the endpoint as
+/// curl-imported (owner decision); the space separator is mandatory — churl
+/// addresses endpoints as `collection/name`, so a `/` in the name would collide
+/// with path addressing. Segments are split on `/` and re-joined with spaces, so
+/// a derived name can never contain one. With no path segments the host stands
+/// in; with neither host nor path, just `<METHOD> curl` (never empty / panics).
+/// The method is upper-cased via [`Method`]'s `Display`.
+///
+/// Shared by BOTH importers — the curl importer ([`Parser::finish`]) and the
+/// foreign interchange importer ([`crate::interchange`]) — so imported endpoints
+/// name identically regardless of source format (no second copy).
+pub(crate) fn derive_name(method: Method, url: &str) -> String {
     let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let without_query = without_scheme
         .split(['?', '#'])
@@ -321,35 +331,27 @@ fn derive_name(url: &str) -> String {
         .unwrap_or(without_scheme);
     let mut segments = without_query.split('/');
     let host = segments.next().unwrap_or("");
-    let slug = match segments.rev().find(|segment| !segment.is_empty()) {
-        Some(last) => slugify(last),
-        None => String::new(),
-    };
-    let slug = if slug.is_empty() { slugify(host) } else { slug };
-    if slug.is_empty() {
-        "endpoint".to_owned()
+    // Path segments after the host, in order, dropping empties (a leading/
+    // trailing or doubled `/` yields no segment).
+    let path_segments: Vec<&str> = segments.filter(|segment| !segment.is_empty()).collect();
+    let mut name = method.to_string();
+    if path_segments.is_empty() {
+        // No path — fall back to the host so the name still says *where*; a
+        // host-less URL leaves just `<METHOD> curl`.
+        if !host.is_empty() {
+            name.push(' ');
+            name.push_str(host);
+        }
     } else {
-        slug
-    }
-}
-
-/// Lower-cases and keeps `[a-z0-9._-]`; every other run of characters becomes
-/// a single `-`. Leading/trailing dashes are trimmed.
-fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut pending_dash = false;
-    for c in input.to_ascii_lowercase().chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-            if pending_dash && !out.is_empty() {
-                out.push('-');
-            }
-            pending_dash = false;
-            out.push(c);
-        } else {
-            pending_dash = true;
+        // The last ≤3 segments, kept verbatim and in path order.
+        let start = path_segments.len().saturating_sub(3);
+        for segment in &path_segments[start..] {
+            name.push(' ');
+            name.push_str(segment);
         }
     }
-    out.trim_matches('-').to_owned()
+    name.push_str(" curl");
+    name
 }
 
 #[cfg(test)]
@@ -368,7 +370,7 @@ mod tests {
         assert!(result.endpoint.request.headers.is_empty());
         assert!(result.endpoint.request.body.is_none());
         assert!(result.warnings.is_empty());
-        assert_eq!(result.endpoint.name, "health");
+        assert_eq!(result.endpoint.name, "GET health curl");
     }
 
     #[test]
@@ -990,15 +992,55 @@ mod tests {
 
     #[test]
     fn name_derivation() {
-        assert_eq!(derive_name("https://api.github.com/user/repos"), "repos");
-        assert_eq!(derive_name("https://example.com/"), "example.com");
-        assert_eq!(derive_name("https://example.com"), "example.com");
-        assert_eq!(derive_name("https://e.com/a/b?x=1"), "b");
+        // Curl-import naming standard (U6): `<METHOD> <last ≤3 path segs> curl`,
+        // space-joined, method upper-cased, segments verbatim, trailing `curl`.
+
+        // ≥3 path segments → keep the LAST three, in path order.
         assert_eq!(
-            derive_name("https://e.com/Users And Groups/"),
-            "users-and-groups"
+            derive_name(Method::Get, "https://api.example.com/v1/users/42"),
+            "GET v1 users 42 curl"
         );
-        assert_eq!(derive_name("https://e.com/{{id}}"), "id");
-        assert_eq!(derive_name(""), "endpoint");
+        assert_eq!(
+            derive_name(Method::Post, "https://e.com/a/b/c/d/e"),
+            "POST c d e curl"
+        );
+
+        // <3 path segments → use however many exist.
+        assert_eq!(
+            derive_name(Method::Get, "https://api.github.com/user/repos"),
+            "GET user repos curl"
+        );
+        assert_eq!(
+            derive_name(Method::Delete, "https://e.com/a/b?x=1"),
+            "DELETE a b curl"
+        );
+
+        // Exactly one path segment.
+        assert_eq!(
+            derive_name(Method::Get, "https://e.com/{{id}}"),
+            "GET {{id}} curl"
+        );
+        // Spaces in a single segment survive verbatim (no slugging, no `/`).
+        assert_eq!(
+            derive_name(Method::Get, "https://e.com/Users And Groups/"),
+            "GET Users And Groups curl"
+        );
+
+        // 0 path segments → host stands in.
+        assert_eq!(
+            derive_name(Method::Get, "https://example.com/"),
+            "GET example.com curl"
+        );
+        assert_eq!(
+            derive_name(Method::Get, "https://example.com"),
+            "GET example.com curl"
+        );
+
+        // No host and no path → just `<METHOD> curl` (never empty / panics).
+        assert_eq!(derive_name(Method::Get, ""), "GET curl");
+
+        // The separator is ALWAYS a space — a derived name can never contain `/`
+        // (churl addresses endpoints as `collection/name`).
+        assert!(!derive_name(Method::Put, "https://e.com/x/y/z").contains('/'));
     }
 }

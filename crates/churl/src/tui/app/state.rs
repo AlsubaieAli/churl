@@ -325,6 +325,27 @@ pub enum ConfirmPurpose {
     /// lives in `App::pending_load` (it can carry a path, so it is not part of
     /// this `Copy` enum).
     DiscardChanges,
+    /// A pasted-curl import whose derived name collides with an existing endpoint
+    /// (U6). Resolved New (`n`, `-N` bump) / Overwrite (`o`, replace the existing
+    /// file) / Cancel (`esc`/`c`, nothing written). The parked import data lives in
+    /// `App::pending_curl_import` (it carries owned data, so it is not part of this
+    /// `Copy` enum). TUI-only — the headless `churl import` path never prompts.
+    ImportCollision,
+}
+
+/// A pasted-curl import parked behind an open [`ConfirmPurpose::ImportCollision`]
+/// overlay: the parsed [`ImportResult`](churl_core::import::ImportResult), the
+/// target collection directory, and the existing colliding file. Resolved by the
+/// New / Overwrite / Cancel keys; dropped (nothing written) on Cancel.
+#[derive(Debug, Clone)]
+pub(in crate::tui::app) struct PendingCurlImport {
+    /// The collection directory the endpoint would be created in.
+    pub(in crate::tui::app) dir: std::path::PathBuf,
+    /// The existing `<slug>.toml` the derived name collides with — Overwrite
+    /// replaces this file's content in place (no bump).
+    pub(in crate::tui::app) existing: std::path::PathBuf,
+    /// The parsed import (endpoint + warnings + captured secrets) to write.
+    pub(in crate::tui::app) result: churl_core::import::ImportResult,
 }
 
 /// A deferred endpoint load awaiting the discard-changes confirm. Every path
