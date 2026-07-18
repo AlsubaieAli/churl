@@ -50,7 +50,8 @@ use serde::Serialize;
 use churl_core::debug::DebugTrace;
 use churl_core::http::{ClientConfig, ExecuteOptions, build_client_with};
 use churl_core::sequence::{
-    RunScopes, SequenceError, StepResult, classify_step, ordered_steps, prepare_step, should_halt,
+    RunScopes, SequenceError, StepResult, classify_step, ordered_steps, prepare_step,
+    prepare_step_traced, should_halt,
 };
 
 use crate::headless::{ExecData, shape_exec_data};
@@ -115,7 +116,8 @@ struct SummaryLine<'a> {
     #[serde(rename = "type")]
     line_type: &'static str,
     command: &'a str,
-    /// `true` ⟺ exit 0: no hard step error and no failed assertion.
+    /// `true` ⟺ exit 0: no hard step error, no failed assertion, no broken
+    /// extraction chain. Derived from the exit code so it can never disagree.
     ok: bool,
     /// The run's sequence name (its file stem).
     sequence: &'a str,
@@ -285,8 +287,16 @@ pub async fn run(args: SeqArgs, cwd: &Path, runtime: &crate::RuntimeCfg, json: b
         }
         stats.ran += 1;
 
-        // Resolve + load the step through the shared engine seam.
-        let prepared = match prepare_step(&root, step, &extracted, &scopes) {
+        // Resolve + load the step through the shared engine seam. Under -v,
+        // capture the var-resolution trail (the trace's `var_steps`) via the
+        // traced twin — the untraced path allocates nothing.
+        let mut var_steps = Vec::new();
+        let prepared_result = if args.verbose {
+            prepare_step_traced(&root, step, &extracted, &scopes, &mut var_steps)
+        } else {
+            prepare_step(&root, step, &extracted, &scopes)
+        };
+        let prepared = match prepared_result {
             Ok(prepared) => prepared,
             Err(err) => {
                 let cli_err = map_prepare_error(err);
@@ -321,9 +331,14 @@ pub async fn run(args: SeqArgs, cwd: &Path, runtime: &crate::RuntimeCfg, json: b
             }
         };
 
-        let mut trace = args
-            .verbose
-            .then(|| DebugTrace::from_request(&prepared.request));
+        let mut trace = args.verbose.then(|| {
+            // Seed the trace with the var-resolution trail captured during
+            // `prepare_step_traced` (the substitution already happened there);
+            // `execute_traced` fills the redirect hops + response side below.
+            let mut trace = DebugTrace::from_request(&prepared.request);
+            trace.var_steps = std::mem::take(&mut var_steps);
+            trace
+        });
         let result = churl_core::http::execute_traced(
             &client,
             &prepared.request,
@@ -404,25 +419,28 @@ pub async fn run(args: SeqArgs, cwd: &Path, runtime: &crate::RuntimeCfg, json: b
         }
     }
 
-    let overall_ok = hard_exit.is_none() && !any_assert_failed && !any_extract_failed;
+    // Single source of truth: compute the exit code once, and derive the
+    // summary line's `ok` from it — so the machine-readable "overall pass"
+    // rollup can never disagree with the process exit code (they were two
+    // separate expressions before, an easy way for the summary to silently lie).
+    let exit_code = match hard_exit {
+        Some(code) => code,
+        None if any_assert_failed || any_extract_failed => 1,
+        None => 0,
+    };
     emit_summary(
         json,
         &SummaryLine {
             schema_version: SCHEMA_VERSION,
             line_type: "summary",
             command: COMMAND,
-            ok: overall_ok,
+            ok: exit_code == 0,
             sequence: &args.name,
             steps: stats,
             assertions: asserts,
         },
     );
-
-    match hard_exit {
-        Some(code) => code,
-        None if any_assert_failed || any_extract_failed => 1,
-        None => 0,
-    }
+    exit_code
 }
 
 /// Maps a [`SequenceError`] (from [`prepare_step`]) onto a [`CliError`] — all

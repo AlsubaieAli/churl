@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use crate::assert::Assertion;
-use crate::debug::DebugTrace;
+use crate::debug::{DebugTrace, VarStep};
 use crate::http::{ExecuteOptions, HttpError, execute_traced};
 use crate::model::{Method, OnError, Response, Sequence, SequenceStep, Timing};
 use crate::persistence::{PersistenceError, load_collection_meta, load_endpoint};
@@ -423,10 +423,12 @@ fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
     }
 }
 
-/// Prepares a step for execution: resolves its endpoint (rejecting traversal),
-/// loads it and its collection ancestor-chain vars, builds the resolver with the
-/// **extracted scope prepended (highest precedence)**, and returns the
-/// substituted request.
+/// Shared implementation of [`prepare_step`] / [`prepare_step_traced`]: resolves
+/// the step's endpoint (rejecting traversal), loads it and its collection
+/// ancestor-chain vars, builds the resolver with the **extracted scope prepended
+/// (highest precedence)**, and returns the substituted request. When `sink` is
+/// `Some`, a [`VarStep`] is recorded for every `{{var}}` that resolves (the
+/// `run-seq -v` trace); `None` takes the exact untraced path.
 ///
 /// The scope chain is
 /// `extracted > session > cli > profile > [leaf-collection … root-collection]`
@@ -438,11 +440,12 @@ fn canonical_escapes_root(root: &Path, path: &Path) -> bool {
 /// chain walked innermost → outermost up to the workspace root (M7.9
 /// inherit-and-override), mirroring the send-time [`crate::template::Resolver`];
 /// `scopes.workspace` carries the root collection's `[vars]` as the outermost rung.
-pub fn prepare_step(
+fn prepare_step_inner(
     workspace_root: &Path,
     step: &SequenceStep,
     extracted: &BTreeMap<String, String>,
     scopes: &RunScopes,
+    sink: Option<&mut Vec<VarStep>>,
 ) -> Result<PreparedStep, SequenceError> {
     let path = resolve_step_path(workspace_root, &step.endpoint)?;
     let endpoint = load_endpoint(&path).map_err(|source| SequenceError::Endpoint {
@@ -476,7 +479,12 @@ pub fn prepare_step(
     let resolver = Resolver::new(resolver_scopes);
 
     let mut request = endpoint.request.clone();
-    resolver.substitute_request(&mut request);
+    // The traced twin produces a byte-identical mutation — same scan, same
+    // per-name resolution — and additionally records the resolution trail.
+    match sink {
+        Some(sink) => resolver.substitute_request_traced(&mut request, sink),
+        None => resolver.substitute_request(&mut request),
+    }
     // Fail loud: an unresolved `{{var}}` must not ship a literal placeholder on the
     // wire. The step fails here (the run's `on_error` decides halt vs continue).
     let names = crate::template::unresolved_placeholders(&request);
@@ -490,6 +498,36 @@ pub fn prepare_step(
         request,
         assertions: endpoint.assertions.clone(),
     })
+}
+
+/// Prepares a step for execution: resolves its endpoint (rejecting traversal),
+/// loads it and its collection ancestor-chain vars, builds the resolver with the
+/// **extracted scope prepended (highest precedence)**, and returns the
+/// substituted request. See [`prepare_step_inner`] for the full scope-chain
+/// semantics.
+pub fn prepare_step(
+    workspace_root: &Path,
+    step: &SequenceStep,
+    extracted: &BTreeMap<String, String>,
+    scopes: &RunScopes,
+) -> Result<PreparedStep, SequenceError> {
+    prepare_step_inner(workspace_root, step, extracted, scopes, None)
+}
+
+/// The traced twin of [`prepare_step`]: produces a byte-identical [`PreparedStep`]
+/// while additionally recording a [`VarStep`] into `sink` for every `{{var}}`
+/// that resolved, in substitution order (the `run-seq -v` per-step trace). Note
+/// that a sequence step's trace reflects the step's *own* resolution context —
+/// including the ephemeral `extracted` scope of chained values — so it is
+/// deliberately richer than a standalone `run -v` of the same endpoint would be.
+pub fn prepare_step_traced(
+    workspace_root: &Path,
+    step: &SequenceStep,
+    extracted: &BTreeMap<String, String>,
+    scopes: &RunScopes,
+    sink: &mut Vec<VarStep>,
+) -> Result<PreparedStep, SequenceError> {
+    prepare_step_inner(workspace_root, step, extracted, scopes, Some(sink))
 }
 
 /// Runs every extraction rule on a step's response, collecting `name → value`.
