@@ -34,6 +34,12 @@ nucleo-matcher = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 futures = "0.3"
 
+# Debug tracing (churl bin only; never churl-core — M8.3 Log panel). The
+# subscriber backs a bounded in-memory ring the TUI renders; no file/network
+# writers, so no extra I/O surface.
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
 # HTTP
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies"] }
 # Owned cookie jar we can serialize to JSON (the store behind reqwest's own
