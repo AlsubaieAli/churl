@@ -408,7 +408,11 @@ fn fold_opener_copies_block_else_line() {
         Some((0, 2)),
         "line 0 is the fold opener, region spans to the closer"
     );
-    assert_eq!(v.fold_region_at_opener(1), None, "a leaf line is not an opener");
+    assert_eq!(
+        v.fold_region_at_opener(1),
+        None,
+        "a leaf line is not an opener"
+    );
     // A block copy is exactly the per-line copies joined by `\n` (byte-exact,
     // same as repeated single-line `Y`).
     let block = v.copy_region(0, 2);

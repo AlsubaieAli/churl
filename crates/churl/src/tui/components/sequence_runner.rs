@@ -564,7 +564,10 @@ fn render_step_list(
             spans.push(Span::styled(format!("  {detail}"), subordinate));
         }
         if let Some(timing) = row.timing {
-            spans.push(Span::styled(format!("  {}ms", timing.as_millis()), subordinate));
+            spans.push(Span::styled(
+                format!("  {}ms", timing.as_millis()),
+                subordinate,
+            ));
         }
         let mut line = Line::from(spans);
         if selected {
@@ -693,7 +696,10 @@ mod tests {
         for theme in [Theme::dark(), Theme::light()] {
             let plain = subordinate_step_style(&theme, false);
             let selected = subordinate_step_style(&theme, true);
-            assert_ne!(plain, selected, "the style must adapt when its row is selected");
+            assert_ne!(
+                plain, selected,
+                "the style must adapt when its row is selected"
+            );
             assert_ne!(
                 selected.fg, selected.bg,
                 "selected subordinate spans must not be fg==bg (invisible) on the selection fill"

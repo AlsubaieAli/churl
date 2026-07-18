@@ -571,7 +571,10 @@ fn response_copy_line_reports_line() {
     app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
         .unwrap();
     let msg = app.pending_copy_message().expect("copy must be queued");
-    assert_eq!(msg, "copied line", "Y on a non-opener line must confirm a line copy");
+    assert_eq!(
+        msg, "copied line",
+        "Y on a non-opener line must confirm a line copy"
+    );
 }
 
 #[test]
@@ -583,7 +586,10 @@ fn response_copy_block_on_fold_opener() {
     app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
         .unwrap();
     let msg = app.pending_copy_message().expect("copy must be queued");
-    assert_eq!(msg, "copied block", "Y on a fold opener must copy the whole block");
+    assert_eq!(
+        msg, "copied block",
+        "Y on a fold opener must copy the whole block"
+    );
 }
 
 #[test]
