@@ -1,6 +1,5 @@
 ---
 source: crates/churl/src/tui/components/load_runner/tests.rs
-assertion_line: 597
 expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
@@ -23,7 +22,7 @@ expression: snapshot(&mut r)
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
 "      ┃│                                      │┃                                                            ┃┃      "
-"      ┃└──────────────────────────────────────┘┗der · j/k move · J/K block · o/O fold · y/Y copy · / search ┛┃      "
+"      ┃└──────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃      "
 "      ┃j/k scroll · h hdrs · p/s pretty · / search · y copy · tab config · q close                           ┃      "
 "      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛      "
 "                                                                                                                    "
