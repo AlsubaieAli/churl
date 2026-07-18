@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use churl_core::debug::DebugTrace;
 use churl_core::secrets;
 
+use super::traffic::TrafficEntry;
 use crate::tui::theme::Theme;
 
 /// Which section of the trace is showing. Cycled with Tab/`l`/Right and
@@ -87,24 +88,61 @@ pub enum InspectorOutcome {
 /// `tui/app/state.rs`) rather than a parallel `App` field.
 #[derive(Debug, Clone)]
 pub struct InspectorState {
-    /// The exchange's captured trace, when one exists. `None` when the
-    /// overlay is opened with no captured trace yet — debug capture was off
-    /// at send time, or nothing has been sent this session — the render
-    /// shows a placeholder instead of panicking or showing stale data.
+    /// The CURRENTLY DISPLAYED exchange's trace. Starts as whatever the
+    /// caller opened with (typically the latest exchange); `n`/`N` browsing
+    /// (see `traffic`/`traffic_selected` below) refreshes it to the selected
+    /// Traffic entry's trace. `None` when there is nothing to show — no
+    /// exchange captured yet, or the selected Traffic entry's trace was
+    /// evicted to bound memory — the render shows a placeholder instead of
+    /// panicking or showing stale data.
     pub trace: Option<DebugTrace>,
     /// The active section tab.
     section: InspectorSection,
     /// Scroll offset (display lines) within the active section.
     scroll: usize,
+    /// The session Traffic feed to browse (M8.3 Wave 4), newest first. Empty
+    /// when the caller opened via [`Self::new`] (legacy/tests) or the
+    /// session has captured nothing yet — `n`/`N` are then no-ops.
+    traffic: Vec<TrafficEntry>,
+    /// Index into `traffic` of the entry `trace` currently mirrors, once the
+    /// user has navigated into the list with `n`/`N`. `None` means `trace`
+    /// is still showing the ambient default the overlay opened with, not a
+    /// specific Traffic entry — kept separate from `Some(0)` so `N` from the
+    /// very first browsed entry can distinguish "back to the default view"
+    /// from "already at the newest browsed entry".
+    traffic_selected: Option<usize>,
 }
 
 impl InspectorState {
-    /// Builds the overlay state from the latest exchange's trace (or `None`).
+    /// Builds the overlay state from a single trace (or `None`), with no
+    /// Traffic list to browse — the pre-Wave-4 constructor, kept for
+    /// existing call sites/tests that don't have a Traffic feed in scope.
     pub fn new(trace: Option<DebugTrace>) -> Self {
+        Self::open(trace, Vec::new())
+    }
+
+    /// Builds the overlay state from `trace` (the ambient default view —
+    /// typically the latest exchange) plus `traffic` (newest-first) to
+    /// browse with `n`/`N`. See the field docs above for why the default
+    /// view is a separate parameter from `traffic[0]` rather than derived
+    /// from it.
+    pub fn open(trace: Option<DebugTrace>, traffic: Vec<TrafficEntry>) -> Self {
         Self {
             trace,
             section: InspectorSection::Request,
             scroll: 0,
+            traffic,
+            traffic_selected: None,
+        }
+    }
+
+    /// Selects Traffic entry `index`, refreshing `trace` to mirror it and
+    /// resetting scroll. A no-op when `index` is out of range.
+    fn select_traffic(&mut self, index: usize) {
+        if let Some(entry) = self.traffic.get(index) {
+            self.traffic_selected = Some(index);
+            self.trace = entry.trace.clone();
+            self.scroll = 0;
         }
     }
 
@@ -139,6 +177,24 @@ impl InspectorState {
                 self.scroll = self.content_lines().len().saturating_sub(1);
                 InspectorOutcome::Consumed
             }
+            // Browse the Traffic feed: `n` = older, `N` = newer (back toward
+            // the ambient default). No-ops when there is nothing to browse —
+            // falls through to the catch-all `Consumed` below.
+            KeyCode::Char('n') if !self.traffic.is_empty() => {
+                let next = self
+                    .traffic_selected
+                    .map_or(0, |i| (i + 1).min(self.traffic.len() - 1));
+                self.select_traffic(next);
+                InspectorOutcome::Consumed
+            }
+            KeyCode::Char('N') if !self.traffic.is_empty() => {
+                if let Some(i) = self.traffic_selected
+                    && i > 0
+                {
+                    self.select_traffic(i - 1);
+                }
+                InspectorOutcome::Consumed
+            }
             // A no-op (falls through to `Consumed`) when there is nothing to
             // copy — never emits `CopyCurl` for the app to act on with no trace.
             KeyCode::Char('y') if self.trace.is_some() => InspectorOutcome::CopyCurl,
@@ -151,6 +207,29 @@ impl InspectorState {
     /// so the two can never drift apart.
     fn content_lines(&self) -> Vec<String> {
         let Some(trace) = self.trace.as_ref() else {
+            // Distinguish WHY there's nothing to show: a selected Traffic
+            // entry whose trace was evicted to bound memory (`Some(i)`) is a
+            // different situation from simply not having navigated into
+            // Traffic yet (`None`) even though history exists to browse —
+            // conflating the two would misreport "evicted" when nothing was
+            // ever selected.
+            if self.traffic_selected.is_some() {
+                return vec![
+                    "this exchange's trace is no longer retained (evicted to bound".to_owned(),
+                    "memory) — browse a more recent one with n/N.".to_owned(),
+                ];
+            }
+            if !self.traffic.is_empty() {
+                return vec![
+                    "no trace captured for this exchange yet.".to_owned(),
+                    String::new(),
+                    format!(
+                        "{} exchange{} in the session Traffic feed — press n to browse.",
+                        self.traffic.len(),
+                        if self.traffic.len() == 1 { "" } else { "s" }
+                    ),
+                ];
+            }
             return vec![
                 "no trace captured for this exchange.".to_owned(),
                 String::new(),
@@ -284,10 +363,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &InspectorState, theme: &The
         .areas(modal);
     frame.render_widget(Clear, modal);
 
+    let title = if state.traffic.is_empty() {
+        " Inspector — tab sections · y copy curl (masked) · q/esc close ".to_owned()
+    } else {
+        let pos = state
+            .traffic_selected
+            .map_or("live".to_owned(), |i| (i + 1).to_string());
+        format!(
+            " Inspector — tab sections · n/N traffic [{pos}/{}] · y copy curl (masked) · q/esc close ",
+            state.traffic.len()
+        )
+    };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
-        .title(" Inspector — tab sections · y copy curl (masked) · q/esc close ")
+        .title(title)
         .title_style(theme.title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
@@ -426,5 +516,77 @@ mod tests {
         let lines = error_lines(&trace);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("no error"));
+    }
+
+    fn traffic_entry(url: &str) -> TrafficEntry {
+        let mut req = request();
+        req.url = url.to_owned();
+        TrafficEntry::new(
+            url.to_owned(),
+            crate::tui::components::traffic::TrafficOutcome::Ok(200),
+            Some(5),
+            DebugTrace::from_request(&req),
+        )
+    }
+
+    #[test]
+    fn n_and_shift_n_browse_traffic_and_wrap_correctly() {
+        let traffic = vec![
+            traffic_entry("https://api.test/newest"),
+            traffic_entry("https://api.test/older"),
+        ];
+        let mut state = InspectorState::open(None, traffic);
+        // Ambient default: nothing selected yet, but Traffic has history.
+        assert!(state.trace.is_none());
+        assert!(
+            state.content_lines()[0].contains("no trace captured for this exchange yet"),
+            "{:?}",
+            state.content_lines()
+        );
+
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            state.trace.as_ref().unwrap().resolved_display.url,
+            "https://api.test/newest"
+        );
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            state.trace.as_ref().unwrap().resolved_display.url,
+            "https://api.test/older"
+        );
+        // At the oldest entry, `n` (older) stays put — no wrap, no panic.
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            state.trace.as_ref().unwrap().resolved_display.url,
+            "https://api.test/older"
+        );
+        // `N` (newer) steps back.
+        state.handle_key(key(KeyCode::Char('N')));
+        assert_eq!(
+            state.trace.as_ref().unwrap().resolved_display.url,
+            "https://api.test/newest"
+        );
+    }
+
+    #[test]
+    fn n_is_a_no_op_with_an_empty_traffic_list() {
+        let mut state = InspectorState::new(Some(DebugTrace::from_request(&request())));
+        let before = state.trace.as_ref().unwrap().resolved_display.url.clone();
+        state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(state.trace.as_ref().unwrap().resolved_display.url, before);
+    }
+
+    #[test]
+    fn evicted_traffic_entry_shows_a_distinct_placeholder_from_never_selected() {
+        let mut entry = traffic_entry("https://api.test/gone");
+        entry.trace = None; // simulates eviction past the live-trace window
+        let mut state = InspectorState::open(None, vec![entry]);
+        state.handle_key(key(KeyCode::Char('n')));
+        assert!(state.trace.is_none());
+        assert!(
+            state.content_lines()[0].contains("no longer retained"),
+            "{:?}",
+            state.content_lines()
+        );
     }
 }

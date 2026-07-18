@@ -416,6 +416,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         SequenceRun,
         LoadRunner,
         Inspector,
+        LogPanel,
         None,
     }
     let body_searching = matches!(app.mode, Mode::BodySearch);
@@ -443,6 +444,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // response body of its own to search), so — like EnvEditor/Options —
         // this is only chosen when `effective_mode == app.mode`.
         Mode::Inspector(_) => Overlay::Inspector,
+        // The Log panel is likewise read-only with no response body of its
+        // own to search, so it never hosts body-search either.
+        Mode::LogPanel(_) => Overlay::LogPanel,
         _ => Overlay::None,
     };
     match overlay {
@@ -599,6 +603,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Overlay::Inspector => {
             if let Mode::Inspector(state) = &app.mode {
                 inspector::render(frame, main, state, &theme);
+            }
+        }
+        Overlay::LogPanel => {
+            // The ring lives on `App` (continuously written by the
+            // background subscriber), not in the mode — snapshot it fresh
+            // each frame.
+            let events = app.log_ring.snapshot();
+            if let Mode::LogPanel(state) = &app.mode {
+                log_panel::render(frame, main, &events, state, &theme);
             }
         }
         Overlay::None => {}

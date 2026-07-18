@@ -170,7 +170,8 @@ impl App {
                 run_generation,
                 index,
                 outcome,
-            } => self.on_sequence_step(run_generation, index, outcome),
+                trace,
+            } => self.on_sequence_step_traced(run_generation, index, outcome, trace),
             AppMsg::LoadStarted {
                 run_generation,
                 index,
@@ -179,7 +180,8 @@ impl App {
                 run_generation,
                 index,
                 outcome,
-            } => self.on_load_result(run_generation, index, outcome),
+                trace,
+            } => self.on_load_result_traced(run_generation, index, outcome, trace),
         }
     }
 
@@ -214,6 +216,34 @@ impl App {
         // History write needs `&mut self`; compute status args before borrowing
         // the target buffer to store the response.
         let status = outcome.as_ref().ok().map(|r| (r.status, r.timing.total));
+        // Feed the session Traffic feed + the Log ring — both are debug-gated
+        // via the trace itself being `Some` only when `debug_enabled` was on
+        // at send time (see `Self::send_request`), so this costs nothing on
+        // the off path: no clone, no push, no tracing event.
+        if let Some(trace) = self.latest_trace.as_deref() {
+            let label = meta
+                .endpoint_path
+                .clone()
+                .unwrap_or_else(|| "(standalone send)".to_owned());
+            let ms = status.map(|(_, total)| total.as_millis() as u64);
+            let traffic_outcome = match &status {
+                Some((code, _)) if *code >= 400 => TrafficOutcome::Failed(*code),
+                Some((code, _)) => TrafficOutcome::Ok(*code),
+                None => TrafficOutcome::Error,
+            };
+            tracing::debug!(
+                target: "churl::send",
+                method = %trace.resolved_display.method,
+                url = %trace.resolved_display.url,
+                status = status.map(|(code, _)| code),
+                ms,
+                "{label}"
+            );
+            traffic::push(
+                &mut self.traffic,
+                TrafficEntry::new(label, traffic_outcome, ms, trace.clone()),
+            );
+        }
         match &outcome {
             Ok(_) => {
                 let (st, total) = status.expect("Ok outcome has status");

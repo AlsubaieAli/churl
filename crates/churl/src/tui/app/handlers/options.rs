@@ -8,7 +8,7 @@
 //! `Arc` survives the rebuild, so toggling cookies off→on keeps the jar.
 
 use super::super::*;
-use crate::tui::components::options::mask_proxy;
+use crate::tui::components::options::{AdvancedField, mask_proxy};
 
 impl App {
     /// Opens the session Options overlay over the current settings.
@@ -19,6 +19,8 @@ impl App {
             self.session_insecure,
             self.cookies_enabled,
             cookies,
+            self.debug_enabled,
+            self.advanced_limits,
         );
         // One transition — construct the state INTO the mode (no parallel field).
         self.mode = Mode::Options(state);
@@ -103,6 +105,10 @@ impl App {
                 self.notify("cookies cleared");
                 self.refresh_options_overlay();
             }
+            OptionsOutcome::ApplyAdvanced { field, value } => {
+                self.apply_advanced_limit(field, value);
+                self.refresh_options_overlay();
+            }
         }
         Ok(())
     }
@@ -135,6 +141,57 @@ impl App {
         Ok(())
     }
 
+    /// Applies a validated Advanced-limit override (M8.3 Wave 4). Concurrency
+    /// and total are checked against the SAME `[load]` guardrail caps
+    /// `churl_core::load::check_config` enforces at run time — a value above
+    /// `max_concurrency`/`max_total` is refused here too, so the debug-gated
+    /// Advanced UI can never be used to bypass the guardrail; a value above
+    /// only the *warn* threshold is still accepted (this changes a stored
+    /// default, not an in-flight run, so there is nothing to confirm y/n
+    /// against). Body-cap/timeout have no guardrail cap to check — any
+    /// positive value (already enforced by the overlay's own edit gate)
+    /// applies directly.
+    fn apply_advanced_limit(&mut self, field: AdvancedField, value: u64) {
+        match field {
+            AdvancedField::Concurrency | AdvancedField::Total => {
+                let mut candidate = churl_core::load::LoadConfig {
+                    total: self.advanced_limits.total,
+                    concurrency: self.advanced_limits.concurrency,
+                    interval: Duration::ZERO,
+                };
+                let clamped = value.min(usize::MAX as u64) as usize;
+                match field {
+                    AdvancedField::Concurrency => candidate.concurrency = clamped,
+                    AdvancedField::Total => candidate.total = clamped,
+                    _ => unreachable!("guarded by the outer match"),
+                }
+                match churl_core::load::check_config(&candidate, &self.load_caps) {
+                    churl_core::load::LoadCheck::Refuse(msg) => {
+                        self.set_options_message(format!("refused — {msg}"));
+                    }
+                    churl_core::load::LoadCheck::Ok | churl_core::load::LoadCheck::Warn(_) => {
+                        self.advanced_limits.concurrency = candidate.concurrency;
+                        self.advanced_limits.total = candidate.total;
+                        self.notify(format!("advanced {} set to {value}", field.label()));
+                    }
+                }
+            }
+            AdvancedField::BodyCapBytes => {
+                self.advanced_limits.body_cap_bytes = value;
+                self.execute_options.max_body_bytes = value;
+                self.notify(format!("advanced body cap set to {value} bytes"));
+            }
+            AdvancedField::TimeoutSecs => {
+                self.advanced_limits.timeout_secs = value;
+                self.client_timeout = Duration::from_secs(value);
+                match self.rebuild_client() {
+                    Ok(()) => self.notify(format!("advanced timeout set to {value}s")),
+                    Err(err) => self.set_options_message(format!("could not apply — {err}")),
+                }
+            }
+        }
+    }
+
     /// Sets an inline message in the open Options overlay footer (a no-op when the
     /// overlay is not open). Used to surface a rejected change without a crash.
     fn set_options_message(&mut self, msg: impl Into<String>) {
@@ -151,8 +208,10 @@ impl App {
         let insecure = self.session_insecure;
         let enabled = self.cookies_enabled;
         let cookies = self.cookie_jar.list();
+        let debug_enabled = self.debug_enabled;
+        let advanced = self.advanced_limits;
         if let Mode::Options(state) = &mut self.mode {
-            state.refresh(proxy, insecure, enabled, cookies);
+            state.refresh(proxy, insecure, enabled, cookies, debug_enabled, advanced);
         }
     }
 

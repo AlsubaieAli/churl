@@ -8,7 +8,9 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use super::{OptionsFocus, OptionsRow, OptionsState, mask_proxy, mask_proxy_password};
+use super::{
+    AdvancedField, OptionsFocus, OptionsRow, OptionsState, mask_proxy, mask_proxy_password,
+};
 use crate::tui::theme::Theme;
 
 /// Renders the Options overlay over `area`.
@@ -33,20 +35,30 @@ pub fn render(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Theme
         return;
     }
 
-    // Three control rows, the cookie list (fill), then a two-row footer.
-    let [rows_area, cookies_area, footer] = Layout::vertical([
-        Constraint::Length(4),
+    // Control rows (Proxy/TLS/Cookies, plus Advanced when debug is on), a
+    // detail panel (fill — cookie list or Advanced field list), then a
+    // two-row footer. The row count only grows past 4 when `debug_enabled`,
+    // so a non-debug session's layout is byte-identical to before M8.3
+    // Wave 4.
+    let rows_height = if state.debug_enabled { 5 } else { 4 };
+    let [rows_area, detail_area, footer] = Layout::vertical([
+        Constraint::Length(rows_height),
         Constraint::Fill(1),
         Constraint::Length(2),
     ])
     .areas(inner);
 
     render_rows(frame, rows_area, state, theme);
-    render_cookie_list(frame, cookies_area, state, theme);
+    if state.row == OptionsRow::Advanced || state.focus == OptionsFocus::AdvancedList {
+        render_advanced_list(frame, detail_area, state, theme);
+    } else {
+        render_cookie_list(frame, detail_area, state, theme);
+    }
     render_footer(frame, footer, state, theme);
 }
 
-/// Renders the three control rows (Proxy / TLS / Cookies).
+/// Renders the control rows (Proxy / TLS / Cookies, plus Advanced when
+/// [`OptionsState::debug_enabled`]).
 fn render_rows(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Theme) {
     let rows_focused = state.focus == OptionsFocus::Rows;
     let sel = |row: OptionsRow| rows_focused && state.row == row;
@@ -85,7 +97,7 @@ fn render_rows(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Them
         Span::raw(insecure_display.to_owned())
     };
 
-    let lines = vec![
+    let mut lines = vec![
         line("Proxy", Span::raw(proxy_display), sel(OptionsRow::Proxy)),
         line("TLS verification", insecure_span, sel(OptionsRow::Tls)),
         line(
@@ -94,7 +106,62 @@ fn render_rows(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Them
             sel(OptionsRow::Cookies),
         ),
     ];
+    if state.debug_enabled {
+        lines.push(line(
+            "Advanced (debug)",
+            Span::raw("↳ concurrency/total/body-cap/timeout"),
+            sel(OptionsRow::Advanced),
+        ));
+    }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Renders the Advanced field list beneath the Advanced row: the four
+/// override knobs, their current resolved values, and the in-progress edit
+/// when one is open. Only ever shown when `debug_enabled` (the caller in
+/// [`render`] gates on `state.row`/`state.focus`, both of which are
+/// unreachable with debug off — see [`OptionsState::debug_enabled`]'s doc).
+fn render_advanced_list(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Theme) {
+    let focused = state.focus == OptionsFocus::AdvancedList;
+    let border = if focused {
+        theme.border_focused
+    } else {
+        theme.border_unfocused
+    };
+    let block = Block::bordered()
+        .border_style(border)
+        .title(" Advanced limits (debug-gated) ")
+        .title_style(theme.title);
+    let list_area = block.inner(area);
+    frame.render_widget(block, area);
+    if list_area.width == 0 || list_area.height == 0 {
+        return;
+    }
+
+    let lines: Vec<Line> = AdvancedField::ALL
+        .iter()
+        .map(|&field| {
+            let selected = focused && state.advanced_field == field;
+            let value = if selected && let Some(editor) = &state.advanced_editing {
+                format!("{}█", editor.text())
+            } else {
+                match field {
+                    AdvancedField::Concurrency => state.advanced.concurrency.to_string(),
+                    AdvancedField::Total => state.advanced.total.to_string(),
+                    AdvancedField::BodyCapBytes => state.advanced.body_cap_bytes.to_string(),
+                    AdvancedField::TimeoutSecs => state.advanced.timeout_secs.to_string(),
+                }
+            };
+            let marker = if selected { "▸ " } else { "  " };
+            let l = Line::from(format!("{marker}{:<18}{value}", field.label()));
+            if selected {
+                l.style(theme.selection)
+            } else {
+                l
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
 }
 
 /// Renders the cookie list beneath the Cookies row (domain · name · masked value).
@@ -174,14 +241,20 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &OptionsState, theme: &Th
     };
     frame.render_widget(Paragraph::new(top), msg_row);
 
-    let hints = if state.editing.is_some() {
+    let hints = if state.advanced_editing.is_some() {
+        "enter apply · esc cancel (positive whole numbers only)".to_owned()
+    } else if state.editing.is_some() {
         "enter apply · esc cancel (empty clears the proxy)".to_owned()
     } else {
         match state.focus {
+            OptionsFocus::Rows if state.debug_enabled => {
+                "j/k move · enter edit/toggle · l cookies/advanced · q close".to_owned()
+            }
             OptionsFocus::Rows => "j/k move · enter edit/toggle · l cookies · q close".to_owned(),
             OptionsFocus::CookieList => {
                 "j/k move · d delete · x clear all · h back · q close".to_owned()
             }
+            OptionsFocus::AdvancedList => "j/k move · enter edit · h back · q close".to_owned(),
         }
     };
     frame.render_widget(

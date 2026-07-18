@@ -254,15 +254,28 @@ impl App {
                 let tx = self.tx.clone();
                 let options = self.execute_options;
                 let request = prepared.request;
+                // Mirrors `churl_core::sequence::run_sequence`'s per-step
+                // `sink.is_some().then(|| DebugTrace::from_request(...))` +
+                // `execute_traced` pattern — see `start_load_run`'s matching
+                // comment for why the live runner stays hand-rolled (streaming
+                // per-step progress) rather than calling `run_sequence` itself.
+                let capture = self.debug_enabled;
                 let handle = tokio::spawn(async move {
-                    let outcome = churl_core::http::execute(&client, &request, &options)
-                        .await
-                        .map_err(|err| err.to_string());
+                    let mut trace = capture.then(|| DebugTrace::from_request(&request));
+                    let outcome = churl_core::http::execute_traced(
+                        &client,
+                        &request,
+                        &options,
+                        trace.as_mut(),
+                    )
+                    .await
+                    .map_err(|err| err.to_string());
                     let _ = tx
                         .send(AppMsg::SequenceStep {
                             run_generation,
                             index,
                             outcome,
+                            trace: trace.map(Box::new),
                         })
                         .await;
                 });
@@ -271,13 +284,31 @@ impl App {
         }
     }
 
-    /// Lands a completed sequence step: drops stale results, classifies with the
-    /// shared core seam, merges extracted values, and advances or finishes.
+    /// Lands a completed sequence step with no captured trace — thin wrapper
+    /// over [`Self::on_sequence_step_traced`] kept so the many existing 3-arg
+    /// call sites (tests driving the runner directly, without a real
+    /// debug-traced send) stay unchanged.
+    #[cfg(test)]
     pub(in crate::tui::app) fn on_sequence_step(
         &mut self,
         run_generation: u64,
         index: usize,
         outcome: Result<Response, String>,
+    ) {
+        self.on_sequence_step_traced(run_generation, index, outcome, None);
+    }
+
+    /// Lands a completed sequence step: drops stale results, classifies with the
+    /// shared core seam, merges extracted values, and advances or finishes.
+    /// `trace` is `Some` only when debug capture was on for the run (see
+    /// [`Self::drive_sequence_step`]); it feeds the session Traffic feed and
+    /// is otherwise a no-op.
+    pub(in crate::tui::app) fn on_sequence_step_traced(
+        &mut self,
+        run_generation: u64,
+        index: usize,
+        outcome: Result<Response, String>,
+        trace: Option<Box<DebugTrace>>,
     ) {
         // The runner lives in `self.mode`, so a live runner borrow aliases `self`
         // — and `self.sequence_abort = None` below is a `self` field
@@ -297,6 +328,7 @@ impl App {
             Some(row) => row.step.clone(),
             None => return,
         };
+        let sequence_name = runner.name.clone();
         let view_gen = runner.next_view_gen();
 
         // Classify with the shared core seam for the success branch; a transport
@@ -342,6 +374,31 @@ impl App {
         // `runner` borrow is released. Never touches disk.
         for (name, value) in session_writes {
             self.write_session_var(name, value);
+        }
+        // Feed the session Traffic feed + the Log ring — `trace` is `Some`
+        // only when `debug_enabled` was on for this run (see
+        // `drive_sequence_step`), so this is free on the off path.
+        if let Some(trace) = trace {
+            let label = format!("{sequence_name} · {}", step.endpoint);
+            let ms = timing.map(|d| d.as_millis() as u64);
+            let traffic_outcome = match &result {
+                StepResult::Ok { status } => TrafficOutcome::Ok(*status),
+                StepResult::Failed { status } => TrafficOutcome::Failed(*status),
+                StepResult::HttpError(_) | StepResult::ExtractError(_) | StepResult::Skipped => {
+                    TrafficOutcome::Error
+                }
+            };
+            tracing::debug!(
+                target: "churl::sequence",
+                method = %trace.resolved_display.method,
+                url = %trace.resolved_display.url,
+                ms,
+                "{label}"
+            );
+            traffic::push(
+                &mut self.traffic,
+                TrafficEntry::new(label, traffic_outcome, ms, *trace),
+            );
         }
         self.finish_sequence_step(index, result);
     }
@@ -473,6 +530,15 @@ impl App {
     /// stay isolated — the Run-face confirm-on-close-while-running never fires in
     /// the Edit face because Edit keys never reach the runner.
     pub(in crate::tui::app) fn handle_sequence_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Narrow leader-from-runner allowlist (M8.3 Wave 4) — mirrors
+        // `Self::handle_load_runner_key`'s identical intercept; see its
+        // comment and `Self::runner_leader_pending`'s doc for the rationale.
+        // Applies to BOTH sequence-surface faces (Edit and Run): the debug
+        // overlays should be reachable regardless of which face is active.
+        if self.keymap.is_leader(key) {
+            self.runner_leader_pending = true;
+            return Ok(());
+        }
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.toggle_sequence_view();
             return Ok(());

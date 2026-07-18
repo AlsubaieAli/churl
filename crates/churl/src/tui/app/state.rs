@@ -136,6 +136,14 @@ pub enum Mode {
     /// constructible without a parallel `Option` field, matching every other
     /// data-carrying overlay here.
     Inspector(InspectorState),
+    /// The debug Log panel overlay (`<leader>L`): a read-only, scrollable
+    /// view of the bounded `tracing` ring (see
+    /// [`crate::tui::log_subscriber`]). Owns its [`LogPanelState`] — scroll
+    /// position only; the ring's contents live on `App`
+    /// (`App::log_ring`), continuously written by the background subscriber
+    /// independent of whether this mode is active, so they cannot live
+    /// inside the variant the way a snapshot-at-open trace does.
+    LogPanel(LogPanelState),
 }
 
 /// The state of the ONE open fuzzy-picker overlay, when `mode` is one of the
@@ -393,6 +401,11 @@ pub enum AppMsg {
         run_generation: u64,
         index: usize,
         outcome: Result<Response, String>,
+        /// This step's captured trace, when debug capture was on for the run
+        /// (mirrors [`AppMsg::Response`]'s `trace` field — same
+        /// present-regardless-of-outcome, boxed-for-size rationale). Folded
+        /// into the session Traffic feed on landing.
+        trace: Option<Box<DebugTrace>>,
     },
     /// One copy of a concurrent-load batch actually started executing —
     /// sent by the launcher when the copy enters the concurrency window, so its
@@ -404,6 +417,9 @@ pub enum AppMsg {
         run_generation: u64,
         index: usize,
         outcome: Result<Response, String>,
+        /// This copy's captured trace, when debug capture was on for the
+        /// run. See [`Self::SequenceStep`]'s `trace` field doc.
+        trace: Option<Box<DebugTrace>>,
     },
 }
 

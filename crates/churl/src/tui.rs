@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod components;
 pub mod events;
 pub mod highlight;
+pub mod log_subscriber;
 pub mod theme;
 
 use std::collections::BTreeMap;
@@ -74,6 +75,10 @@ pub async fn run(
     app.set_secret_policy(secret_policy);
     app.set_keymap_warnings(keymap_warnings);
     app.install_runtime(&config, proxy, insecure)?;
+    // Attach the bounded-ring `tracing` subscriber to the GLOBAL registry —
+    // EXACTLY ONCE, here, never in headless (a second global-subscriber
+    // install elsewhere would panic; see `log_subscriber`'s module docs).
+    app.set_log_ring(log_subscriber::init(log_subscriber::LOG_RING_CAPACITY));
 
     let mut terminal = init();
     let result = app.run(&mut terminal).await;

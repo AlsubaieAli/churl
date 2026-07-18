@@ -314,6 +314,12 @@ impl Default for KeyMap {
         // namespace from leader-root continuations.
         root_bind(key!(d), LeaderEntry::Act(Action::OpenInspector));
         root_bind(key!(shift - d), LeaderEntry::Act(Action::ToggleDebug));
+        // `<leader>L` (shift-l) opens the debug Log panel — a sibling debug
+        // overlay to Inspector's `<leader>d`. Free at root: plain `l` already
+        // descends into the `load` submenu (a disjoint continuation), and
+        // shift-l elsewhere in the app is a PANE overlay binding (Response's
+        // `ScrollBodyRight`), a different namespace from leader-root.
+        root_bind(key!(shift - l), LeaderEntry::Act(Action::OpenLogPanel));
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
         // `<leader><leader>` (Space as its own continuation) opens the
         // endpoint/request picker — owner drive-test 2026-07-10 moved it off `f`,
