@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snap
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ use┏ Log — 0 events · j/k scroll · g/G top/bottom · q/esc close ━━┓───────┘
+│       ┃no log events captured yet — enable debug capture (<leader>D) ┃───────┐
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃───────┘
+│       ┃                                                              ┃───────┐
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+└───────┃                                                              ┃       │
+┌ Sequen┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette
