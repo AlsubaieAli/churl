@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snap
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ use┏ Inspector — tab sections · y copy curl (masked) · q/esc close┓───────┘
+│       ┃ Request  Vars  Redirects  Decisions  Error                   ┃───────┐
+│       ┃no trace captured for this exchange.                          ┃       │
+│       ┃                                                              ┃       │
+│       ┃enable debug capture (<leader>D) and send a request — the     ┃       │
+│       ┃Inspector shows the most recently captured exchange.          ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃───────┘
+│       ┃                                                              ┃───────┐
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+└───────┃                                                              ┃       │
+┌ Sequen┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

@@ -32,6 +32,12 @@ pub struct SendArgs {
     pub profile: Option<String>,
     pub proxy: Option<String>,
     pub insecure: bool,
+    /// `-v`/`--verbose`: gates BOTH the stderr request/response trace
+    /// (`headless::print_human`) AND, new in M8.3, a `DebugTrace` captured
+    /// into `data.trace` under `--json` (see [`run_execution`]'s `capture`
+    /// flag). `send` has no config-level `debug` toggle of its own — this is
+    /// the sole capture gate.
+    pub verbose: bool,
     /// Raw `--assert` flag strings — `send` has no persisted endpoint, so
     /// these are the whole assertion set.
     pub cli_asserts: Vec<String>,
@@ -108,7 +114,7 @@ pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exe
     };
 
     let assertions = crate::headless::parse_cli_assertions(&args.cli_asserts)?;
-    run_execution(request, scopes, inputs, &assertions).await
+    run_execution(request, scopes, inputs, &assertions, args.verbose).await
 }
 
 /// Parses a `-H`/`--header` value as `NAME:VALUE` (curl shape), trimming

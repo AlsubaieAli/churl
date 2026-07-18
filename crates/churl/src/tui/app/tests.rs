@@ -120,7 +120,7 @@ async fn stale_generation_response_is_dropped() {
     set_active_in_flight(&mut app, 5);
 
     // A late result from an older generation is ignored…
-    app.on_response(4, Ok(response()), meta());
+    app.on_response(4, Ok(response()), meta(), None);
     assert!(matches!(app.response(), ResponseState::Idle));
     assert!(
         active_in_flight_is_some(&app),
@@ -128,7 +128,7 @@ async fn stale_generation_response_is_dropped() {
     );
 
     // …the matching generation lands and clears the in-flight slot.
-    app.on_response(5, Ok(response()), meta());
+    app.on_response(5, Ok(response()), meta(), None);
     assert!(matches!(app.response(), ResponseState::Done { .. }));
     assert!(!active_in_flight_is_some(&app));
 }
@@ -662,6 +662,7 @@ async fn sequence_transition_matches_core() {
             &sequence,
             &RunScopes::default(),
             &ExecuteOptions::default(),
+            None,
         )
         .await;
         let core_results: Vec<_> = core_run
@@ -3976,7 +3977,7 @@ async fn structural_jump_non_json_notifies() {
     app.generation = 5;
     set_active_in_flight(&mut app, 5);
     // `response()` carries no content-type, so the body is not JSON.
-    app.on_response(5, Ok(response()), meta());
+    app.on_response(5, Ok(response()), meta(), None);
     app.focus = Pane::Response;
     render_once(&mut app);
     app.handle_key(shift('J')).unwrap();
@@ -4092,6 +4093,358 @@ fn load_result_lands_on_parked_runner_during_body_search() {
         app.load_runner().unwrap().finished,
         "finished state survived the restore"
     );
+}
+
+// ---- debug Inspector overlay (M8.3 Wave 3) ----
+
+/// `<leader>d` opens the Inspector from `Mode::Normal`; with no send made yet
+/// there is no trace to show (the placeholder path), and it never panics.
+/// `q` closes it back to `Mode::Normal`.
+#[test]
+fn inspector_opens_from_normal_and_closes() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    press(&mut app, ' ');
+    press(&mut app, 'd');
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    render_once(&mut app); // must not panic with no trace captured
+    press(&mut app, 'q');
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+/// Opening the Inspector while a runner is the active mode parks the runner
+/// (mem::replace, not a drop) into `inspector_return`; closing restores the
+/// EXACT parked mode with its state intact. Exercises `open_inspector`
+/// directly (the park/return mechanics Inspector shares with
+/// `open_body_search`) — see `leader_d_reaches_inspector_from_load_runner`
+/// below for the actual `<leader>d` KEY SEQUENCE from runner mode, now
+/// reachable via the narrow allowlist (M8.3 Wave 4).
+#[test]
+fn inspector_parks_and_restores_runner_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+    let url_before = app.load_runner().unwrap().url.clone();
+
+    app.open_inspector();
+    assert!(
+        matches!(app.mode, Mode::Inspector(_)),
+        "Inspector is now the active mode"
+    );
+    assert!(
+        matches!(app.inspector_return, Mode::LoadRunner(_)),
+        "the runner is parked, not dropped"
+    );
+
+    app.handle_inspector_key(keyc(KeyCode::Esc));
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "closing restores the parked LoadRunner mode"
+    );
+    assert_eq!(
+        app.load_runner().unwrap().url,
+        url_before,
+        "the restored runner's state is intact"
+    );
+}
+
+// ---- narrow leader-from-runner allowlist (M8.3 Wave 4) ----
+
+/// `<leader>d` reaches the Inspector via the real KEY SEQUENCE from
+/// `Mode::LoadRunner` — the general leader chord is otherwise only engaged
+/// from `Mode::Normal` (`KeyMap::is_leader` is checked nowhere else), so
+/// without the narrow allowlist in `handle_load_runner_key` this would be a
+/// no-op (the leader keypress would fall through to the runner's own key
+/// handling instead). Parks the runner exactly like `open_inspector` does.
+#[test]
+fn leader_d_reaches_inspector_from_load_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+
+    press(&mut app, ' '); // the leader key, routed through handle_load_runner_key
+    assert!(
+        app.runner_leader_pending,
+        "leader press while in a runner arms the narrow pending flag"
+    );
+    press(&mut app, 'd');
+    assert!(
+        matches!(app.mode, Mode::Inspector(_)),
+        "the follow-up key opened the Inspector"
+    );
+    assert!(matches!(app.inspector_return, Mode::LoadRunner(_)));
+
+    app.handle_inspector_key(keyc(KeyCode::Esc));
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "closing restores the parked runner"
+    );
+}
+
+/// `<leader>L` reaches the Log panel from a Sequence surface mode (either
+/// face — the intercept in `handle_sequence_key` runs before the Edit/Run
+/// dispatch) — mirrors `leader_d_reaches_inspector_from_load_runner` for the
+/// sequence surface and the Log overlay.
+#[test]
+fn leader_shift_l_reaches_log_panel_from_sequence_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = sequence_surface_app(dir.path());
+    assert!(matches!(app.mode, Mode::Sequence { .. }));
+
+    press(&mut app, ' ');
+    assert!(app.runner_leader_pending);
+    app.handle_key(shift('L')).unwrap();
+    assert!(
+        matches!(app.mode, Mode::LogPanel(_)),
+        "the follow-up key opened the Log panel"
+    );
+    assert!(matches!(app.log_return, Mode::Sequence { .. }));
+
+    app.handle_log_panel_key(keyc(KeyCode::Esc));
+    assert!(
+        matches!(app.mode, Mode::Sequence { .. }),
+        "closing restores the parked sequence surface"
+    );
+}
+
+/// The allowlist is NARROW: a leader chord bound to any OTHER action
+/// (`<leader>e` → `ToggleExplorer`) does nothing from runner mode — it must
+/// not broaden into the general leader menu. The runner mode itself is left
+/// untouched (still `LoadRunner`, not silently dropped to `Normal`).
+#[test]
+fn leader_from_runner_does_not_broaden_to_other_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    let explorer_hidden_before = app.explorer_hidden;
+
+    press(&mut app, ' ');
+    assert!(app.runner_leader_pending);
+    press(&mut app, 'e'); // <leader>e = ToggleExplorer at the leader root
+    assert_eq!(
+        app.explorer_hidden, explorer_hidden_before,
+        "ToggleExplorer must NOT fire from runner mode — only the two debug \
+         overlays are allowlisted"
+    );
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "the runner mode is untouched by the cancelled chord"
+    );
+    assert!(
+        !app.runner_leader_pending,
+        "the one-shot flag is cleared either way"
+    );
+}
+
+/// Regression (M8.3 adversarial P1): the leader-from-runner intercept must NOT
+/// swallow free text typed into the sequence editor's Edit face. Editing a
+/// rule field, `a Space d` must land the LITERAL "a d" in the field (Space is
+/// a character there, not a leader chord) and leave the mode as `Sequence` —
+/// before the fix the unconditional `is_leader` intercept ate the Space and
+/// the following `d` spuriously opened the Inspector.
+#[test]
+fn sequence_edit_field_leader_key_is_typed_not_intercepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = sequence_surface_app(dir.path());
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
+
+    // Focus the Rules pane and open a fresh rule → begins a rule-name field
+    // edit (a live free-text sub-state).
+    press(&mut app, 'l'); // Steps -> Rules focus
+    press(&mut app, 'a'); // add rule -> begins RuleName edit
+    assert!(
+        app.sequence_editor().unwrap().is_capturing_text(),
+        "a rule field edit is now open"
+    );
+
+    // Type `a`, Space, `d`. The Space is the DEFAULT leader key — the whole
+    // point of the fix is that it reaches the editor here rather than arming
+    // the leader intercept.
+    press(&mut app, 'a');
+    press(&mut app, ' ');
+    press(&mut app, 'd');
+
+    assert!(
+        matches!(app.mode, Mode::Sequence { .. }),
+        "no Inspector overlay may open from typing in a rule field"
+    );
+    assert!(
+        !app.runner_leader_pending,
+        "the leader intercept must never have armed while editing text"
+    );
+    assert_eq!(
+        app.sequence_editor()
+            .unwrap()
+            .current_edit_text()
+            .as_deref(),
+        Some("a d"),
+        "the Space (and the following d) must reach the editor as literal text"
+    );
+}
+
+/// A trace captured by a debug-on send becomes the Inspector's default view;
+/// a later debug-OFF send clears it rather than leaving the stale trace
+/// showing (Constitution: never fake state that no longer matches reality).
+#[tokio::test]
+async fn inspector_shows_latest_trace_and_clears_on_debug_off_send() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.debug_enabled = true;
+    app.generation = 7;
+    set_active_in_flight(&mut app, 7);
+    let trace =
+        churl_core::debug::DebugTrace::from_request(&app.selected().unwrap().endpoint.request);
+    app.on_response(7, Ok(response()), meta(), Some(Box::new(trace)));
+    app.open_inspector();
+    assert!(
+        matches!(&app.mode, Mode::Inspector(state) if state.trace.is_some()),
+        "the captured trace is the Inspector's default view"
+    );
+    app.handle_inspector_key(keyc(KeyCode::Esc));
+
+    // A second send with debug OFF must not leave the first trace visible.
+    app.debug_enabled = false;
+    app.generation = 8;
+    set_active_in_flight(&mut app, 8);
+    app.on_response(8, Ok(response()), meta(), None);
+    app.open_inspector();
+    assert!(
+        matches!(&app.mode, Mode::Inspector(state) if state.trace.is_none()),
+        "a debug-off send clears the stale trace rather than leaving it shown"
+    );
+}
+
+/// History policy invariant (M8.3 Wave 4): a debug-on send captures the full
+/// exchange into the ephemeral Traffic feed, but the DURABLE History row
+/// stays exactly what it always was — metadata-only, no response body. Sends
+/// a response with a distinctive body marker and asserts the marker appears
+/// nowhere in the persisted History row while it DOES show up in Traffic
+/// (the two feeds' whole reason to coexist).
+#[tokio::test]
+async fn debug_on_send_does_not_grow_persisted_history_body_storage() {
+    const MARKER: &str = "SECRET-HISTORY-BODY-MARKER-should-never-persist";
+
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    open_bare_endpoint(&mut app);
+    app.debug_enabled = true;
+    app.generation = 1;
+    set_active_in_flight(&mut app, 1);
+    let trace =
+        churl_core::debug::DebugTrace::from_request(&app.selected().unwrap().endpoint.request);
+    let mut body_response = response();
+    body_response.body = MARKER.as_bytes().to_vec();
+    app.on_response(1, Ok(body_response), meta(), Some(Box::new(trace)));
+
+    // History: one row, and the marker appears NOWHERE in it — `HistoryEntry`
+    // structurally carries no body field (method/url/status/duration/path
+    // only), so this also guards against a future field ever smuggling it in.
+    let rows = app.history.as_ref().unwrap().recent(10).unwrap();
+    assert_eq!(rows.len(), 1, "exactly one history row for the one send");
+    let row_debug = format!("{:?}", rows[0]);
+    assert!(
+        !row_debug.contains(MARKER),
+        "the response body must never reach durable History: {row_debug}"
+    );
+
+    // Traffic: the SAME exchange's trace is present (the ephemeral
+    // full-detail counterpart) — though even there, only `body_present: bool`
+    // is captured, never the body content itself (see `DebugTrace`'s docs).
+    assert_eq!(app.traffic.len(), 1);
+    assert!(
+        !app.traffic[0]
+            .trace
+            .as_ref()
+            .unwrap()
+            .resolved_display
+            .body_present
+    );
+}
+
+/// `<leader>D` flips the session debug-capture toggle; the statusline badge
+/// follows it.
+#[test]
+fn debug_toggle_flips_flag_and_badge() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    assert!(!app.debug_enabled, "off by default");
+    press(&mut app, ' ');
+    app.handle_key(shift('D')).unwrap();
+    assert!(app.debug_enabled, "<leader>D turns debug capture on");
+    press(&mut app, ' ');
+    app.handle_key(shift('D')).unwrap();
+    assert!(!app.debug_enabled, "<leader>D again turns it back off");
+}
+
+// ---- debug-gated Advanced settings (M8.3 Wave 4) ----
+
+/// An Advanced concurrency override above `[load] max_concurrency` is refused
+/// by the SAME `load::check_config` guardrail a live run is checked against —
+/// the debug-gated Advanced UI cannot be used to bypass it.
+#[test]
+fn advanced_concurrency_above_guardrail_max_is_refused() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.debug_enabled = true;
+    app.load_caps.max_concurrency = 10;
+    app.open_options();
+    let Mode::Options(state) = &mut app.mode else {
+        panic!("expected Options mode");
+    };
+    state.row = crate::tui::components::options::OptionsRow::Advanced;
+    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
+    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap(); // begin edit (seeded with the current default)
+    for _ in 0..10 {
+        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "999".chars() {
+        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.advanced_limits.concurrency, 5,
+        "refused override must not change the resolved default"
+    );
+    let Mode::Options(state) = &app.mode else {
+        panic!("expected Options mode");
+    };
+    assert!(
+        state
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("refused")),
+        "footer must surface the refusal: {:?}",
+        state.message
+    );
+}
+
+/// A valid Advanced body-cap override applies live to `execute_options`, the
+/// same field a real send reads (`Self::send_request`).
+#[test]
+fn advanced_body_cap_override_applies_to_execute_options() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.debug_enabled = true;
+    app.open_options();
+    let Mode::Options(state) = &mut app.mode else {
+        panic!("expected Options mode");
+    };
+    state.row = crate::tui::components::options::OptionsRow::Advanced;
+    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
+    state.advanced_field = crate::tui::components::options::AdvancedField::BodyCapBytes;
+    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    for _ in 0..20 {
+        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "4096".chars() {
+        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.advanced_limits.body_cap_bytes, 4096);
+    assert_eq!(app.execute_options.max_body_bytes, 4096);
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
@@ -4713,6 +5066,84 @@ async fn load_cancel_aborts_the_batch_live() {
     );
 }
 
+/// Off-path zero-capture, proven live against a real load run: with debug
+/// OFF, `start_load_run`'s per-copy `capture.then(|| DebugTrace::from_request(...))`
+/// never builds a trace, so `on_load_result_traced` always lands `trace:
+/// None` and the session Traffic feed stays empty regardless of how many
+/// copies ran. With debug ON, the SAME run populates Traffic — one entry per
+/// completed copy — proving the sink actually reaches the loop rather than
+/// being silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_run_traffic_feed_gated_by_debug_enabled() {
+    use churl_core::http::{DEFAULT_TIMEOUT, build_client};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app(dir.path(), &format!("{}/ping", server.uri()));
+    app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
+    app.history = Some(HistoryStore::in_memory().unwrap());
+    {
+        let cfg = &mut app.load_runner_mut().unwrap().cfg;
+        cfg.total = 3;
+        cfg.concurrency = 3;
+        cfg.interval = Duration::ZERO;
+    }
+
+    // Debug OFF: zero-capture — Traffic stays empty after a full run.
+    app.debug_enabled = false;
+    app.start_load_run();
+    drain_until_load_run_settles(&mut app).await;
+    assert!(
+        app.traffic.is_empty(),
+        "debug off must never populate Traffic: {:?}",
+        app.traffic
+    );
+
+    // Debug ON: the same run populates Traffic, one entry per copy.
+    app.debug_enabled = true;
+    app.open_load_runner();
+    {
+        let cfg = &mut app.load_runner_mut().unwrap().cfg;
+        cfg.total = 3;
+        cfg.concurrency = 3;
+        cfg.interval = Duration::ZERO;
+    }
+    app.start_load_run();
+    drain_until_load_run_settles(&mut app).await;
+    assert_eq!(
+        app.traffic.len(),
+        3,
+        "debug on must capture one Traffic entry per completed copy"
+    );
+    assert!(app.traffic.iter().all(|e| e.trace.is_some()));
+}
+
+/// Drives `app`'s channel until the open load run finishes (or a generous
+/// bound elapses), applying every landed [`AppMsg`] exactly as the real event
+/// loop's `self.rx.recv()` arm would — needed here because this unit test
+/// runs the spawned launcher task without the real `App::run` loop polling
+/// `rx` for it.
+async fn drain_until_load_run_settles(app: &mut App) {
+    for _ in 0..200 {
+        if app.load_runner().is_some_and(|r| !r.running) {
+            return;
+        }
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(50), app.rx.recv()).await
+        {
+            app.handle_msg(msg);
+        }
+    }
+    panic!("load run did not settle in time");
+}
+
 // ---- Buffer refactor (Stage 1) unit tests ----
 
 /// Builds a `SelectedEndpoint` with the given file + body for buffer tests.
@@ -5256,7 +5687,7 @@ async fn on_response_routes_by_generation_to_matching_buffer() {
     app.active = 0;
 
     // A response for gen 9 must land on buffer 1 (NOT the active buffer 0).
-    app.on_response(9, Ok(response()), meta());
+    app.on_response(9, Ok(response()), meta(), None);
     assert!(
         matches!(
             app.buffers[1].as_endpoint().unwrap().response,
@@ -5273,7 +5704,7 @@ async fn on_response_routes_by_generation_to_matching_buffer() {
     ));
 
     // An unknown generation is dropped without touching any buffer.
-    app.on_response(42, Ok(response()), meta());
+    app.on_response(42, Ok(response()), meta(), None);
     assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
 }
 

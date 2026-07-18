@@ -80,13 +80,22 @@ impl App {
         let url = request.url.clone();
         let endpoint_path = self.endpoint_rel_path(&selected);
         self.load_request = Some(request);
+        // The default total/concurrency come from the debug-gated Advanced
+        // overrides when set (M8.3 Wave 4), else `LoadConfig::default`'s
+        // built-in gentle default — `Config::advanced_limits` already folds
+        // that fallback in, so this is correct with or without an override.
+        let cfg = LoadConfig {
+            total: self.advanced_limits.total,
+            concurrency: self.advanced_limits.concurrency,
+            ..LoadConfig::default()
+        };
         // One transition — construct the runner INTO the mode. No parallel
         // `load_runner` field, so `(Mode::LoadRunner, None)` is unrepresentable.
         self.mode = Mode::LoadRunner(LoadRunnerState::new(
             selected.endpoint.name.clone(),
             url,
             endpoint_path,
-            LoadConfig::default(),
+            cfg,
         ));
     }
 
@@ -120,6 +129,17 @@ impl App {
         let total = cfg.total;
         let concurrency = cfg.concurrency.max(1);
         let interval = cfg.interval;
+        // A capture sink is built PER COPY only when `debug_enabled` — off
+        // reaches `execute_traced(..., None)` with no `DebugTrace` ever
+        // allocated, matching every other capture site's zero-overhead
+        // discipline. This mirrors `churl_core::load::run_load`'s own
+        // per-copy `capture.then(|| DebugTrace::from_request(&request))` +
+        // `execute_traced` pattern — the live launcher stays hand-rolled
+        // (buffer_unordered fan-out streaming `LoadStarted` progress per
+        // copy, which `run_load`'s all-at-once return can't provide), but
+        // reuses the exact same core primitive so a debug-on load run is
+        // captured identically to `run_load`'s tested twin.
+        let capture = self.debug_enabled;
         let handle = tokio::spawn(async move {
             use futures::stream::StreamExt;
             let start = Instant::now();
@@ -145,14 +165,21 @@ impl App {
                                 index,
                             })
                             .await;
-                        let outcome = churl_core::http::execute(&client, &request, &options)
-                            .await
-                            .map_err(|err| err.to_string());
+                        let mut trace = capture.then(|| DebugTrace::from_request(&request));
+                        let outcome = churl_core::http::execute_traced(
+                            &client,
+                            &request,
+                            &options,
+                            trace.as_mut(),
+                        )
+                        .await
+                        .map_err(|err| err.to_string());
                         let _ = tx
                             .send(AppMsg::LoadResult {
                                 run_generation,
                                 index,
                                 outcome,
+                                trace: trace.map(Box::new),
                             })
                             .await;
                     }
@@ -182,14 +209,31 @@ impl App {
         }
     }
 
-    /// Lands a completed copy: drops stale results, classifies (mirroring the core
-    /// `classify` seam), records it + recomputes stats, and — when the last copy
-    /// lands — finishes the run and writes the batch summary.
+    /// Lands a completed copy with no captured trace — thin wrapper over
+    /// [`Self::on_load_result_traced`] kept so the many existing 3-arg call
+    /// sites (tests driving the runner directly, without a real debug-traced
+    /// send) stay unchanged.
+    #[cfg(test)]
     pub(in crate::tui::app) fn on_load_result(
         &mut self,
         run_generation: u64,
         index: usize,
         outcome: Result<Response, String>,
+    ) {
+        self.on_load_result_traced(run_generation, index, outcome, None);
+    }
+
+    /// Lands a completed copy: drops stale results, classifies (mirroring the core
+    /// `classify` seam), records it + recomputes stats, and — when the last copy
+    /// lands — finishes the run and writes the batch summary. `trace` is `Some`
+    /// only when debug capture was on for the run (see [`Self::start_load_run`]);
+    /// it feeds the session Traffic feed and is otherwise a no-op.
+    pub(in crate::tui::app) fn on_load_result_traced(
+        &mut self,
+        run_generation: u64,
+        index: usize,
+        outcome: Result<Response, String>,
+        trace: Option<Box<DebugTrace>>,
     ) {
         let Some(runner) = self.load_runner_mut() else {
             return;
@@ -199,6 +243,7 @@ impl App {
         }
         let view_gen = runner.next_view_gen();
         let url = runner.url.clone();
+        let endpoint_label = runner.endpoint_label.clone();
         // (borrow continues below; `done` is computed then the borrow is dropped
         //  before the `&mut self` follow-up so the runner state now living in
         //  `self.mode` doesn't alias the summary write.)
@@ -233,6 +278,13 @@ impl App {
                 ReqOutcome::Error(error),
             ),
         };
+        // Computed before `record_result` consumes `status` below.
+        let traffic_outcome = match &status {
+            LoadStatus::Ok(code) => TrafficOutcome::Ok(*code),
+            LoadStatus::Failed(code) => TrafficOutcome::Failed(*code),
+            _ => TrafficOutcome::Error,
+        };
+        let ms = timing.map(|d| d.as_millis() as u64);
         let done = runner.record_result(index, status, timing, response, req_outcome);
         if done {
             runner.running = false;
@@ -240,6 +292,20 @@ impl App {
         }
         // Runner borrow (into `self.mode`) ends here; the batch-finish follow-up
         // touches other `self` fields, so it runs after the borrow is dropped.
+        if let Some(trace) = trace {
+            let label = format!("{endpoint_label} #{index}");
+            tracing::debug!(
+                target: "churl::load",
+                method = %trace.resolved_display.method,
+                url = %trace.resolved_display.url,
+                ms,
+                "{label}"
+            );
+            traffic::push(
+                &mut self.traffic,
+                TrafficEntry::new(label, traffic_outcome, ms, *trace),
+            );
+        }
         if done {
             self.load_abort = None;
             self.write_load_summary(false);
@@ -329,6 +395,29 @@ impl App {
     /// construction). The key is handled inside the `&mut self.mode` borrow, which
     /// is dropped (via the owned `outcome`) before any `&mut self` method runs.
     pub(in crate::tui::app) fn handle_load_runner_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Narrow leader-from-runner allowlist (M8.3 Wave 4): the leader key
+        // is otherwise only reachable from `Mode::Normal` (see
+        // `Self::handle_normal_key`), so the debug overlays could not be
+        // opened from inside a runner even though the spec requires
+        // park-and-return for them. Intercepted BEFORE the response-key/
+        // runner routing below so it can't be shadowed by either. See
+        // `Self::runner_leader_pending`'s doc for why this is a narrow
+        // one-shot flag rather than engaging the general `self.leader` state
+        // machine (which would broaden every leader-root action's
+        // reachability, not just the two debug overlays).
+        //
+        // Suppressed while the inline numeric config-field editor owns the
+        // keyboard: the leader key is Space by default, and although Space is
+        // not a valid digit, arming the intercept would eat the NEXT digit
+        // (consumed by `handle_runner_leader_key` as an unrecognized chord).
+        // Mirrors `handle_sequence_key`'s identical text-capture guard.
+        let editing = self
+            .load_runner()
+            .is_some_and(LoadRunnerState::is_capturing_text);
+        if self.keymap.is_leader(key) && !editing {
+            self.runner_leader_pending = true;
+            return Ok(());
+        }
         // Response-region keys route through the shared response path FIRST (note
         // #2); anything not a response action delegates to the runner below.
         if self.try_route_runner_response_key(key) {

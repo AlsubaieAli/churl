@@ -34,6 +34,12 @@ pub struct StatusCtx<'a> {
     /// succeeds — unlike the auto-expiring message row, so a persistent SQLite
     /// failure can't scroll past unnoticed ("fail loud").
     pub history_failing: bool,
+    /// Whether debug capture is on this session (`<leader>D`): draws a steady
+    /// "DEBUG" flag, same placement rule as the insecure badge — always
+    /// visible while on, never a transient toast, so a debug-instrumented
+    /// session (extra per-request work, and a captured trace held in memory)
+    /// can never be mistaken for a plain one.
+    pub debug_enabled: bool,
     /// Monotonic tick counter (drives the spinner frame).
     pub tick_count: u64,
     /// The colour theme.
@@ -74,6 +80,12 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: StatusCtx) {
     if ctx.insecure {
         spans.push(Span::styled(" · ⚠ TLS OFF", ctx.theme.status_error));
     }
+    // The DEBUG badge: steady, non-error accent (debug is opt-in, not a
+    // fault) — placed beside the insecure flag so both "the session is not
+    // running plain" indicators live together.
+    if ctx.debug_enabled {
+        spans.push(Span::styled(" · DEBUG", ctx.theme.accent));
+    }
     spans.push(Span::raw(tail));
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(ctx.theme.statusline),
@@ -88,6 +100,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn render_line(history_failing: bool) -> String {
+        render_line_with(history_failing, false)
+    }
+
+    fn render_line_with(history_failing: bool, debug_enabled: bool) -> String {
         let theme = Theme::dark();
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -104,6 +120,7 @@ mod tests {
                         in_flight: false,
                         insecure: false,
                         history_failing,
+                        debug_enabled,
                         tick_count: 0,
                         theme: &theme,
                     },
@@ -122,5 +139,13 @@ mod tests {
         // shows no flag; a failing one shows the sticky, persistent warning.
         assert!(!render_line(false).contains("history not recording"));
         assert!(render_line(true).contains("⚠ history not recording"));
+    }
+
+    #[test]
+    fn debug_badge_shows_only_when_enabled() {
+        // Every existing (non-debug) snapshot has `debug_enabled: false`
+        // implicitly — no badge, byte-identical to pre-M8.3.
+        assert!(!render_line_with(false, false).contains("DEBUG"));
+        assert!(render_line_with(false, true).contains("DEBUG"));
     }
 }

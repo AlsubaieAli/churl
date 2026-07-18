@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
 use churl_core::cookies::ChurlCookieJar;
+use churl_core::debug::DebugTrace;
 use churl_core::history::{
     CookieJarWriter, HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path,
 };
@@ -47,26 +48,31 @@ use churl_core::secrets::SecretPolicy;
 use super::clipboard;
 use super::components::env_editor::{EnvEditorState, EnvKeyOutcome, EnvSaveResult};
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
+use super::components::inspector::InspectorState;
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
+use super::components::log_panel::LogPanelState;
 use super::components::message::Message;
 use super::components::options::{OptionsOutcome, OptionsState};
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{
     ResponseGeometry, ResponseMeta, ResponseState, ResponseView, ViewMode,
 };
+use super::components::traffic::{self, TrafficEntry, TrafficOutcome};
 use churl_core::sequence::StepResult;
 
 use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, load_runner, message, method_menu, options, palette, picker,
-    prompt, request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
+    env_editor, explorer, help, inspector, load_runner, log_panel, message, method_menu, options,
+    palette, picker, prompt, request, response, sequence_editor, sequence_runner, statusline,
+    tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
+use super::log_subscriber::LogRing;
 use super::theme::Theme;
 
 /// Builds an `EditorState` seeded with `text`, wired to edtui's in-memory
@@ -201,6 +207,52 @@ pub struct App {
     /// payload for the duration of the overlay (moved in/out via `mem::replace`),
     /// and `load_runner()`/`active_response_surface` consult it while searching.
     body_search_return: Mode,
+    /// The mode to restore when the Inspector overlay closes, PARKED here
+    /// while `Mode::Inspector` is active — mirrors [`Self::body_search_return`].
+    /// The Inspector can be opened over any mode (e.g. `Mode::LoadRunner`), so
+    /// closing it must restore that exact mode, state intact, via
+    /// `mem::replace` rather than dropping it.
+    inspector_return: Mode,
+    /// Whether debug capture is on for this session (`<leader>D`; seeded from
+    /// `Config.debug` at startup by [`Self::install_runtime`]). Gates whether
+    /// [`Self::send_request`] builds a [`DebugTrace`] — off is the exact
+    /// pre-M8.3 path (no trace ever constructed). Drives the statusline DEBUG
+    /// badge.
+    pub(in crate::tui::app) debug_enabled: bool,
+    /// The most recently captured exchange's trace, if debug capture was on
+    /// for that exchange — the Inspector's default view. `None` both before
+    /// any send and after a debug-off send (a stale trace from an earlier
+    /// exchange would be misleading, so a debug-off send clears this rather
+    /// than leaving the previous one showing). Boxed to match
+    /// [`AppMsg::Response`]'s `trace` field (see its doc comment) — moved in
+    /// from there without a re-box.
+    latest_trace: Option<Box<DebugTrace>>,
+    /// The session Traffic feed (M8.3 Wave 4): every captured exchange this
+    /// session — standalone sends, and every copy/step of a load/sequence
+    /// run — while [`Self::debug_enabled`] was on. Ephemeral (never
+    /// persisted) and bounded (see [`super::components::traffic`]); the
+    /// Inspector browses it with `n`/`N`. Unlike [`Self::latest_trace`],
+    /// never cleared by a debug-off send — Traffic is deliberately full
+    /// session history, not a "most recent exchange" pointer.
+    pub(in crate::tui::app) traffic: std::collections::VecDeque<TrafficEntry>,
+    /// The mode to restore when the Log panel overlay closes, PARKED here
+    /// while `Mode::LogPanel` is active — mirrors [`Self::inspector_return`].
+    log_return: Mode,
+    /// Shared handle to the bounded `tracing` ring the Log panel renders.
+    /// Inert (no attached subscriber, gate off) until [`super::run`] installs
+    /// the real one via [`Self::set_log_ring`] — snapshot-test `App`s never
+    /// call that, so they render an always-empty Log panel, consistent with
+    /// [`Self::client`]'s `None` under `TestBackend`.
+    pub(in crate::tui::app) log_ring: LogRing,
+    /// One-shot flag: the leader key was pressed while a load/sequence
+    /// runner mode was active (see [`Self::handle_load_runner_key`] /
+    /// [`Self::handle_sequence_key`]'s narrow leader intercept). The *next*
+    /// key is checked against ONLY the two debug-overlay leader chords
+    /// (`<leader>d`/`<leader>L`) in [`Self::handle_runner_leader_key`); any
+    /// other key cancels silently. Deliberately NOT the general
+    /// `self.leader` state machine — that would make every leader-root
+    /// action reachable from runner mode, not just the two debug overlays.
+    runner_leader_pending: bool,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
     /// History store; `None` when disabled (open failed or no data dir).
@@ -302,6 +354,14 @@ pub struct App {
     load_abort: Option<AbortHandle>,
     /// Concurrent-load guardrail caps (from `[load]` config, or defaults).
     load_caps: churl_core::load::LoadCaps,
+    /// Debug-gated Advanced-limit overrides (M8.3 Wave 4): a new load run's
+    /// default concurrency/total, the body-size cap, and the timeout.
+    /// Session-scoped, mirroring `session_proxy`'s pattern — seeded from
+    /// `Config::advanced_limits` in [`Self::install_runtime`], live-editable
+    /// from the Options overlay's Advanced section (reachable only when
+    /// [`Self::debug_enabled`]), never written back to `config.toml` by the
+    /// app itself.
+    pub(in crate::tui::app) advanced_limits: churl_core::config::ResolvedAdvancedLimits,
     /// The load runner's request, resolved ONCE at open time and cloned for every
     /// copy in a run (consistent batch — no per-copy re-resolution).
     load_request: Option<Request>,
@@ -540,6 +600,13 @@ impl App {
             pending_clipboard: None,
             body_search_editor: LineEditor::default(),
             body_search_return: Mode::Normal,
+            inspector_return: Mode::Normal,
+            debug_enabled: false,
+            latest_trace: None,
+            traffic: std::collections::VecDeque::new(),
+            log_return: Mode::Normal,
+            log_ring: LogRing::inert(super::log_subscriber::LOG_RING_CAPACITY),
+            runner_leader_pending: false,
             highlight_tx: None,
             history: None,
             message: None,
@@ -568,6 +635,7 @@ impl App {
             sequence_abort: None,
             load_abort: None,
             load_caps: churl_core::load::LoadCaps::default(),
+            advanced_limits: churl_core::config::Config::default().advanced_limits(),
             load_request: None,
             session_vars: HashMap::new(),
             client_timeout: DEFAULT_TIMEOUT,
@@ -880,6 +948,39 @@ impl App {
         }
     }
 
+    /// Opens the Inspector overlay directly over `trace` (tests / snapshot
+    /// drivers) — mirrors [`Self::set_response`]'s seam for the response
+    /// viewer: bypasses a real send (which needs a live HTTP exchange to
+    /// produce redirect hops / errors) so a snapshot can drive a
+    /// representative trace deterministically.
+    pub fn open_inspector_with_trace(&mut self, trace: DebugTrace) {
+        self.latest_trace = Some(Box::new(trace));
+        self.open_inspector();
+    }
+
+    /// Pushes synthetic events directly into the Log ring (tests / snapshot
+    /// drivers) — mirrors [`Self::open_inspector_with_trace`]'s bypass
+    /// seam: the real `tracing` subscriber is attached only once, by
+    /// [`super::run`], and never under `TestBackend`, so this is the only
+    /// way to drive the Log panel deterministically outside a real session.
+    pub fn seed_log_ring_for_test(
+        &mut self,
+        events: impl IntoIterator<Item = super::log_subscriber::LogEvent>,
+    ) {
+        for event in events {
+            self.log_ring.push(event);
+        }
+    }
+
+    /// Pushes `entry` directly into the session Traffic feed (tests /
+    /// snapshot drivers) — same bypass rationale as
+    /// [`Self::open_inspector_with_trace`]/[`Self::seed_log_ring_for_test`]:
+    /// no live HTTP exchange is available in a snapshot test, so this drives
+    /// the Traffic-backed Inspector browse UX deterministically.
+    pub fn push_traffic_for_test(&mut self, entry: TrafficEntry) {
+        traffic::push(&mut self.traffic, entry);
+    }
+
     /// Loads an endpoint into a single active buffer (test/white-box entry point;
     /// production code goes through [`App::open_or_focus_buffer`]).
     #[cfg(test)]
@@ -1134,7 +1235,14 @@ impl App {
                     state.paste(&s);
                 }
             }
-            Mode::Jump | Mode::MethodMenu | Mode::Confirm(_) => {}
+            // The Inspector and Log panel are read-only (no text-input
+            // surface), same as Jump/MethodMenu/Confirm — a paste while
+            // either is open has nowhere to land.
+            Mode::Jump
+            | Mode::MethodMenu
+            | Mode::Confirm(_)
+            | Mode::Inspector(_)
+            | Mode::LogPanel(_) => {}
             Mode::Normal => self.handle_paste_normal(text),
         }
     }
@@ -1222,6 +1330,16 @@ impl App {
         self.secret_policy = policy;
     }
 
+    /// Wires the REAL `tracing` ring built by [`super::log_subscriber::init`]
+    /// (attached exactly once at TUI startup) into the app, replacing the
+    /// inert placeholder [`App::new`] seeded. The ring has no runtime gate of
+    /// its own — debug on/off is enforced at the emit sites, and the
+    /// attached layer's target filter keeps third-party logs out (see
+    /// [`super::log_subscriber`]'s docs).
+    pub fn set_log_ring(&mut self, ring: LogRing) {
+        self.log_ring = ring;
+    }
+
     /// Installs the runtime-dependent pieces: the HTTP client (with the
     /// config-resolved timeout), the execution options (body-size cap), the
     /// off-thread highlight worker, and the history store. Called from
@@ -1234,11 +1352,21 @@ impl App {
         cli_proxy: Option<String>,
         cli_insecure: bool,
     ) -> Result<()> {
+        // M8.3 Wave 4: resolve the debug-gated advanced-limit overrides
+        // BEFORE `execute_options`/`client_timeout` are built from them, so a
+        // persisted `[advanced]` override (hand-edited `config.toml`, or a
+        // prior session's Options-overlay edit — never written back by the
+        // app itself today) takes effect from the very first send.
+        self.advanced_limits = config.advanced_limits();
         self.execute_options = ExecuteOptions {
-            max_body_bytes: config.max_body_bytes(),
+            max_body_bytes: self.advanced_limits.body_cap_bytes,
             redirect: config.redirect()?,
         };
         self.load_caps = config.load_caps();
+        // M8.3: seed the session debug-capture toggle from the persisted
+        // config knob; `<leader>D` flips it live for the rest of the session
+        // without writing back to `config.toml` (mirrors `session_insecure`).
+        self.debug_enabled = config.debug;
         // A spawn failure degrades to plain rendering: `spawn` returns
         // `None`, `highlight_tx` stays `None`, and every render site already guards
         // on `if let Some(tx) = &app.highlight_tx`, so the viewer renders fine.
@@ -1275,7 +1403,7 @@ impl App {
         }
 
         // Resolve the M8 session controls, then build the client from them.
-        self.client_timeout = config.timeout();
+        self.client_timeout = Duration::from_secs(self.advanced_limits.timeout_secs);
         let ws_proxy = self
             .workspace
             .as_ref()
@@ -1558,6 +1686,16 @@ impl App {
         if self.leader.is_some() {
             return self.handle_leader_key(key);
         }
+        // The narrow leader-from-runner allowlist (M8.3 Wave 4, see
+        // `Self::runner_leader_pending`'s doc): the leader key was pressed
+        // while a load/sequence runner mode was active, and this is the
+        // follow-up key. Checked here, before the mode match below, so it
+        // takes precedence over the runner's own key handling exactly like
+        // the general `self.leader` case above — but resolves against ONLY
+        // the two debug-overlay chords, never the full leader menu.
+        if self.runner_leader_pending {
+            return self.handle_runner_leader_key(key);
+        }
         // `Mode` is non-`Copy`, so match by reference and dispatch. The
         // payload-carrying overlay arms (`EnvEditor`/`LoadRunner`) delegate to a
         // handler that re-borrows the state out of `self.mode` itself; the small
@@ -1588,6 +1726,14 @@ impl App {
             Mode::Options(_) => self.handle_options_key(key),
             Mode::Sequence { .. } => self.handle_sequence_key(key),
             Mode::LoadRunner(_) => self.handle_load_runner_key(key),
+            Mode::Inspector(_) => {
+                self.handle_inspector_key(key);
+                Ok(())
+            }
+            Mode::LogPanel(_) => {
+                self.handle_log_panel_key(key);
+                Ok(())
+            }
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1793,6 +1939,9 @@ impl App {
             Action::OpenOptions => self.open_options(),
             Action::ToggleInsecure => self.toggle_insecure(),
             Action::ToggleEndpointInsecure => self.toggle_endpoint_insecure(),
+            Action::OpenInspector => self.open_inspector(),
+            Action::ToggleDebug => self.toggle_debug(),
+            Action::OpenLogPanel => self.open_log_panel(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

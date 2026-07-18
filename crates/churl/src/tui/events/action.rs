@@ -57,6 +57,15 @@ pub enum Action {
     OpenOptions,
     /// Toggle insecure-TLS (certificate verification off/on) for the session.
     ToggleInsecure,
+    /// Open the debug Inspector overlay over the latest exchange's captured
+    /// trace (a placeholder when none was captured).
+    OpenInspector,
+    /// Toggle session debug capture on/off — gates whether a send builds a
+    /// `DebugTrace` the Inspector can show.
+    ToggleDebug,
+    /// Open the debug Log panel overlay: a scrollable view of the bounded
+    /// `tracing` ring captured while debug capture is on.
+    OpenLogPanel,
     /// Toggle the selected endpoint's durable insecure-TLS opt-in (persisted onto
     /// the endpoint file), distinct from the session-wide [`Action::ToggleInsecure`].
     ToggleEndpointInsecure,
@@ -287,6 +296,17 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
         Action::ToggleInsecure,
         "toggle-insecure",
         "toggle insecure TLS (verify off/on)",
+    ),
+    (
+        Action::OpenInspector,
+        "open-inspector",
+        "debug inspector (request · vars · redirects)",
+    ),
+    (Action::ToggleDebug, "toggle-debug", "toggle debug capture"),
+    (
+        Action::OpenLogPanel,
+        "open-log-panel",
+        "debug log panel (tracing ring)",
     ),
     (
         Action::ToggleEndpointInsecure,

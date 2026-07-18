@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snap
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ use┏ Inspector — tab sections · y copy curl (masked) · q/esc close┓───────┘
+│       ┃ Request  Vars  Redirects  Decisions  Error                   ┃───────┐
+│       ┃1. 301 https://api.test/orders → https://api.example/v2/orders┃       │
+│       ┃   cross-origin                                               ┃       │
+│       ┃   stripped headers: Authorization                            ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃───────┘
+│       ┃                                                              ┃───────┐
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+└───────┃                                                              ┃       │
+┌ Sequen┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

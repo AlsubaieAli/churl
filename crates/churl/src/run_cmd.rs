@@ -22,9 +22,11 @@ pub struct RunArgs {
     pub profile: Option<String>,
     pub proxy: Option<String>,
     pub insecure: bool,
-    /// `-v`/`--verbose`: print the resolved endpoint file path to stderr
+    /// `-v`/`--verbose`: prints the resolved endpoint file path to stderr
     /// before executing (human mode only — `headless::print_human` covers
-    /// the rest of the request/response trace).
+    /// the rest of the request/response trace); ALSO gates capturing a
+    /// `DebugTrace` into `data.trace` under `--json` (see
+    /// [`run_execution`]'s `capture` flag) — the sole capture gate, M8.3.
     pub verbose: bool,
     /// Raw `--assert` flag strings, parsed and appended after the resolved
     /// endpoint's own persisted `[[assertions]]`.
@@ -100,5 +102,12 @@ pub async fn run(args: RunArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exec
     let mut assertions = resolved.endpoint.assertions;
     assertions.extend(crate::headless::parse_cli_assertions(&args.cli_asserts)?);
 
-    run_execution(resolved.endpoint.request, scopes, inputs, &assertions).await
+    run_execution(
+        resolved.endpoint.request,
+        scopes,
+        inputs,
+        &assertions,
+        args.verbose,
+    )
+    .await
 }

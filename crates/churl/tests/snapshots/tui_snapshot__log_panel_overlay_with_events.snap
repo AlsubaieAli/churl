@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snap
+---
+┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
+│> ▸ orders                  ││no endpoint selected                            │
+│  ▸ use┏ Log — 2 events · j/k scroll · g/G top/bottom · q/esc close ━━┓───────┘
+│       ┃DEBUG churl::send: GET https://api.test/orders status=200 ms=1┃───────┐
+│       ┃ERROR churl::load: load #4 connection refused                 ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃───────┘
+│       ┃                                                              ┃───────┐
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+│       ┃                                                              ┃       │
+└───────┃                                                              ┃       │
+┌ Sequen┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ EXPLORER · demo · ? help · space leader · / search · : palette

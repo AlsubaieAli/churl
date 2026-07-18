@@ -146,6 +146,20 @@ pub struct Config {
     /// overrides it upward. Resolved via [`Config::cookies`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cookies: bool,
+    /// Master debug toggle (M8.3): opt-in, persisted, default off. `false`
+    /// unless set. Gates the Inspector overlay, Log panel, Traffic feed, and
+    /// debug-only advanced settings (later waves); OFF means zero
+    /// trace-capture overhead (`crate::debug`/`crate::http::execute_traced`'s
+    /// `sink: None` path).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug: bool,
+    /// Debug-gated advanced-limit overrides under an `[advanced]` table (M8.3
+    /// Wave 4): default load-run concurrency/total, response body-size cap,
+    /// and per-request timeout. Deferred from Wave 1's `debug` knob (ruling
+    /// 6) — reachable only through the Options overlay's Advanced section
+    /// when [`Config::debug`] is on. Resolved via [`Config::advanced_limits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<AdvancedSection>,
 }
 
 /// The `[load]` config table: optional per-field overrides of the load-run
@@ -165,6 +179,46 @@ pub struct LoadSection {
     /// Override for `max_concurrency`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
+}
+
+/// The `[advanced]` config table (M8.3 Wave 4, debug-gated): optional
+/// overrides for the four "advanced/dangerous" knobs surfaced in the Options
+/// overlay's Advanced section — a NEW load run's default concurrency/total
+/// (overriding [`crate::load::LoadConfig::default`]), the response body-size
+/// cap, and the per-request timeout. A missing field falls back to the
+/// existing default for that knob (see [`Config::advanced_limits`]). Mirrors
+/// [`LoadSection`]'s override-over-default shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdvancedSection {
+    /// Override for a new load run's default concurrency. Still refused above
+    /// `[load] max_concurrency` by [`crate::load::check_config`] even when set
+    /// here — this only changes the *default* offered, not the guardrail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Override for a new load run's default total copies. Still refused
+    /// above `[load] max_total` — see `concurrency`'s doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+    /// Override for the response body-size cap, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_cap_bytes: Option<u64>,
+    /// Override for the per-request timeout, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Fully-resolved advanced-limit overrides — every field defaulted, ready for
+/// the session to apply. Returned by [`Config::advanced_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedAdvancedLimits {
+    /// A new load run's default concurrency.
+    pub concurrency: usize,
+    /// A new load run's default total copies.
+    pub total: usize,
+    /// The response body-size cap, in bytes.
+    pub body_cap_bytes: u64,
+    /// The per-request timeout, in seconds.
+    pub timeout_secs: u64,
 }
 
 /// Where the URL bar's `i`/`Enter` opens the editor: inline in the bar, or in a
@@ -304,6 +358,25 @@ impl Config {
                 max_total: section.max_total.unwrap_or(defaults.max_total),
                 max_concurrency: section.max_concurrency.unwrap_or(defaults.max_concurrency),
             },
+        }
+    }
+
+    /// The resolved advanced-limit overrides (M8.3 Wave 4): each `[advanced]`
+    /// field folded over the existing default for that knob — a new load
+    /// run's built-in `LoadConfig::default()` concurrency/total, and the
+    /// already-resolved [`Config::max_body_bytes`]/[`Config::timeout`]. An
+    /// absent `[advanced]` table yields those defaults verbatim, so the
+    /// session behaves exactly as before M8.3 until a value is explicitly
+    /// set (via the Advanced settings UI, hand-edited `config.toml`, or a
+    /// future M8.5 settings panel).
+    pub fn advanced_limits(&self) -> ResolvedAdvancedLimits {
+        let load_defaults = crate::load::LoadConfig::default();
+        let section = self.advanced.unwrap_or_default();
+        ResolvedAdvancedLimits {
+            concurrency: section.concurrency.unwrap_or(load_defaults.concurrency),
+            total: section.total.unwrap_or(load_defaults.total),
+            body_cap_bytes: section.body_cap_bytes.unwrap_or(self.max_body_bytes()),
+            timeout_secs: section.timeout_secs.unwrap_or(self.timeout().as_secs()),
         }
     }
 
@@ -1026,6 +1099,52 @@ mod tests {
         std::fs::write(&path, "[load]\nwarn_total = \"lots\"\n").unwrap();
         let err = load_config(&path).unwrap_err();
         assert!(err.to_string().contains("config.toml"), "{err}");
+    }
+
+    #[test]
+    fn config_advanced_limits_default_when_absent() {
+        let config = Config::default();
+        let limits = config.advanced_limits();
+        let load_defaults = crate::load::LoadConfig::default();
+        assert_eq!(limits.concurrency, load_defaults.concurrency);
+        assert_eq!(limits.total, load_defaults.total);
+        assert_eq!(limits.body_cap_bytes, crate::http::DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(limits.timeout_secs, crate::http::DEFAULT_TIMEOUT.as_secs());
+    }
+
+    #[test]
+    fn config_parses_advanced_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[advanced]\nconcurrency = 20\nbody_cap_bytes = 4096\n",
+        )
+        .unwrap();
+        let config = load_config(&path).unwrap();
+        let limits = config.advanced_limits();
+        let load_defaults = crate::load::LoadConfig::default();
+        assert_eq!(limits.concurrency, 20);
+        assert_eq!(limits.body_cap_bytes, 4096);
+        // Untouched knobs keep their existing defaults.
+        assert_eq!(limits.total, load_defaults.total);
+        assert_eq!(limits.timeout_secs, crate::http::DEFAULT_TIMEOUT.as_secs());
+    }
+
+    #[test]
+    fn config_parses_advanced_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[advanced]\nconcurrency = 8\ntotal = 200\nbody_cap_bytes = 2048\ntimeout_secs = 5\n",
+        )
+        .unwrap();
+        let limits = load_config(&path).unwrap().advanced_limits();
+        assert_eq!(limits.concurrency, 8);
+        assert_eq!(limits.total, 200);
+        assert_eq!(limits.body_cap_bytes, 2048);
+        assert_eq!(limits.timeout_secs, 5);
     }
 
     #[test]

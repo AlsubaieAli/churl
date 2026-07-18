@@ -33,11 +33,27 @@ impl App {
         let mut request = selected.endpoint.request.clone();
         overwrite_body_text(&mut request, body_text);
 
-        // Resolve `{{var}}` placeholders on the cloned request only — the seam is
-        // `substitute_request`; resolved values are never written to disk (this
-        // clone is discarded after the send). `execute()` stays substitution-free.
-        self.build_resolver(&selected)
-            .substitute_request(&mut request);
+        // A capture sink is built only when `debug_enabled` asked for one —
+        // debug off takes the exact pre-M8.3 path (no `DebugTrace` ever
+        // constructed), matching the zero-overhead discipline
+        // `churl_core::http::execute_traced` documents. Built BEFORE
+        // substitution and carried across the spawned send below (even a
+        // failed exchange), unlike headless's `run_execution`: its `?`
+        // early-return on a failed send drops the local trace before it can
+        // be attached; here the trace is owned by the async task and reaches
+        // `on_response` via `AppMsg::Response` regardless of outcome.
+        let mut trace = self
+            .debug_enabled
+            .then(|| Box::new(DebugTrace::from_request(&request)));
+
+        // Resolve `{{var}}` placeholders on the cloned request only — resolved
+        // values are never written to disk (this clone is discarded after the
+        // send). `execute()`/`execute_traced()` stay substitution-free.
+        let resolver = self.build_resolver(&selected);
+        match trace.as_mut() {
+            Some(trace) => resolver.substitute_request_traced(&mut request, &mut trace.var_steps),
+            None => resolver.substitute_request(&mut request),
+        }
 
         // Fail loud: refuse to send a request that still carries `{{var}}`
         // placeholders no scope resolved — a literal `{{...}}` in the URL/headers/
@@ -69,10 +85,31 @@ impl App {
         let tx = self.tx.clone();
         let task_meta = meta.clone();
         let options = self.execute_options;
+        // `execute_traced` has no access to the `ClientConfig` used to build
+        // `client` (see `AuthCookieProxyDecisions`'s docs) — the session
+        // fields are the one place both are in scope, so read them here
+        // (masking the proxy immediately) and fill the trace's decisions
+        // after the send, mirroring headless's `run_execution`.
+        let cookie_used = self.cookies_enabled;
+        let proxy_masked = self
+            .session_proxy
+            .as_deref()
+            .map(churl_core::secrets::mask_url);
         let handle = tokio::spawn(async move {
-            let outcome = churl_core::http::execute(&client, &request, &options)
-                .await
-                .map_err(|err| err.to_string());
+            let mut trace = trace;
+            let result =
+                churl_core::http::execute_traced(&client, &request, &options, trace.as_deref_mut())
+                    .await;
+            // Filled regardless of success/failure — unlike headless, this
+            // task holds the trace across the whole call (see the doc comment
+            // above `trace`'s construction), so a failed exchange still ends
+            // up with cookie/proxy decisions recorded alongside the error
+            // `execute_traced` already captured internally.
+            if let Some(trace) = trace.as_mut() {
+                trace.decisions.cookie_used = cookie_used;
+                trace.decisions.proxy = proxy_masked;
+            }
+            let outcome = result.map_err(|err| err.to_string());
             // Bounded channel: this is a spawned async task, so awaiting
             // on a full queue applies backpressure without stalling the UI thread.
             let _ = tx
@@ -80,6 +117,7 @@ impl App {
                     generation,
                     outcome,
                     meta: task_meta,
+                    trace,
                 })
                 .await;
         });
@@ -125,13 +163,15 @@ impl App {
                 generation,
                 outcome,
                 meta,
-            } => self.on_response(generation, outcome, meta),
+                trace,
+            } => self.on_response(generation, outcome, meta, trace),
             AppMsg::Highlighted { hash, lines } => self.cache_highlighted(hash, lines),
             AppMsg::SequenceStep {
                 run_generation,
                 index,
                 outcome,
-            } => self.on_sequence_step(run_generation, index, outcome),
+                trace,
+            } => self.on_sequence_step_traced(run_generation, index, outcome, trace),
             AppMsg::LoadStarted {
                 run_generation,
                 index,
@@ -140,7 +180,8 @@ impl App {
                 run_generation,
                 index,
                 outcome,
-            } => self.on_load_result(run_generation, index, outcome),
+                trace,
+            } => self.on_load_result_traced(run_generation, index, outcome, trace),
         }
     }
 
@@ -158,6 +199,7 @@ impl App {
         generation: u64,
         outcome: Result<Response, String>,
         meta: ResponseMeta,
+        trace: Option<Box<DebugTrace>>,
     ) {
         let Some(idx) = self.buffers.iter().position(|b| {
             b.as_endpoint()
@@ -166,9 +208,42 @@ impl App {
         }) else {
             return; // stale — no buffer awaits this generation
         };
+        // The Inspector's default view: this exchange's trace (or `None` when
+        // debug was off for it) — a stale/cancelled exchange never reaches
+        // this line (the early return above), so `latest_trace` only ever
+        // reflects an exchange that actually landed.
+        self.latest_trace = trace;
         // History write needs `&mut self`; compute status args before borrowing
         // the target buffer to store the response.
         let status = outcome.as_ref().ok().map(|r| (r.status, r.timing.total));
+        // Feed the session Traffic feed + the Log ring — both are debug-gated
+        // via the trace itself being `Some` only when `debug_enabled` was on
+        // at send time (see `Self::send_request`), so this costs nothing on
+        // the off path: no clone, no push, no tracing event.
+        if let Some(trace) = self.latest_trace.as_deref() {
+            let label = meta
+                .endpoint_path
+                .clone()
+                .unwrap_or_else(|| "(standalone send)".to_owned());
+            let ms = status.map(|(_, total)| total.as_millis() as u64);
+            let traffic_outcome = match &status {
+                Some((code, _)) if *code >= 400 => TrafficOutcome::Failed(*code),
+                Some((code, _)) => TrafficOutcome::Ok(*code),
+                None => TrafficOutcome::Error,
+            };
+            tracing::debug!(
+                target: "churl::send",
+                method = %trace.resolved_display.method,
+                url = %trace.resolved_display.url,
+                status = status.map(|(code, _)| code),
+                ms,
+                "{label}"
+            );
+            traffic::push(
+                &mut self.traffic,
+                TrafficEntry::new(label, traffic_outcome, ms, trace.clone()),
+            );
+        }
         match &outcome {
             Ok(_) => {
                 let (st, total) = status.expect("Ok outcome has status");

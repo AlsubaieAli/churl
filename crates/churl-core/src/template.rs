@@ -100,6 +100,82 @@ impl Resolver {
             }
         }
     }
+
+    /// The traced twin of [`Resolver::substitute_request`]: produces a
+    /// byte-identical `Request` mutation — both share the exact same
+    /// [`substitute_with`] scan and per-name resolution — while additionally
+    /// recording a [`crate::debug::VarStep`] into `sink` for every placeholder
+    /// that actually resolves. Header and param *names* are never substituted
+    /// (unchanged from `substitute_request`), so nothing is recorded for them.
+    pub fn substitute_request_traced(
+        &self,
+        req: &mut Request,
+        sink: &mut Vec<crate::debug::VarStep>,
+    ) {
+        req.url = self.substitute_traced(&req.url, sink);
+        for header in &mut req.headers {
+            header.value = self.substitute_traced(&header.value, sink);
+        }
+        for param in &mut req.params {
+            param.value = self.substitute_traced(&param.value, sink);
+        }
+        if let Some(body) = req.body.as_mut() {
+            body.content = self.substitute_traced(&body.content, sink);
+        }
+        if let Some(auth) = req.auth.as_mut() {
+            match auth {
+                Auth::Basic { username, password } => {
+                    *username = self.substitute_traced(username, sink);
+                    *password = self.substitute_traced(password, sink);
+                }
+                Auth::Bearer { token } => {
+                    *token = self.substitute_traced(token, sink);
+                }
+                Auth::ApiKey { name, value, .. } => {
+                    *name = self.substitute_traced(name, sink);
+                    *value = self.substitute_traced(value, sink);
+                }
+            }
+        }
+    }
+
+    /// Resolves a single variable name along with the scope that supplied it
+    /// (`None` = the process-environment fallback) — the traced twin of
+    /// [`Resolver::resolve`], returning the exact same value string so tracing
+    /// can never change what a placeholder resolves to.
+    fn resolve_with_scope(&self, name: &str) -> Option<(Option<&'static str>, String)> {
+        for scope in &self.scopes {
+            if let Some(value) = scope.vars.get(name) {
+                return Some((Some(scope.name), value.clone()));
+            }
+        }
+        std::env::var(name).ok().map(|value| (None, value))
+    }
+
+    /// The traced twin of [`Resolver::substitute`]: identical replacement via
+    /// the shared [`substitute_with`] scan (so the returned string is
+    /// byte-identical to `substitute`'s), plus a [`crate::debug::VarStep`]
+    /// pushed to `sink` for every placeholder that resolves. The recorded value
+    /// is masked with the same name+value dual anchor headers use
+    /// ([`crate::secrets::mask_header_value`]): a secret-*named* var
+    /// (`{{api_key}}`, `{{password}}`) is masked even when its value is short /
+    /// low-entropy, and any secret-*shaped* value is masked under any name.
+    /// Masking is display-only; the substitution itself always uses the real
+    /// value.
+    fn substitute_traced(&self, input: &str, sink: &mut Vec<crate::debug::VarStep>) -> String {
+        substitute_with(input, |name| {
+            let resolved = self.resolve_with_scope(name);
+            if let Some((scope, value)) = &resolved {
+                let value_masked = crate::secrets::mask_header_value(name, value);
+                sink.push(crate::debug::VarStep {
+                    name: name.to_owned(),
+                    scope: *scope,
+                    value_masked,
+                });
+            }
+            resolved.map(|(_, value)| value)
+        })
+    }
 }
 
 /// Names of every well-formed `{{name}}` placeholder still present in a
@@ -400,6 +476,110 @@ mod tests {
             }
             _ => panic!("wrong auth kind"),
         }
+    }
+
+    #[test]
+    fn substitute_request_traced_is_byte_identical_to_untraced() {
+        let resolver = Resolver::new(vec![scope(
+            "workspace",
+            &[
+                ("host", "api.test"),
+                ("hv", "app/json"),
+                ("pv", "42"),
+                ("body", "payload"),
+                ("user", "alice"),
+                ("pass", "s3cr3t"),
+                ("hname", "SHOULD_NOT_APPEAR"),
+                ("secret", "sk-live-abcdefghijklmnopqrstuvwx"),
+            ],
+        )]);
+        let build = || Request {
+            method: Method::Post,
+            url: "https://{{host}}/x?token={{secret}}".into(),
+            headers: vec![Header {
+                name: "{{hname}}".into(),
+                value: "{{hv}} {{secret}}".into(),
+                enabled: true,
+            }],
+            params: vec![Param {
+                name: "{{hname}}".into(),
+                value: "{{pv}}".into(),
+                enabled: true,
+            }],
+            body: Some(Body {
+                kind: BodyKind::Text,
+                content: "{{body}}".into(),
+            }),
+            auth: Some(Auth::Basic {
+                username: "{{user}}".into(),
+                password: "{{pass}}".into(),
+            }),
+            insecure: false,
+        };
+
+        let mut untraced = build();
+        resolver.substitute_request(&mut untraced);
+
+        let mut traced = build();
+        let mut var_steps = Vec::new();
+        resolver.substitute_request_traced(&mut traced, &mut var_steps);
+
+        // The mutation itself never diverges: same `Request`, byte-for-byte.
+        assert_eq!(traced, untraced, "traced substitution must match untraced");
+
+        // Every placeholder that resolved was recorded — url, header value,
+        // param value, body, and both auth fields (8 placeholders total; the
+        // header *name* `{{hname}}` and the param *name* `{{hname}}` are never
+        // substituted, so they contribute nothing).
+        let names: Vec<&str> = var_steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "host", "secret", "hv", "secret", "pv", "body", "user", "pass"
+            ],
+            "one VarStep per resolved placeholder, in substitution order"
+        );
+        assert!(
+            var_steps.iter().all(|s| s.scope == Some("workspace")),
+            "every value came from the workspace scope"
+        );
+
+        // The secret-shaped value is masked in the trace but the ACTUAL
+        // substitution still carries the real value (asserted above via the
+        // byte-identical `Request`).
+        for step in &var_steps {
+            if step.name == "secret" {
+                assert_eq!(step.value_masked, crate::secrets::SECRET_MASK);
+            }
+        }
+        assert!(traced.url.contains("sk-live-abcdefghijklmnopqrstuvwx"));
+    }
+
+    #[test]
+    fn substitute_traced_masks_secret_named_var_with_low_entropy_value() {
+        // `api_key` and `password` are secret-NAMED; their values are short /
+        // low-entropy, so a value-shape-only mask would miss them. The name
+        // anchor must fire regardless.
+        let resolver = Resolver::new(vec![scope(
+            "cli",
+            &[
+                ("api_key", "hunter2"),
+                ("password", "letmein"),
+                ("page", "2"),
+            ],
+        )]);
+        let mut req = req_with_url("https://h/x?k={{api_key}}&p={{password}}&page={{page}}");
+        let mut steps = Vec::new();
+        resolver.substitute_request_traced(&mut req, &mut steps);
+
+        let step = |n: &str| steps.iter().find(|s| s.name == n).expect("recorded");
+        assert_eq!(step("api_key").value_masked, crate::secrets::SECRET_MASK);
+        assert_eq!(step("password").value_masked, crate::secrets::SECRET_MASK);
+        // A non-secret var is shown as-is (no over-masking).
+        assert_eq!(step("page").value_masked, "2");
+        // The real values are still substituted onto the wire.
+        assert!(req.url.contains("k=hunter2"));
+        assert!(req.url.contains("p=letmein"));
     }
 
     /// A helper: a plain request whose only templatable content is `url`.

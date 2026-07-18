@@ -14,6 +14,7 @@ pub mod assert;
 pub mod auth;
 pub mod config;
 pub mod cookies;
+pub mod debug;
 pub mod export;
 pub mod history;
 pub mod http;

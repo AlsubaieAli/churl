@@ -12,8 +12,12 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn default_limits() -> ResolvedAdvancedLimits {
+    churl_core::config::Config::default().advanced_limits()
+}
+
 fn state_no_cookies() -> OptionsState {
-    OptionsState::new(None, false, false, Vec::new())
+    OptionsState::new(None, false, false, Vec::new(), false, default_limits())
 }
 
 fn state_with_cookies() -> OptionsState {
@@ -33,7 +37,14 @@ fn state_with_cookies() -> OptionsState {
                 value: "xyz".into(),
             },
         ],
+        false,
+        default_limits(),
     )
+}
+
+/// A state with debug capture on, so the Advanced row/field-list is reachable.
+fn state_debug_on() -> OptionsState {
+    OptionsState::new(None, false, false, Vec::new(), true, default_limits())
 }
 
 #[test]
@@ -53,6 +64,94 @@ fn row_navigation_clamps_at_ends() {
     assert_eq!(s.row, OptionsRow::Cookies, "down at bottom stays");
     s.handle_key(key(KeyCode::Char('k')));
     assert_eq!(s.row, OptionsRow::Tls);
+}
+
+#[test]
+fn advanced_row_unreachable_when_debug_off() {
+    let mut s = state_no_cookies();
+    for _ in 0..5 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    assert_eq!(
+        s.row,
+        OptionsRow::Cookies,
+        "Cookies stays the floor with debug off, Advanced never reached"
+    );
+}
+
+#[test]
+fn advanced_row_reachable_when_debug_on() {
+    let mut s = state_debug_on();
+    for _ in 0..3 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    assert_eq!(s.row, OptionsRow::Advanced);
+    // One more `j` at the floor stays.
+    s.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(s.row, OptionsRow::Advanced);
+    s.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(s.row, OptionsRow::Cookies);
+}
+
+#[test]
+fn advanced_field_edit_emits_apply_advanced() {
+    let mut s = state_debug_on();
+    s.row = OptionsRow::Advanced;
+    s.handle_key(key(KeyCode::Tab)); // descend into the field list
+    assert_eq!(s.focus, OptionsFocus::AdvancedList);
+    assert_eq!(s.advanced_field, AdvancedField::Concurrency);
+    s.handle_key(key(KeyCode::Enter)); // begin edit, seeded with the current value
+    assert!(s.advanced_editing.is_some());
+    for _ in 0..10 {
+        s.handle_key(key(KeyCode::Backspace)); // clear the seed
+    }
+    for c in "42".chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        s.handle_key(key(KeyCode::Enter)),
+        OptionsOutcome::ApplyAdvanced {
+            field: AdvancedField::Concurrency,
+            value: 42
+        }
+    );
+    assert!(s.advanced_editing.is_none(), "commit ends the edit");
+}
+
+#[test]
+fn advanced_field_edit_rejects_zero_and_non_numeric() {
+    let mut s = state_debug_on();
+    s.row = OptionsRow::Advanced;
+    s.focus = OptionsFocus::AdvancedList;
+    s.handle_key(key(KeyCode::Enter));
+    for _ in 0..10 {
+        s.handle_key(key(KeyCode::Backspace)); // clear the seed
+    }
+    s.handle_key(key(KeyCode::Char('0')));
+    assert_eq!(
+        s.handle_key(key(KeyCode::Enter)),
+        OptionsOutcome::Consumed,
+        "zero is rejected, not applied"
+    );
+    assert!(s.message.is_some());
+}
+
+#[test]
+fn advanced_field_navigation_cycles_all_four() {
+    let mut s = state_debug_on();
+    s.row = OptionsRow::Advanced;
+    s.focus = OptionsFocus::AdvancedList;
+    assert_eq!(s.advanced_field, AdvancedField::Concurrency);
+    s.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(s.advanced_field, AdvancedField::Total);
+    s.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(s.advanced_field, AdvancedField::BodyCapBytes);
+    s.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(s.advanced_field, AdvancedField::TimeoutSecs);
+    s.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(s.advanced_field, AdvancedField::Concurrency, "wraps");
+    s.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(s.focus, OptionsFocus::Rows, "h backs out to the row list");
 }
 
 #[test]
@@ -76,7 +175,14 @@ fn proxy_edit_emits_apply_with_typed_value() {
 
 #[test]
 fn empty_proxy_edit_clears_it() {
-    let mut s = OptionsState::new(Some("http://old:1".into()), false, false, Vec::new());
+    let mut s = OptionsState::new(
+        Some("http://old:1".into()),
+        false,
+        false,
+        Vec::new(),
+        false,
+        default_limits(),
+    );
     s.handle_key(key(KeyCode::Enter)); // open editor seeded with the old value
     // Wipe it out.
     for _ in 0..30 {

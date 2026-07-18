@@ -327,3 +327,51 @@ fn mask_url_no_secret_is_byte_identical() {
     // No query, no userinfo.
     assert_eq!(mask_url("https://host/plain"), "https://host/plain");
 }
+
+#[test]
+fn mask_secret_tokens_redacts_secret_shaped_body_value() {
+    let body = r#"{"token":"sk-live-abcdefghijklmnopqrstuvwx"}"#;
+    let masked = mask_secret_tokens(body);
+    assert!(
+        !masked.contains("sk-live-abcdefghijklmnopqrstuvwx"),
+        "raw secret leaked: {masked}"
+    );
+    assert!(masked.contains(SECRET_MASK), "mask token missing: {masked}");
+    // Structure/keys preserved.
+    assert!(masked.starts_with(r#"{"token":"#), "{masked}");
+    assert_eq!(masked, format!(r#"{{"token":"{SECRET_MASK}"}}"#));
+}
+
+#[test]
+fn mask_secret_tokens_preserves_structural_body() {
+    // No secret-shaped tokens → byte-identical (no over-masking).
+    let body = r#"{"page":1,"q":"orders"}"#;
+    assert_eq!(mask_secret_tokens(body), body);
+}
+
+#[test]
+fn mask_secret_tokens_masks_form_encoded_secret() {
+    let body = "grant_type=client_credentials&client_secret=ghp_ABCdef123456GHIjkl789MNOpqr";
+    let masked = mask_secret_tokens(body);
+    assert!(
+        !masked.contains("ghp_ABCdef123456GHIjkl789MNOpqr"),
+        "{masked}"
+    );
+    // Delimiters + non-secret tokens survive.
+    assert!(masked.starts_with("grant_type=client_credentials&client_secret="));
+    assert!(masked.ends_with(SECRET_MASK));
+}
+
+#[test]
+fn mask_secret_tokens_low_entropy_body_secret_is_the_documented_gap() {
+    // A low-entropy value under a secret-looking KEY is NOT caught — the body
+    // has no name anchor. Documented follow-up (reveal-gated real-curl).
+    let body = r#"{"password":"hunter2"}"#;
+    assert_eq!(mask_secret_tokens(body), body);
+}
+
+#[test]
+fn mask_secret_tokens_leaves_placeholder_untouched() {
+    let body = r#"{"token":"{{secret}}"}"#;
+    assert_eq!(mask_secret_tokens(body), body);
+}

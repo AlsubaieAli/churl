@@ -1590,6 +1590,266 @@ fn options_overlay_toggle_tls() {
     insta::assert_snapshot!(snap);
 }
 
+// ---- debug Inspector overlay (M8.3 Wave 3) ----
+
+/// A representative captured trace: a masked auth header + a masked
+/// `{{var}}` value, and a redirect hop that stripped the auth header on a
+/// cross-origin 301. Exercises every Inspector section against real content.
+fn traced_exchange() -> churl_core::debug::DebugTrace {
+    use churl_core::debug::{
+        AuthCookieProxyDecisions, DebugTrace, RedirectHop, ResolvedRequest, VarStep,
+    };
+    use churl_core::model::{Header, Method, Request};
+
+    let request = Request {
+        method: Method::Get,
+        url: "https://api.test/orders".to_owned(),
+        headers: Vec::new(),
+        params: Vec::new(),
+        body: None,
+        auth: None,
+        insecure: false,
+    };
+    let mut trace = DebugTrace::from_request(&request);
+    trace.resolved_display = ResolvedRequest {
+        method: Method::Get,
+        url: "https://api.test/orders".to_owned(),
+        headers: vec![Header {
+            name: "Authorization".to_owned(),
+            value: "••••••".to_owned(),
+            enabled: true,
+        }],
+        body_present: false,
+    };
+    trace.var_steps = vec![VarStep {
+        name: "token".to_owned(),
+        scope: Some("session"),
+        value_masked: "••••••".to_owned(),
+    }];
+    trace.redirect_hops = vec![RedirectHop {
+        from: "https://api.test/orders".to_owned(),
+        to: "https://api.example/v2/orders".to_owned(),
+        status: 301,
+        method_change: None,
+        cross_origin: true,
+        stripped_headers: vec!["Authorization".to_owned()],
+    }];
+    trace.decisions = AuthCookieProxyDecisions {
+        auth_injected: Some("Authorization".to_owned()),
+        cookie_used: true,
+        proxy: None,
+    };
+    trace
+}
+
+/// The Inspector's Request section: masked header value renders as
+/// `••••••`, never a raw secret.
+#[test]
+fn inspector_overlay_request_section_masks_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.open_inspector_with_trace(traced_exchange());
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("••••••"),
+        "a masked header value must render masked, never raw:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// Tabbing to the Redirects section shows the hop, its cross-origin flag, and
+/// the header stripped before following it.
+#[test]
+fn inspector_overlay_redirects_section_shows_stripped_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.open_inspector_with_trace(traced_exchange());
+    press(&mut app, KeyCode::Tab); // Request -> Vars
+    press(&mut app, KeyCode::Tab); // Vars -> Redirects
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("cross-origin") && snap.contains("stripped headers: Authorization"),
+        "the redirect hop's strip decision must be visible:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// Opening the Inspector with no captured trace (debug was off, or nothing
+/// sent yet) shows the placeholder — never panics, never shows stale data.
+#[test]
+fn inspector_overlay_no_trace_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('d'));
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    let snap = snapshot(&mut app);
+    assert!(snap.contains("no trace captured"));
+    insta::assert_snapshot!(snap);
+}
+
+/// `<leader>D` flips the session debug-capture toggle; the statusline shows
+/// a steady DEBUG badge while it's on. Existing non-debug snapshots (every
+/// other test in this file) never set this, so the badge stays absent there
+/// — byte-identical to pre-M8.3.
+#[test]
+fn statusline_debug_badge_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT))
+        .unwrap();
+    let snap = snapshot(&mut app);
+    assert!(snap.contains("DEBUG"), "the DEBUG badge must show:\n{snap}");
+    insta::assert_snapshot!(snap);
+}
+
+// ---- debug Log panel + Traffic feed + Advanced settings (M8.3 Wave 4) ----
+
+/// The Log panel (`<leader>L`) with no events captured yet — the placeholder
+/// path, never a panic.
+#[test]
+fn log_panel_overlay_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(matches!(app.mode, Mode::LogPanel(_)));
+    let snap = snapshot(&mut app);
+    assert!(snap.contains("no log events"), "placeholder:\n{snap}");
+    insta::assert_snapshot!(snap);
+}
+
+/// The Log panel rendering a few captured events, seeded via the test-only
+/// bypass (the real `tracing` subscriber is never attached outside a real
+/// session — see `App::seed_log_ring_for_test`'s doc).
+#[test]
+fn log_panel_overlay_with_events() {
+    use churl::tui::log_subscriber::LogEvent;
+    use tracing::Level;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.seed_log_ring_for_test([
+        LogEvent {
+            level: Level::DEBUG,
+            target: "churl::send".to_owned(),
+            message: "GET https://api.test/orders status=200 ms=12".to_owned(),
+        },
+        LogEvent {
+            level: Level::ERROR,
+            target: "churl::load".to_owned(),
+            message: "load #4 connection refused".to_owned(),
+        },
+    ]);
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT))
+        .unwrap();
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("churl::send") && snap.contains("connection refused"),
+        "both captured events must render:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// Parking-and-return: opening the Log panel over a load runner parks it
+/// (mirrors the Inspector's `inspector_parks_and_restores_runner_state`),
+/// and `q` restores the exact runner state on close.
+#[test]
+fn log_panel_parks_and_restores_load_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    // Move onto "users", expand it, move onto "List users", and select it —
+    // the load runner needs a loaded/hovered endpoint to open over (mirrors
+    // `three_panes_with_selected_endpoint`'s navigation).
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('l')); // load submenu
+    press(&mut app, KeyCode::Char('c')); // open the concurrent-load runner
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(
+        matches!(app.mode, Mode::LogPanel(_)),
+        "<leader>L reaches the Log panel from a load runner"
+    );
+    press(&mut app, KeyCode::Char('q'));
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "closing restores the parked runner"
+    );
+}
+
+/// The Options overlay's debug-gated Advanced section: only reachable with
+/// debug on (M8.3 Wave 4). Shows the four override fields with their
+/// resolved default values.
+#[test]
+fn options_overlay_advanced_section_when_debug_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT))
+        .unwrap(); // <leader>D turns debug capture on
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('o'));
+    // Down to Advanced (Proxy -> TLS -> Cookies -> Advanced), then into the list.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Tab);
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("concurrency") && snap.contains("timeout"),
+        "the four Advanced fields must render:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// The Inspector's Traffic browse UX: with more than one captured exchange,
+/// the title bar shows a `[i/N]` position and `n`/`N` moves the selection —
+/// exercised via synthetic Traffic entries (bypassing a real send, same
+/// rationale as `open_inspector_with_trace` — no live HTTP exchange in a
+/// snapshot test).
+#[test]
+fn inspector_overlay_traffic_browse_position() {
+    use churl::tui::components::traffic::{TrafficEntry, TrafficOutcome};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT))
+        .unwrap(); // <leader>D turns debug capture on
+    app.push_traffic_for_test(TrafficEntry::new(
+        "orders #1".to_owned(),
+        TrafficOutcome::Ok(200),
+        Some(10),
+        traced_exchange(),
+    ));
+    app.push_traffic_for_test(TrafficEntry::new(
+        "orders #2".to_owned(),
+        TrafficOutcome::Failed(500),
+        Some(20),
+        traced_exchange(),
+    ));
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('d'));
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("n/N traffic"),
+        "the traffic browse hint must show with >1 entry:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
 /// The sequences submenu popup: `Space s` shows add (`a`) / open (`space`) /
 /// run (`r`). The single sequence finder is `<leader>s <leader>`, mirroring
 /// `<leader><leader>` for endpoints (owner drive-test 2026-07-10 — the former

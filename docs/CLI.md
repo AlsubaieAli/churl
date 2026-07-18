@@ -37,6 +37,8 @@ Every `--json` invocation of `run`/`send`/`import` prints **exactly one** JSON o
 }
 ```
 
+`data.trace` (M8.3) is omitted from this shape by default — see "Debug trace (`-v`)" below; it appears only when `-v/--verbose` is given under `--json`.
+
 - `request.url` is the request's resolved `url` field (after `{{var}}` substitution), **with secrets masked** (see "Secret masking" below) — it does **not** include enabled query params or a query-placement auth effect appended by `churl_core::http::execute` (those are wire-only effects the current schema doesn't echo; a future schema version may add a dedicated `params` field).
 - `request.headers` lists only *enabled* headers (a disabled header is never sent, so it's never echoed), **with secrets masked**.
 - `response.headers` are echoed **verbatim, unmasked** — including `Set-Cookie`. This is intentional: response data is the whole point of showing the response (matches `curl -i`). Only the *request* echo is redacted (it can carry a resolved credential the caller supplied); the response is what the server chose to send back.
@@ -158,6 +160,38 @@ After the usual response echo, a checklist prints to **stderr** — one line per
 ```
 
 `--json` mode never prints this — the checklist is a human-only rendering of the same `data.assertions` object.
+
+## Debug trace (`-v`)
+
+`run`/`send` accept `-v`/`--verbose`. In human mode this has always printed a request/response trace to stderr. As of M8.3, under `--json` it additionally adds a `data.trace` object to the envelope — the same underlying capture (`churl_core::debug::DebugTrace`) that backs the TUI's Inspector overlay. Omitting `-v` omits `data.trace` entirely (never `"trace": null`); this is a purely additive field — see "Schema versioning" below.
+
+```json
+{
+  "resolved_display": {
+    "method": "GET",
+    "url": "https://api.example.com/x?api_key=••••••",
+    "headers": [{ "name": "Authorization", "value": "••••••", "enabled": true }],
+    "body_present": false
+  },
+  "var_steps": [
+    { "name": "host", "scope": "cli", "value_masked": "api.example.com" },
+    { "name": "api_key", "scope": "profile", "value_masked": "••••••" }
+  ],
+  "redirect_hops": [
+    { "from": "https://a.example/x", "to": "https://b.example/x", "status": 302,
+      "cross_origin": true, "stripped_headers": ["authorization"] }
+  ],
+  "decisions": { "auth_injected": "Authorization", "cookie_used": false, "proxy": null }
+}
+```
+
+- **`resolved_display`** — the final (post-`{{var}}`) request churl actually sent, masked exactly like `data.request` (see "Secret masking" below). `headers` is omitted when empty.
+- **`var_steps`** — every `{{var}}` placeholder that resolved, in substitution order: the name, the scope that supplied it (`"cli"`, `"profile"`, `"collection"`; absent means the process-environment fallback), and the resolved value masked the same dual-anchor way header values are (a secret-*named* var is masked even at low entropy; any secret-*shaped* value is masked under any name). Omitted when empty.
+- **`redirect_hops`** — one entry per redirect hop followed, in hop order: masked `from`/`to`, the hop's status, `method_change` (omitted when the method was preserved), whether the hop crossed origin, and which header names were stripped before it (only populated on a cross-origin hop under the default `strip` redirect policy). Omitted when empty.
+- **`decisions`** — `auth_injected` names the auth-bearing header/query churl added (omitted when none, e.g. a user header of the same name already won); `cookie_used`/`proxy` (masked) reflect the `ClientConfig` `run`/`send` built its client from for this invocation.
+- An `error` field exists on the underlying `DebugTrace` type (for a failed send) but never appears in `data.trace`: `run_execution` only attaches a trace to `ExecData` on a *successful* exchange (a transport/resolution failure returns before `ExecData` exists at all, mirroring every other field of the envelope). The Inspector overlay (TUI) surfaces the failure case separately.
+
+**Schema versioning.** `data.trace` is a new optional field on an existing object — additive per the frozen bump rule (`crates/churl/src/output.rs` module docs): "`SCHEMA_VERSION` bumps ONLY on a breaking change (a field removed, renamed, or its meaning changed); adding a new optional field never bumps it." `schema_version` stays `1`.
 
 ## Secret masking (request echo)
 

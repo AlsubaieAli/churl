@@ -1,0 +1,28 @@
+---
+source: crates/churl/tests/tui_snapshot.rs
+expression: snap
+---
+┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
+┃> ▸ orders                  ┃│no endpoint selected                            │
+┃  ▸ users                   ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Request ───────────────────────────────────────┐
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┃                            ┃└────────────────────────────────────────────────┘
+┃                            ┃┌ Response ──────────────────────────────────────┐
+┃                            ┃│no response yet                                 │
+┃                            ┃│                                                │
+┃                            ┃│no endpoint selected                            │
+┃                            ┃│                                                │
+┃                            ┃│                                                │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                │
+┌ Sequences ─────────────────┐│                                                │
+│<leader>s n to add          ││                                                │
+└────────────────────────────┘└────────────────────────────────────────────────┘
+ debug capture ON — sends now build an inspectable trace                        
+ EXPLORER · demo · DEBUG · ? help · space leader · / search · : palette

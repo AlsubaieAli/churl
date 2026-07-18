@@ -31,7 +31,8 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::http::{ExecuteOptions, HttpError, execute};
+use crate::debug::DebugTrace;
+use crate::http::{ExecuteOptions, HttpError, execute_traced};
 use crate::model::{Method, OnError, Response, Sequence, SequenceStep, Timing};
 use crate::persistence::{PersistenceError, load_collection_meta, load_endpoint};
 use crate::template::{Resolver, Scope};
@@ -613,17 +614,25 @@ pub struct SequenceRun {
     pub steps: Vec<StepOutcome>,
 }
 
-/// Runs a whole sequence end-to-end: for each step, prepare → [`execute`] →
-/// [`classify_step`] → merge extracted values → honour `on_error`. Extracted
+/// Runs a whole sequence end-to-end: for each step, prepare → [`execute_traced`]
+/// → [`classify_step`] → merge extracted values → honour `on_error`. Extracted
 /// values accumulate across steps. This is the wiremock-tested convenience over
 /// the same primitives the live TUI drives; it is the single source of truth for
 /// run semantics.
+///
+/// When `sink` is `Some`, every step that actually sends a request appends its
+/// own [`DebugTrace`] to it, in step order (a step that fails to prepare, or
+/// that is skipped after a halt, contributes no trace — there is no request to
+/// trace). `sink: None` costs nothing extra per step — no `DebugTrace` is ever
+/// built. Unused (always `None`) until a later wave wires the caller up; the
+/// signature is frozen here so that wave is bin-only.
 pub async fn run_sequence(
     client: &reqwest::Client,
     workspace_root: &Path,
     sequence: &Sequence,
     scopes: &RunScopes,
     options: &ExecuteOptions,
+    mut sink: Option<&mut Vec<DebugTrace>>,
 ) -> SequenceRun {
     let mut extracted: BTreeMap<String, String> = BTreeMap::new();
     let mut outcomes = Vec::new();
@@ -655,7 +664,16 @@ pub async fn run_sequence(
                 halted = should_halt(&StepResult::HttpError(String::new()), sequence.on_error);
             }
             Ok(prepared) => {
-                let result = execute(client, &prepared.request, options).await;
+                let mut trace = sink
+                    .is_some()
+                    .then(|| DebugTrace::from_request(&prepared.request));
+                let result =
+                    execute_traced(client, &prepared.request, options, trace.as_mut()).await;
+                if let Some(trace) = trace
+                    && let Some(sink) = sink.as_deref_mut()
+                {
+                    sink.push(trace);
+                }
                 let timing = result.as_ref().ok().map(|response| response.timing);
                 let (step_result, step_extracted) = classify_step(&result, step);
                 if should_halt(&step_result, sequence.on_error) {
