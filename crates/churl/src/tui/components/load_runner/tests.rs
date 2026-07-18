@@ -325,10 +325,18 @@ fn stats_line_shows_counts_and_percentiles() {
         ResponseState::Idle,
         ReqOutcome::Failed { status: 500 },
     );
+    // Rate-first (U8): percentages shown at all times; raw counts hidden by
+    // default until `v` toggles the detailed view.
     let line = stats_line(&r);
     assert!(line.contains("2/2 done"), "{line}");
-    assert!(line.contains("1 ok"), "{line}");
-    assert!(line.contains("1 failed"), "{line}");
+    assert!(
+        line.contains("50% ok / 50% err"),
+        "rate-first percentages: {line}"
+    );
+    assert!(
+        !line.contains("1 ok"),
+        "raw counts hidden by default: {line}"
+    );
     // Grouped latency parts (L3): range (en dash), p50/p95, avg.
     assert!(line.contains("range 10–30ms"), "{line}");
     assert!(line.contains("p50/p95"), "{line}");
@@ -336,6 +344,47 @@ fn stats_line_shows_counts_and_percentiles() {
     // Old separate labels are gone.
     assert!(!line.contains("min "), "{line}");
     assert!(!line.contains("mean "), "{line}");
+    // Toggling detail on (the `v` key) surfaces the raw counts.
+    r.show_detail = true;
+    let detailed = stats_line(&r);
+    assert!(detailed.contains("1 ok"), "{detailed}");
+    assert!(detailed.contains("1 failed"), "{detailed}");
+    assert!(
+        detailed.contains("50% ok / 50% err"),
+        "rate stays even in detail: {detailed}"
+    );
+}
+
+#[test]
+fn stats_line_rate_first_guards_zero_attempted() {
+    let mut r = runner();
+    r.cfg.total = 4;
+    r.reset_for_run();
+    // Nothing has completed → the rates are undefined; the line renders `—`
+    // rather than a fabricated 0% (U8 zero-attempted guard).
+    let line = stats_line(&r);
+    assert!(
+        line.contains("—"),
+        "zero-attempted renders an em dash: {line}"
+    );
+    assert!(
+        !line.contains("% ok"),
+        "no percentage before anything completes: {line}"
+    );
+    assert!(
+        !line.contains("0 ok"),
+        "raw counts stay hidden by default: {line}"
+    );
+}
+
+#[test]
+fn v_key_toggles_detailed_stats() {
+    let mut r = runner();
+    assert!(!r.show_detail, "detail is off by default");
+    r.handle_key(ch('v'));
+    assert!(r.show_detail, "`v` turns the detailed counts view on");
+    r.handle_key(ch('v'));
+    assert!(!r.show_detail, "`v` toggles it back off");
 }
 
 // ---- render snapshots (TestBackend → deterministic plain text) ----

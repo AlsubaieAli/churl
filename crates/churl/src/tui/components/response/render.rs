@@ -93,6 +93,24 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     if let Some(ref stats) = stats_title {
         block = block.title(Line::from(format!(" {stats} ")).right_aligned());
     }
+    // Bottom-right keymap hint. Shown on the `Done` state only — the listed keys
+    // (fold, block-nav, copy, search) all act on a rendered body. Subordinate
+    // statusline styling so it reads as a footer, not content, and it sits on the
+    // BOTTOM edge so it never collides with the top-right Done-state stats.
+    if let ResponseState::Done { .. } = ctx.state {
+        let hint = Line::from(Span::styled(
+            " h header · j/k move · J/K block · o/O fold · y/Y copy · / search ",
+            ctx.theme.statusline,
+        ))
+        .right_aligned();
+        // Only show the footer when it fits without left-clipping. A partially
+        // clipped hint (e.g. `ve · J/K block…`) drops the leading, most useful
+        // keys and reads as broken, so narrow/embedded panes omit it entirely
+        // (the containing modal carries its own footer). +2 for the border cells.
+        if area.width as usize >= hint.width() + 2 {
+            block = block.title_bottom(hint);
+        }
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

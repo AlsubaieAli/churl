@@ -18,6 +18,7 @@ use churl_core::sequence::StepResult;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
@@ -493,6 +494,21 @@ pub fn render(
     job
 }
 
+/// The style for a step row's subordinate trailing spans (status code, timing).
+/// On a plain row it is the dim `statusline` slot. On the SELECTED row those
+/// spans sit on the `selection` fill; the `statusline` Gray fg tracked poorly
+/// against Cyan (Gray-on-Cyan, barely legible), so instead we carry the
+/// selection's *own* foreground — guaranteed to contrast its own background —
+/// and add `DIM` so the spans stay subordinate but legible. Never fg==bg
+/// (mirrors the `session_marker_style` regression precedent).
+fn subordinate_step_style(theme: &Theme, selected: bool) -> Style {
+    if selected {
+        theme.selection.add_modifier(Modifier::DIM)
+    } else {
+        theme.statusline
+    }
+}
+
 /// Renders the left step-list column.
 fn render_step_list(
     frame: &mut Frame,
@@ -538,13 +554,19 @@ fn render_step_list(
             Span::styled(format!("{} ", row.method), theme.title),
             Span::raw(row.endpoint.clone()),
         ];
+        // The status-code + timing are subordinate on a plain row (statusline
+        // fg), but on the SELECTED row that Gray fg sat on the `selection` fill
+        // (Gray-on-Cyan) and was barely legible. Carry the selection's own fg
+        // (guaranteed to contrast its own bg) + DIM so they stay subordinate but
+        // readable — never fg==bg (mirrors `session_marker_style`).
+        let subordinate = subordinate_step_style(theme, selected);
         if let Some(detail) = row.status.detail() {
-            spans.push(Span::styled(format!("  {detail}"), theme.statusline));
+            spans.push(Span::styled(format!("  {detail}"), subordinate));
         }
         if let Some(timing) = row.timing {
             spans.push(Span::styled(
                 format!("  {}ms", timing.as_millis()),
-                theme.statusline,
+                subordinate,
             ));
         }
         let mut line = Line::from(spans);
@@ -662,6 +684,31 @@ mod tests {
         assert_eq!(r.selected, 2);
         r.handle_key(key(KeyCode::Char('g')));
         assert_eq!(r.selected, 0);
+    }
+
+    #[test]
+    fn subordinate_step_style_stays_legible_on_selected_row() {
+        // On a selected step row the status-code + timing spans sit on the
+        // `selection` fill. The bug (U7) was `statusline` Gray-on-Cyan — nearly
+        // fg==bg. Assert the property that means "legible": foreground != the
+        // background it sits on, for BOTH shipped themes; plus that it adapts vs
+        // the plain row and carries the selection background.
+        for theme in [Theme::dark(), Theme::light()] {
+            let plain = subordinate_step_style(&theme, false);
+            let selected = subordinate_step_style(&theme, true);
+            assert_ne!(
+                plain, selected,
+                "the style must adapt when its row is selected"
+            );
+            assert_ne!(
+                selected.fg, selected.bg,
+                "selected subordinate spans must not be fg==bg (invisible) on the selection fill"
+            );
+            assert_eq!(
+                selected.bg, theme.selection.bg,
+                "selected subordinate spans carry the selection background"
+            );
+        }
     }
 
     #[test]
