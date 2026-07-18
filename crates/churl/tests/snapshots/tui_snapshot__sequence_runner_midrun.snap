@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1975
 expression: render_runner(&mut state)
 ---
                                                                                           
@@ -22,6 +23,6 @@ expression: render_runner(&mut state)
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
      ┃┃                                    ┃│                                       │┃    
-     ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└───────────────────────────────────────┘┃    
+     ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└block · o/O fold · y/Y copy · / search ┘┃    
      ┃j/k step · tab response · r re-run · ^R edit · ctrl-c cancel · q close         ┃    
      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

@@ -885,6 +885,39 @@ impl ResponseView {
         }
     }
 
+    /// If `logical` is the **opener** line of a fold region, returns that region's
+    /// inclusive `(opener, closer)` logical-line extent; otherwise `None`. Drives
+    /// the block-aware `Y` copy: on a fold opener the whole folded region is
+    /// yanked, elsewhere `Y` falls back to the single-line copy. Only JSON bodies
+    /// fold, so this is `None` for headers / non-JSON views. A line is the opener
+    /// of at most one region, so the match is unambiguous.
+    pub fn fold_region_at_opener(&mut self, logical: usize) -> Option<(usize, usize)> {
+        if !self.folding_supported() {
+            return None;
+        }
+        self.ensure_folds()
+            .iter()
+            .find(|r| r.opener == logical)
+            .map(|r| (r.opener, r.closer))
+    }
+
+    /// Copies the inclusive logical-line range `[start, end]` as one `\n`-joined
+    /// string, for the block-aware `Y` yank of a folded region. Each line is
+    /// materialised through [`Self::copy_line`], so the same byte-exact invariant
+    /// holds per line (raw wire bytes on the non-reformatted path, displayed
+    /// pretty lines otherwise) — the region copy is exactly the concatenation of
+    /// the line copies the user would get one `Y` at a time.
+    pub fn copy_region(&self, start: usize, end: usize) -> String {
+        let mut out = String::new();
+        for logical in start..=end {
+            if logical > start {
+                out.push('\n');
+            }
+            out.push_str(&self.copy_line(logical));
+        }
+        out
+    }
+
     /// The `idx`-th logical line of the untouched `raw_text` (the on-the-wire
     /// bytes), or `None` when out of range. Unlike [`Self::logical_line`] this does
     /// **not** strip a trailing `\r` — copy-line returns exactly what the wire

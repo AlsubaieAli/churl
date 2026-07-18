@@ -564,11 +564,26 @@ fn response_copy_sets_message() {
 #[test]
 fn response_copy_line_reports_line() {
     let dir = tempfile::tempdir().unwrap();
-    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    // A JSON scalar body has no fold region, so the cursor's line 0 is a plain
+    // leaf — Y copies just that line (Y on a `{`/`[` opener copies the whole
+    // block instead; see `response_copy_block_on_fold_opener`).
+    let mut app = json_done_app(dir.path(), "\"just one line\"");
     app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
         .unwrap();
     let msg = app.pending_copy_message().expect("copy must be queued");
-    assert_eq!(msg, "copied line", "Y must confirm a line copy");
+    assert_eq!(msg, "copied line", "Y on a non-opener line must confirm a line copy");
+}
+
+#[test]
+fn response_copy_block_on_fold_opener() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = json_done_app(dir.path(), "{\n  \"a\": 1\n}");
+    // The cursor starts on line 0 — the `{` fold opener. Y (U4) copies the whole
+    // folded region, reported as a block copy rather than a single line.
+    app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT))
+        .unwrap();
+    let msg = app.pending_copy_message().expect("copy must be queued");
+    assert_eq!(msg, "copied block", "Y on a fold opener must copy the whole block");
 }
 
 #[test]

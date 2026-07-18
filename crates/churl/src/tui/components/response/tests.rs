@@ -398,6 +398,28 @@ fn copy_all_and_line() {
     assert_eq!(v.copy_line(99), "");
 }
 
+#[test]
+fn fold_opener_copies_block_else_line() {
+    // Pretty body is three lines: `{`, `  "a": 1`, `}`. Line 0 is the `{` fold
+    // opener; a leaf line is not an opener (U4).
+    let mut v = json_view(r#"{"a":1}"#);
+    assert_eq!(
+        v.fold_region_at_opener(0),
+        Some((0, 2)),
+        "line 0 is the fold opener, region spans to the closer"
+    );
+    assert_eq!(v.fold_region_at_opener(1), None, "a leaf line is not an opener");
+    // A block copy is exactly the per-line copies joined by `\n` (byte-exact,
+    // same as repeated single-line `Y`).
+    let block = v.copy_region(0, 2);
+    let expected = format!("{}\n{}\n{}", v.copy_line(0), v.copy_line(1), v.copy_line(2));
+    assert_eq!(block, expected);
+    assert!(
+        block.contains("\"a\": 1"),
+        "the region copy carries the inner leaf line: {block}"
+    );
+}
+
 // ---- JSON response reformatter + pretty toggle ----
 
 #[test]

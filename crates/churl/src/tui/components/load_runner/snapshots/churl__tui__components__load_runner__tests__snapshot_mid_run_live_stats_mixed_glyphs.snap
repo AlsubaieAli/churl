@@ -1,15 +1,15 @@
 ---
-source: crates/churl/src/tui/components/load_runner.rs
-assertion_line: 1464
+source: crates/churl/src/tui/components/load_runner/tests.rs
+assertion_line: 451
 expression: snapshot(&mut r)
 ---
 "                                                                                                                    "
 "      ┏ Load ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓      "
-"      ┃List users                                                                                            ┃      "
-"      ┃→ https://api.test/users                                                                              ┃      "
-"      ┃total=8 · concurrency=5 · min gap=0ms · max rate                                                      ┃      "
-"      ┃3/8 done · 1 ok · 1 failed · 1 errored · range 12–88ms · p50/p95 12/88ms · avg 50ms  running          ┃      "
+"      ┃List users  https://api.test/users                                                                    ┃      "
 "      ┃Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.                 ┃      "
+"      ┃total=8 · concurrency=5 · min gap=0ms · max rate                                                      ┃      "
+"      ┃                                                                                                      ┃      "
+"      ┃3/8 done · 33.3% ok / 66.7% err · range 12–88ms · p50/p95 12/88ms · avg 50ms  running                 ┃      "
 "      ┃┏ Results ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ Response ──────────────────────────────────────────────────┐┃      "
 "      ┃┃✓ #1    200  12ms                     ┃│no response yet                                             │┃      "
 "      ┃┃✗ #2    503  88ms                     ┃│                                                            │┃      "

@@ -244,6 +244,10 @@ pub struct LoadRunnerState {
     pub pending_confirm: Option<String>,
     /// True while awaiting an `esc`-again / `y` confirm to stop a running batch.
     pub confirming_close: bool,
+    /// Whether the stats line shows the raw `N ok · N failed · N errored` counts
+    /// (detailed view). Off by default — the line leads with `% ok / % err` and
+    /// the `v` key toggles the counts in/out. Presentation-only.
+    pub show_detail: bool,
 }
 
 impl LoadRunnerState {
@@ -280,6 +284,7 @@ impl LoadRunnerState {
             view_seq: 0,
             pending_confirm: None,
             confirming_close: false,
+            show_detail: false,
         }
     }
 
@@ -489,6 +494,15 @@ impl LoadRunnerState {
                 self.focus = self.focus.prev();
                 LoadOutcome::Consumed
             }
+            // `v` toggles the detailed stats view (raw ok/failed/errored counts).
+            // Pane-independent: the stats line is a fixture of the whole modal, so
+            // the toggle is global rather than routed to a sub-pane. `v` is not a
+            // response-region action, so it never collides with the shared
+            // `response_*` keys the App routes first.
+            KeyCode::Char('v') => {
+                self.show_detail = !self.show_detail;
+                LoadOutcome::Consumed
+            }
             _ => {
                 match self.focus {
                     RunnerFocus::ConfigHeader => self.handle_config_key(key),
@@ -666,11 +680,20 @@ fn stats_line(state: &LoadRunnerState) -> String {
     let total = state.results.len();
     let s = &state.stats;
     let mut parts = vec![format!("{}/{} done", state.completed, total)];
-    parts.push(format!("{} ok", s.ok));
-    if s.failed > 0 {
+    // Rate-first: `% ok / % err` shown at ALL times, from the single-source
+    // `success_rate()` / `error_rate()` (so the TUI and the headless assertions
+    // can never disagree). Both are `None` exactly when nothing was attempted —
+    // render `—` rather than a fabricated 0%.
+    let rate = match (s.success_rate(), s.error_rate()) {
+        (Some(ok), Some(err)) => format!("{}% ok / {}% err", fmt_pct(ok), fmt_pct(err)),
+        _ => "—".to_owned(),
+    };
+    parts.push(rate);
+    // The raw counts are the detailed view, toggled by `v` (default off) so the
+    // line stays rate-first and compact.
+    if state.show_detail {
+        parts.push(format!("{} ok", s.ok));
         parts.push(format!("{} failed", s.failed));
-    }
-    if s.errored > 0 {
         parts.push(format!("{} errored", s.errored));
     }
     let ms = |d: Option<Duration>| d.map(|d| d.as_millis());
@@ -685,6 +708,19 @@ fn stats_line(state: &LoadRunnerState) -> String {
         parts.push(format!("avg {mean}ms"));
     }
     parts.join(" · ")
+}
+
+/// Formats a `0.0..=1.0` fraction as a percentage string: a bare integer when it
+/// lands on a whole percent (`0.5` → `50`), else one decimal (`0.667` → `66.7`).
+/// Keeps the common exact rates (100 / 0 / 50) uncluttered while staying honest
+/// about fractional ones.
+fn fmt_pct(frac: f64) -> String {
+    let p = frac * 100.0;
+    if (p - p.round()).abs() < 1e-9 {
+        format!("{p:.0}")
+    } else {
+        format!("{p:.1}")
+    }
 }
 
 /// The editable config header spans, e.g. `total=10 · concurrency=5 · min
@@ -786,14 +822,16 @@ pub fn render(
         return None;
     }
 
-    // Top-left block, ordered name → url → config → stats, each on its own row so
-    // the four are visually distinct; then the one-line purpose hint, body, footer.
+    // Top-left block, reshaped rate-first (U8): name+URL on one line → the purpose
+    // description → the config/params header → a spacer → the stats line; then body
+    // and footer. Net height is unchanged from the old five-row block — merging
+    // name+URL onto one row reclaims exactly the row the spacer costs.
     let [
-        name_row,
-        url_row,
+        name_url_row,
+        desc_row,
         config_row,
+        _spacer,
         stats_row,
-        hint_row,
         body,
         footer,
     ] = Layout::vertical([
@@ -807,19 +845,21 @@ pub fn render(
     ])
     .areas(inner);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            state.endpoint_label.clone(),
-            theme.title,
-        ))),
-        name_row,
-    );
+    // Name (bold `title`) + URL inline on ONE row; the old `→`/own-line rendering
+    // is dropped, the URL sits next to the name in subordinate `statusline`.
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("→ ", theme.statusline),
-            Span::styled(state.url.clone(), theme.statusline),
+            Span::styled(state.endpoint_label.clone(), theme.title),
+            Span::styled(format!("  {}", state.url), theme.statusline),
         ])),
-        url_row,
+        name_url_row,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.",
+            theme.statusline,
+        ))),
+        desc_row,
     );
     frame.render_widget(
         Paragraph::new(Line::from(config_spans(state, theme))),
@@ -840,13 +880,6 @@ pub fn render(
             Span::styled(status_word.to_owned(), theme.statusline),
         ])),
         stats_row,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Fire this endpoint repeatedly at a set concurrency to measure throughput and latency.",
-            theme.statusline,
-        ))),
-        hint_row,
     );
 
     let left_width = inner.width.saturating_sub(2) / 2;

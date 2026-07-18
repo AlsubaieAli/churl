@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 2018
+assertion_line: 2347
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐  List users                                      
@@ -25,5 +25,5 @@ expression: snapshot(&mut app)
 └────────────────────────────┘┃                                                ┃
 ┌ Sequences ─────────────────┐┃                                                ┃
 │<leader>s n to add          │┃                                                ┃
-└────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+└────────────────────────────┘┗ve · J/K block · o/O fold · y/Y copy · / search ┛
  RESPONSE · demo · ? help · space leader · / search · : palette

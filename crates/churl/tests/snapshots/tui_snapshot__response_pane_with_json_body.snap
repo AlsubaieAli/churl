@@ -25,5 +25,5 @@ expression: snapshot(&mut app)
 └────────────────────────────┘┃                                                ┃
 ┌ Sequences ─────────────────┐┃                                                ┃
 │<leader>s n to add          │┃                                                ┃
-└────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+└────────────────────────────┘┗ve · J/K block · o/O fold · y/Y copy · / search ┛
  RESPONSE · demo · ? help · space leader · / search · : palette

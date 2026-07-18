@@ -369,7 +369,9 @@ impl App {
         }
     }
 
-    /// `Y`: copy the response cursor's logical line via the layered clipboard.
+    /// `Y`: block-aware copy. On a fold-opener line the whole folded region is
+    /// yanked; on any other line, just that logical line. Both go through the
+    /// layered clipboard.
     pub(in crate::tui::app) fn response_copy_line(&mut self) {
         // A missing view (Failed / Dropped / Idle) has no line to copy. Give
         // feedback rather than silently doing nothing (drive-test #4a fold-in).
@@ -385,8 +387,13 @@ impl App {
         let Some(view) = self.response_view_mut() else {
             return;
         };
-        let line = view.copy_line(logical);
-        self.enqueue_clipboard(&line, "copied line");
+        // On a fold opener, copy the whole covered region as one block; otherwise
+        // fall back to the single-line copy.
+        let (payload, label) = match view.fold_region_at_opener(logical) {
+            Some((opener, closer)) => (view.copy_region(opener, closer), "copied block"),
+            None => (view.copy_line(logical), "copied line"),
+        };
+        self.enqueue_clipboard(&payload, label);
     }
 
     /// Copies the full-view text, reporting its size (with a `(truncated)` note
