@@ -29,8 +29,10 @@ fn imports_name_and_flat_requests() {
 #[test]
 fn unnamed_item_uses_the_shared_u6_derive_name() {
     // U6: the interchange importer no longer has its own name deriver — an item
-    // with no `name` falls back to the SAME `<METHOD> <≤3 path segs> curl` scheme
-    // the curl importer uses (one shared `derive_name`, threading the method).
+    // with no `name` falls back to the SAME `<METHOD> <≤3 path segs>` scheme the
+    // curl importer uses (one shared `derive_name`, threading the method). It
+    // passes an empty suffix, so a Postman/native import gets NO `curl` provenance
+    // token (that marker is reserved for actual curl imports).
     let json = r#"{
             "info": { "name": "My API", "schema": "…v2.1.0…" },
             "item": [
@@ -40,10 +42,10 @@ fn unnamed_item_uses_the_shared_u6_derive_name() {
         }"#;
     let import = import_postman_v21(json).unwrap();
     assert_eq!(import.requests.len(), 2);
-    // Method threaded through: POST, last ≤3 path segments, trailing `curl`.
-    assert_eq!(import.requests[0].endpoint.name, "POST v1 users 42 curl");
+    // Method threaded through: POST, last ≤3 path segments, NO `curl` marker.
+    assert_eq!(import.requests[0].endpoint.name, "POST v1 users 42");
     // A bare-URL item defaults to GET (matching the importer) → GET scheme.
-    assert_eq!(import.requests[1].endpoint.name, "GET health curl");
+    assert_eq!(import.requests[1].endpoint.name, "GET health");
     // The separator is always a space — never a `/` (path-addressing safety).
     assert!(!import.requests[0].endpoint.name.contains('/'));
 }

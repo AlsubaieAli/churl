@@ -255,7 +255,7 @@ impl Parser {
         Ok(ImportResult {
             endpoint: Endpoint {
                 seq: 0,
-                name: derive_name(method, &url),
+                name: derive_name(method, &url, "curl"),
                 assertions: Vec::new(),
                 request: Request {
                     method,
@@ -310,20 +310,21 @@ pub fn derive_body_kind(content: &str, headers: &[Header]) -> BodyKind {
     BodyKind::Text
 }
 
-/// Derives an endpoint name from the request `method` + URL using the curl-import
-/// naming standard (U6): `<METHOD> <last ≤3 non-empty path segments> curl`,
-/// space-joined. The literal trailing `curl` token marks the endpoint as
-/// curl-imported (owner decision); the space separator is mandatory — churl
-/// addresses endpoints as `collection/name`, so a `/` in the name would collide
-/// with path addressing. Segments are split on `/` and re-joined with spaces, so
-/// a derived name can never contain one. With no path segments the host stands
-/// in; with neither host nor path, just `<METHOD> curl` (never empty / panics).
-/// The method is upper-cased via [`Method`]'s `Display`.
+/// Derives an endpoint name from the request `method` + URL using the U6 naming
+/// standard: `<METHOD> <last ≤3 non-empty path segments> [suffix]`, space-joined.
+/// The space separator is mandatory — churl addresses endpoints as
+/// `collection/name`, so a `/` in the name would collide with path addressing.
+/// Segments are split on `/` and re-joined with spaces, so a derived name can
+/// never contain one. With no path segments the host stands in; with neither host
+/// nor path, just `<METHOD>` (+ suffix). The method is upper-cased via [`Method`]'s
+/// `Display`.
 ///
-/// Shared by BOTH importers — the curl importer ([`Parser::finish`]) and the
-/// foreign interchange importer ([`crate::interchange`]) — so imported endpoints
-/// name identically regardless of source format (no second copy).
-pub(crate) fn derive_name(method: Method, url: &str) -> String {
+/// `suffix` is a provenance marker appended when non-empty: the curl importer
+/// ([`Parser::finish`]) passes `"curl"` (owner decision — marks curl-imported);
+/// the foreign interchange importer ([`crate::interchange`]) passes `""` (a
+/// Postman/native import is not curl-imported, so no false marker). Sharing the
+/// naming core keeps the two importers in lockstep without a second copy.
+pub(crate) fn derive_name(method: Method, url: &str, suffix: &str) -> String {
     let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let without_query = without_scheme
         .split(['?', '#'])
@@ -350,7 +351,10 @@ pub(crate) fn derive_name(method: Method, url: &str) -> String {
             name.push_str(segment);
         }
     }
-    name.push_str(" curl");
+    if !suffix.is_empty() {
+        name.push(' ');
+        name.push_str(suffix);
+    }
     name
 }
 
@@ -997,50 +1001,56 @@ mod tests {
 
         // ≥3 path segments → keep the LAST three, in path order.
         assert_eq!(
-            derive_name(Method::Get, "https://api.example.com/v1/users/42"),
+            derive_name(Method::Get, "https://api.example.com/v1/users/42", "curl"),
             "GET v1 users 42 curl"
         );
         assert_eq!(
-            derive_name(Method::Post, "https://e.com/a/b/c/d/e"),
+            derive_name(Method::Post, "https://e.com/a/b/c/d/e", "curl"),
             "POST c d e curl"
         );
 
         // <3 path segments → use however many exist.
         assert_eq!(
-            derive_name(Method::Get, "https://api.github.com/user/repos"),
+            derive_name(Method::Get, "https://api.github.com/user/repos", "curl"),
             "GET user repos curl"
         );
         assert_eq!(
-            derive_name(Method::Delete, "https://e.com/a/b?x=1"),
+            derive_name(Method::Delete, "https://e.com/a/b?x=1", "curl"),
             "DELETE a b curl"
         );
 
         // Exactly one path segment.
         assert_eq!(
-            derive_name(Method::Get, "https://e.com/{{id}}"),
+            derive_name(Method::Get, "https://e.com/{{id}}", "curl"),
             "GET {{id}} curl"
         );
         // Spaces in a single segment survive verbatim (no slugging, no `/`).
         assert_eq!(
-            derive_name(Method::Get, "https://e.com/Users And Groups/"),
+            derive_name(Method::Get, "https://e.com/Users And Groups/", "curl"),
             "GET Users And Groups curl"
         );
 
         // 0 path segments → host stands in.
         assert_eq!(
-            derive_name(Method::Get, "https://example.com/"),
+            derive_name(Method::Get, "https://example.com/", "curl"),
             "GET example.com curl"
         );
         assert_eq!(
-            derive_name(Method::Get, "https://example.com"),
+            derive_name(Method::Get, "https://example.com", "curl"),
             "GET example.com curl"
         );
 
         // No host and no path → just `<METHOD> curl` (never empty / panics).
-        assert_eq!(derive_name(Method::Get, ""), "GET curl");
+        assert_eq!(derive_name(Method::Get, "", "curl"), "GET curl");
+
+        // An empty suffix (the interchange importer) omits the provenance token.
+        assert_eq!(
+            derive_name(Method::Get, "https://api.example.com/v1/users/42", ""),
+            "GET v1 users 42"
+        );
 
         // The separator is ALWAYS a space — a derived name can never contain `/`
         // (churl addresses endpoints as `collection/name`).
-        assert!(!derive_name(Method::Put, "https://e.com/x/y/z").contains('/'));
+        assert!(!derive_name(Method::Put, "https://e.com/x/y/z", "curl").contains('/'));
     }
 }

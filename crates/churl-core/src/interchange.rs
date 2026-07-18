@@ -316,7 +316,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
             seq: 0,
             name: item_name
                 .map(str::to_owned)
-                .unwrap_or_else(|| crate::import::derive_name(Method::Get, url)),
+                .unwrap_or_else(|| crate::import::derive_name(Method::Get, url, "")),
             // Foreign formats carry no assertion concept — import seeds an empty
             // set (export likewise omits it). Assertions round-trip only through
             // native TOML persistence.
@@ -359,7 +359,7 @@ fn map_request(request: &Value, item_name: Option<&str>, ctx: &mut ImportCtx) ->
 
     let name = item_name
         .map(str::to_owned)
-        .unwrap_or_else(|| crate::import::derive_name(method, &url));
+        .unwrap_or_else(|| crate::import::derive_name(method, &url, ""));
 
     Endpoint {
         seq: 0,
