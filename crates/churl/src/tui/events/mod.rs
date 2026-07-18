@@ -306,6 +306,14 @@ impl Default for KeyMap {
             key!(shift - k),
             LeaderEntry::Act(Action::ToggleEndpointInsecure),
         );
+        // `<leader>d` opens the debug Inspector overlay; `<leader>D` (shift-d)
+        // flips the session debug-capture toggle — mirrors the `k`/`K` pairing
+        // above (a direct session action alongside a related one). Both were
+        // free at the leader root: plain `d` only exists in the
+        // Explorer/Request PANE overlays (Delete / RowDelete), a disjoint
+        // namespace from leader-root continuations.
+        root_bind(key!(d), LeaderEntry::Act(Action::OpenInspector));
+        root_bind(key!(shift - d), LeaderEntry::Act(Action::ToggleDebug));
         root_bind(key!(q), LeaderEntry::Act(Action::Quit));
         // `<leader><leader>` (Space as its own continuation) opens the
         // endpoint/request picker — owner drive-test 2026-07-10 moved it off `f`,

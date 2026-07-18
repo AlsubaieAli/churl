@@ -1590,6 +1590,122 @@ fn options_overlay_toggle_tls() {
     insta::assert_snapshot!(snap);
 }
 
+// ---- debug Inspector overlay (M8.3 Wave 3) ----
+
+/// A representative captured trace: a masked auth header + a masked
+/// `{{var}}` value, and a redirect hop that stripped the auth header on a
+/// cross-origin 301. Exercises every Inspector section against real content.
+fn traced_exchange() -> churl_core::debug::DebugTrace {
+    use churl_core::debug::{
+        AuthCookieProxyDecisions, DebugTrace, RedirectHop, ResolvedRequest, VarStep,
+    };
+    use churl_core::model::{Header, Method, Request};
+
+    let request = Request {
+        method: Method::Get,
+        url: "https://api.test/orders".to_owned(),
+        headers: Vec::new(),
+        params: Vec::new(),
+        body: None,
+        auth: None,
+        insecure: false,
+    };
+    let mut trace = DebugTrace::from_request(&request);
+    trace.resolved_display = ResolvedRequest {
+        method: Method::Get,
+        url: "https://api.test/orders".to_owned(),
+        headers: vec![Header {
+            name: "Authorization".to_owned(),
+            value: "••••••".to_owned(),
+            enabled: true,
+        }],
+        body_present: false,
+    };
+    trace.var_steps = vec![VarStep {
+        name: "token".to_owned(),
+        scope: Some("session"),
+        value_masked: "••••••".to_owned(),
+    }];
+    trace.redirect_hops = vec![RedirectHop {
+        from: "https://api.test/orders".to_owned(),
+        to: "https://api.example/v2/orders".to_owned(),
+        status: 301,
+        method_change: None,
+        cross_origin: true,
+        stripped_headers: vec!["Authorization".to_owned()],
+    }];
+    trace.decisions = AuthCookieProxyDecisions {
+        auth_injected: Some("Authorization".to_owned()),
+        cookie_used: true,
+        proxy: None,
+    };
+    trace
+}
+
+/// The Inspector's Request section: masked header value renders as
+/// `••••••`, never a raw secret.
+#[test]
+fn inspector_overlay_request_section_masks_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.open_inspector_with_trace(traced_exchange());
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("••••••"),
+        "a masked header value must render masked, never raw:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// Tabbing to the Redirects section shows the hop, its cross-origin flag, and
+/// the header stripped before following it.
+#[test]
+fn inspector_overlay_redirects_section_shows_stripped_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.open_inspector_with_trace(traced_exchange());
+    press(&mut app, KeyCode::Tab); // Request -> Vars
+    press(&mut app, KeyCode::Tab); // Vars -> Redirects
+    let snap = snapshot(&mut app);
+    assert!(
+        snap.contains("cross-origin") && snap.contains("stripped headers: Authorization"),
+        "the redirect hop's strip decision must be visible:\n{snap}"
+    );
+    insta::assert_snapshot!(snap);
+}
+
+/// Opening the Inspector with no captured trace (debug was off, or nothing
+/// sent yet) shows the placeholder — never panics, never shows stale data.
+#[test]
+fn inspector_overlay_no_trace_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('d'));
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    let snap = snapshot(&mut app);
+    assert!(snap.contains("no trace captured"));
+    insta::assert_snapshot!(snap);
+}
+
+/// `<leader>D` flips the session debug-capture toggle; the statusline shows
+/// a steady DEBUG badge while it's on. Existing non-debug snapshots (every
+/// other test in this file) never set this, so the badge stays absent there
+/// — byte-identical to pre-M8.3.
+#[test]
+fn statusline_debug_badge_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT))
+        .unwrap();
+    let snap = snapshot(&mut app);
+    assert!(snap.contains("DEBUG"), "the DEBUG badge must show:\n{snap}");
+    insta::assert_snapshot!(snap);
+}
+
 /// The sequences submenu popup: `Space s` shows add (`a`) / open (`space`) /
 /// run (`r`). The single sequence finder is `<leader>s <leader>`, mirroring
 /// `<leader><leader>` for endpoints (owner drive-test 2026-07-10 — the former

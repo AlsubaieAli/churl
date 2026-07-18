@@ -155,15 +155,19 @@ crates/
       tui/
         app/               # App state + orchestration (directory module; mod.rs is the spine)
           mod.rs           # App state, Pane (incl. UrlBar)/Mode (incl. Jump/MethodMenu/Prompt/Confirm/EnvEditor/
-                           #   Sequence/LoadRunner/Options — each mode owns its state in-variant)/AppMsg (incl. SequenceStep,
-                           #   LoadStarted/LoadResult); Picker enum (data-carrying, one variant per picker kind);
+                           #   Sequence/LoadRunner/Options/Inspector — each mode owns its state in-variant)/AppMsg
+                           #   (incl. SequenceStep, LoadStarted/LoadResult, Response{..,trace} M8.3); Picker enum
+                           #   (data-carrying, one variant per picker kind);
                            #   RequestTabs, loaded_snapshot (derived dirty), inline LineEditor edit; key routing via
                            #   lookup_ctx; tokio::select! loop + event loop; send-time {{var}} resolution,
-                           #   profile switching, Theme; send/cancel, history, highlight cache
-          handlers/        # per-concern key/action handlers: buffers, crud, editing, env_editor, help,
+                           #   profile switching, Theme; send/cancel, history, highlight cache; debug_enabled +
+                           #   latest_trace + inspector_return (M8.3: boxed DebugTrace, park-and-return overlay)
+          handlers/        # per-concern key/action handlers: buffers, crud, debug (M8.3: Inspector open/close/
+                           #   copy-curl + <leader>D session toggle), editing, env_editor, help,
                            #   load_runner, options (M8: overlay + <leader>k session toggle + client rebuild + jar
                            #   persist; M8.1: <leader>K per-endpoint insecure toggle + client_for divergence seam),
-                           #   response, send, sequence, vars, workspace (+ mod.rs)
+                           #   response, send (M8.3: debug-gated execute_traced + substitute_request_traced),
+                           #   sequence, vars, workspace (+ mod.rs)
           render.rs        # the render layer (render + leader popup / collapsed-stub / prompt / confirm helpers)
           state.rs         # pure state types
           pure.rs          # self-free helpers (query split/decode, auth-tab + export-path helpers)
@@ -188,6 +192,9 @@ crates/
                            #     live precedence display; core stays UI-free; `p` ephemeral peek reveals a masked value + `y` copies it),
                            #   options/ (M8 session Options overlay: proxy/TLS/cookies rows + cookie list; mod.rs state +
                            #     render.rs + edit.rs, mirrors env_editor; UI-only, emits OptionsOutcome the app applies),
+                           #   inspector.rs (M8.3: debug Inspector overlay — per-exchange DebugTrace viewer, tabbed
+                           #     Request/Vars/Redirects/Decisions/Error sections; renders ONLY masked display fields,
+                           #     never resolved_raw; y copies DebugTrace::masked_curl() via the clipboard path),
                            #   picker, method_menu, prompt (CRUD prompt + confirm overlays),
                            #   search, palette (curated command allowlist), jump (pane-only jump labels), statusline,
                            #   vim_ext (Normal-mode W/B/^/f/F/t/T motions edtui lacks, for both edtui editors),

@@ -11,6 +11,7 @@ mod buffers;
 // `looks_like_curl` (not a method, so it can't reach it via `self.`) to keep
 // the expand-trigger predicate identical to the submit-time import check.
 pub(in crate::tui::app) mod crud;
+mod debug;
 mod editing;
 mod env_editor;
 mod help;

@@ -120,7 +120,7 @@ async fn stale_generation_response_is_dropped() {
     set_active_in_flight(&mut app, 5);
 
     // A late result from an older generation is ignored…
-    app.on_response(4, Ok(response()), meta());
+    app.on_response(4, Ok(response()), meta(), None);
     assert!(matches!(app.response(), ResponseState::Idle));
     assert!(
         active_in_flight_is_some(&app),
@@ -128,7 +128,7 @@ async fn stale_generation_response_is_dropped() {
     );
 
     // …the matching generation lands and clears the in-flight slot.
-    app.on_response(5, Ok(response()), meta());
+    app.on_response(5, Ok(response()), meta(), None);
     assert!(matches!(app.response(), ResponseState::Done { .. }));
     assert!(!active_in_flight_is_some(&app));
 }
@@ -3977,7 +3977,7 @@ async fn structural_jump_non_json_notifies() {
     app.generation = 5;
     set_active_in_flight(&mut app, 5);
     // `response()` carries no content-type, so the body is not JSON.
-    app.on_response(5, Ok(response()), meta());
+    app.on_response(5, Ok(response()), meta(), None);
     app.focus = Pane::Response;
     render_once(&mut app);
     app.handle_key(shift('J')).unwrap();
@@ -4093,6 +4093,105 @@ fn load_result_lands_on_parked_runner_during_body_search() {
         app.load_runner().unwrap().finished,
         "finished state survived the restore"
     );
+}
+
+// ---- debug Inspector overlay (M8.3 Wave 3) ----
+
+/// `<leader>d` opens the Inspector from `Mode::Normal`; with no send made yet
+/// there is no trace to show (the placeholder path), and it never panics.
+/// `q` closes it back to `Mode::Normal`.
+#[test]
+fn inspector_opens_from_normal_and_closes() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    press(&mut app, ' ');
+    press(&mut app, 'd');
+    assert!(matches!(app.mode, Mode::Inspector(_)));
+    render_once(&mut app); // must not panic with no trace captured
+    press(&mut app, 'q');
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+/// Opening the Inspector while a runner is the active mode parks the runner
+/// (mem::replace, not a drop) into `inspector_return`; closing restores the
+/// EXACT parked mode with its state intact. Exercises `open_inspector`
+/// directly — the leader chord itself only engages from `Mode::Normal` (the
+/// same restriction every other leader action has: no mode's key handler
+/// besides `Mode::Normal` checks `KeyMap::is_leader`), so this is the
+/// state-machine test for the park/return mechanics Inspector shares with
+/// `open_body_search`.
+#[test]
+fn inspector_parks_and_restores_runner_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = load_app(dir.path(), "https://api.test/ping");
+    assert!(matches!(app.mode, Mode::LoadRunner(_)));
+    let url_before = app.load_runner().unwrap().url.clone();
+
+    app.open_inspector();
+    assert!(
+        matches!(app.mode, Mode::Inspector(_)),
+        "Inspector is now the active mode"
+    );
+    assert!(
+        matches!(app.inspector_return, Mode::LoadRunner(_)),
+        "the runner is parked, not dropped"
+    );
+
+    app.handle_inspector_key(keyc(KeyCode::Esc));
+    assert!(
+        matches!(app.mode, Mode::LoadRunner(_)),
+        "closing restores the parked LoadRunner mode"
+    );
+    assert_eq!(
+        app.load_runner().unwrap().url,
+        url_before,
+        "the restored runner's state is intact"
+    );
+}
+
+/// A trace captured by a debug-on send becomes the Inspector's default view;
+/// a later debug-OFF send clears it rather than leaving the stale trace
+/// showing (Constitution: never fake state that no longer matches reality).
+#[tokio::test]
+async fn inspector_shows_latest_trace_and_clears_on_debug_off_send() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.debug_enabled = true;
+    app.generation = 7;
+    set_active_in_flight(&mut app, 7);
+    let trace =
+        churl_core::debug::DebugTrace::from_request(&app.selected().unwrap().endpoint.request);
+    app.on_response(7, Ok(response()), meta(), Some(Box::new(trace)));
+    app.open_inspector();
+    assert!(
+        matches!(&app.mode, Mode::Inspector(state) if state.trace.is_some()),
+        "the captured trace is the Inspector's default view"
+    );
+    app.handle_inspector_key(keyc(KeyCode::Esc));
+
+    // A second send with debug OFF must not leave the first trace visible.
+    app.debug_enabled = false;
+    app.generation = 8;
+    set_active_in_flight(&mut app, 8);
+    app.on_response(8, Ok(response()), meta(), None);
+    app.open_inspector();
+    assert!(
+        matches!(&app.mode, Mode::Inspector(state) if state.trace.is_none()),
+        "a debug-off send clears the stale trace rather than leaving it shown"
+    );
+}
+
+/// `<leader>D` flips the session debug-capture toggle; the statusline badge
+/// follows it.
+#[test]
+fn debug_toggle_flips_flag_and_badge() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    assert!(!app.debug_enabled, "off by default");
+    press(&mut app, ' ');
+    app.handle_key(shift('D')).unwrap();
+    assert!(app.debug_enabled, "<leader>D turns debug capture on");
+    press(&mut app, ' ');
+    app.handle_key(shift('D')).unwrap();
+    assert!(!app.debug_enabled, "<leader>D again turns it back off");
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
@@ -5257,7 +5356,7 @@ async fn on_response_routes_by_generation_to_matching_buffer() {
     app.active = 0;
 
     // A response for gen 9 must land on buffer 1 (NOT the active buffer 0).
-    app.on_response(9, Ok(response()), meta());
+    app.on_response(9, Ok(response()), meta(), None);
     assert!(
         matches!(
             app.buffers[1].as_endpoint().unwrap().response,
@@ -5274,7 +5373,7 @@ async fn on_response_routes_by_generation_to_matching_buffer() {
     ));
 
     // An unknown generation is dropped without touching any buffer.
-    app.on_response(42, Ok(response()), meta());
+    app.on_response(42, Ok(response()), meta(), None);
     assert!(app.buffers[0].as_endpoint().unwrap().in_flight.is_some());
 }
 

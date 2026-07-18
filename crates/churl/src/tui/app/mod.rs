@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use churl_core::config::Config;
 use churl_core::cookies::ChurlCookieJar;
+use churl_core::debug::DebugTrace;
 use churl_core::history::{
     CookieJarWriter, HistoryStore, LoadBatchSummary, NewHistoryEntry, default_state_path,
 };
@@ -47,6 +48,7 @@ use churl_core::secrets::SecretPolicy;
 use super::clipboard;
 use super::components::env_editor::{EnvEditorState, EnvKeyOutcome, EnvSaveResult};
 use super::components::explorer::{ExplorerState, RowKind, SelectedEndpoint};
+use super::components::inspector::InspectorState;
 use super::components::jump::{JumpState, JumpTarget};
 use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
@@ -62,8 +64,9 @@ use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, load_runner, message, method_menu, options, palette, picker,
-    prompt, request, response, sequence_editor, sequence_runner, statusline, tab_strip, urlbar,
+    env_editor, explorer, help, inspector, load_runner, message, method_menu, options, palette,
+    picker, prompt, request, response, sequence_editor, sequence_runner, statusline, tab_strip,
+    urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -201,6 +204,26 @@ pub struct App {
     /// payload for the duration of the overlay (moved in/out via `mem::replace`),
     /// and `load_runner()`/`active_response_surface` consult it while searching.
     body_search_return: Mode,
+    /// The mode to restore when the Inspector overlay closes, PARKED here
+    /// while `Mode::Inspector` is active — mirrors [`Self::body_search_return`].
+    /// The Inspector can be opened over any mode (e.g. `Mode::LoadRunner`), so
+    /// closing it must restore that exact mode, state intact, via
+    /// `mem::replace` rather than dropping it.
+    inspector_return: Mode,
+    /// Whether debug capture is on for this session (`<leader>D`; seeded from
+    /// `Config.debug` at startup by [`Self::install_runtime`]). Gates whether
+    /// [`Self::send_request`] builds a [`DebugTrace`] — off is the exact
+    /// pre-M8.3 path (no trace ever constructed). Drives the statusline DEBUG
+    /// badge.
+    pub(in crate::tui::app) debug_enabled: bool,
+    /// The most recently captured exchange's trace, if debug capture was on
+    /// for that exchange — the Inspector's default view. `None` both before
+    /// any send and after a debug-off send (a stale trace from an earlier
+    /// exchange would be misleading, so a debug-off send clears this rather
+    /// than leaving the previous one showing). Boxed to match
+    /// [`AppMsg::Response`]'s `trace` field (see its doc comment) — moved in
+    /// from there without a re-box.
+    latest_trace: Option<Box<DebugTrace>>,
     /// Job sender for the off-thread highlight worker; `None` under `TestBackend`.
     highlight_tx: Option<JobSender<HighlightJob>>,
     /// History store; `None` when disabled (open failed or no data dir).
@@ -540,6 +563,9 @@ impl App {
             pending_clipboard: None,
             body_search_editor: LineEditor::default(),
             body_search_return: Mode::Normal,
+            inspector_return: Mode::Normal,
+            debug_enabled: false,
+            latest_trace: None,
             highlight_tx: None,
             history: None,
             message: None,
@@ -880,6 +906,16 @@ impl App {
         }
     }
 
+    /// Opens the Inspector overlay directly over `trace` (tests / snapshot
+    /// drivers) — mirrors [`Self::set_response`]'s seam for the response
+    /// viewer: bypasses a real send (which needs a live HTTP exchange to
+    /// produce redirect hops / errors) so a snapshot can drive a
+    /// representative trace deterministically.
+    pub fn open_inspector_with_trace(&mut self, trace: DebugTrace) {
+        self.latest_trace = Some(Box::new(trace));
+        self.open_inspector();
+    }
+
     /// Loads an endpoint into a single active buffer (test/white-box entry point;
     /// production code goes through [`App::open_or_focus_buffer`]).
     #[cfg(test)]
@@ -1134,7 +1170,10 @@ impl App {
                     state.paste(&s);
                 }
             }
-            Mode::Jump | Mode::MethodMenu | Mode::Confirm(_) => {}
+            // The Inspector is read-only (no text-input surface), same as
+            // Jump/MethodMenu/Confirm — a paste while it is open has nowhere
+            // to land.
+            Mode::Jump | Mode::MethodMenu | Mode::Confirm(_) | Mode::Inspector(_) => {}
             Mode::Normal => self.handle_paste_normal(text),
         }
     }
@@ -1239,6 +1278,10 @@ impl App {
             redirect: config.redirect()?,
         };
         self.load_caps = config.load_caps();
+        // M8.3: seed the session debug-capture toggle from the persisted
+        // config knob; `<leader>D` flips it live for the rest of the session
+        // without writing back to `config.toml` (mirrors `session_insecure`).
+        self.debug_enabled = config.debug;
         // A spawn failure degrades to plain rendering: `spawn` returns
         // `None`, `highlight_tx` stays `None`, and every render site already guards
         // on `if let Some(tx) = &app.highlight_tx`, so the viewer renders fine.
@@ -1588,6 +1631,10 @@ impl App {
             Mode::Options(_) => self.handle_options_key(key),
             Mode::Sequence { .. } => self.handle_sequence_key(key),
             Mode::LoadRunner(_) => self.handle_load_runner_key(key),
+            Mode::Inspector(_) => {
+                self.handle_inspector_key(key);
+                Ok(())
+            }
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1793,6 +1840,8 @@ impl App {
             Action::OpenOptions => self.open_options(),
             Action::ToggleInsecure => self.toggle_insecure(),
             Action::ToggleEndpointInsecure => self.toggle_endpoint_insecure(),
+            Action::OpenInspector => self.open_inspector(),
+            Action::ToggleDebug => self.toggle_debug(),
             Action::RunSequence => self.run_selected_sequence(),
             Action::EditSequence => self.edit_selected_sequence()?,
             Action::OpenSequencePicker => self.open_sequence_picker(false),

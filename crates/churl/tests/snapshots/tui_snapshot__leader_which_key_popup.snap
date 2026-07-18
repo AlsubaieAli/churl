@@ -1,17 +1,16 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1527
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
 ┃> ▸ orders                  ┃│no endpoint selected                            │
-┃  ▸ users                   ┃└────────────────────────────────────────────────┘
-┃                            ┃┌ Request ───────────────────────────────────────┐
-┃                            ┃┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  ▸ users                   ┃┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃┃ Shift-d  toggle debug capture                  ┃
 ┃                            ┃┃ Shift-k  toggle insecure TLS for this endpoint ┃
 ┃                            ┃┃ Shift-n  new collection (choose location)      ┃
 ┃                            ┃┃ Space  request picker                          ┃
 ┃                            ┃┃ c  cancel request                              ┃
+┃                            ┃┃ d  debug inspector (request · vars · redirects)┃
 ┃                            ┃┃ e  toggle explorer sidebar                     ┃
 ┃                            ┃┃ k  toggle insecure TLS (verify off/on)         ┃
 ┃                            ┃┃ n  new endpoint (choose location)              ┃

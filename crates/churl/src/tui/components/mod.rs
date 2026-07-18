@@ -6,6 +6,7 @@ pub mod env_editor;
 pub mod explorer;
 pub mod fold;
 pub mod help;
+pub mod inspector;
 pub mod jump;
 pub mod line_editor;
 pub mod load_runner;

@@ -129,6 +129,13 @@ pub enum Mode {
     /// controls. Owns its [`OptionsState`] — the overlay cannot exist without its
     /// data, so no parallel `Option` field is needed.
     Options(OptionsState),
+    /// The debug Inspector overlay (`<leader>d`): a per-exchange, read-only
+    /// view of a captured [`churl_core::debug::DebugTrace`]. Owns its
+    /// [`InspectorState`] — including the trace itself (`None` when nothing
+    /// was captured yet) — so an Inspector with no data to show is still
+    /// constructible without a parallel `Option` field, matching every other
+    /// data-carrying overlay here.
+    Inspector(InspectorState),
 }
 
 /// The state of the ONE open fuzzy-picker overlay, when `mode` is one of the
@@ -363,6 +370,16 @@ pub enum AppMsg {
         outcome: Result<Response, String>,
         /// Metadata captured at send time.
         meta: ResponseMeta,
+        /// The exchange's captured debug trace, when debug capture was on for
+        /// this send (`None` otherwise — see [`super::App::debug_enabled`]).
+        /// Present regardless of `outcome`: `churl_core::http::execute_traced`
+        /// records a failure into the trace itself before returning `Err`, and
+        /// the sending task keeps the trace alive across the call (unlike
+        /// headless's `run_execution`, whose early `?` return can't). Boxed:
+        /// `DebugTrace` carries a full `Request` clone (`resolved_raw`),
+        /// which would otherwise bloat every `AppMsg` (most variants are a
+        /// few words) to its size.
+        trace: Option<Box<DebugTrace>>,
     },
     /// Highlighted lines for a viewport, returned by the highlight worker.
     Highlighted {
