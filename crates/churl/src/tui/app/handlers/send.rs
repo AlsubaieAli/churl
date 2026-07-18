@@ -19,14 +19,25 @@ impl App {
             self.message = Some(Message::new("request already in flight — ctrl-c to cancel"));
             return;
         }
+        // Pick the endpoint to send: the open buffer, else the endpoint the
+        // explorer cursor hovers. When falling back to a hovered endpoint, OPEN
+        // it into a buffer first — the same gesture Enter uses
+        // (`open_or_focus_buffer`) — so it becomes the active buffer and the
+        // in-flight/response state set at the tail lands on a real buffer that
+        // `on_response` routes the reply back to for display. The common case
+        // (an endpoint already open) skips this block untouched.
+        if self.selected().is_none() {
+            match self.hovered_endpoint() {
+                Some(hovered) => self.open_or_focus_buffer(hovered),
+                None => {
+                    self.message = Some(Message::new("no endpoint selected — nothing to send"));
+                    return;
+                }
+            }
+        }
         // Clone `SelectedEndpoint` so `build_resolver`/`endpoint_rel_path` can
-        // borrow `&self` while we later hold `&mut` the active buffer. Fall back
-        // to the hovered endpoint when nothing is loaded, so ctrl-s sends what
-        // the explorer cursor points at (the same one-shot read precedent as
-        // copy-as-curl / the load runner). With no active buffer the `body_text`
-        // read below resolves empty and the in-flight/response state at the tail
-        // is skipped (no buffer awaits it).
-        let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
+        // borrow `&self` while we later hold `&mut` the active buffer.
+        let Some(selected) = self.selected().cloned() else {
             self.message = Some(Message::new("no endpoint selected — nothing to send"));
             return;
         };

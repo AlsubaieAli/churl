@@ -3079,9 +3079,55 @@ fn send_falls_back_to_hovered_endpoint() {
         Some("unresolved variable(s): alphavar — set them in a profile/env or via CLI"),
         "send built its request from the hovered endpoint (alpha)"
     );
+    // The hovered endpoint was OPENED into the active buffer before the request
+    // was built (that's how the send reached alpha's URL). Here the fail-loud
+    // unresolved guard then refused it, so nothing went in flight — the
+    // buffer-awaits-the-response path is covered live in
+    // `send_hovered_opens_a_buffer_that_awaits_the_response`.
     assert!(
-        app.active_endpoint_buffer().is_none(),
-        "nothing loaded, so no buffer went in flight"
+        app.active_endpoint_buffer().is_some_and(|b| b
+            .endpoint
+            .endpoint
+            .request
+            .url
+            .contains("alphavar")
+            && b.in_flight.is_none()),
+        "hovered endpoint opened as the active buffer; refused send left it out of flight"
+    );
+}
+
+/// U2: a hovered-send with NOTHING loaded OPENS the hovered endpoint into the
+/// active buffer and the buffer then awaits the send's generation — so
+/// `on_response` routes the reply back for display instead of dropping it
+/// (the earlier footgun where a hovered send fired but showed no response).
+#[tokio::test]
+async fn send_hovered_opens_a_buffer_that_awaits_the_response() {
+    use churl_core::http::{DEFAULT_TIMEOUT, build_client};
+    let dir = tempfile::tempdir().unwrap();
+    // `hover_fallback_ws` URLs are fully resolved, so the send clears the
+    // unresolved guard; a real client lets it reach the in-flight tail.
+    let mut app = hover_fallback_ws(dir.path());
+    app.client = Some(build_client(DEFAULT_TIMEOUT).unwrap());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "nothing loaded before the send");
+    app.send_request();
+    let b = app
+        .active_endpoint_buffer()
+        .expect("the hovered endpoint was opened into the active buffer");
+    assert!(
+        b.endpoint.endpoint.request.url.contains("api.test/alpha"),
+        "the buffer holds the hovered endpoint (alpha): {}",
+        b.endpoint.endpoint.request.url
+    );
+    let in_flight = b
+        .in_flight
+        .as_ref()
+        .expect("the opened buffer awaits the send (response would render, not drop)");
+    assert_eq!(
+        in_flight.generation, app.generation,
+        "buffer awaits THIS send's generation, so `on_response` routes the reply to it"
     );
 }
 
@@ -3130,6 +3176,10 @@ fn send_with_no_load_and_no_hover_is_safe_noop() {
     assert_eq!(
         app.message.as_ref().map(|m| m.text.as_str()),
         Some("no endpoint selected — nothing to send"),
+    );
+    assert!(
+        app.active_endpoint_buffer().is_none(),
+        "no endpoint hovered → nothing opened, no request built"
     );
 }
 
