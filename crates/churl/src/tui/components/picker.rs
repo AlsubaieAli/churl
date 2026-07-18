@@ -1,6 +1,7 @@
 //! Generic fuzzy picker overlay shared by the search (`/`) and command palette
 //! (`:`) modes: a query line plus a filtered, selectable result list.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::Line;
@@ -8,6 +9,23 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::tui::events::FuzzyFinder;
 use crate::tui::theme::Theme;
+
+/// What routing a key into a [`PickerState`] asks the caller to do next. The
+/// navigation + query editing is handled internally ([`PickerKey::Consumed`]);
+/// only the two terminal signals — accept the current selection or cancel — are
+/// handed back, because what "accept"/"cancel" *mean* differs per overlay (the
+/// app search picker loads an endpoint, the sequence editor's add-step picker
+/// appends a step). Centralising the key semantics here is what lets every
+/// picker share one nav story (e.g. the Ctrl-j/k vim aliases) — a fix lands once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKey {
+    /// The key was handled internally (navigation, query edit, or ignored).
+    Consumed,
+    /// Enter — the caller should act on the current selection.
+    Accept,
+    /// Esc — the caller should close/cancel the picker.
+    Cancel,
+}
 
 /// State of an open picker overlay.
 #[derive(Debug)]
@@ -79,6 +97,31 @@ impl PickerState {
     /// Returns the item index of the current selection, if any.
     pub fn current(&self) -> Option<usize> {
         self.filtered.get(self.selected).copied()
+    }
+
+    /// Routes one key into the picker: navigation (↑/↓, plus the Ctrl-p/n and
+    /// Ctrl-k/j vim aliases), query editing (printable chars + Backspace,
+    /// refiltered through `finder`), and the two terminal signals — Enter →
+    /// [`PickerKey::Accept`], Esc → [`PickerKey::Cancel`]. Everything the
+    /// caller must interpret (what to do on accept/cancel) is returned; the
+    /// rest is [`PickerKey::Consumed`]. This is the single home of picker key
+    /// semantics, shared by every overlay.
+    pub fn handle_key(&mut self, key: KeyEvent, finder: &mut FuzzyFinder) -> PickerKey {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => return PickerKey::Cancel,
+            KeyCode::Enter => return PickerKey::Accept,
+            KeyCode::Up => self.move_up(),
+            KeyCode::Down => self.move_down(),
+            KeyCode::Char('p') if ctrl => self.move_up(),
+            KeyCode::Char('n') if ctrl => self.move_down(),
+            KeyCode::Char('k') if ctrl => self.move_up(),
+            KeyCode::Char('j') if ctrl => self.move_down(),
+            KeyCode::Backspace => self.backspace(finder),
+            KeyCode::Char(c) if !ctrl => self.push_char(c, finder),
+            _ => {}
+        }
+        PickerKey::Consumed
     }
 }
 
