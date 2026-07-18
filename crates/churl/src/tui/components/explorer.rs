@@ -600,21 +600,6 @@ impl ExplorerState {
             .collect()
     }
 
-    /// Loads every collection's endpoints (recursively, whole tree) and returns
-    /// their file paths (for the sequence editor's add-step picker).
-    pub fn all_endpoint_files(&mut self) -> Result<Vec<PathBuf>, PersistenceError> {
-        self.materialize_all()?;
-        let mut out = Vec::new();
-        for node in &self.collections {
-            if let Some(endpoints) = &node.endpoints {
-                for (path, _) in endpoints {
-                    out.push(path.clone());
-                }
-            }
-        }
-        Ok(out)
-    }
-
     /// Every endpoint as `(file path, display path)` in tree display order — the
     /// sequence add-step picker STORES the file-derived identifier (unchanged
     /// wire format) but LABELS each row by the same `collection/…/name` display
@@ -638,7 +623,7 @@ impl ExplorerState {
     /// discovers every sub-collection, depth-first from the root. After this,
     /// `self.collections` holds every node and each node's `endpoints`/`children`
     /// are `Some`. Used by the whole-tree readers (`all_endpoints`,
-    /// `all_endpoint_files`).
+    /// `all_endpoint_choices`).
     fn materialize_all(&mut self) -> Result<(), PersistenceError> {
         let mut i = 0;
         while i < self.collections.len() {
