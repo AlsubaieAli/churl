@@ -166,6 +166,27 @@ impl SequenceEditorState {
         &self.name
     }
 
+    /// Whether a free-text sub-input currently owns the keyboard: an in-place
+    /// rule name/expression field edit, or the add-step picker's filter query
+    /// (where Space is a term separator, not a leader chord). Used by the
+    /// app's sequence-key router to suppress the narrow leader-from-runner
+    /// intercept while text is being typed — otherwise a typed Space would be
+    /// eaten as leader and the next key spuriously parks the editor. The
+    /// discard-confirm overlay (`pending_close`) is a y/n gate, not free text,
+    /// so it is deliberately excluded.
+    pub fn is_capturing_text(&self) -> bool {
+        self.edit.is_some() || self.picker.is_some()
+    }
+
+    /// The in-progress rule field-edit's current text, for tests driving the
+    /// app-level key router (proving a typed key actually reached the editor
+    /// rather than being stolen by the leader intercept). `None` when no field
+    /// edit is open.
+    #[cfg(test)]
+    pub fn current_edit_text(&self) -> Option<String> {
+        self.edit.as_ref().map(|e| e.editor.text())
+    }
+
     /// Whether the working copy differs from the snapshot.
     pub fn is_dirty(&self) -> bool {
         (self.on_error, &self.steps) != (self.snapshot.0, &self.snapshot.1)

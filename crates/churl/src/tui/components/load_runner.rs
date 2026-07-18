@@ -634,6 +634,17 @@ impl LoadRunnerState {
         self.pending_confirm.is_some() || self.confirming_close || self.editing.is_some()
     }
 
+    /// Whether the inline numeric config-field editor currently owns the
+    /// keyboard. The only char-input sub-state in the load runner (digits for
+    /// total/concurrency/interval); Space is not a valid digit, but the leader
+    /// key IS Space by default, so the app suppresses the leader-from-runner
+    /// intercept while this is open — otherwise a stray Space would arm leader
+    /// and eat the following digit. Mirrors the sequence editor's
+    /// `is_capturing_text`.
+    pub fn is_capturing_text(&self) -> bool {
+        self.editing.is_some()
+    }
+
     /// The selected results row's response state, for the shared `response_*`
     /// handlers. `None` when there is no selectable row (pre-run) — the
     /// caller falls back to an idle no-op.

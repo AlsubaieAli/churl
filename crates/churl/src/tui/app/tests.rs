@@ -4234,6 +4234,52 @@ fn leader_from_runner_does_not_broaden_to_other_actions() {
     );
 }
 
+/// Regression (M8.3 adversarial P1): the leader-from-runner intercept must NOT
+/// swallow free text typed into the sequence editor's Edit face. Editing a
+/// rule field, `a Space d` must land the LITERAL "a d" in the field (Space is
+/// a character there, not a leader chord) and leave the mode as `Sequence` —
+/// before the fix the unconditional `is_leader` intercept ate the Space and
+/// the following `d` spuriously opened the Inspector.
+#[test]
+fn sequence_edit_field_leader_key_is_typed_not_intercepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = sequence_surface_app(dir.path());
+    assert_eq!(app.sequence_view().unwrap(), SeqView::Edit);
+
+    // Focus the Rules pane and open a fresh rule → begins a rule-name field
+    // edit (a live free-text sub-state).
+    press(&mut app, 'l'); // Steps -> Rules focus
+    press(&mut app, 'a'); // add rule -> begins RuleName edit
+    assert!(
+        app.sequence_editor().unwrap().is_capturing_text(),
+        "a rule field edit is now open"
+    );
+
+    // Type `a`, Space, `d`. The Space is the DEFAULT leader key — the whole
+    // point of the fix is that it reaches the editor here rather than arming
+    // the leader intercept.
+    press(&mut app, 'a');
+    press(&mut app, ' ');
+    press(&mut app, 'd');
+
+    assert!(
+        matches!(app.mode, Mode::Sequence { .. }),
+        "no Inspector overlay may open from typing in a rule field"
+    );
+    assert!(
+        !app.runner_leader_pending,
+        "the leader intercept must never have armed while editing text"
+    );
+    assert_eq!(
+        app.sequence_editor()
+            .unwrap()
+            .current_edit_text()
+            .as_deref(),
+        Some("a d"),
+        "the Space (and the following d) must reach the editor as literal text"
+    );
+}
+
 /// A trace captured by a debug-on send becomes the Inspector's default view;
 /// a later debug-OFF send clears it rather than leaving the stale trace
 /// showing (Constitution: never fake state that no longer matches reality).

@@ -1332,12 +1332,11 @@ impl App {
 
     /// Wires the REAL `tracing` ring built by [`super::log_subscriber::init`]
     /// (attached exactly once at TUI startup) into the app, replacing the
-    /// inert placeholder [`App::new`] seeded. Re-applies
-    /// [`Self::debug_enabled`]'s current value as the ring's capture gate —
-    /// [`super::run`] calls this AFTER [`App::install_runtime`], so the seed
-    /// there would otherwise be lost.
+    /// inert placeholder [`App::new`] seeded. The ring has no runtime gate of
+    /// its own — debug on/off is enforced at the emit sites, and the
+    /// attached layer's target filter keeps third-party logs out (see
+    /// [`super::log_subscriber`]'s docs).
     pub fn set_log_ring(&mut self, ring: LogRing) {
-        ring.set_enabled(self.debug_enabled);
         self.log_ring = ring;
     }
 
@@ -1368,10 +1367,6 @@ impl App {
         // config knob; `<leader>D` flips it live for the rest of the session
         // without writing back to `config.toml` (mirrors `session_insecure`).
         self.debug_enabled = config.debug;
-        // Keep the Log ring's capture gate in lockstep with the seeded
-        // toggle — off means the subscriber's `enabled()` returns `false`
-        // for every event site (the zero-overhead path) from the first frame.
-        self.log_ring.set_enabled(self.debug_enabled);
         // A spawn failure degrades to plain rendering: `spawn` returns
         // `None`, `highlight_tx` stays `None`, and every render site already guards
         // on `if let Some(tx) = &app.highlight_tx`, so the viewer renders fine.

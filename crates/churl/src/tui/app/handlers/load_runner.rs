@@ -405,7 +405,16 @@ impl App {
         // one-shot flag rather than engaging the general `self.leader` state
         // machine (which would broaden every leader-root action's
         // reachability, not just the two debug overlays).
-        if self.keymap.is_leader(key) {
+        //
+        // Suppressed while the inline numeric config-field editor owns the
+        // keyboard: the leader key is Space by default, and although Space is
+        // not a valid digit, arming the intercept would eat the NEXT digit
+        // (consumed by `handle_runner_leader_key` as an unrecognized chord).
+        // Mirrors `handle_sequence_key`'s identical text-capture guard.
+        let editing = self
+            .load_runner()
+            .is_some_and(LoadRunnerState::is_capturing_text);
+        if self.keymap.is_leader(key) && !editing {
             self.runner_leader_pending = true;
             return Ok(());
         }

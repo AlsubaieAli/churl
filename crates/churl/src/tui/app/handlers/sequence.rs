@@ -68,6 +68,19 @@ impl App {
         }
     }
 
+    /// Whether the sequence surface is on the Edit face AND its editor is
+    /// currently capturing free text (a rule field edit or the add-step
+    /// picker query). Gates the leader-from-runner intercept in
+    /// [`Self::handle_sequence_key`] so a typed Space is not swallowed. `false`
+    /// on the Run face (keys route to the runner, not the editor) and when no
+    /// editor is built.
+    pub(in crate::tui::app) fn sequence_edit_capturing_text(&self) -> bool {
+        matches!(self.sequence_view(), Some(SeqView::Edit))
+            && self
+                .sequence_editor()
+                .is_some_and(SequenceEditorState::is_capturing_text)
+    }
+
     /// The active face of the open sequence surface. `SeqView` is `Copy`,
     /// so this hands back an owned value, dropping the `self.mode` borrow — callers
     /// can then act via `&mut self`. `None` when not in a sequence surface.
@@ -533,9 +546,15 @@ impl App {
         // Narrow leader-from-runner allowlist (M8.3 Wave 4) — mirrors
         // `Self::handle_load_runner_key`'s identical intercept; see its
         // comment and `Self::runner_leader_pending`'s doc for the rationale.
-        // Applies to BOTH sequence-surface faces (Edit and Run): the debug
-        // overlays should be reachable regardless of which face is active.
-        if self.keymap.is_leader(key) {
+        // Applies to BOTH faces (Edit and Run) so the debug overlays are
+        // reachable regardless of active face — BUT NOT while the Edit face's
+        // editor is capturing free text (an in-place rule field edit, or the
+        // add-step picker query where Space is a term separator). Without this
+        // guard a typed Space would be swallowed as leader and the next key
+        // (e.g. `d`) would spuriously park the editor + open the Inspector,
+        // corrupting text input. Mirrors `handle_normal_key`'s discipline of
+        // gating the leader behind its text-edit predicates.
+        if self.keymap.is_leader(key) && !self.sequence_edit_capturing_text() {
             self.runner_leader_pending = true;
             return Ok(());
         }

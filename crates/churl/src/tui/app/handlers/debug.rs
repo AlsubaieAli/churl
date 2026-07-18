@@ -75,9 +75,9 @@ impl App {
     /// goes back off.
     pub(in crate::tui::app) fn toggle_debug(&mut self) {
         self.debug_enabled = !self.debug_enabled;
-        // Keep the Log ring's capture gate in lockstep — see
-        // `install_runtime`'s matching seed.
-        self.log_ring.set_enabled(self.debug_enabled);
+        // The Log ring needs no toggle here — off means the send/load/sequence
+        // emit sites simply don't emit (their `if let Some(trace)` guard is
+        // `None`), so the ring stops filling; see `log_subscriber`'s docs.
         self.notify(if self.debug_enabled {
             "debug capture ON — sends now build an inspectable trace"
         } else {
