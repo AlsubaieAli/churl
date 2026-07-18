@@ -139,6 +139,21 @@ pub async fn run(args: LoadArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Loa
     // owned fields (`cli_vars`, `proxy`) are moved below.
     let cfg = load_config(&args);
 
+    // Guardrail caps, pre-flight (before any request is fired). The TUI enforces
+    // a hard ceiling on total/concurrency ("a testing aid, not a load-cannon");
+    // the headless path enforces the same `Refuse` tier so a CI typo (`--total
+    // 100000`) can't DoS a real target. The `Warn` tier has no TTY to confirm
+    // headlessly, so it surfaces loudly on stderr and proceeds — the caller
+    // chose the numbers. Raise `[load] max_total`/`max_concurrency` to lift the
+    // ceiling deliberately (the refusal message says so).
+    match churl_core::load::check_config(&cfg, &runtime.load_caps) {
+        churl_core::load::LoadCheck::Refuse(reason) => {
+            return Err(CliError::new(ErrorKind::LoadCapExceeded, reason));
+        }
+        churl_core::load::LoadCheck::Warn(reason) => eprintln!("warning: {reason}"),
+        churl_core::load::LoadCheck::Ok => {}
+    }
+
     // Resolver scopes match `App::build_resolver`/`run_cmd`: cli → profile →
     // collection ancestor chain (leaf → root). No "session" scope — a one-shot
     // process never captures one.

@@ -345,3 +345,47 @@ async fn load_human_mode_prints_stats_to_stderr_stdout_empty() {
     assert!(stderr.contains("3 attempted"), "{stderr}");
     assert!(stderr.contains("passed"), "assertion checklist: {stderr}");
 }
+
+// ---- gate follow-up: headless guardrail caps (M8.4.2 adversarial review) ----
+
+#[test]
+fn total_over_hard_cap_is_refused_exit_5_before_any_request() {
+    // The headless path enforces the same hard ceiling the TUI does: --total
+    // above the [load] max_total (default 10_000) is refused pre-flight (band 5),
+    // before a single request is fired — a CI typo can't DoS a real target. The
+    // base_url points at an unreachable host to prove nothing is contacted.
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), "http://127.0.0.1:1");
+    let output = churl_in(dir.path(), &["--json", "load", "Hit", "--total", "20000"]);
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an over-cap total must be refused (band 5): stderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert!(env["data"].is_null());
+    assert_eq!(env["error"]["kind"], "load-cap-exceeded");
+    assert_eq!(env["command"], "load");
+}
+
+#[test]
+fn concurrency_over_hard_cap_is_refused_exit_5() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), "http://127.0.0.1:1");
+    let output = churl_in(
+        dir.path(),
+        &[
+            "--json",
+            "load",
+            "Hit",
+            "--total",
+            "10",
+            "--concurrency",
+            "5000",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(envelope(&output)["error"]["kind"], "load-cap-exceeded");
+}

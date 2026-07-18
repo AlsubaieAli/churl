@@ -270,6 +270,9 @@ struct RuntimeCfg {
     insecure: bool,
     max_body_bytes: u64,
     redirect: churl_core::config::RedirectPolicy,
+    /// The `[load]` guardrail caps — used by `churl load` to refuse a headless
+    /// run above the hard ceiling (`run`/`send` ignore it).
+    load_caps: churl_core::load::LoadCaps,
 }
 
 /// Resolves [`RuntimeCfg`] from the global config, mapping any failure to a
@@ -290,6 +293,7 @@ fn build_runtime_cfg() -> std::result::Result<RuntimeCfg, CliError> {
         insecure: config.insecure(),
         max_body_bytes: config.max_body_bytes(),
         redirect,
+        load_caps: config.load_caps(),
     })
 }
 

@@ -230,8 +230,9 @@ pub fn stats(outcomes: &[(ReqOutcome, Option<Duration>)]) -> LoadStats {
     let mean = if timings.is_empty() {
         None
     } else {
-        // Sum in nanoseconds to keep precision; u128 cannot overflow here (cap
-        // is 10_000 requests × sub-day latencies).
+        // Sum in nanoseconds to keep precision; the u128 sum cannot overflow for
+        // any realistic request count (even far above the `[load]` hard cap,
+        // billions of sub-day-ns latencies stay well under u128::MAX).
         let total: u128 = timings.iter().map(Duration::as_nanos).sum();
         Some(Duration::from_nanos(
             u64::try_from(total / timings.len() as u128).unwrap_or(u64::MAX),

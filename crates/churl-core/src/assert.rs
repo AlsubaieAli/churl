@@ -562,7 +562,11 @@ pub fn run_stats_assertions(
 /// formatting the number; `exists`/`absent` test whether the stat is *defined*
 /// (a natural fit — `stats.p95 exists` asserts at least one request completed).
 fn evaluate_stat(op: AssertOp, expected: Option<&str>, resolved: Option<f64>) -> AssertOutcome {
-    const UNDEFINED: &str = "stat is undefined (no completed requests)";
+    // A latency stat is undefined when no request completed; a rate/rps stat
+    // when none was attempted — the message covers both so it never
+    // misattributes a zero-attempted rate failure to "no completed requests".
+    const UNDEFINED: &str =
+        "stat is undefined (no completed requests, or none attempted for a rate)";
     match op {
         AssertOp::Exists => match resolved {
             Some(value) => AssertOutcome {

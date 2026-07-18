@@ -97,6 +97,12 @@ pub enum ErrorKind {
     /// (M8.4): a schema-compatible new closed-enum variant, per the module
     /// docs' "new `ErrorKind` variants are additive" rule.
     InvalidAssertion,
+    /// A `churl load` run's `--total`/`--concurrency` exceeded the `[load]`
+    /// hard cap (`LoadCaps`) — refused pre-flight before any request is fired,
+    /// mirroring the TUI's own hard ceiling. A usage/input mistake (the caller
+    /// asked for more than the configured maximum), hence band 5. Additive
+    /// (M8.4.2). Raise `[load] max_total`/`max_concurrency` to allow it.
+    LoadCapExceeded,
 }
 
 impl ErrorKind {
@@ -112,7 +118,8 @@ impl ErrorKind {
             ErrorKind::InvalidUrl | ErrorKind::Timeout | ErrorKind::TransportError => 4,
             ErrorKind::NotACurlCommand
             | ErrorKind::ImportWriteFailed
-            | ErrorKind::InvalidAssertion => 5,
+            | ErrorKind::InvalidAssertion
+            | ErrorKind::LoadCapExceeded => 5,
         }
     }
 }

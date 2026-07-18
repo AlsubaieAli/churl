@@ -77,6 +77,7 @@ Every non-zero exit accompanies `ok: false` and a populated `error.kind`, **exce
 | `not-a-curl-command` | 5 | `import`'s input didn't parse as a curl command — covers a tokenize failure, a missing/duplicate URL, an unknown flag, an unsupported construct, an invalid `-X` method, **and** the non-interactive stdin guard (no curl given and stdin isn't piped) |
 | `import-write-failed` | 5 | The curl command parsed, but writing the endpoint failed (e.g. a newly-authored literal secret was refused, or a disk error) |
 | `invalid-assertion` | 5 | A `--assert` flag did not parse: an unknown operator, a value-requiring operator (everything but `exists`/`absent`) with no value, or an empty target (M8.4); for `load`, also a target that is not a known `stats.<field>` name (M8.4.2) |
+| `load-cap-exceeded` | 5 | A `churl load` run's `--total`/`--concurrency` exceeded the `[load]` hard cap — refused pre-flight before any request is fired (M8.4.2). Raise `[load] max_total`/`max_concurrency` to allow it |
 
 Implementation: `crates/churl/src/output.rs` (`ErrorKind::exit_code`).
 
@@ -228,6 +229,10 @@ churl load <endpoint> [--total N] [--concurrency C] [--gap MS] [--assert 'stats.
 - `--concurrency C` — maximum requests in flight at once (default 5).
 - `--gap MS` — minimum delay between successive launches, milliseconds (default 0 = burst); maps to the TUI load config's min-gap / `LoadConfig.interval`.
 
+**Guardrail caps.** `load` enforces the same hard ceiling the TUI does: a `--total`/`--concurrency` above the `[load]` `max_total`/`max_concurrency` (defaults 10 000 / 200) is **refused pre-flight** — `error.kind: "load-cap-exceeded"`, exit **5**, before a single request is fired — so a CI typo (`--total 100000`) can't turn a test aid into a load-cannon against a real target. Raise `[load] max_total`/`max_concurrency` in the global config to lift the ceiling deliberately (the refusal message says so). The TUI's *warn* tier (a soft threshold below the hard cap) has no TTY to confirm at headlessly, so it instead prints a `warning:` line to stderr and proceeds — the caller chose the numbers.
+
+Only the CLI `stats.*` `--assert` flags gate a `load` run; an endpoint's persisted `[[assertions]]` (which check a single *response*) are **not** applied — a load run has no single response, only the aggregate.
+
 ### The single aggregate envelope (`--json`)
 
 A load run is **one aggregate result**, so — unlike `run-seq`'s per-step NDJSON — it emits a **single** `{ schema_version, ok, command, data, error }` envelope (reusing the exact `run`/`send` seam; per-request NDJSON would flood with thousands of lines). `command` is `"load"`.
@@ -271,7 +276,7 @@ Values follow the units table above — latencies in **milliseconds**, rates as 
 
 ### Exit codes
 
-Reuses the frozen bands: `no-workspace`/`endpoint-not-found`/`unresolved-var`/`unknown-profile`/`config-error` → **3**; a transport failure building the client → **4**; a bad `--assert` (unparseable grammar, or a target that is not a known `stats.<field>`) → **5** `invalid-assertion`, caught pre-flight before any request runs; a failed `stats.*` assertion → **1**; clean → **0**. Note a **per-request** transport failure is not a command error — it lands in `stats.errored` (the aggregate is still a successful result); only a failure to *build* the client is band 4.
+Reuses the frozen bands: `no-workspace`/`endpoint-not-found`/`unresolved-var`/`unknown-profile`/`config-error` → **3**; a transport failure building the client → **4**; a bad `--assert` (unparseable grammar, or a target that is not a known `stats.<field>`) → **5** `invalid-assertion`, or a `--total`/`--concurrency` over the hard cap → **5** `load-cap-exceeded`, both caught pre-flight before any request runs; a failed `stats.*` assertion → **1**; clean → **0**. Note a **per-request** transport failure is not a command error — it lands in `stats.errored` (the aggregate is still a successful result); only a failure to *build* the client is band 4.
 
 ### Human mode (non-`--json`)
 
