@@ -20,8 +20,13 @@ impl App {
             return;
         }
         // Clone `SelectedEndpoint` so `build_resolver`/`endpoint_rel_path` can
-        // borrow `&self` while we later hold `&mut` the active buffer.
-        let Some(selected) = self.selected().cloned() else {
+        // borrow `&self` while we later hold `&mut` the active buffer. Fall back
+        // to the hovered endpoint when nothing is loaded, so ctrl-s sends what
+        // the explorer cursor points at (the same one-shot read precedent as
+        // copy-as-curl / the load runner). With no active buffer the `body_text`
+        // read below resolves empty and the in-flight/response state at the tail
+        // is skipped (no buffer awaits it).
+        let Some(selected) = self.selected().cloned().or_else(|| self.hovered_endpoint()) else {
             self.message = Some(Message::new("no endpoint selected — nothing to send"));
             return;
         };

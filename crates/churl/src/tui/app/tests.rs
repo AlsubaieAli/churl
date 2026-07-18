@@ -3039,6 +3039,100 @@ fn copy_as_curl_prefers_loaded_over_hover() {
     );
 }
 
+/// A workspace like `hover_fallback_ws` but each endpoint's URL carries a
+/// DISTINCT unresolved `{{var}}` (no profile resolves it). A send's fail-loud
+/// "unresolved variable(s): <name>" message then names which endpoint the
+/// request was built from — the discriminator the U2 targeting tests need.
+fn hover_unresolved_ws(root: &Path) -> App {
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = root.join("api");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+            coll.join("a.toml"),
+            "seq = 0\nname = \"alpha\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{{alphavar}}\"\n",
+        )
+        .unwrap();
+    std::fs::write(
+            coll.join("b.toml"),
+            "seq = 1\nname = \"beta\"\n\n[request]\nmethod = \"GET\"\nurl = \"https://api.test/{{betavar}}\"\n",
+        )
+        .unwrap();
+    let ws = open_workspace(root).unwrap();
+    App::new(ws, KeyMap::default()).unwrap()
+}
+
+/// U2: with NOTHING loaded, `send_request` (ctrl-s) falls back to the HOVERED
+/// endpoint — the request is built from it, proven by the fail-loud message
+/// naming that endpoint's unresolved variable. No buffer goes in flight.
+#[test]
+fn send_falls_back_to_hovered_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "no buffer loaded");
+    assert!(app.hovered_endpoint().is_some(), "cursor hovers alpha");
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("unresolved variable(s): alphavar — set them in a profile/env or via CLI"),
+        "send built its request from the hovered endpoint (alpha)"
+    );
+    assert!(
+        app.active_endpoint_buffer().is_none(),
+        "nothing loaded, so no buffer went in flight"
+    );
+}
+
+/// U2: with an endpoint LOADED, `send_request` still targets the loaded one even
+/// when the explorer cursor hovers a DIFFERENT endpoint — no surprise for the
+/// common case. Proven by the message naming the loaded endpoint's var, not the
+/// hover's.
+#[test]
+fn send_prefers_loaded_over_hover() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap();
+    app.explorer.move_down(); // onto "alpha"
+    let alpha = app.explorer.select().unwrap().expect("alpha selected");
+    app.load_endpoint(alpha);
+    assert!(app.selected().is_some(), "alpha loaded");
+    app.set_focus(Pane::Explorer);
+    app.explorer.move_down(); // hover "beta"
+    assert!(
+        app.hovered_endpoint()
+            .is_some_and(|h| h.endpoint.request.url.contains("betavar")),
+        "cursor now hovers beta"
+    );
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("unresolved variable(s): alphavar — set them in a profile/env or via CLI"),
+        "send targets the LOADED endpoint (alpha), not the hover (beta)"
+    );
+}
+
+/// U2 edge: nothing loaded AND nothing hovered (cursor on the collection row) →
+/// the same safe no-op as before — a message, no panic, no request built.
+#[test]
+fn send_with_no_load_and_no_hover_is_safe_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = hover_unresolved_ws(dir.path());
+    app.explorer.expand().unwrap(); // cursor rests on the "api" collection row
+    app.set_focus(Pane::Explorer);
+    assert!(app.selected().is_none(), "nothing loaded");
+    assert!(
+        app.hovered_endpoint().is_none(),
+        "cursor is on a collection, not an endpoint"
+    );
+    app.send_request();
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("no endpoint selected — nothing to send"),
+    );
+}
+
 /// m1 regression: `<leader>s o` picking a sequence moves the sub-pane cursor
 /// onto it, so a later run/edit acts on the PICKED sequence, not #0.
 #[test]
