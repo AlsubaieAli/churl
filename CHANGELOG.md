@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/AlsubaieAli/churl/compare/v0.7.0...v0.8.0) - 2026-07-19
+
+### Added
+
+- U3 — endpoint-level extraction into session vars ([#108](https://github.com/AlsubaieAli/churl/pull/108))
+- U6 — curl-import naming standard + collision prompt ([#107](https://github.com/AlsubaieAli/churl/pull/107))
+- U2 — Ctrl-s sends the hovered endpoint when none is open ([#105](https://github.com/AlsubaieAli/churl/pull/105))
+- U-track Batch A — response/load-runner presentation polish (U4/U5/U7/U8) ([#104](https://github.com/AlsubaieAli/churl/pull/104))
+- headless load runs — load fires N concurrent copies and asserts on aggregate stats ([#103](https://github.com/AlsubaieAli/churl/pull/103))
+- headless sequence runs — run-seq streams NDJSON, per-step assertions, exit 1 on failure ([#102](https://github.com/AlsubaieAli/churl/pull/102))
+- debugging shell — Inspector, Log panel, Traffic feed, headless -v trace, advanced settings ([#101](https://github.com/AlsubaieAli/churl/pull/101))
+- response assertions — --assert, exit 1, machine-readable pass/fail ([#99](https://github.com/AlsubaieAli/churl/pull/99))
+
+### Other
+
+- U1 — route sequence add-step through the shared picker ([#106](https://github.com/AlsubaieAli/churl/pull/106))
+
 ## [0.7.0] - 2026-07-17
 
 - feat: CLI & headless (agent-first, human-second) — M8.2 (#97)
