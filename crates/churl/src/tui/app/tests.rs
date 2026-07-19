@@ -966,6 +966,27 @@ async fn standalone_send_captures_persisted_extract_into_session() {
     );
 }
 
+/// A standalone send against a failed (>= 400) response captures NOTHING, even
+/// when the error body carries all the extractable fields — mirroring
+/// `sequence::classify_response`, which skips extraction on status >= 400. Keeps
+/// standalone and sequence capture semantics identical and stops a session var
+/// being poisoned by a stale/garbage value read out of an error body.
+#[tokio::test]
+async fn standalone_send_does_not_capture_from_failed_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut app = standalone_extract_app(root);
+
+    // A 401 whose body would otherwise satisfy the persisted extract rule.
+    let body = r#"{"data":{"token":"S3cr3t-TOKEN","request_id":"req-42"}}"#;
+    app.on_response(7, Ok(ok_resp(401, body)), meta(), None);
+
+    assert!(
+        app.session_vars().is_empty(),
+        "a standalone send must not capture from a >= 400 response"
+    );
+}
+
 /// A standalone send whose endpoint has extract rules but NONE persisted writes
 /// nothing to the Session store (mirrors a run-only sequence rule).
 #[tokio::test]

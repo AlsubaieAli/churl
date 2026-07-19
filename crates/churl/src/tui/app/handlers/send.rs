@@ -29,6 +29,13 @@ fn capture_endpoint_session_vars(
     if endpoint.extract.is_empty() {
         return Vec::new();
     }
+    // Only capture from a successful response — mirror sequence-step semantics
+    // (`sequence::classify_response` skips extraction on status >= 400) so a
+    // standalone send and a sequence step behave identically. Capturing off a
+    // 4xx/5xx error body could poison a session var with a stale/garbage value.
+    if response.status >= 400 {
+        return Vec::new();
+    }
     let mut extracted: Vec<(String, String)> = Vec::with_capacity(endpoint.extract.len());
     for (name, expr) in &endpoint.extract {
         match churl_core::sequence::extract_value(response, expr) {
