@@ -127,6 +127,8 @@ mod tests {
             seq: 0,
             name: "test".to_owned(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request,
         }
     }

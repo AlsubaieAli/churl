@@ -1249,6 +1249,8 @@ mod tests {
             seq: 0,
             name: "t".into(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "https://e.com/".into(),

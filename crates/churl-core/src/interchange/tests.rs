@@ -222,6 +222,8 @@ fn sample_endpoints() -> Vec<Endpoint> {
             seq: 0,
             name: "get users".into(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Get,
                 url: "https://api.test/users?page=2".into(),
@@ -249,6 +251,8 @@ fn sample_endpoints() -> Vec<Endpoint> {
             seq: 1,
             name: "create user".into(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Post,
                 url: "https://api.test/users".into(),
@@ -269,6 +273,8 @@ fn sample_endpoints() -> Vec<Endpoint> {
             seq: 2,
             name: "form post".into(),
             assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
             request: Request {
                 method: Method::Post,
                 url: "https://api.test/form".into(),
@@ -332,6 +338,8 @@ fn export_refuses_literal_secret_auth() {
         seq: 0,
         name: "leaky".into(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://e/x".into(),
@@ -456,6 +464,8 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                     seq: 0,
                     name: "list users".into(),
                     assertions: Vec::new(),
+                    extract: std::collections::BTreeMap::new(),
+                    persist: Vec::new(),
                     request: Request {
                         method: Method::Get,
                         url: "https://api.test/users".into(),
@@ -496,6 +506,8 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                     seq: 1,
                     name: "create user".into(),
                     assertions: Vec::new(),
+                    extract: std::collections::BTreeMap::new(),
+                    persist: Vec::new(),
                     request: Request {
                         method: Method::Post,
                         url: "https://api.test/users".into(),
@@ -521,6 +533,8 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                     seq: 0,
                     name: "form post".into(),
                     assertions: Vec::new(),
+                    extract: std::collections::BTreeMap::new(),
+                    persist: Vec::new(),
                     request: Request {
                         method: Method::Put,
                         url: "https://api.test/form".into(),
@@ -542,6 +556,8 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                     seq: 1,
                     name: "text ping".into(),
                     assertions: Vec::new(),
+                    extract: std::collections::BTreeMap::new(),
+                    persist: Vec::new(),
                     request: Request {
                         method: Method::Delete,
                         url: "https://api.test/ping".into(),

@@ -7,6 +7,8 @@ fn endpoint(auth: Option<Auth>) -> Endpoint {
         seq: 0,
         name: "e".to_owned(),
         assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
         request: Request {
             method: Method::Get,
             url: "https://example.com".to_owned(),

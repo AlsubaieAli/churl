@@ -86,6 +86,8 @@ fn endpoint() -> impl Strategy<Value = Endpoint> {
                 seq,
                 name,
                 assertions: Vec::new(),
+                extract: std::collections::BTreeMap::new(),
+                persist: Vec::new(),
                 request: Request {
                     method,
                     url,
