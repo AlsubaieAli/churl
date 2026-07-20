@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/AlsubaieAli/churl/compare/v0.8.0...v0.9.0) - 2026-07-20
+
+### Added
+
+- *(tui)* settings panel UX polish (J/K adjust, leader-key capture, MB units, inline descriptions) ([#112](https://github.com/AlsubaieAli/churl/pull/112))
+- cookie model — SameSite + manual add/edit (M8.5.1) ([#111](https://github.com/AlsubaieAli/churl/pull/111))
+- centralized settings panel + config writer ([#109](https://github.com/AlsubaieAli/churl/pull/109))
+
 ## [0.8.0](https://github.com/AlsubaieAli/churl/compare/v0.7.0...v0.8.0) - 2026-07-19
 
 ### Added
