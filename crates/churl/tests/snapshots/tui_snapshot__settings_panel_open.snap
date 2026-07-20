@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1604
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -20,8 +21,8 @@ expression: snapshot(&mut app)
 │           ┃                                                      ┃           │
 │           ┃                                                      ┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter/l open · s save · q close           ┃           │
-└───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
+│           ┃                                                      ┃           │
+└───────────┗ j/k move · enter open · s save · q close ━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

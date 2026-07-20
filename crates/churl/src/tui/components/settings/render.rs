@@ -9,14 +9,22 @@ use churl_core::secrets::SecretPolicy;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use super::{
     AdvancedField, AppearanceRow, CookieFormField, DebugRow, LoadRow, NetworkRow, PanelFocus,
-    RequestRow, SettingKey, SettingsCategory, SettingsLevel, SettingsState, mask_proxy,
-    mask_proxy_password,
+    RequestRow, SettingKey, SettingsCategory, SettingsLevel, SettingsState, format_body_cap,
+    leader_key_eq, mask_proxy, mask_proxy_password,
 };
 use crate::tui::theme::Theme;
+
+/// Panel-footer height: one status/message row plus three rows for the
+/// per-setting description. Three description rows is what the longest
+/// description (the redirect-policy and TLS notes) needs to wrap fully on
+/// screen at the real modal width (`Percentage(70)` → ~52 usable columns on
+/// an 80-col terminal), so no note is ever cut mid-sentence. The description
+/// renders with word-wrap across those rows (see `render_footer`).
+const FOOTER_HEIGHT: u16 = 4;
 
 /// The dirty dot's actual predicate (FIX 2): touched AND differs from disk —
 /// NOT a bare value comparison. A knob the panel merely displays (CLI `-k`,
@@ -43,11 +51,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
         SettingsLevel::Menu => " Settings ".to_owned(),
         SettingsLevel::Panel => format!(" Settings · {} ", state.category.label()),
     };
+    // The compact key-hint line lives on the block's bottom-right border
+    // (M8.5.2) — freeing the footer's hint row for a per-setting description
+    // (see `render_footer`/`setting_description`). Computed once here, before
+    // the level/focus-specific body renders, since it depends on the SAME
+    // state those renders read.
+    let hint = footer_hint(state);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
         .title(title)
-        .title_style(theme.title);
+        .title_style(theme.title)
+        // LEFT-aligned (mirrors the top title's placement) so an over-long
+        // hint clips its TRAILING, least-important token instead of eating the
+        // flagship `j/k · J/K adjust` prefix — a right-aligned bottom hint
+        // clipped the left, hiding exactly the token users most need to
+        // discover. Strings are also kept within the border width so nothing
+        // clips at the real modal size (`footer_hint`).
+        .title_bottom(Line::from(format!(" {hint} ")).left_aligned());
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     if inner.width == 0 || inner.height == 0 {
@@ -60,14 +81,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
     }
 }
 
-/// Renders the category menu (level 1).
+/// Renders the category menu (level 1). The key hints live on the modal's
+/// border (see `footer_hint`) — this footer is just the live message row.
 fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
-    let [list_area, msg_row, hint_row] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [list_area, msg_row] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
     let lines: Vec<Line> = SettingsCategory::visible(state.debug_enabled)
         .into_iter()
@@ -91,13 +109,6 @@ fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &The
         None => Line::from(""),
     };
     frame.render_widget(Paragraph::new(top), msg_row);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            " j/k move · enter/l open · s save · q close",
-            theme.statusline,
-        )),
-        hint_row,
-    );
 }
 
 /// Renders the open category panel (level 2): its rows, plus a detail area
@@ -108,7 +119,7 @@ fn render_panel(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Th
     // modal panel, not another row list.
     if state.cookie_form.is_some() {
         let [body, footer] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(FOOTER_HEIGHT)]).areas(area);
         render_cookie_form(frame, body, state, theme);
         render_footer(frame, footer, state, theme);
         return;
@@ -123,12 +134,12 @@ fn render_panel(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Th
         Layout::vertical([
             Constraint::Length(rows_height),
             Constraint::Fill(1),
-            Constraint::Length(2),
+            Constraint::Length(FOOTER_HEIGHT),
         ])
         .areas(area)
     } else {
         let [rows_area, footer] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(FOOTER_HEIGHT)]).areas(area);
         [rows_area, Rect::default(), footer]
     };
 
@@ -233,7 +244,7 @@ fn render_request_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
         state,
         super::EditTarget::Advanced(AdvancedField::BodyCapBytes),
     )
-    .unwrap_or_else(|| format!("{}", state.advanced.body_cap_bytes));
+    .unwrap_or_else(|| format_body_cap(state.advanced.body_cap_bytes));
 
     let lines = vec![
         row_line(
@@ -376,8 +387,12 @@ fn render_load_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme:
 
 fn render_appearance_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
     let sel = |row: AppearanceRow| state.focus == PanelFocus::Rows && state.appearance_row == row;
-    let leader_display = editing_text(state, super::EditTarget::LeaderKey)
-        .unwrap_or_else(|| state.leader_key.clone());
+    let leader_display = if state.capturing_leader_key {
+        "press a key… (tab: type a combo instead, esc: cancel)".to_owned()
+    } else {
+        editing_text(state, super::EditTarget::LeaderKey)
+            .unwrap_or_else(|| state.leader_key.clone())
+    };
     let lines = vec![
         row_line(
             AppearanceRow::Theme.label(),
@@ -397,7 +412,9 @@ fn render_appearance_rows(frame: &mut Frame, area: Rect, state: &SettingsState, 
             dirty(
                 state,
                 SettingKey::LeaderKey,
-                state.leader_key != state.persisted.leader_key,
+                // Canonical combo compare, not raw string equality — a captured
+                // `"Space"` must not read dirty against the default `"space"`.
+                !leader_key_eq(&state.leader_key, &state.persisted.leader_key),
             ),
             theme,
         ),
@@ -455,8 +472,15 @@ fn render_advanced_list(frame: &mut Frame, area: Rect, state: &SettingsState, th
         .iter()
         .map(|&field| {
             let selected = focused && state.advanced_field == field;
-            let value = editing_text(state, super::EditTarget::Advanced(field))
-                .unwrap_or_else(|| field.get(&state.advanced).to_string());
+            let value =
+                editing_text(state, super::EditTarget::Advanced(field)).unwrap_or_else(|| {
+                    let raw = field.get(&state.advanced);
+                    if field == AdvancedField::BodyCapBytes {
+                        format_body_cap(raw)
+                    } else {
+                        raw.to_string()
+                    }
+                });
             let differs = field.get(&state.advanced) != field.get(&state.persisted.advanced);
             let is_dirty = dirty(state, field.setting_key(), differs);
             row_line(field.label(), Span::raw(value), selected, is_dirty, theme)
@@ -617,11 +641,138 @@ fn render_cookie_form(frame: &mut Frame, area: Rect, state: &SettingsState, them
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Renders the footer: a live message row plus the key hints for the current
-/// level/focus.
+/// The compact key-hint line for the modal's bottom-right border (M8.5.2:
+/// moved off the footer to free it for a per-setting description — see
+/// `render_footer`/`setting_description`). Covers both nav levels and every
+/// panel focus/edit/capture/form sub-state, so the border always shows
+/// exactly what the current keys do.
+///
+/// The border is right-aligned, so an over-long hint clips on the LEFT — it
+/// would eat the flagship `J/K adjust` token first. Every string here is
+/// therefore kept short enough to fit the modal's inner bottom border at the
+/// real width (`Percentage(70)` → ~54 columns on an 80-col terminal); the
+/// full, verbose key list stays reachable via `?` help and the command
+/// palette.
+fn footer_hint(state: &SettingsState) -> &'static str {
+    match state.level {
+        SettingsLevel::Menu => "j/k move · enter open · s save · q close",
+        SettingsLevel::Panel => {
+            if let Some(form) = &state.cookie_form {
+                if form.editing.is_some() {
+                    "enter apply · esc cancel"
+                } else {
+                    "j/k · enter edit · s save cookie · esc cancel"
+                }
+            } else if state.capturing_leader_key {
+                "press any key · tab to type · esc cancel"
+            } else if state.editing.is_some() {
+                "enter apply · esc cancel"
+            } else {
+                match state.focus {
+                    PanelFocus::Rows if state.category == SettingsCategory::Network => {
+                        "j/k · J/K adjust · enter · a add · l list · s save"
+                    }
+                    PanelFocus::Rows => "j/k move · J/K adjust · enter · s save · esc · q",
+                    PanelFocus::CookieList => "j/k · a add · e edit · d del · x clear · esc",
+                    PanelFocus::AdvancedList => "j/k · J/K adjust · enter edit · s save · esc back",
+                }
+            }
+        }
+    }
+}
+
+/// A one-line description of the currently-hovered setting — what it does,
+/// plus anything useful a value alone doesn't convey (units, "applies on
+/// next launch", a security note). `None` when nothing meaningful is hovered
+/// (the category menu, a form/list with its own detail, or mid-edit/-capture
+/// where the description would just repeat what's already on screen).
+fn setting_description(state: &SettingsState) -> Option<&'static str> {
+    if state.cookie_form.is_some() || state.editing.is_some() || state.capturing_leader_key {
+        return None;
+    }
+    let SettingsLevel::Panel = state.level else {
+        return None;
+    };
+    match (state.category, state.focus) {
+        (SettingsCategory::Request, PanelFocus::Rows) => Some(match state.request_row {
+            RequestRow::Timeout => "How long to wait for a response before giving up, in seconds.",
+            RequestRow::MaxBodyBytes => {
+                "Max response body to read; larger is truncated. Entered in MB/KB (e.g. 10MB), \
+                 stored as bytes."
+            }
+            RequestRow::Redirect => {
+                "Cross-origin redirect handling: strip drops auth headers, strict stops at the \
+                 hop, follow-all keeps them."
+            }
+            RequestRow::UrlEdit => {
+                "What the URL bar's i/Enter opens: inline (in place) or popup (full editor)."
+            }
+            RequestRow::SecretPolicy => {
+                "How a save reacts to a literal secret in the request: strict blocks it, warn \
+                 allows with a warning."
+            }
+        }),
+        (SettingsCategory::Network, PanelFocus::Rows) => Some(match state.network_row {
+            NetworkRow::Proxy => {
+                "HTTP(S) proxy for every request this session. Empty uses the HTTP(S)_PROXY env \
+                 var."
+            }
+            NetworkRow::Tls => {
+                "Certificate verification for HTTPS. Turning this OFF accepts ANY certificate — \
+                 only for trusted environments."
+            }
+            NetworkRow::Cookies => {
+                "Automatic cookie capture and replay this session, backed by the on-disk jar \
+                 below."
+            }
+        }),
+        (SettingsCategory::Load, PanelFocus::Rows) => Some(match state.load_row {
+            LoadRow::WarnTotal => "Total requests above which a load run asks to confirm first.",
+            LoadRow::WarnConcurrency => {
+                "Concurrent requests above which a load run asks to confirm first."
+            }
+            LoadRow::MaxTotal => {
+                "Hard ceiling on total requests — a load run above this is refused."
+            }
+            LoadRow::MaxConcurrency => {
+                "Hard ceiling on concurrent requests — a load run above this is refused."
+            }
+        }),
+        (SettingsCategory::Appearance, PanelFocus::Rows) => Some(match state.appearance_row {
+            AppearanceRow::Theme => "The color theme (dark or light).",
+            AppearanceRow::LeaderKey => {
+                "The leader key that opens the which-key menu. Applies on next launch."
+            }
+        }),
+        (SettingsCategory::Debug, PanelFocus::Rows) => Some(match state.debug_row {
+            DebugRow::DebugToggle => {
+                "Captures request/response traffic for the debug Inspector this session."
+            }
+            DebugRow::Advanced => {
+                "Override default load concurrency/total and the request timeout/body cap."
+            }
+        }),
+        (SettingsCategory::Debug, PanelFocus::AdvancedList) => Some(match state.advanced_field {
+            AdvancedField::Concurrency => "Default concurrent requests for a new load run.",
+            AdvancedField::Total => "Default total requests for a new load run.",
+            AdvancedField::BodyCapBytes => "Max response body to read; larger is truncated.",
+            AdvancedField::TimeoutSecs => {
+                "How long to wait for a response before giving up, in seconds."
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Renders the footer: a live message row, then a WORD-WRAPPED description of
+/// the currently-hovered setting across the remaining rows (freed up by
+/// moving the key hints to the modal's bottom-right border — see
+/// `footer_hint`). The description wraps rather than clipping, so the full
+/// text (units, the TLS-off security note, the redirect-policy summary) is on
+/// screen even at the real modal width where a single line would truncate.
 fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
-    let [msg_row, hint_row] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    let [msg_row, desc_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
 
     let top = match &state.message {
         Some(msg) => Line::styled(format!(" {msg}"), theme.status_error),
@@ -629,34 +780,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
     };
     frame.render_widget(Paragraph::new(top), msg_row);
 
-    let hints = if let Some(form) = &state.cookie_form {
-        if form.editing.is_some() {
-            "enter apply · esc cancel".to_owned()
-        } else {
-            "j/k move · enter edit/toggle/cycle · s save cookie · esc cancel".to_owned()
-        }
-    } else if state.editing.is_some() {
-        "enter apply · esc cancel".to_owned()
-    } else {
-        match state.focus {
-            PanelFocus::Rows if state.category == SettingsCategory::Network => {
-                "j/k move · enter edit/toggle · a add · l cookies · s save · esc menu · q close"
-                    .to_owned()
-            }
-            PanelFocus::Rows => {
-                "j/k move · enter edit/toggle/cycle · s save · esc menu · q close".to_owned()
-            }
-            PanelFocus::CookieList => {
-                "j/k move · a add · e edit · d delete · x clear · s save · h/esc back · q close"
-                    .to_owned()
-            }
-            PanelFocus::AdvancedList => {
-                "j/k move · enter edit · s save · h/esc back · q close".to_owned()
-            }
-        }
-    };
+    let desc = setting_description(state).unwrap_or("");
     frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {hints}"), theme.statusline)),
-        hint_row,
+        Paragraph::new(Line::styled(format!(" {desc}"), theme.statusline))
+            .wrap(Wrap { trim: true }),
+        desc_area,
     );
 }

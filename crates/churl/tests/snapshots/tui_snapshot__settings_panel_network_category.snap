@@ -1,5 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1619
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -16,12 +17,12 @@ expression: snapshot(&mut app)
 │           ┃│                                                    │┃           │
 │           ┃│                                                    │┃───────────┘
 │           ┃│                                                    │┃───────────┐
-│           ┃│                                                    │┃           │
-│           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit/toggle · a add · l cookies · s ┃           │
-└───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
+│           ┃HTTP(S) proxy for every request this session. Empty   ┃           │
+│           ┃uses the HTTP(S)_PROXY env var.                       ┃           │
+│           ┃                                                      ┃           │
+└───────────┗ j/k · J/K adjust · enter · a add · l list · s save ━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
