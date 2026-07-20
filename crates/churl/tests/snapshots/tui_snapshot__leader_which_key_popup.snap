@@ -14,7 +14,7 @@ expression: snapshot(&mut app)
 ┃                            ┃┃ e  toggle explorer sidebar                     ┃
 ┃                            ┃┃ k  toggle insecure TLS (verify off/on)         ┃
 ┃                            ┃┃ n  new endpoint (choose location)              ┃
-┃                            ┃┃ o  Options (proxy · TLS · cookies)             ┃
+┃                            ┃┃ o  Settings (request · network · load · debug) ┃
 ┃                            ┃┃ p  switch profile                              ┃
 ┃                            ┃┃ q  quit                                        ┃
 ┃                            ┃┃ r  reload workspace from disk                  ┃

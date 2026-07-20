@@ -125,10 +125,11 @@ pub enum Mode {
     /// selected endpoint with live results + latency stats. Owns its
     /// [`LoadRunnerState`] — the runner cannot exist without its data.
     LoadRunner(LoadRunnerState),
-    /// The session Options overlay: proxy / TLS-verification / cookie-jar
-    /// controls. Owns its [`OptionsState`] — the overlay cannot exist without its
+    /// The Settings panel (M8.5): a categorized modal (Request / Network /
+    /// Load / Appearance / Debug) generalizing the old session-scoped Options
+    /// overlay. Owns its [`SettingsState`] — the panel cannot exist without its
     /// data, so no parallel `Option` field is needed.
-    Options(OptionsState),
+    Settings(SettingsState),
     /// The debug Inspector overlay (`<leader>d`): a per-exchange, read-only
     /// view of a captured [`churl_core::debug::DebugTrace`]. Owns its
     /// [`InspectorState`] — including the trace itself (`None` when nothing

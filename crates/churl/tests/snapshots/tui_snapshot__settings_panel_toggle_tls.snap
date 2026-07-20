@@ -5,24 +5,24 @@ expression: snap
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
-│           ┏ Options ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
+│           ┏ Settings · Network ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
 │           ┃  Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
-│           ┃  TLS verification  on                                ┃           │
+│           ┃▸ TLS verification  OFF — certificates NOT verified   ┃           │
 │           ┃  Cookies           off                               ┃           │
-│           ┃  Advanced (debug)  ↳ concurrency/total/body-cap/timeo┃           │
-│           ┃                                                      ┃           │
-│           ┃┌ Advanced limits (debug-gated) ─────────────────────┐┃           │
-│           ┃│▸ concurrency       5                               │┃           │
-│           ┃│  total             10                              │┃───────────┘
-│           ┃│  body cap (bytes)  10485760                        │┃───────────┐
-│           ┃│  timeout (s)       30                              │┃           │
+│           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
+│           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃───────────┘
+│           ┃│                                                    │┃───────────┐
+│           ┃│                                                    │┃           │
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit · h back · q close             ┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · esc menu ·┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- debug capture ON — sends now build an inspectable trace                        
- EXPLORER · demo · DEBUG · ? help · space leader · / search · : palette
+ ⚠ TLS verification OFF — certificates not checked                              
+ EXPLORER · demo · ⚠ TLS OFF · ? help · space leader · / search · : palette

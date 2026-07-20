@@ -4655,30 +4655,31 @@ fn advanced_concurrency_above_guardrail_max_is_refused() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
     app.load_caps.max_concurrency = 10;
-    app.open_options();
-    let Mode::Options(state) = &mut app.mode else {
-        panic!("expected Options mode");
+    app.open_settings();
+    let Mode::Settings(state) = &mut app.mode else {
+        panic!("expected Settings mode");
     };
-    state.row = crate::tui::components::options::OptionsRow::Advanced;
-    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    state.level = crate::tui::components::settings::SettingsLevel::Panel;
+    state.category = crate::tui::components::settings::SettingsCategory::Debug;
+    state.focus = crate::tui::components::settings::PanelFocus::AdvancedList;
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap(); // begin edit (seeded with the current default)
     for _ in 0..10 {
-        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .unwrap();
     }
     for c in "999".chars() {
-        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
             .unwrap();
     }
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(
         app.advanced_limits.concurrency, 5,
         "refused override must not change the resolved default"
     );
-    let Mode::Options(state) = &app.mode else {
-        panic!("expected Options mode");
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
     };
     assert!(
         state
@@ -4696,24 +4697,25 @@ fn advanced_concurrency_above_guardrail_max_is_refused() {
 fn advanced_body_cap_override_applies_to_execute_options() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
-    app.open_options();
-    let Mode::Options(state) = &mut app.mode else {
-        panic!("expected Options mode");
+    app.open_settings();
+    let Mode::Settings(state) = &mut app.mode else {
+        panic!("expected Settings mode");
     };
-    state.row = crate::tui::components::options::OptionsRow::Advanced;
-    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
-    state.advanced_field = crate::tui::components::options::AdvancedField::BodyCapBytes;
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    state.level = crate::tui::components::settings::SettingsLevel::Panel;
+    state.category = crate::tui::components::settings::SettingsCategory::Debug;
+    state.focus = crate::tui::components::settings::PanelFocus::AdvancedList;
+    state.advanced_field = crate::tui::components::settings::AdvancedField::BodyCapBytes;
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     for _ in 0..20 {
-        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .unwrap();
     }
     for c in "4096".chars() {
-        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
             .unwrap();
     }
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.advanced_limits.body_cap_bytes, 4096);
     assert_eq!(app.execute_options.max_body_bytes, 4096);

@@ -36,7 +36,7 @@ struct Cli {
     import_collection: Option<PathBuf>,
     /// Route every request through this HTTP/HTTPS proxy for the session (highest
     /// precedence, above `churl.toml`/config/env). A `user:pass@` proxy is
-    /// accepted here but never persisted. Also settable live in the Options overlay.
+    /// accepted here but never persisted. Also settable live in the Settings panel.
     #[arg(long = "proxy", value_name = "URL", global = true)]
     proxy: Option<String>,
     /// Disable TLS certificate verification for the session (accepts self-signed

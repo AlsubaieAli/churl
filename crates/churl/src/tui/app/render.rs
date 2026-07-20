@@ -411,7 +411,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Prompt(PromptPurpose),
         Confirm(ConfirmPurpose),
         EnvEditor,
-        Options,
+        Settings,
         SequenceEdit,
         SequenceRun,
         LoadRunner,
@@ -430,7 +430,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Prompt(purpose) => Overlay::Prompt(*purpose),
         Mode::Confirm(purpose) => Overlay::Confirm(*purpose),
         Mode::EnvEditor(_) => Overlay::EnvEditor,
-        Mode::Options(_) => Overlay::Options,
+        Mode::Settings(_) => Overlay::Settings,
         // The active face lives in the (effective) `Mode::Sequence`
         // payload. While body-search is open over the Run-face Response region the
         // sequence mode is parked in `body_search_return` (= `effective_mode`), so
@@ -441,7 +441,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         },
         Mode::LoadRunner(_) => Overlay::LoadRunner,
         // The Inspector never hosts body-search (it is read-only, no
-        // response body of its own to search), so — like EnvEditor/Options —
+        // response body of its own to search), so — like EnvEditor/Settings —
         // this is only chosen when `effective_mode == app.mode`.
         Mode::Inspector(_) => Overlay::Inspector,
         // The Log panel is likewise read-only with no response body of its
@@ -495,9 +495,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 env_editor::render(frame, main, editor, &theme);
             }
         }
-        Overlay::Options => {
-            if let Mode::Options(options) = &app.mode {
-                options::render(frame, main, options, &theme);
+        Overlay::Settings => {
+            if let Mode::Settings(settings_state) = &app.mode {
+                settings::render(frame, main, settings_state, &theme);
             }
         }
         Overlay::SequenceEdit => {

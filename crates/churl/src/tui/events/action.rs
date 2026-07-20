@@ -53,8 +53,9 @@ pub enum Action {
     SwitchProfile,
     /// Open the environments & variables editor (workspace/collection/profile vars).
     OpenEnvEditor,
-    /// Open the session Options overlay (proxy / TLS / cookies).
-    OpenOptions,
+    /// Open the Settings panel (M8.5): Request / Network / Load / Appearance /
+    /// Debug knobs, with a `Save as default` action to persist them.
+    OpenSettings,
     /// Toggle insecure-TLS (certificate verification off/on) for the session.
     ToggleInsecure,
     /// Open the debug Inspector overlay over the latest exchange's captured
@@ -288,9 +289,9 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::SwitchProfile, "switch-profile", "switch profile"),
     (Action::OpenEnvEditor, "env-editor", "Environments & vars"),
     (
-        Action::OpenOptions,
-        "options",
-        "Options (proxy · TLS · cookies)",
+        Action::OpenSettings,
+        "settings",
+        "Settings (request · network · load · debug)",
     ),
     (
         Action::ToggleInsecure,

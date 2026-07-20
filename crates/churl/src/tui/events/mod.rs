@@ -294,10 +294,11 @@ impl Default for KeyMap {
         root_bind(key!(p), LeaderEntry::Act(Action::SwitchProfile));
         // `<leader>v` opens the environments & variables editor (`v` is free).
         root_bind(key!(v), LeaderEntry::Act(Action::OpenEnvEditor));
-        // `<leader>o` opens the session Options overlay (proxy / TLS / cookies);
+        // `<leader>o` opens the Settings panel (M8.5: request / network / load /
+        // appearance / debug, generalizing the old session Options overlay);
         // `<leader>k` toggles insecure-TLS from anywhere. Both letters were
-        // verified free at the leader root (mnemonics: o=options, k=insecure).
-        root_bind(key!(o), LeaderEntry::Act(Action::OpenOptions));
+        // verified free at the leader root (mnemonics: o=options→settings, k=insecure).
+        root_bind(key!(o), LeaderEntry::Act(Action::OpenSettings));
         root_bind(key!(k), LeaderEntry::Act(Action::ToggleInsecure));
         // `<leader>K` (shift-k) toggles the SELECTED endpoint's durable insecure-TLS
         // opt-in — a persisted per-endpoint flag, deliberately distinct from the
