@@ -838,3 +838,23 @@ pub(crate) fn parse_body_cap(text: &str) -> Option<u64> {
     };
     number.trim().parse::<u64>().ok()?.checked_mul(multiplier)
 }
+
+/// Whether two leader-key combo strings denote the SAME key, compared
+/// canonically rather than by raw string equality. The panel produces the
+/// leader-key value through three different surfaces — the built-in default
+/// (`"space"`, lowercase), the free-type editor (verbatim user text), and the
+/// capture path (crokey's `Display` form, e.g. `"Space"`, `"Ctrl-b"`) — which
+/// can spell the identical combination with different casing/aliases. Both
+/// sides are parsed through the SAME `crokey` parser the real keymap uses and
+/// compared as `KeyCombination`s, so a captured `"Space"` is seen as equal to
+/// the default `"space"` (no spurious dirty dot, no net-zero re-write). A side
+/// that doesn't parse falls back to a trimmed case-insensitive string compare
+/// — the values still can't be judged unequal on a mere casing difference.
+pub(crate) fn leader_key_eq(a: &str, b: &str) -> bool {
+    use crokey::KeyCombination;
+    use std::str::FromStr;
+    match (KeyCombination::from_str(a), KeyCombination::from_str(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
+}

@@ -16,12 +16,12 @@ expression: snap
 │           ┃│                                                    │┃           │
 │           ┃│                                                    │┃───────────┘
 │           ┃│                                                    │┃───────────┐
-│           ┃│                                                    │┃           │
-│           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ Certificate verification for HTTPS requests. Turning ┃           │
-└───────────┗gle · a add · l cookies · s save · esc menu · q close ┛           │
+│           ┃Certificate verification for HTTPS. Turning this OFF  ┃           │
+│           ┃accepts ANY certificate — only for trusted            ┃           │
+│           ┃environments.                                         ┃           │
+└───────────┗ j/k · J/K adjust · enter · a add · l list · s save ━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

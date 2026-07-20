@@ -890,6 +890,36 @@ fn leader_key_capture_registers_a_modifier_chord() {
     );
 }
 
+/// FIX 4 (gate): a captured key whose crokey `Display` form the keymap parser
+/// can't read back must NOT be applied — persisting an unparseable leader key
+/// would hard-error at next launch. `F(25)` renders as `"F25"`, which the
+/// parser rejects (it only knows f1–f24). Capture stays active with a message.
+#[test]
+fn leader_key_capture_rejects_a_non_round_tripping_key() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    s.handle_key(key(KeyCode::Enter)); // -> capture mode
+    let f25 = KeyEvent::new(KeyCode::F(25), KeyModifiers::NONE);
+    assert_eq!(
+        s.handle_key(f25),
+        SettingsOutcome::Consumed,
+        "an unparseable captured combo must NOT emit ApplyLeaderKey"
+    );
+    assert!(
+        s.capturing_leader_key,
+        "capture stays active so the user can try another key"
+    );
+    assert!(
+        s.message.is_some(),
+        "a brief 'unsupported key' message is shown"
+    );
+    // Sanity: a normal key right after still works (capture wasn't broken).
+    assert_eq!(
+        s.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        SettingsOutcome::ApplyLeaderKey("Ctrl-b".to_owned())
+    );
+}
+
 /// Esc cancels the capture prompt with no change and no outcome — the
 /// leader-key value (and, downstream, its touched state) is untouched.
 #[test]
@@ -1306,48 +1336,76 @@ fn render_cookie_form_masks_the_value_field() {
     );
 }
 
-/// Renders `s` to a wide-enough buffer (long descriptions must not clip) and
-/// joins it into one searchable string.
-fn render_text(s: &SettingsState) -> String {
+/// Renders `s` at the REAL modal width (80×24 — the modal is `Percentage(70)`,
+/// so ~52 usable description columns, exactly what a user sees) and returns
+/// the reconstructed footer description as one collapsed-whitespace line.
+///
+/// De-rigging note (M8.5.2 gate FIX 1): the first cut of this helper rendered
+/// at 200 cols where nothing wraps or clips, giving false confidence — a
+/// long description that hard-clips at the real 80-col width still "passed".
+/// This renders at 80 and stitches the wrapped description rows (the three
+/// rows above the modal's thick bottom border, between its `┃` borders) back
+/// into one string, so a description that is cut mid-sentence at real width
+/// fails the `contains` assertions below.
+fn footer_desc_at_80(s: &SettingsState) -> String {
     use crate::tui::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
+    let (w, h) = (80u16, 24u16);
     let theme = Theme::dark();
-    let backend = TestBackend::new(200, 30);
+    let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render(frame, Rect::new(0, 0, 200, 30), s, &theme))
+        .draw(|frame| render(frame, Rect::new(0, 0, w, h), s, &theme))
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
-    (0..30)
+    let rows: Vec<String> = (0..h)
         .map(|y| {
-            (0..200)
+            (0..w)
                 .map(|x| buffer[(x, y)].symbol().to_owned())
                 .collect::<String>()
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    // The modal's thick bottom border carries the '┗' corner; the footer's
+    // FOOTER_HEIGHT-1 description rows sit directly above it (the message row
+    // is above those). Stitch the three description rows, sliced between the
+    // modal's left/right '┃' borders, into one collapsed line.
+    let bottom = rows
+        .iter()
+        .position(|r| r.contains('┗'))
+        .expect("modal bottom border row");
+    let mut out = String::new();
+    for r in &rows[bottom.saturating_sub(3)..bottom] {
+        if let (Some(a), Some(b)) = (r.find('┃'), r.rfind('┃'))
+            && b > a
+        {
+            out.push_str(&r[a + '┃'.len_utf8()..b]);
+            out.push(' ');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The footer's freed description space (M8.5.2) tracks the hovered row —
-/// moving off it must drop the old text, not leave it lingering.
+/// moving off it must drop the old text, not leave it lingering. Rendered at
+/// the real 80-col modal width.
 #[test]
 fn footer_description_matches_the_hovered_row_and_changes_with_it() {
     let mut s = state_no_cookies();
     s.handle_key(key(KeyCode::Enter)); // -> Panel, Request/Timeout row
 
-    let text = render_text(&s);
+    let text = footer_desc_at_80(&s);
     assert!(
-        text.contains("How long to wait for a response"),
-        "Timeout row's description must show:\n{text}"
+        text.contains("How long to wait for a response before giving up, in seconds."),
+        "Timeout row's FULL description must be on screen at 80 cols:\n{text}"
     );
 
     s.handle_key(key(KeyCode::Char('j'))); // -> MaxBodyBytes row
-    let text = render_text(&s);
+    let text = footer_desc_at_80(&s);
     assert!(
-        text.contains("Maximum response body size"),
+        text.contains("Max response body to read"),
         "the description must change with the hovered row:\n{text}"
     );
     assert!(
@@ -1357,7 +1415,10 @@ fn footer_description_matches_the_hovered_row_and_changes_with_it() {
 }
 
 /// A known security-sensitive knob (TLS verification off) must surface its
-/// security note in the description, not just a bare "on/off" value.
+/// FULL security note in the description at the real 80-col modal width — the
+/// whole point of item 6. This is the de-rigged regression: the note wraps
+/// and every word is on screen, so a single-line hard-clip (the pre-fix bug,
+/// which cut off "accepts ANY certificate") fails this test.
 #[test]
 fn tls_row_description_surfaces_a_security_note() {
     let mut s = state_no_cookies();
@@ -1366,11 +1427,32 @@ fn tls_row_description_surfaces_a_security_note() {
     s.handle_key(key(KeyCode::Char('j'))); // -> Tls row
     assert_eq!(s.network_row, NetworkRow::Tls);
 
-    let text = render_text(&s);
+    let text = footer_desc_at_80(&s);
     assert!(
         text.contains("accepts ANY certificate"),
-        "the TLS row's description must carry a security note about turning \
-         verification off:\n{text}"
+        "the TLS row's security note must be fully on screen at 80 cols:\n{text}"
+    );
+    assert!(
+        text.contains("only for trusted environments"),
+        "the note's tail must not clip at the real modal width:\n{text}"
+    );
+}
+
+/// The redirect-policy note is the longest description — its tail ("keeps
+/// them") must still be on screen at 80 cols, proving the wrap gives every
+/// description enough room.
+#[test]
+fn longest_description_does_not_clip_at_real_width() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Request rows
+    for _ in 0..2 {
+        s.handle_key(key(KeyCode::Char('j'))); // -> Redirect row
+    }
+    assert_eq!(s.request_row, RequestRow::Redirect);
+    let text = footer_desc_at_80(&s);
+    assert!(
+        text.contains("Cross-origin redirect handling") && text.contains("follow-all keeps them"),
+        "the full redirect note (head AND tail) must be on screen at 80 cols:\n{text}"
     );
 }
 
@@ -1381,11 +1463,11 @@ fn tls_row_description_surfaces_a_security_note() {
 fn footer_description_is_blank_while_editing_or_capturing() {
     let mut s = state_no_cookies();
     s.handle_key(key(KeyCode::Enter)); // -> Panel, Timeout row
-    let with_row_hovered = render_text(&s);
+    let with_row_hovered = footer_desc_at_80(&s);
     assert!(with_row_hovered.contains("How long to wait for a response"));
 
     s.handle_key(key(KeyCode::Enter)); // begin editing Timeout
-    let while_editing = render_text(&s);
+    let while_editing = footer_desc_at_80(&s);
     assert!(
         !while_editing.contains("How long to wait for a response"),
         "the description must not linger once the editor is open:\n{while_editing}"
@@ -1490,6 +1572,26 @@ fn body_cap_format_and_parse_round_trip() {
             format_body_cap(bytes)
         );
     }
+}
+
+// ---- leader-key canonical comparison (M8.5.2 gate FIX 3) ----
+
+#[test]
+fn leader_key_eq_is_canonical_across_casing_and_alias() {
+    // The three surfaces that produce a leader-key string can spell the same
+    // combo differently: default `"space"`, capture `"Space"`, free-type
+    // `"SPACE"` — all denote the spacebar and must compare equal.
+    assert!(leader_key_eq("space", "Space"));
+    assert!(leader_key_eq("Space", "space"));
+    assert!(leader_key_eq("SPACE", "space"));
+    assert!(leader_key_eq("ctrl-b", "Ctrl-b"));
+    // Genuinely different combos are still unequal.
+    assert!(!leader_key_eq("space", "Ctrl-b"));
+    assert!(!leader_key_eq("a", "b"));
+    // Unparseable strings fall back to a case-insensitive compare, so a mere
+    // casing difference is still not judged a change.
+    assert!(leader_key_eq("not a combo", "NOT A COMBO"));
+    assert!(!leader_key_eq("not a combo", "also bad"));
 }
 
 // ---- Save-as-default (M8.5 Wave 3) ----

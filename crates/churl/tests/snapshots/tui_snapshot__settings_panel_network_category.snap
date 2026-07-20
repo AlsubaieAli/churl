@@ -17,12 +17,12 @@ expression: snapshot(&mut app)
 │           ┃│                                                    │┃           │
 │           ┃│                                                    │┃───────────┘
 │           ┃│                                                    │┃───────────┐
-│           ┃│                                                    │┃           │
-│           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ An HTTP(S) proxy used for every request this session.┃           │
-└───────────┗gle · a add · l cookies · s save · esc menu · q close ┛           │
+│           ┃HTTP(S) proxy for every request this session. Empty   ┃           │
+│           ┃uses the HTTP(S)_PROXY env var.                       ┃           │
+│           ┃                                                      ┃           │
+└───────────┗ j/k · J/K adjust · enter · a add · l list · s save ━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

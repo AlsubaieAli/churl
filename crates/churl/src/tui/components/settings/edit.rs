@@ -522,21 +522,36 @@ impl SettingsState {
     /// `Esc` cancels with no change; `Tab` falls back to the free-type editor
     /// (for a chord a terminal can't emit as one `KeyEvent`, e.g. `alt-b`);
     /// anything else is normalized through the same path the real keymap uses
-    /// (`KeyEvent` → `KeyCombination` → `.normalized().to_string()`) and
-    /// applied directly — no further validation needed, since every
-    /// `KeyEvent` this method receives already IS a valid combination by
-    /// construction.
+    /// (`KeyEvent` → `KeyCombination` → `.normalized().to_string()`).
+    ///
+    /// The produced string is re-parsed through the SAME `crokey` parser
+    /// `commit_edit` runs on the free-type path before it is applied — crokey's
+    /// `Display` can emit strings (media/modifier keys via its `{:?}` fallback)
+    /// its own parser rejects, and a persisted unparseable leader key would
+    /// hard-error at the next launch (`KeyMap::set_leader` propagates out of
+    /// TUI startup). A rejected key leaves capture mode ACTIVE with a brief
+    /// message, so the user can try another key or `Tab` to type a combo — it
+    /// never registers something that can't round-trip.
     fn handle_leader_capture_key(&mut self, key: KeyEvent) -> SettingsOutcome {
-        self.capturing_leader_key = false;
         match key.code {
-            KeyCode::Esc => SettingsOutcome::Consumed,
+            KeyCode::Esc => {
+                self.capturing_leader_key = false;
+                SettingsOutcome::Consumed
+            }
             KeyCode::Tab => {
+                self.capturing_leader_key = false;
                 self.editing = Some((EditTarget::LeaderKey, LineEditor::new(&self.leader_key)));
                 SettingsOutcome::Consumed
             }
             _ => {
                 let combo = KeyCombination::from(key).normalized().to_string();
-                SettingsOutcome::ApplyLeaderKey(combo)
+                if KeyCombination::from_str(&combo).is_ok() {
+                    self.capturing_leader_key = false;
+                    SettingsOutcome::ApplyLeaderKey(combo)
+                } else {
+                    self.message = Some("unsupported key — press tab to type a combo".to_owned());
+                    SettingsOutcome::Consumed
+                }
             }
         }
     }

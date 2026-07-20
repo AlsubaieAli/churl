@@ -247,7 +247,14 @@ impl App {
             }
             SettingsOutcome::ApplyLeaderKey(combo) => {
                 self.leader_key = combo.clone();
-                let differs = self.leader_key != self.settings_baseline.leader_key;
+                // Canonical combo compare, not raw string equality — capturing
+                // the already-bound key (e.g. Space → crokey's `"Space"` vs the
+                // stored default `"space"`) is a net-zero interaction and must
+                // not mark the knob touched (no dirty dot, no net-zero rewrite).
+                let differs = !crate::tui::components::settings::leader_key_eq(
+                    &self.leader_key,
+                    &self.settings_baseline.leader_key,
+                );
                 self.mark_setting(SettingKey::LeaderKey, differs);
                 self.notify(format!(
                     "leader key set to {combo} (applies on next launch)"

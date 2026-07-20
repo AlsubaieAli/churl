@@ -5353,6 +5353,64 @@ fn quick_adjust_max_body_j_then_k_to_origin_unmarks_the_knob() {
     );
 }
 
+/// FIX 3 (gate): capturing the ALREADY-BOUND leader key is a net-zero
+/// interaction and must not mark the knob touched (no dirty dot, no net-zero
+/// re-write). The default leader is stored lowercase `"space"`; capturing the
+/// spacebar yields crokey's `Display` form `"Space"`. Before the canonical
+/// comparison, `"Space" != "space"` marked LeaderKey touched and Save wrote a
+/// spurious `leader_key = "Space"`.
+#[test]
+fn capturing_the_already_bound_leader_key_does_not_mark_it_dirty() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    for _ in 0..3 {
+        press(&mut app, 'j'); // Request -> Network -> Load -> Appearance
+    }
+    enter(&mut app); // -> Panel (Appearance/Theme)
+    press(&mut app, 'j'); // -> LeaderKey row
+    enter(&mut app); // -> capture mode
+    // Press the spacebar — the already-bound default leader.
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::LeaderKey),
+        "re-capturing the already-bound leader key must be net-zero (canonical \
+         compare: captured \"Space\" equals the stored default \"space\")"
+    );
+}
+
+/// The other half: capturing a DIFFERENT key is a real change and still marks
+/// the knob (the canonical compare must not over-suppress genuine edits).
+#[test]
+fn capturing_a_different_leader_key_marks_it_dirty() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    for _ in 0..3 {
+        press(&mut app, 'j');
+    }
+    enter(&mut app); // -> Panel (Appearance/Theme)
+    press(&mut app, 'j'); // -> LeaderKey row
+    enter(&mut app); // -> capture mode
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        .unwrap(); // capture Ctrl-b (not the default)
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::LeaderKey),
+        "capturing a genuinely different key must mark LeaderKey touched"
+    );
+}
+
 /// A genuine change still persists: a fresh (non-insecure) session toggling
 /// TLS on writes it, and changing timeout from its default writes that too —
 /// the net-change guard must not suppress real edits.

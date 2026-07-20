@@ -16,12 +16,12 @@ expression: snap
 │           ┃│    timeout (s)       30                            │┃           │
 │           ┃│                                                    │┃───────────┘
 │           ┃│                                                    │┃───────────┐
-│           ┃│                                                    │┃           │
-│           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ Default concurrent requests for a new load run.      ┃           │
-└───────────┗K adjust · enter edit · s save · h/esc back · q close ┛           │
+│           ┃Default concurrent requests for a new load run.       ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
+└───────────┗ j/k · J/K adjust · enter edit · s save · esc back ━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
