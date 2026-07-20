@@ -5,7 +5,7 @@
 //! never render in plaintext).
 
 use churl_core::config::{RedirectPolicy, UrlEditMode};
-use churl_core::cookies::CookieView;
+use churl_core::cookies::{CookieView, SameSite};
 use churl_core::load::LoadCaps;
 use churl_core::secrets::SecretPolicy;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -51,11 +51,17 @@ fn state_with_cookies() -> SettingsState {
                 domain: "a.example".into(),
                 name: "sid".into(),
                 value: "secret".into(),
+                path: "/".into(),
+                secure: true,
+                same_site: Some(SameSite::Strict),
             },
             CookieView {
                 domain: "b.example".into(),
                 name: "tok".into(),
                 value: "xyz".into(),
+                path: "/api".into(),
+                secure: false,
+                same_site: None,
             },
         ],
     ))
@@ -300,6 +306,152 @@ fn cookie_list_esc_backs_to_rows_not_close() {
         s.handle_key(key(KeyCode::Char('q'))),
         SettingsOutcome::Close
     );
+}
+
+// ---- Cookie add/edit form (M8.5.1) ----
+
+fn open_add_cookie_form(s: &mut SettingsState) {
+    goto_network_cookies(s);
+    s.handle_key(key(KeyCode::Char('a')));
+}
+
+fn type_text(s: &mut SettingsState, text: &str) {
+    for c in text.chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+}
+
+/// Types `text` into the currently-focused text field via Enter → type →
+/// Enter (open the field's editor, type, commit), leaving focus on that field.
+fn fill_focused_field(s: &mut SettingsState, text: &str) {
+    s.handle_key(key(KeyCode::Enter));
+    type_text(s, text);
+    s.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn cookie_add_form_fill_and_commit_emits_upsert_with_no_previous() {
+    let mut s = state_no_cookies();
+    open_add_cookie_form(&mut s);
+    assert!(s.cookie_form.is_some(), "a opens the add form");
+    assert!(
+        s.cookie_form.as_ref().unwrap().editing_existing.is_none(),
+        "a fresh add form has no original coordinates"
+    );
+
+    fill_focused_field(&mut s, "a.example"); // Domain
+    s.handle_key(key(KeyCode::Char('j'))); // -> Name
+    fill_focused_field(&mut s, "sid");
+    s.handle_key(key(KeyCode::Char('j'))); // -> Value
+    fill_focused_field(&mut s, "abc123");
+
+    let outcome = s.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(
+        outcome,
+        SettingsOutcome::UpsertCookie {
+            previous: None,
+            domain: "a.example".into(),
+            name: "sid".into(),
+            value: "abc123".into(),
+            path: "/".into(),
+            secure: false,
+            same_site: None,
+        }
+    );
+    assert!(
+        s.cookie_form.is_none(),
+        "a successful submit closes the form"
+    );
+}
+
+#[test]
+fn cookie_edit_form_prefills_and_commit_emits_upsert_with_previous() {
+    let mut s = state_with_cookies(); // a.example/sid/secret (secure, Strict) selected first
+    goto_network_cookies(&mut s);
+    s.handle_key(key(KeyCode::Char('l'))); // -> CookieList, selects a.example/sid
+    s.handle_key(key(KeyCode::Char('e'))); // open edit form, prefilled
+
+    {
+        let form = s.cookie_form.as_ref().expect("e opens the edit form");
+        assert_eq!(form.domain, "a.example");
+        assert_eq!(form.name, "sid");
+        assert_eq!(form.value, "secret");
+        assert_eq!(form.path, "/");
+        assert!(form.secure);
+        assert_eq!(form.same_site, Some(SameSite::Strict));
+        assert_eq!(
+            form.editing_existing,
+            Some(("a.example".into(), "sid".into(), "/".into())),
+            "the edit form must remember the cookie's ORIGINAL coordinates"
+        );
+    }
+
+    // Change only the value; domain/name/path stay as prefilled.
+    s.handle_key(key(KeyCode::Char('j'))); // Domain -> Name
+    s.handle_key(key(KeyCode::Char('j'))); // Name -> Value
+    s.handle_key(key(KeyCode::Enter)); // begin editing Value (prefilled "secret")
+    for _ in 0.."secret".len() {
+        s.handle_key(key(KeyCode::Backspace));
+    }
+    type_text(&mut s, "newvalue");
+    s.handle_key(key(KeyCode::Enter)); // commit Value
+
+    let outcome = s.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(
+        outcome,
+        SettingsOutcome::UpsertCookie {
+            previous: Some(("a.example".into(), "sid".into(), "/".into())),
+            domain: "a.example".into(),
+            name: "sid".into(),
+            value: "newvalue".into(),
+            path: "/".into(),
+            secure: true,
+            same_site: Some(SameSite::Strict),
+        },
+        "previous must be Some(original coords) even though the key didn't change \
+         — the app handler decides whether an old-key delete is actually needed"
+    );
+}
+
+#[test]
+fn cookie_form_esc_cancels_without_emitting_anything() {
+    let mut s = state_no_cookies();
+    open_add_cookie_form(&mut s);
+    fill_focused_field(&mut s, "a.example");
+
+    assert_eq!(
+        s.handle_key(key(KeyCode::Esc)),
+        SettingsOutcome::Consumed,
+        "esc cancels the form, not the whole panel"
+    );
+    assert!(s.cookie_form.is_none());
+    assert_eq!(
+        s.focus,
+        PanelFocus::Rows,
+        "canceling the form returns to the row list, panel stays open"
+    );
+}
+
+#[test]
+fn cookie_add_form_rejects_empty_domain_and_stays_open() {
+    let mut s = state_no_cookies();
+    open_add_cookie_form(&mut s);
+    // Leave Domain blank, fill only Name, then try to submit.
+    s.handle_key(key(KeyCode::Char('j'))); // Domain -> Name
+    fill_focused_field(&mut s, "sid");
+
+    let outcome = s.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(
+        outcome,
+        SettingsOutcome::Consumed,
+        "an invalid submit must not emit UpsertCookie"
+    );
+    assert!(
+        s.cookie_form.is_some(),
+        "the form stays open on validation failure — losing 5 other filled \
+         fields over one bad one would be a needless retype"
+    );
+    assert!(s.message.is_some(), "an inline error must be shown");
 }
 
 // ---- Request category ----
@@ -648,6 +800,117 @@ fn render_cookie_list_masks_values_and_marks_selection() {
     assert!(
         !text.contains("xyz"),
         "plaintext cookie value leaked:\n{text}"
+    );
+    // SameSite/Secure render too (M8.5.1 B1): a.example/sid is secure+Strict,
+    // b.example/tok is neither.
+    assert!(
+        text.contains("secure:✓") && text.contains("samesite:Strict"),
+        "secure cookie must show secure:✓ and samesite:Strict:\n{text}"
+    );
+    assert!(
+        text.contains("secure:✗") && text.contains("samesite:—"),
+        "non-secure/no-samesite cookie must show secure:✗ and samesite:—:\n{text}"
+    );
+
+    // A cookie that just went through the add flow and landed in the panel's
+    // mirror (via `refresh`, exactly like a real add would) must stay masked
+    // too — masking is a property of the render, not of which cookies
+    // happened to be present when the panel opened.
+    s.refresh(snapshot(
+        false,
+        vec![CookieView {
+            domain: "new.example".into(),
+            name: "added".into(),
+            value: "topsecret".into(),
+            path: "/".into(),
+            secure: false,
+            same_site: None,
+        }],
+    ));
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, 80, 24), &s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = (0..24)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("new.example"), "{text}");
+    assert!(text.contains("added"), "{text}");
+    assert!(
+        text.contains("••••••"),
+        "a freshly-added cookie's value must render masked too:\n{text}"
+    );
+    assert!(
+        !text.contains("topsecret"),
+        "plaintext cookie value leaked for a freshly-added cookie:\n{text}"
+    );
+}
+
+/// FIX C guard: the cookie ADD/EDIT FORM must mask the value field, exactly
+/// like the list does. Without this, a regression swapping the Value line's
+/// `masked_value()` back to a plaintext render would ship green (the recurring
+/// M8.2/M8.3/M8.5 secret-leak class). Opens an edit form prefilled with a
+/// distinctive value, renders it, and asserts the plaintext is absent while
+/// the mask is present.
+#[test]
+fn render_cookie_form_masks_the_value_field() {
+    use crate::tui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    let mut s = SettingsState::new(snapshot(
+        false,
+        vec![CookieView {
+            domain: "a.example".into(),
+            name: "sid".into(),
+            value: "SUPERSECRET".into(),
+            path: "/".into(),
+            secure: false,
+            same_site: None,
+        }],
+    ));
+    goto_network_cookies(&mut s);
+    s.handle_key(key(KeyCode::Char('l'))); // descend into the cookie list
+    s.handle_key(key(KeyCode::Char('e'))); // open the edit form, prefilled
+    assert!(
+        s.cookie_form.is_some(),
+        "the edit form must be open for this to test the form render"
+    );
+    assert_eq!(
+        s.cookie_form.as_ref().unwrap().value,
+        "SUPERSECRET",
+        "the form must actually hold the secret value it is masking"
+    );
+
+    let theme = Theme::dark();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, 80, 24), &s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = (0..24)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !text.contains("SUPERSECRET"),
+        "the cookie form must NEVER render the value in plaintext:\n{text}"
+    );
+    assert!(
+        text.contains("••••••"),
+        "the cookie form's value field must render masked:\n{text}"
     );
 }
 

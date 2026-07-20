@@ -17,12 +17,57 @@
 use std::io::BufReader;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use cookie::SameSite as RawSameSite;
+use cookie::time::{Duration, OffsetDateTime};
 use cookie_store::{CookieStore, RawCookie};
+use reqwest::Url;
 use reqwest::header::HeaderValue;
+
+/// The `SameSite` cookie attribute, surfaced by churl without leaking the
+/// `cookie` crate's own type through the public API (semver hygiene — see the
+/// 0.5.0 `#[non_exhaustive]` lesson in `docs/DECISIONS.md`: a dependency's
+/// enum showing up in churl's own signatures couples a patch bump in that dep
+/// to churl's semver).
+///
+/// `None` here is the RFC `SameSite=None` attribute value ("send on every
+/// cross-site request, Secure required"). An **absent** `SameSite` attribute
+/// is `Option::<SameSite>::None` on [`CookieView::same_site`] — a different
+/// thing from this variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameSite {
+    /// Never sent on a cross-site request.
+    Strict,
+    /// Sent on cross-site "safe" (GET/HEAD/OPTIONS/TRACE) requests only.
+    Lax,
+    /// Sent on every cross-site request (the RFC `SameSite=None` value).
+    None,
+}
+
+impl SameSite {
+    fn from_raw(raw: RawSameSite) -> Self {
+        match raw {
+            RawSameSite::Strict => SameSite::Strict,
+            RawSameSite::Lax => SameSite::Lax,
+            RawSameSite::None => SameSite::None,
+        }
+    }
+
+    fn to_raw(self) -> RawSameSite {
+        match self {
+            SameSite::Strict => RawSameSite::Strict,
+            SameSite::Lax => RawSameSite::Lax,
+            SameSite::None => RawSameSite::None,
+        }
+    }
+}
 
 /// One cookie as surfaced to the UI / `churl cookies list`. Values are shown
 /// masked in the TUI (a cookie value is credential-shaped); this carries the
-/// plaintext so the caller decides how to render it.
+/// plaintext so the caller decides how to render it. Carries every field an
+/// edit form needs to round-trip a cookie (added M8.5.1 alongside
+/// [`ChurlCookieJar::upsert`] — a struct-literal type, not
+/// `#[non_exhaustive]`, since the panel's render test still builds it via
+/// `CookieView { .. }`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CookieView {
     /// The domain the cookie is scoped to (host-only or `Domain=` suffix).
@@ -31,6 +76,31 @@ pub struct CookieView {
     pub name: String,
     /// The cookie value (plaintext — mask before display).
     pub value: String,
+    /// The cookie's `Path=` attribute (or the default path if unset).
+    pub path: String,
+    /// Whether the `Secure` attribute is set.
+    pub secure: bool,
+    /// The `SameSite` attribute, or `None` if the attribute is absent
+    /// entirely (not to be confused with `Some(SameSite::None)`).
+    pub same_site: Option<SameSite>,
+}
+
+/// A cookie the user typed by hand (the Settings panel's add/edit form),
+/// fed to [`ChurlCookieJar::upsert`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieSpec {
+    /// The domain to scope the cookie to.
+    pub domain: String,
+    /// The cookie name.
+    pub name: String,
+    /// The cookie value.
+    pub value: String,
+    /// The cookie's path. Empty is treated as `/` by [`ChurlCookieJar::upsert`].
+    pub path: String,
+    /// Whether to set the `Secure` attribute.
+    pub secure: bool,
+    /// The `SameSite` attribute to set, or `None` to leave it absent.
+    pub same_site: Option<SameSite>,
 }
 
 /// A persistent, serializable cookie jar shared (as `Arc`) with the reqwest
@@ -97,14 +167,83 @@ impl ChurlCookieJar {
         let store = self.store_read();
         let mut views: Vec<CookieView> = store
             .iter_unexpired()
-            .map(|cookie| CookieView {
-                domain: String::from(&cookie.domain),
-                name: cookie.name().to_owned(),
-                value: cookie.value().to_owned(),
+            .map(|c| CookieView {
+                domain: String::from(&c.domain),
+                name: c.name().to_owned(),
+                value: c.value().to_owned(),
+                path: c.path().map(str::to_owned).unwrap_or_default(),
+                secure: c.secure().unwrap_or(false),
+                same_site: c.same_site().map(SameSite::from_raw),
             })
             .collect();
         views.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
         views
+    }
+
+    /// Adds or replaces a cookie the user typed by hand (the Settings panel's
+    /// add/edit form). Always stored as **persistent** — a far-future
+    /// `Expires` — because a session cookie (no `Max-Age`/`Expires`) would
+    /// evaporate before [`Self::to_json`] ever wrote it out, and a
+    /// manually-entered cookie (often an auth token) must stick.
+    ///
+    /// **Host-only scope.** The cookie is stored WITHOUT a `Domain=`
+    /// attribute, so the store scopes it host-only (RFC 6265): it is sent
+    /// back only to the exact host the user typed, never to a subdomain. This
+    /// is the browser default for a hand-typed host and the safe direction —
+    /// silently broadening an auth token to every `*.{domain}` subdomain is
+    /// the cross-origin over-scoping churl's redirect-strip policy (R3) exists
+    /// to prevent. Subdomain-wide (`Domain=`) manual cookies are a deliberate
+    /// non-goal for now. [`Self::list`] still shows the host in its `domain`
+    /// column.
+    ///
+    /// Validates `name`/`domain` are non-empty and that `domain`+`path`
+    /// resolve to a URL BEFORE touching the store. The cookie is inserted via
+    /// `cookie_store::CookieStore::insert_raw` against a synthesized
+    /// `https://{domain}{path}` request URL — always `https` so a `Secure`
+    /// cookie is never rejected at insert, and the request host IS the
+    /// cookie's scope (host-only), so the store accepts it. **The store's
+    /// rejection is never swallowed**: any `Err` from `insert_raw`
+    /// (unparseable host, mismatch, …) is propagated as `CookieError`, never
+    /// reported as a silent success — a cookie jar must never claim to hold
+    /// something it doesn't.
+    ///
+    /// **The store keys cookies on `(domain, path, name)`.** `upsert`
+    /// REPLACES a same-key entry (the "edit in place" case). If the caller is
+    /// editing an existing cookie and the user changed its domain, name, or
+    /// path, the OLD entry is a *different* key and is left untouched by this
+    /// call — the caller (the app's `UpsertCookie` handler) is responsible
+    /// for removing the old coordinates itself, via [`Self::delete_exact`]
+    /// and only AFTER this upsert succeeds.
+    pub fn upsert(&self, spec: CookieSpec) -> Result<(), CookieError> {
+        if spec.name.is_empty() {
+            return Err(CookieError("cookie name cannot be empty".to_owned()));
+        }
+        if spec.domain.is_empty() {
+            return Err(CookieError("cookie domain cannot be empty".to_owned()));
+        }
+        let path = if spec.path.is_empty() {
+            "/"
+        } else {
+            spec.path.as_str()
+        };
+        let url = Url::parse(&format!("https://{}{path}", spec.domain))
+            .map_err(|err| CookieError(format!("invalid domain/path: {err}")))?;
+
+        let mut raw = RawCookie::new(spec.name, spec.value);
+        raw.set_path(path.to_owned());
+        raw.set_secure(spec.secure);
+        raw.set_same_site(spec.same_site.map(SameSite::to_raw));
+        // Deliberately NO `set_domain` — a host-only cookie (see the doc
+        // above). Adding `Domain={host}` would make it a `Suffix` cookie the
+        // store sends to every subdomain too.
+        // RFC 6265 caps dates at year 9999; `set_expires` clamps to that
+        // itself, so any comfortably-far-future date works here.
+        raw.set_expires(OffsetDateTime::now_utc() + Duration::weeks(520));
+
+        self.store_write()
+            .insert_raw(&raw, &url)
+            .map(|_action| ())
+            .map_err(|err| CookieError(err.to_string()))
     }
 
     /// Removes every cookie matching `(domain, name)` (a domain can hold the same
@@ -134,6 +273,20 @@ impl ChurlCookieJar {
             store.remove(d, p, n);
         }
         true
+    }
+
+    /// Removes the ONE cookie at the exact `(domain, path, name)` key,
+    /// returning whether anything was removed. Unlike [`Self::delete`] (which
+    /// is domain+name-scoped and wipes every path under that pair), this is
+    /// path-precise — it surfaces the store's own `(domain, path, name)`
+    /// primitive so an edit that moves a cookie to a new path can drop just
+    /// the old coordinate without touching a sibling cookie of the same name
+    /// at a different path.
+    pub fn delete_exact(&self, domain: &str, path: &str, name: &str) -> bool {
+        // `remove` returns the removed cookie (or `None` if the exact key
+        // wasn't present), so a single write-lock pass answers "did anything
+        // go?" without a separate read scan.
+        self.store_write().remove(domain, path, name).is_some()
     }
 
     /// Empties the jar.
@@ -318,5 +471,155 @@ mod tests {
             ChurlCookieJar::load_json(&json).unwrap().list().is_empty(),
             "empty jar round-trips to empty"
         );
+    }
+
+    fn spec(domain: &str, name: &str, value: &str) -> CookieSpec {
+        CookieSpec {
+            domain: domain.to_owned(),
+            name: name.to_owned(),
+            value: value.to_owned(),
+            path: String::new(),
+            secure: false,
+            same_site: None,
+        }
+    }
+
+    #[test]
+    fn upsert_add_is_visible_in_list_with_all_fields() {
+        let jar = ChurlCookieJar::new();
+        jar.upsert(CookieSpec {
+            domain: "a.example".to_owned(),
+            name: "sid".to_owned(),
+            value: "abc123".to_owned(),
+            path: "/app".to_owned(),
+            secure: true,
+            same_site: Some(SameSite::Lax),
+        })
+        .unwrap();
+
+        let listed = jar.list();
+        assert_eq!(listed.len(), 1);
+        let c = &listed[0];
+        assert_eq!(c.domain, "a.example");
+        assert_eq!(c.name, "sid");
+        assert_eq!(c.value, "abc123");
+        assert_eq!(c.path, "/app");
+        assert!(c.secure);
+        assert_eq!(c.same_site, Some(SameSite::Lax));
+    }
+
+    #[test]
+    fn upsert_same_key_replaces_not_duplicates() {
+        let jar = ChurlCookieJar::new();
+        jar.upsert(spec("a.example", "sid", "first")).unwrap();
+        jar.upsert(spec("a.example", "sid", "second")).unwrap();
+
+        let listed = jar.list();
+        assert_eq!(listed.len(), 1, "upsert must replace, not duplicate");
+        assert_eq!(listed[0].value, "second");
+    }
+
+    #[test]
+    fn upsert_then_to_json_round_trips() {
+        let jar = ChurlCookieJar::new();
+        jar.upsert(spec("a.example", "sid", "abc123")).unwrap();
+        let json = jar.to_json().unwrap();
+
+        let restored = ChurlCookieJar::load_json(&json).unwrap();
+        let listed = restored.list();
+        assert_eq!(listed.len(), 1, "upsert must persist (survive to_json)");
+        assert_eq!(listed[0].value, "abc123");
+    }
+
+    #[test]
+    fn upsert_rejects_empty_name_or_domain() {
+        let jar = ChurlCookieJar::new();
+        assert!(jar.upsert(spec("a.example", "", "v")).is_err());
+        assert!(jar.upsert(spec("", "sid", "v")).is_err());
+        assert!(
+            jar.list().is_empty(),
+            "a rejected upsert must not partially insert"
+        );
+    }
+
+    #[test]
+    fn upsert_surfaces_store_rejection_never_silently_swallows_it() {
+        let jar = ChurlCookieJar::new();
+        // A domain that cannot even parse into the synthesized request URL —
+        // `upsert` must propagate the store/URL rejection as `Err`, never
+        // report success while leaving nothing actually stored.
+        let result = jar.upsert(spec("[not-a-valid-host", "sid", "v"));
+        assert!(
+            result.is_err(),
+            "an unparseable domain must be a surfaced error, not a silent no-op"
+        );
+        assert!(jar.list().is_empty());
+    }
+
+    #[test]
+    fn list_surfaces_same_site_secure_and_path_from_set_cookies() {
+        let jar = ChurlCookieJar::new();
+        set_cookie(
+            &jar,
+            "sid=abc; Max-Age=3600; Path=/app; Secure; SameSite=Strict",
+            "https://a.example/",
+        );
+        let listed = jar.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "/app");
+        assert!(listed[0].secure);
+        assert_eq!(listed[0].same_site, Some(SameSite::Strict));
+    }
+
+    #[test]
+    fn upsert_is_host_only_not_sent_to_subdomain() {
+        // A hand-typed cookie must be host-only: sent back to the exact host,
+        // never silently broadened to every subdomain (the cross-origin
+        // over-scoping churl's R3 redirect policy guards against).
+        let jar = ChurlCookieJar::new();
+        jar.upsert(spec("a.example", "sid", "abc123")).unwrap();
+
+        assert!(
+            jar.cookies(&url("https://a.example/")).is_some(),
+            "a host-only cookie must still be offered back to its own host"
+        );
+        assert!(
+            jar.cookies(&url("https://sub.a.example/")).is_none(),
+            "a hand-typed cookie must NOT be broadened to a subdomain"
+        );
+        // And the list still shows the host in the domain column.
+        assert_eq!(jar.list()[0].domain, "a.example");
+    }
+
+    #[test]
+    fn delete_exact_removes_only_the_named_path() {
+        // The path-precise primitive: a sibling cookie of the same
+        // (domain, name) at a DIFFERENT path must survive.
+        let jar = ChurlCookieJar::new();
+        jar.upsert(CookieSpec {
+            path: "/app".to_owned(),
+            ..spec("a.example", "sid", "app-val")
+        })
+        .unwrap();
+        jar.upsert(CookieSpec {
+            path: "/admin".to_owned(),
+            ..spec("a.example", "sid", "admin-val")
+        })
+        .unwrap();
+        assert_eq!(jar.list().len(), 2, "two cookies, same name, two paths");
+
+        assert!(
+            jar.delete_exact("a.example", "/app", "sid"),
+            "the exact /app coordinate is removed"
+        );
+        assert!(
+            !jar.delete_exact("a.example", "/app", "sid"),
+            "a second delete_exact of the same coord finds nothing"
+        );
+
+        let listed = jar.list();
+        assert_eq!(listed.len(), 1, "the /admin sibling must survive");
+        assert_eq!(listed[0].path, "/admin");
+        assert_eq!(listed[0].value, "admin-val");
     }
 }

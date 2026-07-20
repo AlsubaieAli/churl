@@ -15,6 +15,7 @@
 
 use super::super::*;
 use crate::tui::components::settings::{AdvancedField, SettingKey, mask_proxy};
+use churl_core::cookies::CookieSpec;
 
 impl App {
     /// Opens the Settings panel over the current session settings. Captures the
@@ -133,6 +134,53 @@ impl App {
                 self.cookie_jar.clear();
                 self.persist_cookie_jar();
                 self.notify("cookies cleared");
+                self.refresh_settings_panel();
+            }
+            SettingsOutcome::UpsertCookie {
+                previous,
+                domain,
+                name,
+                value,
+                path,
+                secure,
+                same_site,
+            } => {
+                // Jar CONTENTS are not a settings-panel-managed knob (mirrors
+                // DeleteCookie/ClearCookies above) — no `SettingKey` to mark.
+                let is_edit = previous.is_some();
+                let spec = CookieSpec {
+                    domain: domain.clone(),
+                    name: name.clone(),
+                    value,
+                    path: path.clone(),
+                    secure,
+                    same_site,
+                };
+                match self.cookie_jar.upsert(spec) {
+                    Ok(()) => {
+                        // Upsert FIRST, then remove the old coordinate — only
+                        // now that the new one is safely in. When an edit
+                        // changed the key (domain/name/path), drop the OLD
+                        // entry with the PATH-PRECISE `delete_exact`, never the
+                        // domain+name-scoped `delete` (which would wipe a
+                        // same-name sibling at another path). Because the new
+                        // key differs from the old by definition of "changed,"
+                        // deleting the exact old coord can't touch the row this
+                        // upsert just added, and a failed upsert (below) skips
+                        // the delete entirely, so the original always survives.
+                        if let Some((old_domain, old_name, old_path)) = &previous
+                            && (*old_domain != domain || *old_name != name || *old_path != path)
+                        {
+                            self.cookie_jar.delete_exact(old_domain, old_path, old_name);
+                        }
+                        self.persist_cookie_jar();
+                        let verb = if is_edit { "updated" } else { "added" };
+                        // Never echo the value — it's credential-shaped, same
+                        // stance as `DeleteCookie`'s notification.
+                        self.notify(format!("{verb} cookie {name} ({domain})"));
+                    }
+                    Err(err) => self.set_settings_message(format!("could not save cookie — {err}")),
+                }
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyAdvanced { field, value } => {

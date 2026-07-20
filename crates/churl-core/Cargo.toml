@@ -11,6 +11,7 @@ readme = "README.md"
 
 [dependencies]
 base64.workspace = true
+cookie.workspace = true
 cookie_store.workspace = true
 dirs.workspace = true
 futures.workspace = true

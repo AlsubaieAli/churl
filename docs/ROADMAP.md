@@ -112,7 +112,10 @@ CLI, real testing, and the polish to launch — grouped by target release.
       generalizing the session Options overlay to surface every config knob. Changes apply live
       to the session; a **Save as default** action persists them to `config.toml` (a
       comment- and unknown-key-preserving `toml_edit` write — churl's first config writer).
-      Cookie-model additions (SameSite, manual add/edit) follow as a sibling step.
+      Cookie-model additions have landed as a sibling step: SameSite + Secure surfaced in the
+      cookie list, and a manual cookie add/edit form (`a`/`e` on the Network category's Cookies
+      row) backed by `ChurlCookieJar::upsert`. The headless `churl cookies` add/edit CLI is not
+      in scope yet — TUI + jar only so far.
 - [ ] Multipart / file upload.
 - [ ] Response output — save response bodies to file, HTML/XML pretty-printing.
 

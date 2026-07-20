@@ -21,6 +21,9 @@ impl SettingsState {
         // A live message is cleared on the next interaction so it does not linger.
         self.message = None;
 
+        if self.cookie_form.is_some() {
+            return self.handle_cookie_form_key(key);
+        }
         if self.editing.is_some() {
             return self.handle_edit_key(key);
         }
@@ -166,6 +169,10 @@ impl SettingsState {
                 ));
                 SettingsOutcome::Consumed
             }
+            KeyCode::Char('a') if self.network_row == NetworkRow::Cookies => {
+                self.open_add_cookie_form();
+                SettingsOutcome::Consumed
+            }
             _ => SettingsOutcome::Consumed,
         }
     }
@@ -196,6 +203,14 @@ impl SettingsState {
                 } else {
                     SettingsOutcome::ClearCookies
                 }
+            }
+            KeyCode::Char('a') => {
+                self.open_add_cookie_form();
+                SettingsOutcome::Consumed
+            }
+            KeyCode::Char('e') => {
+                self.open_edit_cookie_form();
+                SettingsOutcome::Consumed
             }
             KeyCode::Char('q') => SettingsOutcome::Close,
             _ => SettingsOutcome::Consumed,
