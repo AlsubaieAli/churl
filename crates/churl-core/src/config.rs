@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, Table};
 
 use crate::model::Workspace;
 
@@ -47,6 +48,43 @@ pub enum ConfigError {
     /// further sub-tables (its submenus).
     #[error("bad [keys] structure: {0}")]
     BadKeys(String),
+    /// The config file exists but its content is not valid TOML at all (parsed
+    /// as a raw [`toml_edit::DocumentMut`] for an in-place update — see
+    /// [`save_defaults`] — rather than deserialized into [`Config`]).
+    #[error("failed to parse existing config {path} for update: {source}")]
+    ParseDocument {
+        /// Path of the file that failed to parse.
+        path: PathBuf,
+        /// Underlying TOML document-parse error.
+        source: toml_edit::TomlError,
+    },
+    /// The updated config could not be written back to disk.
+    #[error("failed to write config {path}: {source}")]
+    Write {
+        /// Path of the file that failed to write.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+    /// [`save_defaults`] refuses to persist a credential-bearing proxy
+    /// (`user:pass@host`) — see [`proxy_has_credentials`]. The credentials stay
+    /// session-only; write the proxy without them, or leave it unset.
+    #[error(
+        "refusing to persist a credential-bearing proxy to {path} — remove the \
+         embedded username/password first (it can stay session-only)"
+    )]
+    ProxyCredentials {
+        /// The config path the write was refused for.
+        path: PathBuf,
+    },
+    /// The platform config directory could not be determined (see
+    /// [`global_config_path`]), so there is nowhere to write a default config
+    /// without an explicit [`CONFIG_PATH_ENV`] override.
+    #[error(
+        "could not determine the global config directory; set {CONFIG_PATH_ENV} to an \
+         explicit path"
+    )]
+    NoConfigDir,
 }
 
 /// Global churl configuration. Every field is optional; a missing file means defaults.
@@ -524,6 +562,307 @@ pub fn load_global_config() -> Result<Config, ConfigError> {
         Some(path) => load_config(&path),
         None => Ok(Config::default()),
     }
+}
+
+/// The resolved values the settings panel (M8.5) manages and can persist to
+/// `config.toml` via [`save_defaults`]. Every field mirrors a resolved
+/// [`Config`] knob — the panel's *working copy*, not the raw optional-override
+/// shape [`Config`] itself uses for partial files.
+///
+/// Deliberately **not** `Config` (or a wrapper around it): the panel edits base
+/// knobs only — `[keys]` / `[theme_colors]` / `raw_keys` are owned by other
+/// subsystems and must never be touched by a settings-panel save. Using a
+/// dedicated struct with no fields for them makes that structurally impossible
+/// (there is nothing here to mistakenly serialize), rather than relying on
+/// every future call site to remember to skip them on a shared `Config`.
+///
+/// [`save_defaults`] compares each field against its built-in default (the same
+/// default [`Config`]'s own resolver methods fall back to) and **removes** the
+/// key when they match, so saving a knob back to its default cleans up any
+/// stale override rather than writing it out explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsDefaults {
+    /// The colour theme name (`"dark"` | `"light"`); compared against the
+    /// built-in default `"dark"`.
+    pub theme: String,
+    /// The leader key combination string; compared against the built-in
+    /// default `"space"`.
+    pub leader_key: String,
+    /// Per-request timeout in seconds; compared against
+    /// [`crate::http::DEFAULT_TIMEOUT`].
+    pub timeout_secs: u64,
+    /// Response body-size cap in bytes; compared against
+    /// [`crate::http::DEFAULT_MAX_BODY_BYTES`].
+    pub max_body_bytes: u64,
+    /// What the URL bar's `i`/`Enter` opens.
+    pub url_edit: UrlEditMode,
+    /// Save-time secret policy.
+    pub secret_policy: crate::secrets::SecretPolicy,
+    /// Cross-origin redirect policy.
+    pub redirect: RedirectPolicy,
+    /// Global HTTP/HTTPS proxy URL; `None` writes no `proxy` key. A
+    /// credential-bearing proxy is refused by [`save_defaults`] rather than
+    /// silently stripped.
+    pub proxy: Option<String>,
+    /// Whether TLS verification is off by default.
+    pub insecure: bool,
+    /// Whether the persistent cookie jar is on by default.
+    pub cookies: bool,
+    /// Master debug toggle.
+    pub debug: bool,
+    /// Concurrent-load guardrail caps; each field compared against
+    /// [`crate::load::LoadCaps::default`].
+    pub load_caps: crate::load::LoadCaps,
+    /// Debug-gated advanced-limit overrides; each field compared against its
+    /// existing default (see [`Config::advanced_limits`]).
+    pub advanced: ResolvedAdvancedLimits,
+}
+
+impl Default for SettingsDefaults {
+    /// The built-in defaults, expressed the same way [`Config::default`]'s own
+    /// resolvers would — round-tripping a default-valued [`SettingsDefaults`]
+    /// through [`save_defaults`] writes no keys at all (every field already
+    /// matches its default).
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            theme: "dark".to_owned(),
+            leader_key: "space".to_owned(),
+            timeout_secs: config.timeout().as_secs(),
+            max_body_bytes: config.max_body_bytes(),
+            url_edit: UrlEditMode::default(),
+            secret_policy: crate::secrets::SecretPolicy::default(),
+            redirect: RedirectPolicy::default(),
+            proxy: None,
+            insecure: false,
+            cookies: false,
+            debug: false,
+            load_caps: config.load_caps(),
+            advanced: config.advanced_limits(),
+        }
+    }
+}
+
+/// Sets `doc[key]` to a string, or removes it when `value` is `None`.
+fn set_or_remove_str(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<&str>) {
+    match value {
+        Some(v) => doc[key] = toml_edit::value(v),
+        None => {
+            doc.remove(key);
+        }
+    }
+}
+
+/// Sets `doc[key]` to an integer, or removes it when `value` is `None`.
+/// `u64` values beyond `i64::MAX` saturate rather than panic — no real
+/// timeout/body-cap/limit knob approaches that range.
+fn set_or_remove_u64(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<u64>) {
+    match value {
+        Some(v) => doc[key] = toml_edit::value(i64::try_from(v).unwrap_or(i64::MAX)),
+        None => {
+            doc.remove(key);
+        }
+    }
+}
+
+/// Sets `doc[key]` to `true`, or removes it when `value == default` (`false`
+/// for every panel-managed boolean today).
+fn set_or_remove_bool(doc: &mut toml_edit::DocumentMut, key: &str, value: bool, default: bool) {
+    if value == default {
+        doc.remove(key);
+    } else {
+        doc[key] = toml_edit::value(value);
+    }
+}
+
+/// Sets or removes `int_key` inside the `[table_key]` sub-table, creating the
+/// table on first use and removing it entirely once every managed field is
+/// back at its default (an empty override table is noise, not signal).
+fn set_or_remove_subtable_u64(
+    doc: &mut toml_edit::DocumentMut,
+    table_key: &str,
+    int_key: &str,
+    value: Option<u64>,
+) {
+    match value {
+        Some(v) => {
+            let table = doc[table_key].or_insert(toml_edit::table());
+            table[int_key] = toml_edit::value(i64::try_from(v).unwrap_or(i64::MAX));
+        }
+        None => {
+            if let Some(table) = doc.get_mut(table_key).and_then(|item| item.as_table_mut()) {
+                table.remove(int_key);
+            }
+        }
+    }
+    if doc
+        .get(table_key)
+        .and_then(|item| item.as_table())
+        .is_some_and(Table::is_empty)
+    {
+        doc.remove(table_key);
+    }
+}
+
+/// Persists `values` to `path`: reads the existing file into a
+/// [`toml_edit::DocumentMut`] (an empty document when the file is missing — a
+/// missing file is not an error, mirroring [`load_config`]), sets each
+/// panel-managed key that differs from its built-in default, **removes** any
+/// that now matches its default, and writes the result back **atomically**
+/// (temp file in the same directory, then rename over `path`; the parent
+/// directory is created if missing). `[keys]` / `[theme_colors]` / `raw_keys`
+/// are never read or touched — [`SettingsDefaults`] has no fields for them, so
+/// there is nothing here that could.
+///
+/// Every OTHER key already in the file — including ones churl doesn't model —
+/// and every comment/key-order in the document survive untouched: only the
+/// panel-managed keys are set via the DOM, never a wholesale re-serialize.
+///
+/// Refuses (never silently strips) a credential-bearing proxy
+/// ([`proxy_has_credentials`]) with [`ConfigError::ProxyCredentials`] before
+/// touching the file at all.
+pub fn save_defaults(values: &SettingsDefaults, path: &Path) -> Result<(), ConfigError> {
+    if let Some(proxy) = values.proxy.as_deref()
+        && proxy_has_credentials(proxy)
+    {
+        return Err(ConfigError::ProxyCredentials {
+            path: path.to_owned(),
+        });
+    }
+
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|source| ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        })?;
+    }
+
+    let mut doc: DocumentMut = match std::fs::read_to_string(path) {
+        Ok(existing) => existing
+            .parse()
+            .map_err(|source| ConfigError::ParseDocument {
+                path: path.to_owned(),
+                source,
+            })?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+
+    let theme = (values.theme != "dark").then_some(values.theme.as_str());
+    set_or_remove_str(&mut doc, "theme", theme);
+    let leader_key = (values.leader_key != "space").then_some(values.leader_key.as_str());
+    set_or_remove_str(&mut doc, "leader_key", leader_key);
+    let timeout_secs = (values.timeout_secs != crate::http::DEFAULT_TIMEOUT.as_secs())
+        .then_some(values.timeout_secs);
+    set_or_remove_u64(&mut doc, "timeout_secs", timeout_secs);
+    let max_body_bytes = (values.max_body_bytes != crate::http::DEFAULT_MAX_BODY_BYTES)
+        .then_some(values.max_body_bytes);
+    set_or_remove_u64(&mut doc, "max_body_bytes", max_body_bytes);
+    let url_edit = (values.url_edit != UrlEditMode::default()).then_some(match values.url_edit {
+        UrlEditMode::Inline => "inline",
+        UrlEditMode::Popup => "popup",
+    });
+    set_or_remove_str(&mut doc, "url_edit", url_edit);
+    let secret_policy = (values.secret_policy != crate::secrets::SecretPolicy::default())
+        .then_some(match values.secret_policy {
+            crate::secrets::SecretPolicy::Strict => "strict",
+            crate::secrets::SecretPolicy::Warn => "warn",
+        });
+    set_or_remove_str(&mut doc, "secret_policy", secret_policy);
+    let redirect =
+        (values.redirect != RedirectPolicy::default()).then_some(match values.redirect {
+            RedirectPolicy::Strip => "strip",
+            RedirectPolicy::Strict => "strict",
+            RedirectPolicy::FollowAll => "follow-all",
+        });
+    set_or_remove_str(&mut doc, "redirect", redirect);
+    set_or_remove_str(&mut doc, "proxy", values.proxy.as_deref());
+    set_or_remove_bool(&mut doc, "insecure", values.insecure, false);
+    set_or_remove_bool(&mut doc, "cookies", values.cookies, false);
+    set_or_remove_bool(&mut doc, "debug", values.debug, false);
+
+    let load_defaults = crate::load::LoadCaps::default();
+    let caps = values.load_caps;
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "load",
+        "warn_total",
+        (caps.warn_total != load_defaults.warn_total).then_some(caps.warn_total as u64),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "load",
+        "warn_concurrency",
+        (caps.warn_concurrency != load_defaults.warn_concurrency)
+            .then_some(caps.warn_concurrency as u64),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "load",
+        "max_total",
+        (caps.max_total != load_defaults.max_total).then_some(caps.max_total as u64),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "load",
+        "max_concurrency",
+        (caps.max_concurrency != load_defaults.max_concurrency)
+            .then_some(caps.max_concurrency as u64),
+    );
+
+    // The [advanced] defaults mirror `Config::advanced_limits`'s own fallback:
+    // a fresh `LoadConfig::default()` for concurrency/total, and the ALREADY-
+    // panel-managed base timeout/body-cap for the other two — an advanced
+    // override is only meaningful relative to the base knob it overrides.
+    let run_defaults = crate::load::LoadConfig::default();
+    let advanced = values.advanced;
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "advanced",
+        "concurrency",
+        (advanced.concurrency != run_defaults.concurrency).then_some(advanced.concurrency as u64),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "advanced",
+        "total",
+        (advanced.total != run_defaults.total).then_some(advanced.total as u64),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "advanced",
+        "body_cap_bytes",
+        (advanced.body_cap_bytes != values.max_body_bytes).then_some(advanced.body_cap_bytes),
+    );
+    set_or_remove_subtable_u64(
+        &mut doc,
+        "advanced",
+        "timeout_secs",
+        (advanced.timeout_secs != values.timeout_secs).then_some(advanced.timeout_secs),
+    );
+
+    crate::persistence::atomic_write(path, doc.to_string().as_bytes()).map_err(|source| {
+        ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        }
+    })
+}
+
+/// The path [`save_defaults`] should target: an explicit [`CONFIG_PATH_ENV`]
+/// override wins (deterministic for tests/CI, mirroring [`load_global_config`]);
+/// otherwise the platform path from [`global_config_path`]. Errs when neither
+/// is available — unlike a *load*, a *write* has nowhere safe to default to.
+pub fn resolve_settings_path() -> Result<PathBuf, ConfigError> {
+    if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    global_config_path().ok_or(ConfigError::NoConfigDir)
 }
 
 /// Case-insensitive substrings that flag a *name* (variable / header / query
@@ -1362,5 +1701,234 @@ mod tests {
             vec!["vars.api_key".to_string()]
         );
         assert!(collection_secret_violations(&CollectionMeta::default()).is_empty());
+    }
+
+    // ---- M8.5 settings-panel config writer (`save_defaults`) ----
+
+    /// Serializes access to the `CHURL_CONFIG` env var across the tests below
+    /// that set it — `cargo test` runs this crate's tests on multiple threads
+    /// in one process, and env vars are process-global.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn save_defaults_round_trip_preserves_comment_and_unknown_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# a note the user left themselves\ntheme = \"light\"\nmystery_key = 42\n",
+        )
+        .unwrap();
+
+        // theme stays "light" (unchanged — still non-default, must survive).
+        let values = SettingsDefaults {
+            theme: "light".to_owned(),
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&values, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# a note the user left themselves"),
+            "leading comment must survive:\n{text}"
+        );
+        assert!(
+            text.contains("mystery_key = 42"),
+            "a key churl doesn't model must survive:\n{text}"
+        );
+        assert!(text.contains("theme = \"light\""), "{text}");
+    }
+
+    #[test]
+    fn save_defaults_sets_a_non_default_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let values = SettingsDefaults {
+            timeout_secs: 90,
+            proxy: Some("http://proxy.local:3128".to_owned()),
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&values, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("timeout_secs = 90"), "{text}");
+        assert!(
+            text.contains("proxy = \"http://proxy.local:3128\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn save_defaults_setting_back_to_default_removes_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "timeout_secs = 90\n").unwrap();
+
+        let values = SettingsDefaults::default(); // timeout_secs back at the built-in default
+        save_defaults(&values, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("timeout_secs"),
+            "resetting to default must prune the stale key:\n{text}"
+        );
+    }
+
+    #[test]
+    fn save_defaults_load_subtable_prunes_to_nothing_when_all_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[load]\nwarn_total = 25\n").unwrap();
+
+        let values = SettingsDefaults::default(); // load_caps at the built-in default
+        save_defaults(&values, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("[load]") && !text.contains("warn_total"),
+            "an all-default [load] table must be pruned entirely:\n{text}"
+        );
+    }
+
+    #[test]
+    fn save_defaults_load_subtable_partial_override_keeps_only_that_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let values = SettingsDefaults {
+            load_caps: crate::load::LoadCaps {
+                max_concurrency: 64,
+                ..crate::load::LoadCaps::default()
+            },
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&values, &path).unwrap();
+
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let load = doc["load"].as_table().expect("[load] table present");
+        assert_eq!(load["max_concurrency"].as_integer(), Some(64));
+        assert!(
+            load.get("warn_total").is_none(),
+            "untouched load knobs stay absent"
+        );
+    }
+
+    #[test]
+    fn save_defaults_refuses_credentialed_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let values = SettingsDefaults {
+            proxy: Some("http://user:pass@proxy.local:3128".to_owned()),
+            ..SettingsDefaults::default()
+        };
+        let err = save_defaults(&values, &path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::ProxyCredentials { .. }),
+            "expected ProxyCredentials, got {err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused write must not touch the file at all"
+        );
+    }
+
+    #[test]
+    fn save_defaults_never_writes_keys_or_theme_colors_tables() {
+        // A settings-panel save must never touch [keys]/[theme_colors]/raw_keys —
+        // SettingsDefaults structurally has no fields for them, but this asserts
+        // the on-disk behaviour too: an existing [keys]/[theme_colors] table
+        // survives a save byte-for-byte.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[keys]\nq = \"quit\"\n\n[theme_colors]\ntitle = \"red\"\n",
+        )
+        .unwrap();
+
+        let values = SettingsDefaults {
+            timeout_secs: 45,
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&values, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[keys]") && text.contains("q = \"quit\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("[theme_colors]") && text.contains("title = \"red\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn resolve_settings_path_honors_churl_config_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("config.toml");
+        unsafe { std::env::set_var(CONFIG_PATH_ENV, &target) };
+        let resolved = resolve_settings_path().unwrap();
+        unsafe { std::env::remove_var(CONFIG_PATH_ENV) };
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
+    fn save_defaults_creates_missing_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let values = SettingsDefaults {
+            timeout_secs: 45,
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&values, &path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_defaults_via_churl_config_then_load_round_trips_resolved_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        unsafe { std::env::set_var(CONFIG_PATH_ENV, &target) };
+
+        let values = SettingsDefaults {
+            theme: "light".to_owned(),
+            timeout_secs: 77,
+            max_body_bytes: 2_048,
+            url_edit: UrlEditMode::Popup,
+            secret_policy: crate::secrets::SecretPolicy::Warn,
+            redirect: RedirectPolicy::FollowAll,
+            insecure: true,
+            cookies: true,
+            load_caps: crate::load::LoadCaps {
+                max_concurrency: 64,
+                ..crate::load::LoadCaps::default()
+            },
+            ..SettingsDefaults::default()
+        };
+
+        let path = resolve_settings_path().unwrap();
+        assert_eq!(path, target);
+        save_defaults(&values, &path).unwrap();
+
+        let loaded = load_global_config().unwrap();
+        unsafe { std::env::remove_var(CONFIG_PATH_ENV) };
+
+        assert_eq!(loaded.theme.as_deref(), Some("light"));
+        assert_eq!(loaded.timeout(), Duration::from_secs(77));
+        assert_eq!(loaded.max_body_bytes(), 2_048);
+        assert_eq!(loaded.url_edit().unwrap(), UrlEditMode::Popup);
+        assert_eq!(
+            loaded.secret_policy().unwrap(),
+            crate::secrets::SecretPolicy::Warn
+        );
+        assert_eq!(loaded.redirect().unwrap(), RedirectPolicy::FollowAll);
+        assert!(loaded.insecure());
+        assert!(loaded.cookies());
+        assert_eq!(loaded.load_caps().max_concurrency, 64);
     }
 }
