@@ -156,9 +156,8 @@ impl App {
                 self.refresh_settings_panel();
             }
             SettingsOutcome::SaveDefaults => {
-                // Wired in M8.5 Wave 3 (Save-as-default): assembles the working
-                // copy and calls `churl_core::config::save_defaults`. No key
-                // binding emits this outcome yet, so it is unreachable today.
+                self.save_settings_defaults();
+                self.refresh_settings_panel();
             }
         }
         Ok(())
@@ -253,10 +252,67 @@ impl App {
         }
     }
 
+    /// The current session's working copy, assembled into the shape
+    /// [`churl_core::config::save_defaults`] persists (M8.5 Wave 3). Request's
+    /// `timeout_secs`/`max_body_bytes` and Debug's Advanced `timeout`/`body cap`
+    /// share the SAME live fields (`self.advanced_limits`, see
+    /// [`crate::tui::components::settings::RequestRow`]'s doc) — passing that
+    /// one resolved value into both `timeout_secs`/`max_body_bytes` AND
+    /// `advanced.timeout_secs`/`body_cap_bytes` here means the writer's own
+    /// equals-the-base-value pruning naturally drops the redundant `[advanced]`
+    /// override key, leaving a clean top-level `timeout_secs`/`max_body_bytes`.
+    fn settings_defaults(&self) -> churl_core::config::SettingsDefaults {
+        churl_core::config::SettingsDefaults {
+            theme: self.theme_name.clone(),
+            leader_key: self.leader_key.clone(),
+            timeout_secs: self.advanced_limits.timeout_secs,
+            max_body_bytes: self.advanced_limits.body_cap_bytes,
+            url_edit: self.url_edit_mode,
+            secret_policy: self.secret_policy,
+            redirect: self.execute_options.redirect,
+            proxy: self.session_proxy.clone(),
+            insecure: self.session_insecure,
+            cookies: self.cookies_enabled,
+            debug: self.debug_enabled,
+            load_caps: self.load_caps,
+            advanced: self.advanced_limits,
+        }
+    }
+
+    /// Persists the current working copy to `config.toml` (M8.5 Wave 3,
+    /// `s` inside the Settings panel). Never silent: a confirm toast names the
+    /// written file on success; a failure — including a refused
+    /// credential-bearing proxy — surfaces as a loud inline error in the
+    /// panel's own message slot (visible regardless of which level/category
+    /// is open) rather than being swallowed.
+    fn save_settings_defaults(&mut self) {
+        let path = match churl_core::config::resolve_settings_path() {
+            Ok(path) => path,
+            Err(err) => {
+                self.set_settings_message(format!("save failed — {err}"));
+                return;
+            }
+        };
+        let values = self.settings_defaults();
+        match churl_core::config::save_defaults(&values, &path) {
+            Ok(()) => self.notify(format!("saved defaults to {}", path.display())),
+            Err(err) => self.set_settings_message(format!("save failed — {err}")),
+        }
+    }
+
     /// A snapshot of every session-scoped value the panel manages, taken from
     /// the app's current state — used both to open the panel and (via
     /// [`Self::refresh_settings_panel`]) to refresh its mirror after a change.
+    /// `persisted` is a best-effort dirty-indicator baseline: freshly re-read
+    /// from disk every time (config.toml is tiny), so it never goes stale
+    /// across a session even if something else edits the file; a read/parse
+    /// failure degrades to the built-in defaults rather than blocking the
+    /// panel (the indicator is advisory, never load-bearing).
     fn settings_snapshot(&self) -> crate::tui::components::settings::SettingsSnapshot {
+        let persisted = churl_core::config::resolve_settings_path()
+            .and_then(|path| churl_core::config::load_config(&path))
+            .and_then(|config| churl_core::config::SettingsDefaults::from_config(&config))
+            .unwrap_or_default();
         crate::tui::components::settings::SettingsSnapshot {
             redirect: self.execute_options.redirect,
             url_edit: self.url_edit_mode,
@@ -270,6 +326,7 @@ impl App {
             leader_key: self.leader_key.clone(),
             debug_enabled: self.debug_enabled,
             advanced: self.advanced_limits,
+            persisted,
         }
     }
 

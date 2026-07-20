@@ -479,6 +479,10 @@ pub struct SettingsSnapshot {
     pub debug_enabled: bool,
     /// Mirrors `App::advanced_limits`.
     pub advanced: ResolvedAdvancedLimits,
+    /// The dirty-indicator baseline: what's currently on disk, freshly
+    /// re-read by the app on every open/refresh (best-effort — see
+    /// [`SettingsState::persisted`]'s doc).
+    pub persisted: churl_core::config::SettingsDefaults,
 }
 
 /// Full state of the open Settings panel.
@@ -524,6 +528,12 @@ pub struct SettingsState {
     pub editing: Option<(EditTarget, LineEditor)>,
     /// Inline status/error message shown in the footer.
     pub message: Option<String>,
+    /// Dirty-indicator baseline (best-effort): what's currently on disk. A row
+    /// whose working value differs from the matching field here renders a
+    /// dirty dot, mirroring the URL bar's convention. Refreshed alongside
+    /// everything else, so it never drifts stale mid-session; cleared to
+    /// match the working copy immediately on a successful Save.
+    pub persisted: churl_core::config::SettingsDefaults,
 }
 
 impl SettingsState {
@@ -555,6 +565,7 @@ impl SettingsState {
             advanced_field: AdvancedField::Concurrency,
             editing: None,
             message: None,
+            persisted: snapshot.persisted,
         }
     }
 
@@ -574,6 +585,7 @@ impl SettingsState {
         self.leader_key = snapshot.leader_key;
         self.debug_enabled = snapshot.debug_enabled;
         self.advanced = snapshot.advanced;
+        self.persisted = snapshot.persisted;
         // Debug going off mid-session (`<leader>D`) must not strand the panel
         // inside the category/list that just became unreachable.
         if !self.debug_enabled && self.category == SettingsCategory::Debug {

@@ -34,6 +34,7 @@ fn snapshot(debug_enabled: bool, cookies: Vec<CookieView>) -> SettingsSnapshot {
         leader_key: DEFAULT_LEADER_KEY.to_owned(),
         debug_enabled,
         advanced: default_limits(),
+        persisted: churl_core::config::SettingsDefaults::default(),
     }
 }
 
@@ -684,4 +685,55 @@ fn mask_proxy_password_keeps_user_visible_hides_password() {
     );
     assert!(!mask_proxy_password("http://u:p$s!w0rd@h").contains("p$s!w0rd"));
     assert!(!mask_proxy_password("http://u:p$s!w0rd").contains("p$s!w0rd"));
+}
+
+// ---- Save-as-default (M8.5 Wave 3) ----
+
+#[test]
+fn s_emits_save_defaults_from_the_menu() {
+    let mut s = state_no_cookies();
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('s'))),
+        SettingsOutcome::SaveDefaults
+    );
+}
+
+#[test]
+fn s_emits_save_defaults_from_a_panel() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j'))); // -> Network
+    s.handle_key(key(KeyCode::Enter)); // -> Panel
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('s'))),
+        SettingsOutcome::SaveDefaults
+    );
+}
+
+#[test]
+fn s_emits_save_defaults_from_a_list() {
+    let mut s = state_with_cookies();
+    goto_network_cookies(&mut s);
+    s.handle_key(key(KeyCode::Char('l'))); // -> CookieList
+    assert_eq!(s.focus, PanelFocus::CookieList);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('s'))),
+        SettingsOutcome::SaveDefaults
+    );
+}
+
+#[test]
+fn s_types_normally_inside_an_open_edit_rather_than_saving() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j'))); // -> Network
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Proxy row
+    s.handle_key(key(KeyCode::Enter)); // open the proxy editor
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('s'))),
+        SettingsOutcome::Consumed,
+        "typing 's' while editing must type it, not trigger save"
+    );
+    assert_eq!(
+        s.editing.as_ref().map(|(_, e)| e.text()),
+        Some("s".to_owned())
+    );
 }

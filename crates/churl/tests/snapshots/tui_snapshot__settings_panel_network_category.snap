@@ -6,9 +6,9 @@ expression: snapshot(&mut app)
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
 │           ┏ Settings · Network ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
-│           ┃▸ Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
-│           ┃  TLS verification  on                                ┃           │
-│           ┃  Cookies           off                               ┃           │
+│           ┃▸   Proxy             (none — uses HTTP(S)_PROXY env) ┃           │
+│           ┃    TLS verification  on                              ┃           │
+│           ┃    Cookies           off                             ┃           │
 │           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
 │           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
 │           ┃│                                                    │┃           │
@@ -20,7 +20,7 @@ expression: snapshot(&mut app)
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit/toggle · l cookies · esc menu ·┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · s save · e┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │

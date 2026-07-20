@@ -643,6 +643,36 @@ impl Default for SettingsDefaults {
     }
 }
 
+impl SettingsDefaults {
+    /// Builds a [`SettingsDefaults`] from a loaded [`Config`]'s RESOLVED
+    /// values — e.g. so a live session's working copy can be compared
+    /// against what is currently on disk (the M8.5 settings panel's
+    /// best-effort dirty indicator). Fails on the same malformed-value cases
+    /// [`Config`]'s own resolvers do (an unknown `url_edit`/`secret_policy`/
+    /// `redirect` string) — the caller decides how to degrade (the panel
+    /// treats a failure as "nothing to compare against" rather than blocking).
+    pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
+        Ok(Self {
+            theme: config.theme.clone().unwrap_or_else(|| "dark".to_owned()),
+            leader_key: config
+                .leader_key
+                .clone()
+                .unwrap_or_else(|| "space".to_owned()),
+            timeout_secs: config.timeout().as_secs(),
+            max_body_bytes: config.max_body_bytes(),
+            url_edit: config.url_edit()?,
+            secret_policy: config.secret_policy()?,
+            redirect: config.redirect()?,
+            proxy: config.proxy().map(str::to_owned),
+            insecure: config.insecure(),
+            cookies: config.cookies(),
+            debug: config.debug,
+            load_caps: config.load_caps(),
+            advanced: config.advanced_limits(),
+        })
+    }
+}
+
 /// Sets `doc[key]` to a string, or removes it when `value` is `None`.
 fn set_or_remove_str(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<&str>) {
     match value {
@@ -1930,5 +1960,49 @@ mod tests {
         assert!(loaded.insecure());
         assert!(loaded.cookies());
         assert_eq!(loaded.load_caps().max_concurrency, 64);
+    }
+
+    #[test]
+    fn settings_defaults_from_config_default_matches_default() {
+        // A default Config resolves to the exact same SettingsDefaults as
+        // SettingsDefaults::default() (both express the built-in defaults).
+        assert_eq!(
+            SettingsDefaults::from_config(&Config::default()).unwrap(),
+            SettingsDefaults::default()
+        );
+    }
+
+    #[test]
+    fn settings_defaults_from_config_reflects_a_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let saved = SettingsDefaults {
+            theme: "light".to_owned(),
+            timeout_secs: 45,
+            insecure: true,
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&saved, &path).unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        let resolved = SettingsDefaults::from_config(&loaded).unwrap();
+        assert_eq!(resolved.theme, "light");
+        assert_eq!(resolved.timeout_secs, 45);
+        assert!(resolved.insecure);
+        // Untouched knobs stay at the built-in default.
+        assert_eq!(
+            resolved.max_body_bytes,
+            SettingsDefaults::default().max_body_bytes
+        );
+    }
+
+    #[test]
+    fn settings_defaults_from_config_propagates_bad_enum_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "redirect = \"nope\"\n").unwrap();
+        let loaded = load_config(&path).unwrap();
+        let err = SettingsDefaults::from_config(&loaded).unwrap_err();
+        assert!(matches!(err, ConfigError::BadValue { .. }));
     }
 }

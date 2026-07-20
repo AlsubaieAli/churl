@@ -6,9 +6,9 @@ expression: snap
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
 │           ┏ Settings · Network ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
-│           ┃  Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
-│           ┃▸ TLS verification  OFF — certificates NOT verified   ┃           │
-│           ┃  Cookies           off                               ┃           │
+│           ┃    Proxy             (none — uses HTTP(S)_PROXY env) ┃           │
+│           ┃▸ ● TLS verification  OFF — certificates NOT verified ┃           │
+│           ┃    Cookies           off                             ┃           │
 │           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
 │           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
 │           ┃│                                                    │┃           │
@@ -19,7 +19,7 @@ expression: snap
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit/toggle · l cookies · esc menu ·┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · s save · e┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │

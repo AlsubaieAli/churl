@@ -24,6 +24,13 @@ impl SettingsState {
         if self.editing.is_some() {
             return self.handle_edit_key(key);
         }
+        // `s` saves the current working copy as the default (M8.5 Wave 3),
+        // reachable from anywhere in the panel — mirroring `q`'s reach-from-
+        // anywhere close. Free at every level (no row/list binds it) and never
+        // shadows typed text (an open edit returns above, before this check).
+        if matches!(key.code, KeyCode::Char('s')) {
+            return SettingsOutcome::SaveDefaults;
+        }
         match self.level {
             SettingsLevel::Menu => self.handle_menu_key(key),
             SettingsLevel::Panel => match self.focus {

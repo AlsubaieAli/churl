@@ -20,7 +20,7 @@ expression: snapshot(&mut app)
 │           ┃                                                      ┃           │
 │           ┃                                                      ┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter/l open · q close                    ┃           │
+│           ┃ j/k move · enter/l open · s save · q close           ┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │

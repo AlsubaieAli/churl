@@ -1,6 +1,51 @@
 use super::*;
 use churl_core::model::{OnError, Timing};
 
+/// Serializes access to `CHURL_CONFIG` across tests that open the Settings
+/// panel — opening it reads whatever `churl_core::config::resolve_settings_path`
+/// resolves to, which MUST be a tempdir here, never the real machine's
+/// `~/.config/churl/config.toml` (mirrors `churl-core`'s own `ENV_LOCK`
+/// pattern in `config.rs`, and `tui_snapshot.rs`'s `SettingsEnvGuard`, for the
+/// same hermeticity reason — a separate lock because integration tests run in
+/// a separate process from this lib test binary).
+static SETTINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard: points `CHURL_CONFIG` at a fresh empty tempdir for the
+/// duration of a Settings-panel test, holding [`SETTINGS_ENV_LOCK`].
+struct SettingsEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl SettingsEnvGuard {
+    fn new() -> Self {
+        let lock = SETTINGS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        unsafe {
+            std::env::set_var(churl_core::config::CONFIG_PATH_ENV, &path);
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            path,
+        }
+    }
+
+    /// The resolved config path for this guard's tempdir — where a Save
+    /// writes to, so a test can assert on-disk content afterward.
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SettingsEnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(churl_core::config::CONFIG_PATH_ENV) };
+    }
+}
+
 #[test]
 fn export_target_stays_inside_workspace() {
     let dir = tempfile::tempdir().unwrap();
@@ -4652,6 +4697,7 @@ fn debug_toggle_flips_flag_and_badge() {
 /// the debug-gated Advanced UI cannot be used to bypass it.
 #[test]
 fn advanced_concurrency_above_guardrail_max_is_refused() {
+    let _settings_env = SettingsEnvGuard::new();
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
     app.load_caps.max_concurrency = 10;
@@ -4695,6 +4741,7 @@ fn advanced_concurrency_above_guardrail_max_is_refused() {
 /// same field a real send reads (`Self::send_request`).
 #[test]
 fn advanced_body_cap_override_applies_to_execute_options() {
+    let _settings_env = SettingsEnvGuard::new();
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
     app.open_settings();
@@ -4719,6 +4766,92 @@ fn advanced_body_cap_override_applies_to_execute_options() {
         .unwrap();
     assert_eq!(app.advanced_limits.body_cap_bytes, 4096);
     assert_eq!(app.execute_options.max_body_bytes, 4096);
+}
+
+// ---- Save-as-default (M8.5 Wave 3) ----
+
+/// `s` inside the open Settings panel assembles the working copy and calls
+/// the config-writer — a changed proxy lands in the written `config.toml`,
+/// and the panel's own message slot confirms which file was written.
+#[test]
+fn settings_save_writes_the_working_copy_to_config_toml() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_proxy = Some("http://proxy.local:3128".to_owned());
+    app.open_settings();
+    app.handle_settings_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("proxy = \"http://proxy.local:3128\""),
+        "the working copy's proxy must be written:\n{text}"
+    );
+
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        state.message.is_none(),
+        "a successful save must not show an error"
+    );
+}
+
+/// Saving a credential-bearing proxy is refused (never silently stripped) —
+/// the config-writer's own guardrail, surfaced loudly in the panel.
+#[test]
+fn settings_save_refuses_a_credentialed_proxy() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_proxy = Some("http://user:pass@proxy.local:3128".to_owned());
+    app.open_settings();
+    app.handle_settings_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !env.path().exists(),
+        "a refused save must not write the file at all"
+    );
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        state
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("refus")),
+        "the refusal must surface loudly in the panel: {:?}",
+        state.message
+    );
+}
+
+/// After a successful save, the panel's dirty-indicator baseline
+/// (`persisted`) refreshes to match — a value just saved no longer shows
+/// dirty.
+#[test]
+fn settings_save_clears_the_dirty_indicator() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_insecure = true;
+    app.open_settings();
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert_ne!(
+            state.insecure, state.persisted.insecure,
+            "insecure must start dirty relative to the (default, unsaved) baseline"
+        );
+    }
+    app.handle_settings_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert_eq!(
+        state.insecure, state.persisted.insecure,
+        "after a successful save the baseline must match the working copy"
+    );
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)

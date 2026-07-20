@@ -50,8 +50,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
 
 /// Renders the category menu (level 1).
 fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
-    let [list_area, footer] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+    let [list_area, msg_row, hint_row] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
 
     let lines: Vec<Line> = SettingsCategory::visible(state.debug_enabled)
         .into_iter()
@@ -67,12 +71,20 @@ fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &The
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
+
+    // A `s` (save) failure can fire from the menu level too (e.g. a
+    // credentialed proxy refused on write) — shown loud, same as the panel's.
+    let top = match &state.message {
+        Some(msg) => Line::styled(format!(" {msg}"), theme.status_error),
+        None => Line::from(""),
+    };
+    frame.render_widget(Paragraph::new(top), msg_row);
     frame.render_widget(
         Paragraph::new(Line::styled(
-            " j/k move · enter/l open · q close",
+            " j/k move · enter/l open · s save · q close",
             theme.statusline,
         )),
-        footer,
+        hint_row,
     );
 }
 
@@ -126,10 +138,28 @@ fn category_rows_height(state: &SettingsState) -> u16 {
 }
 
 /// A single row line, shared rendering shape across every category: a
-/// selection marker, a fixed-width label, then the value span.
-fn row_line(label: &str, value: Span<'static>, selected: bool, theme: &Theme) -> Line<'static> {
+/// selection marker, a best-effort dirty dot (M8.5 Wave 3 — mirrors the URL
+/// bar's `●` convention: accent-coloured, shown when the working value
+/// differs from what's on disk), a fixed-width label, then the value span.
+fn row_line(
+    label: &str,
+    value: Span<'static>,
+    selected: bool,
+    dirty: bool,
+    theme: &Theme,
+) -> Line<'static> {
     let marker = if selected { "▸ " } else { "  " };
-    let l = Line::from(vec![Span::raw(format!("{marker}{label:<18}")), value]);
+    let dot = if dirty {
+        Span::styled("●", theme.accent)
+    } else {
+        Span::raw(" ")
+    };
+    let l = Line::from(vec![
+        Span::raw(marker),
+        dot,
+        Span::raw(format!(" {label:<18}")),
+        value,
+    ]);
     if selected {
         l.style(theme.selection)
     } else {
@@ -187,30 +217,35 @@ fn render_request_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
             RequestRow::Timeout.label(),
             Span::raw(timeout_display),
             sel(RequestRow::Timeout),
+            state.advanced.timeout_secs != state.persisted.timeout_secs,
             theme,
         ),
         row_line(
             RequestRow::MaxBodyBytes.label(),
             Span::raw(body_display),
             sel(RequestRow::MaxBodyBytes),
+            state.advanced.body_cap_bytes != state.persisted.max_body_bytes,
             theme,
         ),
         row_line(
             RequestRow::Redirect.label(),
             Span::raw(redirect_label(state.redirect)),
             sel(RequestRow::Redirect),
+            state.redirect != state.persisted.redirect,
             theme,
         ),
         row_line(
             RequestRow::UrlEdit.label(),
             Span::raw(url_edit_label(state.url_edit)),
             sel(RequestRow::UrlEdit),
+            state.url_edit != state.persisted.url_edit,
             theme,
         ),
         row_line(
             RequestRow::SecretPolicy.label(),
             Span::raw(secret_policy_label(state.secret_policy)),
             sel(RequestRow::SecretPolicy),
+            state.secret_policy != state.persisted.secret_policy,
             theme,
         ),
     ];
@@ -248,18 +283,21 @@ fn render_network_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
             NetworkRow::Proxy.label(),
             Span::raw(proxy_display),
             sel(NetworkRow::Proxy),
+            state.proxy != state.persisted.proxy,
             theme,
         ),
         row_line(
             NetworkRow::Tls.label(),
             insecure_span,
             sel(NetworkRow::Tls),
+            state.insecure != state.persisted.insecure,
             theme,
         ),
         row_line(
             NetworkRow::Cookies.label(),
             Span::raw(cookies_display.to_owned()),
             sel(NetworkRow::Cookies),
+            state.cookies_enabled != state.persisted.cookies,
             theme,
         ),
     ];
@@ -273,7 +311,8 @@ fn render_load_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme:
         .map(|&row| {
             let display = editing_text(state, super::EditTarget::Load(row))
                 .unwrap_or_else(|| row.get(&state.load_caps).to_string());
-            row_line(row.label(), Span::raw(display), sel(row), theme)
+            let dirty = row.get(&state.load_caps) != row.get(&state.persisted.load_caps);
+            row_line(row.label(), Span::raw(display), sel(row), dirty, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
@@ -288,12 +327,14 @@ fn render_appearance_rows(frame: &mut Frame, area: Rect, state: &SettingsState, 
             AppearanceRow::Theme.label(),
             Span::raw(state.theme_name.clone()),
             sel(AppearanceRow::Theme),
+            state.theme_name != state.persisted.theme,
             theme,
         ),
         row_line(
             AppearanceRow::LeaderKey.label(),
             Span::raw(leader_display),
             sel(AppearanceRow::LeaderKey),
+            state.leader_key != state.persisted.leader_key,
             theme,
         ),
     ];
@@ -308,12 +349,14 @@ fn render_debug_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme
             DebugRow::DebugToggle.label(),
             Span::raw(debug_display.to_owned()),
             sel(DebugRow::DebugToggle),
+            state.debug_enabled != state.persisted.debug,
             theme,
         ),
         row_line(
             DebugRow::Advanced.label(),
             Span::raw("↳ concurrency/total/body-cap/timeout"),
             sel(DebugRow::Advanced),
+            false,
             theme,
         ),
     ];
@@ -346,7 +389,8 @@ fn render_advanced_list(frame: &mut Frame, area: Rect, state: &SettingsState, th
             let selected = focused && state.advanced_field == field;
             let value = editing_text(state, super::EditTarget::Advanced(field))
                 .unwrap_or_else(|| field.get(&state.advanced).to_string());
-            row_line(field.label(), Span::raw(value), selected, theme)
+            let dirty = field.get(&state.advanced) != field.get(&state.persisted.advanced);
+            row_line(field.label(), Span::raw(value), selected, dirty, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
@@ -436,15 +480,17 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
     } else {
         match state.focus {
             PanelFocus::Rows if state.category == SettingsCategory::Network => {
-                "j/k move · enter edit/toggle · l cookies · esc menu · q close".to_owned()
+                "j/k move · enter edit/toggle · l cookies · s save · esc menu · q close".to_owned()
             }
             PanelFocus::Rows => {
-                "j/k move · enter edit/toggle/cycle · esc menu · q close".to_owned()
+                "j/k move · enter edit/toggle/cycle · s save · esc menu · q close".to_owned()
             }
             PanelFocus::CookieList => {
-                "j/k move · d delete · x clear all · h/esc back · q close".to_owned()
+                "j/k move · d delete · x clear all · s save · h/esc back · q close".to_owned()
             }
-            PanelFocus::AdvancedList => "j/k move · enter edit · h/esc back · q close".to_owned(),
+            PanelFocus::AdvancedList => {
+                "j/k move · enter edit · s save · h/esc back · q close".to_owned()
+            }
         }
     };
     frame.render_widget(
