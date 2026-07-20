@@ -370,6 +370,7 @@ name = "churl-core"
 version = "0.8.0"
 dependencies = [
  "base64",
+ "cookie",
  "cookie_store",
  "dirs",
  "futures",

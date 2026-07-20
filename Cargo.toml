@@ -46,6 +46,11 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "c
 # `Jar`); declared explicitly so `ChurlCookieJar` can hold + persist it. Pinned
 # to the exact version reqwest's `cookies` feature resolves (see Cargo.lock).
 cookie_store = "0.22"
+# The `cookie::Cookie` type behind `cookie_store::RawCookie` — already resolved
+# transitively via `cookie_store`; declared explicitly (same 0.18.x it pins)
+# so `ChurlCookieJar::upsert` can build one via the builder/setter API and
+# reach `cookie::time` for a far-future persistent expiry.
+cookie = "0.18"
 
 # curl import/export
 shlex = "1"
