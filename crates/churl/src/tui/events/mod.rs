@@ -294,11 +294,19 @@ impl Default for KeyMap {
         root_bind(key!(p), LeaderEntry::Act(Action::SwitchProfile));
         // `<leader>v` opens the environments & variables editor (`v` is free).
         root_bind(key!(v), LeaderEntry::Act(Action::OpenEnvEditor));
-        // `<leader>o` opens the Settings panel (M8.5: request / network / load /
-        // appearance / debug, generalizing the old session Options overlay);
-        // `<leader>k` toggles insecure-TLS from anywhere. Both letters were
-        // verified free at the leader root (mnemonics: o=options→settings, k=insecure).
-        root_bind(key!(o), LeaderEntry::Act(Action::OpenSettings));
+        // `<leader>,` opens the Settings panel (M8.5: request / network / load /
+        // appearance / debug, generalizing the old session Options overlay) —
+        // comma reads as "settings" the way many editors bind it, and was
+        // verified free at the leader root. Built with `KeyCombination::new`
+        // rather than the `key!` macro: crokey's compile-time `key!(',')`
+        // char-literal form is not exercised anywhere in this crate and may
+        // not compile, unlike the runtime constructor already used below for
+        // `BackTab`.
+        // `<leader>k` toggles insecure-TLS from anywhere (verified free too).
+        root_bind(
+            KeyCombination::new(KeyCode::Char(','), KeyModifiers::NONE),
+            LeaderEntry::Act(Action::OpenSettings),
+        );
         root_bind(key!(k), LeaderEntry::Act(Action::ToggleInsecure));
         // `<leader>K` (shift-k) toggles the SELECTED endpoint's durable insecure-TLS
         // opt-in — a persisted per-endpoint flag, deliberately distinct from the

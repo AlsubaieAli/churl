@@ -11,8 +11,8 @@ use crokey::KeyCombination;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{
-    AdvancedField, AppearanceRow, DebugRow, EditTarget, LineEditor, NetworkRow, PanelFocus,
-    RequestRow, SettingsCategory, SettingsLevel, SettingsOutcome, SettingsState,
+    AdvancedField, AppearanceRow, DebugRow, EditTarget, LineEditor, LoadRow, NetworkRow,
+    PanelFocus, RequestRow, SettingsCategory, SettingsLevel, SettingsOutcome, SettingsState,
 };
 
 impl SettingsState {
@@ -23,6 +23,13 @@ impl SettingsState {
 
         if self.cookie_form.is_some() {
             return self.handle_cookie_form_key(key);
+        }
+        // The Appearance leader-key capture prompt intercepts the NEXT key
+        // unconditionally (it IS the value being set) — checked before the
+        // `s`-save shortcut below, or capturing "s" as a combo would instead
+        // fire a save.
+        if self.capturing_leader_key {
+            return self.handle_leader_capture_key(key);
         }
         if self.editing.is_some() {
             return self.handle_edit_key(key);
@@ -104,6 +111,12 @@ impl SettingsState {
                 self.request_row = self.request_row.prev();
                 SettingsOutcome::Consumed
             }
+            // `J`/`K` (shift) quick-adjust the hovered row IN PLACE, without
+            // opening the Enter editor — distinct from `j`/`k` row movement.
+            KeyCode::Char('J') | KeyCode::Char('K') => {
+                let forward = key.code == KeyCode::Char('J');
+                self.quick_adjust_request(forward)
+            }
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('i') => match self.request_row {
                 RequestRow::Timeout => {
                     self.begin_advanced_edit(AdvancedField::TimeoutSecs);
@@ -130,6 +143,43 @@ impl SettingsState {
         }
     }
 
+    /// `J`/`K` quick-adjust for the Request category: numeric rows step by a
+    /// fixed increment (clamped at the same positive-whole-number floor
+    /// `commit_edit` enforces on the same fields via [`step_u64`]), enum rows
+    /// cycle forward/backward. Emits the SAME outcome variant the Enter path
+    /// emits for that row, so the app applies and net-change-marks it exactly
+    /// the same way — a `J` then `K` back to the origin value nets to
+    /// "untouched" for free, with no separate marking logic to keep in sync.
+    fn quick_adjust_request(&mut self, forward: bool) -> SettingsOutcome {
+        match self.request_row {
+            RequestRow::Timeout => SettingsOutcome::ApplyAdvanced {
+                field: AdvancedField::TimeoutSecs,
+                value: step_u64(self.advanced.timeout_secs, 1, forward),
+            },
+            RequestRow::MaxBodyBytes => SettingsOutcome::ApplyAdvanced {
+                field: AdvancedField::BodyCapBytes,
+                value: step_u64(self.advanced.body_cap_bytes, super::MB, forward),
+            },
+            RequestRow::Redirect => {
+                self.redirect = if forward {
+                    next_redirect(self.redirect)
+                } else {
+                    prev_redirect(self.redirect)
+                };
+                SettingsOutcome::ApplyRedirect(self.redirect)
+            }
+            RequestRow::UrlEdit => {
+                // A 2-state toggle: either direction flips it.
+                self.url_edit = next_url_edit(self.url_edit);
+                SettingsOutcome::ApplyUrlEdit(self.url_edit)
+            }
+            RequestRow::SecretPolicy => {
+                self.secret_policy = next_secret_policy(self.secret_policy);
+                SettingsOutcome::ApplySecretPolicy(self.secret_policy)
+            }
+        }
+    }
+
     // ---- Network category (ported from the old Options overlay) ----
 
     fn handle_network_rows_key(&mut self, key: KeyEvent) -> SettingsOutcome {
@@ -142,6 +192,13 @@ impl SettingsState {
                 self.network_row = self.network_row.prev();
                 SettingsOutcome::Consumed
             }
+            // `J`/`K` cycle the two toggle rows in place; Proxy has no
+            // quick-adjust (free text, not a toggle/enum/number).
+            KeyCode::Char('J') | KeyCode::Char('K') => match self.network_row {
+                NetworkRow::Tls => SettingsOutcome::ToggleInsecure,
+                NetworkRow::Cookies => SettingsOutcome::ToggleCookies,
+                NetworkRow::Proxy => SettingsOutcome::Consumed,
+            },
             // Descend into the cookie list (only meaningful on the Cookies row
             // with cookies present).
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right
@@ -149,6 +206,16 @@ impl SettingsState {
             {
                 self.focus = PanelFocus::CookieList;
                 self.cookie_sel = 0;
+                SettingsOutcome::Consumed
+            }
+            // The same keys on an EMPTY jar used to fall through to a silent
+            // no-op (the footer still advertised `l`) — speak up instead. Only
+            // reachable when the guard above didn't match, i.e. the jar really
+            // is empty.
+            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right
+                if self.network_row == NetworkRow::Cookies =>
+            {
+                self.message = Some("no cookies in the jar — press a to add one".to_owned());
                 SettingsOutcome::Consumed
             }
             KeyCode::Enter | KeyCode::Char(' ') => match self.network_row {
@@ -229,12 +296,30 @@ impl SettingsState {
                 self.load_row = self.load_row.prev();
                 SettingsOutcome::Consumed
             }
+            KeyCode::Char('J') | KeyCode::Char('K') => {
+                let forward = key.code == KeyCode::Char('J');
+                self.quick_adjust_load(forward)
+            }
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('i') => {
                 let seed = self.load_row.get(&self.load_caps).to_string();
                 self.editing = Some((EditTarget::Load(self.load_row), LineEditor::new(&seed)));
                 SettingsOutcome::Consumed
             }
             _ => SettingsOutcome::Consumed,
+        }
+    }
+
+    /// `J`/`K` quick-adjust for the Load category's caps: concurrency knobs
+    /// step by 1, total knobs by 10 (owner-locked steps), clamped at the same
+    /// positive-whole-number floor the Enter edit enforces.
+    fn quick_adjust_load(&mut self, forward: bool) -> SettingsOutcome {
+        let step = match self.load_row {
+            LoadRow::WarnConcurrency | LoadRow::MaxConcurrency => 1,
+            LoadRow::WarnTotal | LoadRow::MaxTotal => 10,
+        };
+        SettingsOutcome::ApplyLoadCap {
+            field: self.load_row,
+            value: step_usize(self.load_row.get(&self.load_caps), step, forward),
         }
     }
 
@@ -250,6 +335,10 @@ impl SettingsState {
                 self.appearance_row = self.appearance_row.prev();
                 SettingsOutcome::Consumed
             }
+            KeyCode::Char('J') | KeyCode::Char('K') => {
+                let forward = key.code == KeyCode::Char('J');
+                self.quick_adjust_appearance(forward)
+            }
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('i') => match self.appearance_row {
                 AppearanceRow::Theme => {
                     let next = if self.theme_name == "light" {
@@ -261,11 +350,36 @@ impl SettingsState {
                     SettingsOutcome::ApplyTheme(next.to_owned())
                 }
                 AppearanceRow::LeaderKey => {
-                    self.editing = Some((EditTarget::LeaderKey, LineEditor::new(&self.leader_key)));
+                    // Primary path: capture the NEXT keypress as the new combo
+                    // (handles a modifier chord the terminal CAN emit as one
+                    // `KeyEvent`, e.g. `ctrl-b`). The free-type editor stays
+                    // one key away — see `handle_leader_capture_key` — for a
+                    // chord the terminal can't emit as a single event.
+                    self.capturing_leader_key = true;
                     SettingsOutcome::Consumed
                 }
             },
             _ => SettingsOutcome::Consumed,
+        }
+    }
+
+    /// `J`/`K` quick-adjust for Appearance: Theme is a 2-state toggle (either
+    /// key flips it); LeaderKey has no quick-adjust — it is free text, not a
+    /// number/enum/toggle, so this is a deliberate no-op rather than
+    /// accidentally entering capture mode on a shift-key typo.
+    fn quick_adjust_appearance(&mut self, forward: bool) -> SettingsOutcome {
+        let _ = forward;
+        match self.appearance_row {
+            AppearanceRow::Theme => {
+                let next = if self.theme_name == "light" {
+                    "dark"
+                } else {
+                    "light"
+                };
+                self.theme_name = next.to_owned();
+                SettingsOutcome::ApplyTheme(next.to_owned())
+            }
+            AppearanceRow::LeaderKey => SettingsOutcome::Consumed,
         }
     }
 
@@ -280,6 +394,10 @@ impl SettingsState {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.debug_row = self.debug_row.prev();
                 SettingsOutcome::Consumed
+            }
+            KeyCode::Char('J') | KeyCode::Char('K') => {
+                let forward = key.code == KeyCode::Char('J');
+                self.quick_adjust_debug(forward)
             }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right
                 if self.debug_row == DebugRow::Advanced =>
@@ -298,6 +416,18 @@ impl SettingsState {
         }
     }
 
+    /// `J`/`K` quick-adjust for the Debug category's top-level rows: the
+    /// master toggle flips either way; `Advanced` is a submenu link, not a
+    /// knob itself, so it no-ops (the actual advanced knobs quick-adjust from
+    /// inside the list — see [`Self::quick_adjust_advanced`]).
+    fn quick_adjust_debug(&mut self, forward: bool) -> SettingsOutcome {
+        let _ = forward;
+        match self.debug_row {
+            DebugRow::DebugToggle => SettingsOutcome::ToggleDebug,
+            DebugRow::Advanced => SettingsOutcome::Consumed,
+        }
+    }
+
     /// Keys while the Advanced field list has focus (`concurrency` / `total`
     /// / `body cap` / `timeout`).
     fn handle_advanced_list_key(&mut self, key: KeyEvent) -> SettingsOutcome {
@@ -309,6 +439,10 @@ impl SettingsState {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.advanced_field = self.advanced_field.prev();
                 SettingsOutcome::Consumed
+            }
+            KeyCode::Char('J') | KeyCode::Char('K') => {
+                let forward = key.code == KeyCode::Char('J');
+                self.quick_adjust_advanced(forward)
             }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => {
                 self.focus = PanelFocus::Rows;
@@ -327,9 +461,31 @@ impl SettingsState {
         }
     }
 
+    /// `J`/`K` quick-adjust for the Advanced field list: concurrency/timeout
+    /// step by 1, total by 10, body cap by 1 MB (owner-locked steps — mirrors
+    /// [`Self::quick_adjust_request`]'s Timeout/MaxBodyBytes steps exactly,
+    /// since they alias the same live fields; see [`AdvancedField`]'s doc).
+    fn quick_adjust_advanced(&mut self, forward: bool) -> SettingsOutcome {
+        let field = self.advanced_field;
+        let value = match field {
+            AdvancedField::Concurrency => step_u64(field.get(&self.advanced), 1, forward),
+            AdvancedField::Total => step_u64(field.get(&self.advanced), 10, forward),
+            AdvancedField::BodyCapBytes => step_u64(field.get(&self.advanced), super::MB, forward),
+            AdvancedField::TimeoutSecs => step_u64(field.get(&self.advanced), 1, forward),
+        };
+        SettingsOutcome::ApplyAdvanced { field, value }
+    }
+
     /// Seeds the numeric editor with `field`'s current resolved value.
+    /// `BodyCapBytes` seeds with the friendly MB/KB display (see
+    /// [`super::format_body_cap`]) rather than the raw byte count, so editing
+    /// starts from what's on screen; every other field seeds with its bare
+    /// number, unchanged.
     fn begin_advanced_edit(&mut self, field: AdvancedField) {
-        let seed = field.get(&self.advanced).to_string();
+        let seed = match field {
+            AdvancedField::BodyCapBytes => super::format_body_cap(field.get(&self.advanced)),
+            _ => field.get(&self.advanced).to_string(),
+        };
         self.editing = Some((EditTarget::Advanced(field), LineEditor::new(&seed)));
     }
 
@@ -343,6 +499,12 @@ impl SettingsState {
             return false;
         };
         match target {
+            EditTarget::Advanced(AdvancedField::BodyCapBytes) => {
+                // Accepts a unit suffix (`10MB`/`512KB`) alongside bare
+                // digits — see `parse_body_cap` — so paste must NOT strip
+                // letters the way the purely-numeric fields below do.
+                editor.insert_str(text);
+            }
             EditTarget::Advanced(_) | EditTarget::Load(_) => {
                 // Digits only, mirroring the load runner's numeric-field paste —
                 // keeps the field a valid number regardless of clipboard content.
@@ -352,6 +514,31 @@ impl SettingsState {
             EditTarget::Proxy | EditTarget::LeaderKey => editor.insert_str(text),
         }
         true
+    }
+
+    /// Keys while the Appearance category's leader-key row is in "press a
+    /// key…" capture mode (entered from [`Self::handle_appearance_rows_key`]'s
+    /// `LeaderKey` arm): the very next key IS the value, no further typing.
+    /// `Esc` cancels with no change; `Tab` falls back to the free-type editor
+    /// (for a chord a terminal can't emit as one `KeyEvent`, e.g. `alt-b`);
+    /// anything else is normalized through the same path the real keymap uses
+    /// (`KeyEvent` → `KeyCombination` → `.normalized().to_string()`) and
+    /// applied directly — no further validation needed, since every
+    /// `KeyEvent` this method receives already IS a valid combination by
+    /// construction.
+    fn handle_leader_capture_key(&mut self, key: KeyEvent) -> SettingsOutcome {
+        self.capturing_leader_key = false;
+        match key.code {
+            KeyCode::Esc => SettingsOutcome::Consumed,
+            KeyCode::Tab => {
+                self.editing = Some((EditTarget::LeaderKey, LineEditor::new(&self.leader_key)));
+                SettingsOutcome::Consumed
+            }
+            _ => {
+                let combo = KeyCombination::from(key).normalized().to_string();
+                SettingsOutcome::ApplyLeaderKey(combo)
+            }
+        }
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent) -> SettingsOutcome {
@@ -368,8 +555,12 @@ impl SettingsState {
                 self.editing = None;
                 SettingsOutcome::Consumed
             }
+            // `BodyCapBytes` accepts a unit suffix (`MB`/`KB`) alongside
+            // digits — see `parse_body_cap` — so it is exempt from the
+            // digits-only gate every other Advanced/Load field keeps.
             KeyCode::Char(c)
                 if matches!(target, EditTarget::Advanced(_) | EditTarget::Load(_))
+                    && !matches!(target, EditTarget::Advanced(AdvancedField::BodyCapBytes))
                     && !c.is_ascii_digit() =>
             {
                 SettingsOutcome::Consumed
@@ -381,10 +572,12 @@ impl SettingsState {
     /// Commits the open edit. Numeric targets require a positive whole number
     /// (an empty, unparseable, or zero value is rejected with an inline
     /// message, and the editor still closes — matching the old Advanced-field
-    /// edit's behaviour exactly: retry means re-opening the row). The proxy
-    /// text edit always commits (empty clears it); the leader-key text edit
-    /// is validated as a parseable key combination (via the same `crokey`
-    /// parser the real keymap uses) before committing.
+    /// edit's behaviour exactly: retry means re-opening the row) — except
+    /// `BodyCapBytes`, which accepts `10MB`/`512KB`/a bare byte count via
+    /// [`super::parse_body_cap`] (still requires the parsed byte value to be
+    /// positive). The proxy text edit always commits (empty clears it); the
+    /// leader-key text edit is validated as a parseable key combination (via
+    /// the same `crokey` parser the real keymap uses) before committing.
     fn commit_edit(&mut self, target: EditTarget) -> SettingsOutcome {
         let Some((_, editor)) = self.editing.take() else {
             return SettingsOutcome::Consumed;
@@ -399,6 +592,21 @@ impl SettingsState {
                     Some(trimmed.to_owned())
                 };
                 SettingsOutcome::ApplyProxy(proxy)
+            }
+            EditTarget::Advanced(AdvancedField::BodyCapBytes) => {
+                match super::parse_body_cap(&text) {
+                    Some(value) if value > 0 => SettingsOutcome::ApplyAdvanced {
+                        field: AdvancedField::BodyCapBytes,
+                        value,
+                    },
+                    _ => {
+                        self.message = Some(
+                            "value must be a positive size, e.g. 10MB, 512KB, or a byte count"
+                                .to_owned(),
+                        );
+                        SettingsOutcome::Consumed
+                    }
+                }
             }
             EditTarget::Advanced(field) => match text.trim().parse::<u64>() {
                 Ok(value) if value > 0 => SettingsOutcome::ApplyAdvanced { field, value },
@@ -466,5 +674,37 @@ fn next_secret_policy(policy: SecretPolicy) -> SecretPolicy {
     match policy {
         SecretPolicy::Strict => SecretPolicy::Warn,
         SecretPolicy::Warn => SecretPolicy::Strict,
+    }
+}
+
+/// The `J`/`K`-backward counterpart of [`next_redirect`] — cycles the OTHER
+/// direction through the same 3-state loop (Strip → FollowAll → Strict →
+/// Strip), so `J` then `K` (or vice versa) always returns to the origin.
+fn prev_redirect(policy: RedirectPolicy) -> RedirectPolicy {
+    match policy {
+        RedirectPolicy::Strip => RedirectPolicy::FollowAll,
+        RedirectPolicy::FollowAll => RedirectPolicy::Strict,
+        RedirectPolicy::Strict => RedirectPolicy::Strip,
+    }
+}
+
+/// Steps a `u64` knob by `step` (forward = increment, backward = decrement),
+/// clamped at 1 — the same "positive whole number" floor `commit_edit`
+/// enforces on every numeric edit, so quick-adjust can never walk a knob down
+/// to (or through) zero.
+fn step_u64(current: u64, step: u64, forward: bool) -> u64 {
+    if forward {
+        current.saturating_add(step)
+    } else {
+        current.saturating_sub(step).max(1)
+    }
+}
+
+/// `usize` counterpart of [`step_u64`], for the Load category's caps.
+fn step_usize(current: usize, step: usize, forward: bool) -> usize {
+    if forward {
+        current.saturating_add(step)
+    } else {
+        current.saturating_sub(step).max(1)
     }
 }

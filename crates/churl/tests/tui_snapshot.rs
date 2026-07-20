@@ -1590,7 +1590,7 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// The Settings panel (`<leader>o`, M8.5): opens at the category menu
+/// The Settings panel (`<leader>,`, M8.5): opens at the category menu
 /// (Request / Network / Load / Appearance / Debug — Debug hidden with debug
 /// capture off).
 #[test]
@@ -1599,7 +1599,7 @@ fn settings_panel_open() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char(','));
     assert!(matches!(app.mode, Mode::Settings(_)));
     insta::assert_snapshot!(snapshot(&mut app));
 }
@@ -1612,7 +1612,7 @@ fn settings_panel_network_category() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char(','));
     press(&mut app, KeyCode::Char('j')); // Request -> Network
     press(&mut app, KeyCode::Enter); // open the panel
     assert!(matches!(app.mode, Mode::Settings(_)));
@@ -1629,7 +1629,7 @@ fn settings_malformed_proxy_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char(','));
     press(&mut app, KeyCode::Char('j')); // Request -> Network
     press(&mut app, KeyCode::Enter); // open the panel (Proxy row selected first)
     press(&mut app, KeyCode::Enter); // opens the inline editor
@@ -1662,7 +1662,7 @@ fn settings_panel_toggle_tls() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char(','));
     press(&mut app, KeyCode::Char('j')); // Request -> Network
     press(&mut app, KeyCode::Enter); // open the panel
     press(&mut app, KeyCode::Char('j')); // move to TLS row
@@ -1887,7 +1887,7 @@ fn settings_panel_advanced_section_when_debug_on() {
     app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT))
         .unwrap(); // <leader>D turns debug capture on
     press(&mut app, KeyCode::Char(' '));
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char(','));
     // Down to the Debug category (Request -> Network -> Load -> Appearance ->
     // Debug), open its panel (DebugToggle row first), down to Advanced, then
     // into the field list.

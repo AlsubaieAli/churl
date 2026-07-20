@@ -290,6 +290,54 @@ fn cannot_enter_empty_cookie_list() {
     assert_eq!(s.focus, PanelFocus::Rows, "no descent into an empty list");
 }
 
+/// M8.5.2: `l`/`Tab`/`→` on the Cookies row with an EMPTY jar used to fall
+/// through to a silent no-op — the footer still advertised `l` with nothing
+/// happening. It must speak up instead, and name the actual add keybind.
+#[test]
+fn empty_cookie_list_l_shows_an_actionable_message() {
+    let mut s = state_no_cookies();
+    goto_network_cookies(&mut s);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('l'))),
+        SettingsOutcome::Consumed
+    );
+    assert_eq!(
+        s.focus,
+        PanelFocus::Rows,
+        "still no descent — the jar is empty"
+    );
+    assert_eq!(
+        s.message.as_deref(),
+        Some("no cookies in the jar — press a to add one")
+    );
+}
+
+/// Same message for `Tab` and `Right`, the other two keys the guarded-descent
+/// arm accepts.
+#[test]
+fn empty_cookie_list_tab_and_right_show_the_same_message() {
+    for code in [KeyCode::Tab, KeyCode::Right] {
+        let mut s = state_no_cookies();
+        goto_network_cookies(&mut s);
+        s.handle_key(key(code));
+        assert_eq!(
+            s.message.as_deref(),
+            Some("no cookies in the jar — press a to add one")
+        );
+    }
+}
+
+/// A non-empty jar still descends normally — the message is an EMPTY-jar-only
+/// path, not a general replacement of the descend behaviour.
+#[test]
+fn nonempty_cookie_list_l_still_descends_without_a_message() {
+    let mut s = state_with_cookies();
+    goto_network_cookies(&mut s);
+    s.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(s.focus, PanelFocus::CookieList);
+    assert!(s.message.is_none());
+}
+
 #[test]
 fn cookie_list_esc_backs_to_rows_not_close() {
     let mut s = state_with_cookies();
@@ -542,6 +590,99 @@ fn request_url_edit_and_secret_policy_cycle() {
     );
 }
 
+// ---- Request category: `J`/`K` quick-adjust (M8.5.2) ----
+
+#[test]
+fn request_timeout_quick_adjust_steps_by_one_second_and_clamps_at_one() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Timeout row (first)
+    let start = s.advanced.timeout_secs;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::TimeoutSecs,
+            value: start + 1,
+        },
+        "J must NOT open the editor — it applies directly"
+    );
+    assert!(s.editing.is_none());
+    s.advanced.timeout_secs = 1;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::TimeoutSecs,
+            value: 1,
+        },
+        "K must clamp at the same positive-whole-number floor commit_edit enforces"
+    );
+}
+
+#[test]
+fn request_max_body_quick_adjust_steps_by_one_mb() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter));
+    s.handle_key(key(KeyCode::Char('j'))); // -> MaxBodyBytes row
+    let start = s.advanced.body_cap_bytes;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::BodyCapBytes,
+            value: start + MB,
+        }
+    );
+    s.advanced.body_cap_bytes = start;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::BodyCapBytes,
+            value: start - MB,
+        }
+    );
+}
+
+#[test]
+fn request_redirect_quick_adjust_cycles_both_directions() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter));
+    for _ in 0..2 {
+        s.handle_key(key(KeyCode::Char('j'))); // -> Redirect row
+    }
+    assert_eq!(s.request_row, RequestRow::Redirect);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyRedirect(RedirectPolicy::Strict)
+    );
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyRedirect(RedirectPolicy::Strip),
+        "K undoes the J that preceded it"
+    );
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyRedirect(RedirectPolicy::FollowAll),
+        "K alone cycles backward"
+    );
+}
+
+#[test]
+fn request_url_edit_and_secret_policy_quick_adjust_toggle_either_direction() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter));
+    for _ in 0..3 {
+        s.handle_key(key(KeyCode::Char('j'))); // -> UrlEdit row
+    }
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyUrlEdit(UrlEditMode::Popup),
+        "a 2-state toggle flips on K too, not just J"
+    );
+    s.handle_key(key(KeyCode::Char('j'))); // -> SecretPolicy row
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplySecretPolicy(SecretPolicy::Warn)
+    );
+}
+
 // ---- Load category ----
 
 #[test]
@@ -586,6 +727,74 @@ fn load_cap_edit_rejects_zero() {
     assert!(s.message.is_some());
 }
 
+#[test]
+fn load_cap_quick_adjust_steps_by_family_and_clamps_at_one() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j')));
+    s.handle_key(key(KeyCode::Char('j'))); // -> Load
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, WarnTotal row (a "total": step 10)
+    assert_eq!(s.load_row, LoadRow::WarnTotal);
+    let start = s.load_row.get(&s.load_caps);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyLoadCap {
+            field: LoadRow::WarnTotal,
+            value: start + 10,
+        }
+    );
+    s.handle_key(key(KeyCode::Char('j'))); // -> WarnConcurrency (step 1)
+    assert_eq!(s.load_row, LoadRow::WarnConcurrency);
+    let start = s.load_row.get(&s.load_caps);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyLoadCap {
+            field: LoadRow::WarnConcurrency,
+            value: start + 1,
+        }
+    );
+    // Clamp: decrementing to/through zero stays at 1.
+    s.load_caps.warn_concurrency = 1;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyLoadCap {
+            field: LoadRow::WarnConcurrency,
+            value: 1,
+        }
+    );
+}
+
+// ---- Network category: `J`/`K` quick-adjust (M8.5.2) ----
+
+#[test]
+fn network_tls_and_cookies_quick_adjust_toggle() {
+    let mut s = state_no_cookies();
+    goto_network_cookies(&mut s); // -> Panel, Cookies row (via Proxy -> Tls -> Cookies)
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ToggleCookies
+    );
+    s.handle_key(key(KeyCode::Char('k'))); // Cookies -> Tls
+    assert_eq!(s.network_row, NetworkRow::Tls);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ToggleInsecure
+    );
+}
+
+/// Proxy is free text — `J`/`K` has nothing to quick-adjust there.
+#[test]
+fn network_proxy_quick_adjust_is_a_no_op() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j'))); // -> Network
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Proxy row
+    assert_eq!(s.network_row, NetworkRow::Proxy);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::Consumed
+    );
+    assert!(s.editing.is_none(), "must not open the proxy editor either");
+}
+
 // ---- Appearance category ----
 
 #[test]
@@ -605,15 +814,112 @@ fn theme_row_cycles_dark_and_light() {
     );
 }
 
+/// A 2-state toggle: `J` and `K` both flip it, without opening anything.
 #[test]
-fn leader_key_edit_validates_and_applies() {
+fn theme_row_quick_adjust_toggles_on_either_key() {
     let mut s = state_no_cookies();
     for _ in 0..3 {
         s.handle_key(key(KeyCode::Char('j')));
     }
-    s.handle_key(key(KeyCode::Enter)); // -> Panel
+    s.handle_key(key(KeyCode::Enter)); // -> Panel (Appearance/Theme)
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyTheme("light".to_owned())
+    );
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyTheme("dark".to_owned())
+    );
+}
+
+/// LeaderKey has no quick-adjust — free text, not a number/enum/toggle — so
+/// `J`/`K` must be a no-op there rather than entering capture mode.
+#[test]
+fn leader_key_row_quick_adjust_is_a_no_op() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::Consumed
+    );
+    assert!(!s.capturing_leader_key);
+    assert!(s.editing.is_none());
+}
+
+/// Drives a fresh state to the Appearance category's LeaderKey row, panel
+/// level.
+fn goto_appearance_leader_key(s: &mut SettingsState) {
+    for _ in 0..3 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    s.handle_key(key(KeyCode::Enter)); // -> Panel (Appearance/Theme)
     s.handle_key(key(KeyCode::Char('j'))); // -> LeaderKey row
-    s.handle_key(key(KeyCode::Enter)); // begin edit
+}
+
+#[test]
+fn leader_key_enter_opens_capture_mode_not_the_editor() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    assert_eq!(s.handle_key(key(KeyCode::Enter)), SettingsOutcome::Consumed);
+    assert!(
+        s.capturing_leader_key,
+        "Enter must start capture mode, not open the free-type editor directly"
+    );
+    assert!(s.editing.is_none());
+}
+
+/// The primary path: a captured `KeyEvent` (with modifiers) normalizes
+/// straight to its combo string and registers — no typing involved.
+#[test]
+fn leader_key_capture_registers_a_modifier_chord() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    s.handle_key(key(KeyCode::Enter)); // -> capture mode
+    let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+    // crokey's `Display` capitalizes the modifier prefix (`Ctrl-`, same as
+    // the `Shift-d` shown in the leader which-key popup) but leaves the base
+    // key's own case alone — this is the SAME normalized string
+    // `KeyCombination::from_str` accepts back, so it round-trips.
+    assert_eq!(
+        s.handle_key(ctrl_b),
+        SettingsOutcome::ApplyLeaderKey("Ctrl-b".to_owned())
+    );
+    assert!(
+        !s.capturing_leader_key,
+        "capture mode ends once a key is registered"
+    );
+}
+
+/// Esc cancels the capture prompt with no change and no outcome — the
+/// leader-key value (and, downstream, its touched state) is untouched.
+#[test]
+fn leader_key_capture_esc_cancels_without_change() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    let before = s.leader_key.clone();
+    s.handle_key(key(KeyCode::Enter)); // -> capture mode
+    assert_eq!(s.handle_key(key(KeyCode::Esc)), SettingsOutcome::Consumed);
+    assert!(!s.capturing_leader_key, "esc must end capture mode");
+    assert!(s.editing.is_none());
+    assert_eq!(
+        s.leader_key, before,
+        "esc must leave the leader key unchanged"
+    );
+}
+
+/// `Tab` from capture mode falls back to the free-type editor (for a chord a
+/// terminal can't emit as one `KeyEvent`), seeded with the current value —
+/// exercising the SAME validate-and-apply path the editor always has.
+#[test]
+fn leader_key_edit_validates_and_applies() {
+    let mut s = state_no_cookies();
+    goto_appearance_leader_key(&mut s);
+    s.handle_key(key(KeyCode::Enter)); // -> capture mode
+    assert_eq!(s.handle_key(key(KeyCode::Tab)), SettingsOutcome::Consumed);
+    assert!(
+        !s.capturing_leader_key && s.editing.is_some(),
+        "tab must switch from capture mode to the free-type editor"
+    );
     for _ in 0..10 {
         s.handle_key(key(KeyCode::Backspace));
     }
@@ -629,12 +935,9 @@ fn leader_key_edit_validates_and_applies() {
 #[test]
 fn leader_key_edit_rejects_bad_combo() {
     let mut s = state_no_cookies();
-    for _ in 0..3 {
-        s.handle_key(key(KeyCode::Char('j')));
-    }
-    s.handle_key(key(KeyCode::Enter));
-    s.handle_key(key(KeyCode::Char('j')));
-    s.handle_key(key(KeyCode::Enter));
+    goto_appearance_leader_key(&mut s);
+    s.handle_key(key(KeyCode::Enter)); // -> capture mode
+    s.handle_key(key(KeyCode::Tab)); // -> free-type editor
     for _ in 0..10 {
         s.handle_key(key(KeyCode::Backspace));
     }
@@ -672,6 +975,95 @@ fn debug_toggle_row_emits_toggle_debug() {
     assert_eq!(
         s.handle_key(key(KeyCode::Enter)),
         SettingsOutcome::ToggleDebug
+    );
+}
+
+#[test]
+fn debug_toggle_row_quick_adjust_flips_either_direction() {
+    let mut s = state_debug_on();
+    for _ in 0..4 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, DebugToggle row
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ToggleDebug
+    );
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ToggleDebug
+    );
+}
+
+/// The Advanced row is a submenu link, not a knob — `J`/`K` there is a no-op
+/// (the actual knobs quick-adjust from inside the field list, tested below).
+#[test]
+fn debug_advanced_row_quick_adjust_is_a_no_op() {
+    let mut s = state_debug_on();
+    for _ in 0..4 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    s.handle_key(key(KeyCode::Enter)); // -> Panel
+    s.handle_key(key(KeyCode::Char('j'))); // -> Advanced row
+    assert_eq!(s.debug_row, DebugRow::Advanced);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::Consumed
+    );
+    assert_eq!(
+        s.focus,
+        PanelFocus::Rows,
+        "must not descend into the list either"
+    );
+}
+
+#[test]
+fn advanced_field_quick_adjust_steps_by_family() {
+    let mut s = state_debug_on();
+    for _ in 0..4 {
+        s.handle_key(key(KeyCode::Char('j')));
+    }
+    s.handle_key(key(KeyCode::Enter)); // -> Panel
+    s.handle_key(key(KeyCode::Char('j'))); // -> Advanced row
+    s.handle_key(key(KeyCode::Tab)); // -> AdvancedList, Concurrency field (step 1)
+    assert_eq!(s.advanced_field, AdvancedField::Concurrency);
+    let start = s.advanced_field.get(&s.advanced);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::Concurrency,
+            value: start + 1,
+        }
+    );
+    s.handle_key(key(KeyCode::Char('j'))); // -> Total (step 10)
+    assert_eq!(s.advanced_field, AdvancedField::Total);
+    let start = s.advanced_field.get(&s.advanced);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::Total,
+            value: start + 10,
+        }
+    );
+    s.handle_key(key(KeyCode::Char('j'))); // -> BodyCapBytes (step 1 MB)
+    assert_eq!(s.advanced_field, AdvancedField::BodyCapBytes);
+    let start = s.advanced_field.get(&s.advanced);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('J'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::BodyCapBytes,
+            value: start + MB,
+        }
+    );
+    s.handle_key(key(KeyCode::Char('j'))); // -> TimeoutSecs (step 1)
+    assert_eq!(s.advanced_field, AdvancedField::TimeoutSecs);
+    let start = s.advanced_field.get(&s.advanced);
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::TimeoutSecs,
+            value: start.saturating_sub(1).max(1),
+        }
     );
 }
 
@@ -914,6 +1306,92 @@ fn render_cookie_form_masks_the_value_field() {
     );
 }
 
+/// Renders `s` to a wide-enough buffer (long descriptions must not clip) and
+/// joins it into one searchable string.
+fn render_text(s: &SettingsState) -> String {
+    use crate::tui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    let theme = Theme::dark();
+    let backend = TestBackend::new(200, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, 200, 30), s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..30)
+        .map(|y| {
+            (0..200)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The footer's freed description space (M8.5.2) tracks the hovered row —
+/// moving off it must drop the old text, not leave it lingering.
+#[test]
+fn footer_description_matches_the_hovered_row_and_changes_with_it() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Request/Timeout row
+
+    let text = render_text(&s);
+    assert!(
+        text.contains("How long to wait for a response"),
+        "Timeout row's description must show:\n{text}"
+    );
+
+    s.handle_key(key(KeyCode::Char('j'))); // -> MaxBodyBytes row
+    let text = render_text(&s);
+    assert!(
+        text.contains("Maximum response body size"),
+        "the description must change with the hovered row:\n{text}"
+    );
+    assert!(
+        !text.contains("How long to wait for a response"),
+        "the OLD row's description must not linger:\n{text}"
+    );
+}
+
+/// A known security-sensitive knob (TLS verification off) must surface its
+/// security note in the description, not just a bare "on/off" value.
+#[test]
+fn tls_row_description_surfaces_a_security_note() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j'))); // -> Network
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Proxy row
+    s.handle_key(key(KeyCode::Char('j'))); // -> Tls row
+    assert_eq!(s.network_row, NetworkRow::Tls);
+
+    let text = render_text(&s);
+    assert!(
+        text.contains("accepts ANY certificate"),
+        "the TLS row's description must carry a security note about turning \
+         verification off:\n{text}"
+    );
+}
+
+/// Mid-edit and mid-capture, the description row goes quiet rather than
+/// showing a stale or misleading line (the editor/capture prompt already
+/// occupies the row it describes).
+#[test]
+fn footer_description_is_blank_while_editing_or_capturing() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Timeout row
+    let with_row_hovered = render_text(&s);
+    assert!(with_row_hovered.contains("How long to wait for a response"));
+
+    s.handle_key(key(KeyCode::Enter)); // begin editing Timeout
+    let while_editing = render_text(&s);
+    assert!(
+        !while_editing.contains("How long to wait for a response"),
+        "the description must not linger once the editor is open:\n{while_editing}"
+    );
+}
+
 #[test]
 fn mask_proxy_hides_userinfo() {
     assert_eq!(
@@ -949,6 +1427,69 @@ fn mask_proxy_password_keeps_user_visible_hides_password() {
     );
     assert!(!mask_proxy_password("http://u:p$s!w0rd@h").contains("p$s!w0rd"));
     assert!(!mask_proxy_password("http://u:p$s!w0rd").contains("p$s!w0rd"));
+}
+
+// ---- max-body-bytes MB/KB display + parse (M8.5.2) ----
+
+#[test]
+fn format_body_cap_picks_the_largest_clean_unit() {
+    assert_eq!(format_body_cap(10 * MB), "10 MB");
+    assert_eq!(format_body_cap(512 * KB), "512 KB");
+    assert_eq!(format_body_cap(1), "1 bytes");
+    assert_eq!(format_body_cap(0), "0 bytes");
+    // Not a whole multiple of either unit — falls back to bytes.
+    assert_eq!(format_body_cap(MB + 1), "1048577 bytes");
+}
+
+#[test]
+fn parse_body_cap_accepts_mb_kb_and_bare_bytes() {
+    assert_eq!(parse_body_cap("10MB"), Some(10 * MB));
+    assert_eq!(
+        parse_body_cap("10mb"),
+        Some(10 * MB),
+        "unit is case-insensitive"
+    );
+    assert_eq!(
+        parse_body_cap("10 MB"),
+        Some(10 * MB),
+        "a space before the unit is fine"
+    );
+    assert_eq!(parse_body_cap("512KB"), Some(512 * KB));
+    assert_eq!(
+        parse_body_cap("1048576"),
+        Some(MB),
+        "a bare number is bytes — back-compat with the old raw-bytes input"
+    );
+    assert_eq!(
+        parse_body_cap("1 bytes"),
+        Some(1),
+        "format_body_cap's own bytes fallback must parse back"
+    );
+    assert_eq!(parse_body_cap("5 byte"), Some(5));
+}
+
+#[test]
+fn parse_body_cap_rejects_garbage() {
+    assert_eq!(parse_body_cap(""), None);
+    assert_eq!(parse_body_cap("   "), None);
+    assert_eq!(parse_body_cap("MB"), None, "a unit with no number");
+    assert_eq!(parse_body_cap("ten MB"), None);
+    assert_eq!(parse_body_cap("-5"), None, "no negative sizes");
+    assert_eq!(parse_body_cap("5GB"), None, "GB is not a supported unit");
+}
+
+/// `format_body_cap` output always round-trips back through `parse_body_cap`
+/// — the seed a user sees when opening the editor must parse as itself.
+#[test]
+fn body_cap_format_and_parse_round_trip() {
+    for bytes in [MB, 10 * MB, KB, 512 * KB, 1, 0, MB + 1] {
+        assert_eq!(
+            parse_body_cap(&format_body_cap(bytes)),
+            Some(bytes),
+            "format_body_cap({bytes}) = {:?} must parse back to {bytes}",
+            format_body_cap(bytes)
+        );
+    }
 }
 
 // ---- Save-as-default (M8.5 Wave 3) ----

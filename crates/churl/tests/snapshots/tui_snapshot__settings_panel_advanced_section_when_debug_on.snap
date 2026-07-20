@@ -12,7 +12,7 @@ expression: snap
 │           ┃┌ Advanced limits (debug-gated) ─────────────────────┐┃           │
 │           ┃│▸   concurrency       5                             │┃           │
 │           ┃│    total             10                            │┃           │
-│           ┃│    body cap (bytes)  10485760                      │┃           │
+│           ┃│    body cap          10 MB                         │┃           │
 │           ┃│    timeout (s)       30                            │┃           │
 │           ┃│                                                    │┃───────────┘
 │           ┃│                                                    │┃───────────┐
@@ -20,8 +20,8 @@ expression: snap
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit · s save · h/esc back · q close┃           │
-└───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
+│           ┃ Default concurrent requests for a new load run.      ┃           │
+└───────────┗K adjust · enter edit · s save · h/esc back · q close ┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

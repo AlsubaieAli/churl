@@ -1,10 +1,12 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1590
 expression: snapshot(&mut app)
 ---
 ┏ Explorer ━━━━━━━━━━━━━━━━━━┓┌ URL ───────────────────────────────────────────┐
 ┃> ▸ orders                  ┃┏ leader ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃  ▸ users                   ┃┃ Shift-d  toggle debug capture                  ┃
+┃  ▸ users                   ┃┃ ,  Settings (request · network · load · debug) ┃
+┃                            ┃┃ Shift-d  toggle debug capture                  ┃
 ┃                            ┃┃ Shift-k  toggle insecure TLS for this endpoint ┃
 ┃                            ┃┃ Shift-l  debug log panel (tracing ring)        ┃
 ┃                            ┃┃ Shift-n  new collection (choose location)      ┃
@@ -14,7 +16,6 @@ expression: snapshot(&mut app)
 ┃                            ┃┃ e  toggle explorer sidebar                     ┃
 ┃                            ┃┃ k  toggle insecure TLS (verify off/on)         ┃
 ┃                            ┃┃ n  new endpoint (choose location)              ┃
-┃                            ┃┃ o  Settings (request · network · load · debug) ┃
 ┃                            ┃┃ p  switch profile                              ┃
 ┃                            ┃┃ q  quit                                        ┃
 ┃                            ┃┃ r  reload workspace from disk                  ┃

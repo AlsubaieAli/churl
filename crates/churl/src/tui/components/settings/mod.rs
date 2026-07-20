@@ -37,6 +37,13 @@ pub(crate) const DEFAULT_THEME_NAME: &str = "dark";
 /// The built-in default leader-key combo string (crokey's `key!(space)`).
 pub(crate) const DEFAULT_LEADER_KEY: &str = "space";
 
+/// One mebibyte, in bytes — the Request/Advanced max-body-bytes knob's
+/// display unit and `J`/`K` quick-adjust step. The wire format (config,
+/// `churl-core`) stays raw bytes; only this crate's display/input/step logic
+/// knows about MB/KB.
+pub(crate) const MB: u64 = 1_048_576;
+const KB: u64 = 1_024;
+
 /// Identifies one knob the Settings panel can persist independently — the
 /// unit of "touched this session" tracking (owner-decided fix: Save must
 /// persist ONLY the knobs the user actually edited IN THE PANEL this
@@ -182,7 +189,7 @@ impl RequestRow {
     pub(crate) fn label(self) -> &'static str {
         match self {
             RequestRow::Timeout => "Timeout (s)",
-            RequestRow::MaxBodyBytes => "Max body (bytes)",
+            RequestRow::MaxBodyBytes => "Max body",
             RequestRow::Redirect => "Redirects",
             RequestRow::UrlEdit => "URL edit",
             RequestRow::SecretPolicy => "Secret policy",
@@ -398,7 +405,7 @@ impl AdvancedField {
         match self {
             AdvancedField::Concurrency => "concurrency",
             AdvancedField::Total => "total",
-            AdvancedField::BodyCapBytes => "body cap (bytes)",
+            AdvancedField::BodyCapBytes => "body cap",
             AdvancedField::TimeoutSecs => "timeout (s)",
         }
     }
@@ -627,6 +634,15 @@ pub struct SettingsState {
 
     /// The one open text/numeric edit, if any — paired with what it commits to.
     pub editing: Option<(EditTarget, LineEditor)>,
+    /// Whether the Appearance category's leader-key row is in "press a key…"
+    /// capture mode: the NEXT `KeyEvent` (any key) is normalized and
+    /// registered as the new leader-key combo — see
+    /// `SettingsState::handle_leader_capture_key` (in `edit.rs`). Mutually exclusive
+    /// with `editing` (illegal states unrepresentable: a row is either being
+    /// captured or typed into, never both) — entering capture mode never sets
+    /// `editing`, and the free-type fallback it can hand off to always clears
+    /// this flag first.
+    pub capturing_leader_key: bool,
     /// Inline status/error message shown in the footer.
     pub message: Option<String>,
     /// Dirty-indicator baseline (best-effort): what's currently on disk. A row
@@ -674,6 +690,7 @@ impl SettingsState {
             debug_row: DebugRow::DebugToggle,
             advanced_field: AdvancedField::Concurrency,
             editing: None,
+            capturing_leader_key: false,
             message: None,
             persisted: snapshot.persisted,
             touched: snapshot.touched,
@@ -776,4 +793,48 @@ pub(crate) fn mask_proxy_password(proxy: &str) -> String {
         Some(tail) => format!("{scheme}{masked_userinfo}@{tail}"),
         None => format!("{scheme}{masked_userinfo}"),
     }
+}
+
+/// Formats a raw byte count as a compact, human display: the largest clean
+/// unit the value divides evenly into (`"10 MB"`, `"512 KB"`), falling back
+/// to a bare byte count when it isn't a whole multiple of either. Display
+/// only — the wire format (`max_body_bytes` in `churl-core::config`) stays
+/// bytes; this never touches it.
+pub(crate) fn format_body_cap(bytes: u64) -> String {
+    if bytes != 0 && bytes.is_multiple_of(MB) {
+        format!("{} MB", bytes / MB)
+    } else if bytes != 0 && bytes.is_multiple_of(KB) {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Parses a max-body-bytes entry into a raw byte count: `"10MB"`, `"512kb"`,
+/// `"1048576"`, or `"1 bytes"` (a bare number, with or without a trailing
+/// `bytes`/`byte`, is bytes — back-compat with the old raw-bytes input, and
+/// the `bytes` suffix specifically so [`format_body_cap`]'s own fallback
+/// output always round-trips through this parser). The unit is
+/// case-insensitive and an optional space may separate the number from it.
+/// `None` on anything that isn't `<number>[unit]` (empty, non-numeric, or an
+/// overflow past `u64::MAX`) — the caller's job is to turn that into an
+/// inline error, same stance as every other numeric edit in this panel.
+pub(crate) fn parse_body_cap(text: &str) -> Option<u64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let (number, multiplier) = if let Some(n) = lower.strip_suffix("mb") {
+        (n, MB)
+    } else if let Some(n) = lower.strip_suffix("kb") {
+        (n, KB)
+    } else if let Some(n) = lower.strip_suffix("bytes") {
+        (n, 1)
+    } else if let Some(n) = lower.strip_suffix("byte") {
+        (n, 1)
+    } else {
+        (lower.as_str(), 1)
+    };
+    number.trim().parse::<u64>().ok()?.checked_mul(multiplier)
 }

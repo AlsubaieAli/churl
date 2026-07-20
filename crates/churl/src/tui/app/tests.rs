@@ -5283,6 +5283,76 @@ fn toggle_back_to_origin_unmarks_the_knob() {
     );
 }
 
+/// M8.5.2's `J`/`K` quick-adjust routes through the SAME `SettingsOutcome`
+/// (and therefore the same `mark_setting`/net-change-baseline path) the
+/// Enter-edit case already uses — see `SettingsState::quick_adjust_request`.
+/// So the net-change guard covers it for free: a `J` immediately undone by a
+/// `K` must un-mark the knob, exactly like `toggle_back_to_origin_unmarks_the_knob`
+/// above but via the quick-adjust keys instead of the Enter editor.
+#[test]
+fn quick_adjust_j_then_k_to_origin_unmarks_the_knob() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    // Request category, Timeout row is already selected/first.
+    enter(&mut app); // -> Panel, Request rows, Timeout row
+    press(&mut app, 'J'); // +1s — a real net change
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Timeout),
+            "a real quick-adjust marks the knob touched"
+        );
+    }
+    press(&mut app, 'K'); // -1s — back to the panel-open origin
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::Timeout),
+        "J then K back to origin must un-mark the knob, same as the Enter-cycle case"
+    );
+}
+
+/// Same guard, the other numeric family sharing `AdvancedField` (the
+/// max-body-bytes MB step, M8.5.2 item 3's unit — interlocking with item 2's
+/// quick-adjust step so both changes are covered by one regression).
+#[test]
+fn quick_adjust_max_body_j_then_k_to_origin_unmarks_the_knob() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    enter(&mut app); // -> Panel, Request rows, Timeout row
+    press(&mut app, 'j'); // -> MaxBodyBytes row
+    press(&mut app, 'J'); // +1 MB
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::MaxBodyBytes)
+        );
+    }
+    press(&mut app, 'K'); // -1 MB, back to origin
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::MaxBodyBytes),
+        "J then K back to origin must un-mark MaxBodyBytes too"
+    );
+}
+
 /// A genuine change still persists: a fresh (non-insecure) session toggling
 /// TLS on writes it, and changing timeout from its default writes that too —
 /// the net-change guard must not suppress real edits.

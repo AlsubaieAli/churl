@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::{
     AdvancedField, AppearanceRow, CookieFormField, DebugRow, LoadRow, NetworkRow, PanelFocus,
-    RequestRow, SettingKey, SettingsCategory, SettingsLevel, SettingsState, mask_proxy,
-    mask_proxy_password,
+    RequestRow, SettingKey, SettingsCategory, SettingsLevel, SettingsState, format_body_cap,
+    mask_proxy, mask_proxy_password,
 };
 use crate::tui::theme::Theme;
 
@@ -43,11 +43,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
         SettingsLevel::Menu => " Settings ".to_owned(),
         SettingsLevel::Panel => format!(" Settings · {} ", state.category.label()),
     };
+    // The compact key-hint line lives on the block's bottom-right border
+    // (M8.5.2) — freeing the footer's hint row for a per-setting description
+    // (see `render_footer`/`setting_description`). Computed once here, before
+    // the level/focus-specific body renders, since it depends on the SAME
+    // state those renders read.
+    let hint = footer_hint(state);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
         .title(title)
-        .title_style(theme.title);
+        .title_style(theme.title)
+        .title_bottom(Line::from(format!(" {hint} ")).right_aligned());
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     if inner.width == 0 || inner.height == 0 {
@@ -60,14 +67,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
     }
 }
 
-/// Renders the category menu (level 1).
+/// Renders the category menu (level 1). The key hints live on the modal's
+/// border (see `footer_hint`) — this footer is just the live message row.
 fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
-    let [list_area, msg_row, hint_row] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [list_area, msg_row] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
     let lines: Vec<Line> = SettingsCategory::visible(state.debug_enabled)
         .into_iter()
@@ -91,13 +95,6 @@ fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &The
         None => Line::from(""),
     };
     frame.render_widget(Paragraph::new(top), msg_row);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            " j/k move · enter/l open · s save · q close",
-            theme.statusline,
-        )),
-        hint_row,
-    );
 }
 
 /// Renders the open category panel (level 2): its rows, plus a detail area
@@ -233,7 +230,7 @@ fn render_request_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
         state,
         super::EditTarget::Advanced(AdvancedField::BodyCapBytes),
     )
-    .unwrap_or_else(|| format!("{}", state.advanced.body_cap_bytes));
+    .unwrap_or_else(|| format_body_cap(state.advanced.body_cap_bytes));
 
     let lines = vec![
         row_line(
@@ -376,8 +373,12 @@ fn render_load_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme:
 
 fn render_appearance_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
     let sel = |row: AppearanceRow| state.focus == PanelFocus::Rows && state.appearance_row == row;
-    let leader_display = editing_text(state, super::EditTarget::LeaderKey)
-        .unwrap_or_else(|| state.leader_key.clone());
+    let leader_display = if state.capturing_leader_key {
+        "press a key… (tab: type a combo instead, esc: cancel)".to_owned()
+    } else {
+        editing_text(state, super::EditTarget::LeaderKey)
+            .unwrap_or_else(|| state.leader_key.clone())
+    };
     let lines = vec![
         row_line(
             AppearanceRow::Theme.label(),
@@ -455,8 +456,15 @@ fn render_advanced_list(frame: &mut Frame, area: Rect, state: &SettingsState, th
         .iter()
         .map(|&field| {
             let selected = focused && state.advanced_field == field;
-            let value = editing_text(state, super::EditTarget::Advanced(field))
-                .unwrap_or_else(|| field.get(&state.advanced).to_string());
+            let value =
+                editing_text(state, super::EditTarget::Advanced(field)).unwrap_or_else(|| {
+                    let raw = field.get(&state.advanced);
+                    if field == AdvancedField::BodyCapBytes {
+                        format_body_cap(raw)
+                    } else {
+                        raw.to_string()
+                    }
+                });
             let differs = field.get(&state.advanced) != field.get(&state.persisted.advanced);
             let is_dirty = dirty(state, field.setting_key(), differs);
             row_line(field.label(), Span::raw(value), selected, is_dirty, theme)
@@ -617,10 +625,145 @@ fn render_cookie_form(frame: &mut Frame, area: Rect, state: &SettingsState, them
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Renders the footer: a live message row plus the key hints for the current
-/// level/focus.
+/// The compact key-hint line for the modal's bottom-right border (M8.5.2:
+/// moved off the footer to free it for a per-setting description — see
+/// `render_footer`/`setting_description`). Covers both nav levels and every
+/// panel focus/edit/capture/form sub-state, so the border always shows
+/// exactly what the current keys do.
+fn footer_hint(state: &SettingsState) -> String {
+    match state.level {
+        SettingsLevel::Menu => "j/k move · enter/l open · s save · q close".to_owned(),
+        SettingsLevel::Panel => {
+            if let Some(form) = &state.cookie_form {
+                if form.editing.is_some() {
+                    "enter apply · esc cancel".to_owned()
+                } else {
+                    "j/k move · enter edit/toggle/cycle · s save cookie · esc cancel".to_owned()
+                }
+            } else if state.capturing_leader_key {
+                "press any key · tab type a combo · esc cancel".to_owned()
+            } else if state.editing.is_some() {
+                "enter apply · esc cancel".to_owned()
+            } else {
+                match state.focus {
+                    PanelFocus::Rows if state.category == SettingsCategory::Network => {
+                        "j/k move · J/K adjust · enter edit/toggle · a add · l cookies · s save \
+                         · esc menu · q close"
+                            .to_owned()
+                    }
+                    PanelFocus::Rows => "j/k move · J/K adjust · enter edit/toggle/cycle · s \
+                                          save · esc menu · q close"
+                        .to_owned(),
+                    PanelFocus::CookieList => {
+                        "j/k move · a add · e edit · d delete · x clear · s save · h/esc back \
+                         · q close"
+                            .to_owned()
+                    }
+                    PanelFocus::AdvancedList => {
+                        "j/k move · J/K adjust · enter edit · s save · h/esc back · q close"
+                            .to_owned()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A one-line description of the currently-hovered setting — what it does,
+/// plus anything useful a value alone doesn't convey (units, "applies on
+/// next launch", a security note). `None` when nothing meaningful is hovered
+/// (the category menu, a form/list with its own detail, or mid-edit/-capture
+/// where the description would just repeat what's already on screen).
+fn setting_description(state: &SettingsState) -> Option<&'static str> {
+    if state.cookie_form.is_some() || state.editing.is_some() || state.capturing_leader_key {
+        return None;
+    }
+    let SettingsLevel::Panel = state.level else {
+        return None;
+    };
+    match (state.category, state.focus) {
+        (SettingsCategory::Request, PanelFocus::Rows) => Some(match state.request_row {
+            RequestRow::Timeout => "How long to wait for a response before giving up, in seconds.",
+            RequestRow::MaxBodyBytes => {
+                "Maximum response body size to read; larger bodies are truncated. Shown/entered \
+                 in MB or KB (e.g. 10MB) — stored as bytes."
+            }
+            RequestRow::Redirect => {
+                "Cross-origin redirect handling: strip drops auth headers on a cross-origin hop \
+                 (default), strict stops at the first cross-origin hop, follow-all never drops \
+                 headers."
+            }
+            RequestRow::UrlEdit => {
+                "What the URL bar's i/Enter opens: inline (type in place) or popup (a full-screen editor)."
+            }
+            RequestRow::SecretPolicy => {
+                "How a save reacts to a literal secret found in the request: strict blocks it, \
+                 warn lets it through with a warning."
+            }
+        }),
+        (SettingsCategory::Network, PanelFocus::Rows) => Some(match state.network_row {
+            NetworkRow::Proxy => {
+                "An HTTP(S) proxy used for every request this session. Empty falls back to the \
+                 HTTP(S)_PROXY environment variable."
+            }
+            NetworkRow::Tls => {
+                "Certificate verification for HTTPS requests. Turning this OFF accepts ANY \
+                 certificate — only for trusted, controlled environments."
+            }
+            NetworkRow::Cookies => {
+                "Automatic cookie capture and replay for this session, backed by the on-disk \
+                 jar below."
+            }
+        }),
+        (SettingsCategory::Load, PanelFocus::Rows) => Some(match state.load_row {
+            LoadRow::WarnTotal => {
+                "Total request count above which starting a load run asks for confirmation first."
+            }
+            LoadRow::WarnConcurrency => {
+                "Concurrent request count above which starting a load run asks for confirmation \
+                 first."
+            }
+            LoadRow::MaxTotal => {
+                "Hard ceiling on total requests — a load run above this is refused outright."
+            }
+            LoadRow::MaxConcurrency => {
+                "Hard ceiling on concurrent requests — a load run above this is refused outright."
+            }
+        }),
+        (SettingsCategory::Appearance, PanelFocus::Rows) => Some(match state.appearance_row {
+            AppearanceRow::Theme => "The color theme (dark or light).",
+            AppearanceRow::LeaderKey => {
+                "The leader key that opens the which-key menu. Applies on next launch, not this \
+                 session."
+            }
+        }),
+        (SettingsCategory::Debug, PanelFocus::Rows) => Some(match state.debug_row {
+            DebugRow::DebugToggle => {
+                "Captures request/response traffic for the debug Inspector this session."
+            }
+            DebugRow::Advanced => {
+                "Override the default load concurrency/total and the request timeout/body cap."
+            }
+        }),
+        (SettingsCategory::Debug, PanelFocus::AdvancedList) => Some(match state.advanced_field {
+            AdvancedField::Concurrency => "Default concurrent requests for a new load run.",
+            AdvancedField::Total => "Default total requests for a new load run.",
+            AdvancedField::BodyCapBytes => {
+                "Maximum response body size to read; larger bodies are truncated."
+            }
+            AdvancedField::TimeoutSecs => {
+                "How long to wait for a response before giving up, in seconds."
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Renders the footer: a live message row, then a one-line description of
+/// the currently-hovered setting (freed up by moving the key hints to the
+/// modal's bottom-right border — see `footer_hint`).
 fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
-    let [msg_row, hint_row] =
+    let [msg_row, desc_row] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let top = match &state.message {
@@ -629,34 +772,9 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
     };
     frame.render_widget(Paragraph::new(top), msg_row);
 
-    let hints = if let Some(form) = &state.cookie_form {
-        if form.editing.is_some() {
-            "enter apply · esc cancel".to_owned()
-        } else {
-            "j/k move · enter edit/toggle/cycle · s save cookie · esc cancel".to_owned()
-        }
-    } else if state.editing.is_some() {
-        "enter apply · esc cancel".to_owned()
-    } else {
-        match state.focus {
-            PanelFocus::Rows if state.category == SettingsCategory::Network => {
-                "j/k move · enter edit/toggle · a add · l cookies · s save · esc menu · q close"
-                    .to_owned()
-            }
-            PanelFocus::Rows => {
-                "j/k move · enter edit/toggle/cycle · s save · esc menu · q close".to_owned()
-            }
-            PanelFocus::CookieList => {
-                "j/k move · a add · e edit · d delete · x clear · s save · h/esc back · q close"
-                    .to_owned()
-            }
-            PanelFocus::AdvancedList => {
-                "j/k move · enter edit · s save · h/esc back · q close".to_owned()
-            }
-        }
-    };
+    let desc = setting_description(state).unwrap_or("");
     frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {hints}"), theme.statusline)),
-        hint_row,
+        Paragraph::new(Line::styled(format!(" {desc}"), theme.statusline)),
+        desc_row,
     );
 }
