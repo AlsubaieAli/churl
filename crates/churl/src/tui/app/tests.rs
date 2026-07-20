@@ -5035,6 +5035,156 @@ fn cli_forced_insecure_never_touched_shows_no_dirty_dot() {
     );
 }
 
+// ---- net-change guard: interaction without a net change persists nothing ----
+
+/// A forced `--proxy` re-committed UNCHANGED through the editor (open the
+/// proxy row, Enter to open the seeded editor, Enter to commit) is a net-zero
+/// interaction — Save must not write the forced proxy to global config. This
+/// is the residual footgun the re-review flagged (borderline P1 for proxy).
+#[test]
+fn forced_proxy_committed_unchanged_is_not_persisted() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_proxy = Some("http://workspace:3128".to_owned()); // forced (CLI/workspace)
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    enter(&mut app); // open editor, seeded with the forced proxy
+    enter(&mut app); // commit UNCHANGED -> ApplyProxy(Some(forced))
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            !state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Proxy),
+            "an unchanged commit of the forced proxy must not mark it touched"
+        );
+    }
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap_or_default();
+    assert!(
+        !text.contains("proxy"),
+        "a forced proxy merely re-committed must never reach global config:\n{text}"
+    );
+}
+
+/// A `-k` session where the user double-toggles TLS in the panel (off, then
+/// back on to the forced origin) is net-zero — Save must not write `insecure`.
+#[test]
+fn cli_insecure_double_toggle_back_is_not_persisted() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_insecure = true; // simulates `-k`
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle -> false
+    enter(&mut app); // toggle -> true (back to the forced origin)
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            !state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Insecure),
+            "a toggle back to the forced origin must net-zero (un-mark) the knob"
+        );
+    }
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap_or_default();
+    assert!(
+        !text.contains("insecure"),
+        "a double-toggle back to the forced value must never persist insecure:\n{text}"
+    );
+}
+
+/// The un-marking is general: change a knob then change it back to origin
+/// leaves the touched-set empty (nothing to persist, dirty dot clears). Uses
+/// redirect (a 3-way cycle: Strip -> Strict -> FollowAll -> Strip).
+#[test]
+fn toggle_back_to_origin_unmarks_the_knob() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    // Request category is already the first/highlighted one.
+    enter(&mut app); // -> Panel, Request rows
+    for _ in 0..2 {
+        press(&mut app, 'j'); // Timeout -> MaxBodyBytes -> Redirect
+    }
+    // Cycle redirect a full loop back to its origin (Strip default).
+    enter(&mut app); // Strip -> Strict
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Redirect),
+            "a real change marks the knob touched"
+        );
+    }
+    enter(&mut app); // Strict -> FollowAll
+    enter(&mut app); // FollowAll -> Strip (back to origin)
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::Redirect),
+        "cycling a knob back to its panel-open origin must un-mark it"
+    );
+    assert!(
+        state.touched.is_empty(),
+        "no net change anywhere ⇒ nothing touched"
+    );
+}
+
+/// A genuine change still persists: a fresh (non-insecure) session toggling
+/// TLS on writes it, and changing timeout from its default writes that too —
+/// the net-change guard must not suppress real edits.
+#[test]
+fn genuine_changes_still_persist() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    // Timeout 30 (default) -> 60 via the Request/Timeout row editor.
+    enter(&mut app); // -> Panel, Request/Timeout row
+    enter(&mut app); // open the numeric editor (seeded with 30)
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "60".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> ApplyAdvanced { TimeoutSecs, 60 }
+    // Toggle TLS on from a non-insecure baseline.
+    esc(&mut app); // Panel -> Menu (still on Request)
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle insecure ON (a real change)
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("timeout_secs = 60"),
+        "a genuine timeout change must persist:\n{text}"
+    );
+    assert!(
+        text.contains("insecure = true"),
+        "a genuine TLS toggle must persist:\n{text}"
+    );
+}
+
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
 /// returns the BYTE-EXACT raw wire bytes (byte-exactness invariant holds in the runner).
 #[test]

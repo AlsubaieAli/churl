@@ -445,6 +445,15 @@ pub struct App {
     /// `<leader>k`/`<leader>D`); cleared by a successful Save.
     pub(in crate::tui::app) settings_touched:
         std::collections::HashSet<super::components::settings::SettingKey>,
+    /// The net-change baseline for [`Self::settings_touched`]: every managed
+    /// knob's value at the moment the Settings panel last opened (re-captured
+    /// after a successful save). A panel edit marks its knob touched only when
+    /// the new value differs from THIS — so interacting with a knob without
+    /// net-changing it (a toggle round-trip, an Enter-commit that changed
+    /// nothing) leaves nothing to persist. Set by
+    /// `handlers::settings::open_settings`/`save_settings_defaults`; the value
+    /// while the panel is closed is inert (never read).
+    pub(in crate::tui::app) settings_baseline: churl_core::config::ResolvedSettings,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -691,6 +700,7 @@ impl App {
             cookie_writer: None,
             cookie_exit_error: None,
             settings_touched: std::collections::HashSet::new(),
+            settings_baseline: churl_core::config::ResolvedSettings::default(),
         })
     }
 

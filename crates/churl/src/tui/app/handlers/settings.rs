@@ -14,11 +14,17 @@
 //! — Save-as-default (M8.5 Wave 3) is what actually persists it.
 
 use super::super::*;
-use crate::tui::components::settings::{AdvancedField, mask_proxy};
+use crate::tui::components::settings::{AdvancedField, SettingKey, mask_proxy};
 
 impl App {
-    /// Opens the Settings panel over the current session settings.
+    /// Opens the Settings panel over the current session settings. Captures the
+    /// net-change **baseline** ([`Self::settings_baseline`]) from the session's
+    /// current effective values FIRST — every panel edit is then judged
+    /// net-changed-or-not against this snapshot, so a knob merely interacted
+    /// with (a toggle round-trip, an Enter-commit that changed nothing) never
+    /// ends up persisted.
     pub(in crate::tui::app) fn open_settings(&mut self) {
+        self.settings_baseline = self.settings_working_copy();
         let state = SettingsState::new(self.settings_snapshot());
         // One transition — construct the state INTO the mode (no parallel field).
         self.mode = Mode::Settings(state);
@@ -39,15 +45,18 @@ impl App {
     /// NEVER propagate out of here, or the run loop's `handle_key(key)?` would tear
     /// down the whole session over a typo.
     ///
-    /// FIX 1 (owner decision): every outcome arm below that actually applies a
-    /// change also inserts the matching [`crate::tui::components::settings::SettingKey`]
-    /// into [`App::settings_touched`] — ONLY on the branch that truly changed
-    /// state (never on a rejected/rolled-back edit), and marked HERE rather
-    /// than inside a shared helper (`toggle_debug`, `toggle_insecure`) that a
-    /// non-panel keybinding also calls, so a global shortcut never gets
-    /// mistaken for a panel edit.
+    /// FIX 1 (owner decision) + net-change guard: every outcome arm that
+    /// actually applies a change calls [`Self::mark_setting`] with whether the
+    /// new value **net-differs from the panel-open baseline**
+    /// ([`Self::settings_baseline`], captured in [`Self::open_settings`]).
+    /// `mark_setting` INSERTS on a real net change and REMOVES on a net-zero
+    /// one (a toggle back to origin, or an Enter-commit that didn't change the
+    /// value) — so a knob the user merely *interacted with* without changing
+    /// never persists its CLI/`-k`/workspace-forced value. Marking happens
+    /// HERE rather than inside a shared helper (`toggle_debug`,
+    /// `toggle_insecure`) that a non-panel keybinding also calls, so a global
+    /// shortcut is never mistaken for a panel edit.
     pub(in crate::tui::app) fn handle_settings_key(&mut self, key: KeyEvent) -> Result<()> {
-        use crate::tui::components::settings::SettingKey;
         let Mode::Settings(state) = &mut self.mode else {
             return Ok(());
         };
@@ -58,7 +67,11 @@ impl App {
             SettingsOutcome::ApplyProxy(proxy) => {
                 match self.with_client_rebuild(|s| s.session_proxy = proxy) {
                     Ok(()) => {
-                        self.settings_touched.insert(SettingKey::Proxy);
+                        // Compares REAL proxy values (not the masked display),
+                        // so re-committing the seeded forced proxy unchanged is
+                        // correctly net-zero.
+                        let differs = self.session_proxy != self.settings_baseline.proxy;
+                        self.mark_setting(SettingKey::Proxy, differs);
                         let msg = match &self.session_proxy {
                             Some(p) => format!("proxy set: {}", mask_proxy(p)),
                             None => "proxy cleared (using env proxy)".to_owned(),
@@ -72,7 +85,8 @@ impl App {
             SettingsOutcome::ToggleInsecure => {
                 match self.with_client_rebuild(|s| s.session_insecure = !s.session_insecure) {
                     Ok(()) => {
-                        self.settings_touched.insert(SettingKey::Insecure);
+                        let differs = self.session_insecure != self.settings_baseline.insecure;
+                        self.mark_setting(SettingKey::Insecure, differs);
                         self.notify(insecure_message(self.session_insecure));
                     }
                     Err(err) => self.set_settings_message(format!("could not apply — {err}")),
@@ -82,7 +96,8 @@ impl App {
             SettingsOutcome::ToggleCookies => {
                 match self.with_client_rebuild(|s| s.cookies_enabled = !s.cookies_enabled) {
                     Ok(()) => {
-                        self.settings_touched.insert(SettingKey::Cookies);
+                        let differs = self.cookies_enabled != self.settings_baseline.cookies;
+                        self.mark_setting(SettingKey::Cookies, differs);
                         // Persist on the way off, so the in-RAM jar's persistent
                         // cookies are captured before the client stops receiving new
                         // ones. (Only after a successful rebuild — a rolled-back
@@ -122,7 +137,7 @@ impl App {
             }
             SettingsOutcome::ApplyAdvanced { field, value } => {
                 // Marks the right `SettingKey` internally, on exactly the
-                // branches that actually change state (see its doc).
+                // branches that actually change state, against the baseline.
                 self.apply_advanced_limit(field, value);
                 self.refresh_settings_panel();
             }
@@ -131,24 +146,28 @@ impl App {
                 // (see its doc) — touched is marked HERE, not inside it, so
                 // `<leader>D` outside the panel never marks it.
                 self.toggle_debug();
-                self.settings_touched.insert(SettingKey::Debug);
+                let differs = self.debug_enabled != self.settings_baseline.debug;
+                self.mark_setting(SettingKey::Debug, differs);
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyRedirect(policy) => {
                 self.execute_options.redirect = policy;
-                self.settings_touched.insert(SettingKey::Redirect);
+                let differs = self.execute_options.redirect != self.settings_baseline.redirect;
+                self.mark_setting(SettingKey::Redirect, differs);
                 self.notify(format!("redirect policy set to {}", redirect_label(policy)));
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyUrlEdit(mode) => {
                 self.set_url_edit_mode(mode);
-                self.settings_touched.insert(SettingKey::UrlEdit);
+                let differs = self.url_edit_mode != self.settings_baseline.url_edit;
+                self.mark_setting(SettingKey::UrlEdit, differs);
                 self.notify(format!("URL edit mode set to {}", url_edit_label(mode)));
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplySecretPolicy(policy) => {
                 self.set_secret_policy(policy);
-                self.settings_touched.insert(SettingKey::SecretPolicy);
+                let differs = self.secret_policy != self.settings_baseline.secret_policy;
+                self.mark_setting(SettingKey::SecretPolicy, differs);
                 self.notify(format!(
                     "secret policy set to {}",
                     secret_policy_label(policy)
@@ -157,7 +176,9 @@ impl App {
             }
             SettingsOutcome::ApplyLoadCap { field, value } => {
                 field.set(&mut self.load_caps, value);
-                self.settings_touched.insert(field.setting_key());
+                let differs =
+                    field.get(&self.load_caps) != field.get(&self.settings_baseline.load_caps);
+                self.mark_setting(field.setting_key(), differs);
                 self.notify(format!("{} set to {value}", field.label()));
                 self.refresh_settings_panel();
             }
@@ -166,7 +187,8 @@ impl App {
                     Ok(theme) => {
                         self.theme = theme;
                         self.theme_name = name.clone();
-                        self.settings_touched.insert(SettingKey::Theme);
+                        let differs = self.theme_name != self.settings_baseline.theme;
+                        self.mark_setting(SettingKey::Theme, differs);
                         self.highlight_tx =
                             highlight::spawn(self.tx.clone(), self.theme.is_light());
                         self.notify(format!("theme set to {name}"));
@@ -177,7 +199,8 @@ impl App {
             }
             SettingsOutcome::ApplyLeaderKey(combo) => {
                 self.leader_key = combo.clone();
-                self.settings_touched.insert(SettingKey::LeaderKey);
+                let differs = self.leader_key != self.settings_baseline.leader_key;
+                self.mark_setting(SettingKey::LeaderKey, differs);
                 self.notify(format!(
                     "leader key set to {combo} (applies on next launch)"
                 ));
@@ -189,6 +212,21 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Records the net-change state of one panel knob against the panel-open
+    /// baseline: INSERT into [`Self::settings_touched`] when the new value
+    /// genuinely differs from what it was when the panel opened, REMOVE it
+    /// when the value is back at (or never left) that baseline. This is what
+    /// makes the touched-set mean "net-changed in the panel", not merely
+    /// "interacted with" — so a toggle-back-to-origin, or an Enter-commit that
+    /// didn't change anything, leaves nothing to persist.
+    fn mark_setting(&mut self, key: SettingKey, differs: bool) {
+        if differs {
+            self.settings_touched.insert(key);
+        } else {
+            self.settings_touched.remove(&key);
+        }
     }
 
     /// Applies a session-setting `mutate`, then rebuilds the single client. A
@@ -234,10 +272,12 @@ impl App {
     ///
     /// This fn is reached ONLY from the panel's `ApplyAdvanced` outcome (see
     /// its one call site in [`Self::handle_settings_key`]), so it is safe —
-    /// and the clearest place — to mark [`crate::tui::components::settings::SettingKey`]
-    /// touched here, on exactly the branches that actually change state (a
-    /// `Refuse`d concurrency/total edit changes nothing, so it must not mark
-    /// touched — that would let a REJECTED edit persist the prior value).
+    /// and the clearest place — to net-change-mark
+    /// [`crate::tui::components::settings::SettingKey`] here, on exactly the
+    /// branches that actually change state (a `Refuse`d concurrency/total edit
+    /// changes nothing, so it must not touch the set). Marking is against the
+    /// panel-open baseline via [`Self::mark_setting`], so re-entering a field's
+    /// existing value is net-zero.
     fn apply_advanced_limit(&mut self, field: AdvancedField, value: u64) {
         match field {
             AdvancedField::Concurrency | AdvancedField::Total => {
@@ -259,7 +299,9 @@ impl App {
                     churl_core::load::LoadCheck::Ok | churl_core::load::LoadCheck::Warn(_) => {
                         self.advanced_limits.concurrency = candidate.concurrency;
                         self.advanced_limits.total = candidate.total;
-                        self.settings_touched.insert(field.setting_key());
+                        let differs = field.get(&self.advanced_limits)
+                            != field.get(&self.settings_baseline.advanced);
+                        self.mark_setting(field.setting_key(), differs);
                         self.notify(format!("advanced {} set to {value}", field.label()));
                     }
                 }
@@ -267,17 +309,20 @@ impl App {
             AdvancedField::BodyCapBytes => {
                 self.advanced_limits.body_cap_bytes = value;
                 self.execute_options.max_body_bytes = value;
-                self.settings_touched.insert(field.setting_key());
+                let differs =
+                    field.get(&self.advanced_limits) != field.get(&self.settings_baseline.advanced);
+                self.mark_setting(field.setting_key(), differs);
                 self.notify(format!("advanced body cap set to {value} bytes"));
             }
             AdvancedField::TimeoutSecs => {
                 self.advanced_limits.timeout_secs = value;
                 self.client_timeout = Duration::from_secs(value);
-                // Marked touched unconditionally, matching the (pre-existing)
-                // behaviour above: `advanced_limits.timeout_secs` is NOT
-                // rolled back on a rebuild failure, so the working copy really
-                // did change either way.
-                self.settings_touched.insert(field.setting_key());
+                // `advanced_limits.timeout_secs` is NOT rolled back on a
+                // rebuild failure, so the working copy really did change — mark
+                // by net-change against the baseline either way.
+                let differs =
+                    field.get(&self.advanced_limits) != field.get(&self.settings_baseline.advanced);
+                self.mark_setting(field.setting_key(), differs);
                 match self.rebuild_client() {
                     Ok(()) => self.notify(format!("advanced timeout set to {value}s")),
                     Err(err) => self.set_settings_message(format!("could not apply — {err}")),
@@ -294,6 +339,29 @@ impl App {
         }
     }
 
+    /// Every managed knob's current session value in the FULL resolved shape,
+    /// used as the net-change baseline ([`Self::settings_baseline`], captured
+    /// at [`Self::open_settings`] and re-captured after a save). This is the
+    /// panel's working copy exactly as displayed — the sparse write-path shape
+    /// is [`Self::settings_edits`].
+    fn settings_working_copy(&self) -> churl_core::config::ResolvedSettings {
+        churl_core::config::ResolvedSettings {
+            theme: self.theme_name.clone(),
+            leader_key: self.leader_key.clone(),
+            timeout_secs: self.advanced_limits.timeout_secs,
+            max_body_bytes: self.advanced_limits.body_cap_bytes,
+            url_edit: self.url_edit_mode,
+            secret_policy: self.secret_policy,
+            redirect: self.execute_options.redirect,
+            proxy: self.session_proxy.clone(),
+            insecure: self.session_insecure,
+            cookies: self.cookies_enabled,
+            debug: self.debug_enabled,
+            load_caps: self.load_caps,
+            advanced: self.advanced_limits,
+        }
+    }
+
     /// The current session's working copy, assembled into the SPARSE shape
     /// [`churl_core::config::save_defaults`] persists (FIX 1: only a knob in
     /// [`Self::settings_touched`] gets a `Some` here — everything else is
@@ -305,7 +373,6 @@ impl App {
     /// [`crate::tui::components::settings::SettingKey`] — so editing either
     /// surface touches the one field this reads.
     fn settings_edits(&self) -> churl_core::config::SettingsDefaults {
-        use crate::tui::components::settings::SettingKey;
         let t = &self.settings_touched;
         churl_core::config::SettingsDefaults {
             theme: t
@@ -376,8 +443,15 @@ impl App {
     /// that knob genuinely was not saved, so its dirty dot must stay lit
     /// (clearing it would silently claim persistence that didn't happen) —
     /// the next `s` retries it.
+    ///
+    /// On success the net-change **baseline** is re-captured to the just-saved
+    /// working copy, so a later edit compares against the freshly-persisted
+    /// state (e.g. saving timeout 30→60 then setting it back to 60 is
+    /// correctly net-zero, while back to 30 is a real change again). In the
+    /// proxy-skip case the proxy baseline is left as-is — the proxy was NOT
+    /// persisted, so its "no net change" origin is unchanged, keeping the
+    /// still-unsaved credentialed proxy net-changed for the retry.
     fn save_settings_defaults(&mut self) {
-        use crate::tui::components::settings::SettingKey;
         let path = match churl_core::config::resolve_settings_path() {
             Ok(path) => path,
             Err(err) => {
@@ -389,6 +463,12 @@ impl App {
         match churl_core::config::save_defaults(&edits, &path) {
             Ok(outcome) if outcome.proxy_skipped => {
                 self.settings_touched.retain(|k| *k == SettingKey::Proxy);
+                // Re-baseline everything that WAS persisted; keep the proxy
+                // baseline so the still-unsaved credentialed proxy stays a net
+                // change (and its dirty dot stays lit) for the retry.
+                let proxy_baseline = self.settings_baseline.proxy.clone();
+                self.settings_baseline = self.settings_working_copy();
+                self.settings_baseline.proxy = proxy_baseline;
                 self.notify(format!(
                     "saved defaults to {} — proxy not persisted (contains credentials)",
                     path.display()
@@ -396,6 +476,7 @@ impl App {
             }
             Ok(_) => {
                 self.settings_touched.clear();
+                self.settings_baseline = self.settings_working_copy();
                 self.notify(format!("saved defaults to {}", path.display()));
             }
             Err(err) => self.set_settings_message(format!("save failed — {err}")),
