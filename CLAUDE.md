@@ -117,7 +117,9 @@ crates/
                            #   (no AbortHandle in core); applies AuthWire effects (user header of same name wins)
       cookies.rs           # ChurlCookieJar (M8): RwLock<cookie_store::CookieStore> impl of reqwest CookieStore;
                            #   RFC 6265 origin scoping (no cross-origin leak); to_json/load_json (persistent only),
-                           #   list/delete/clear for the Options overlay + `churl cookies` CLI
+                           #   list/delete/clear for the Options overlay + `churl cookies` CLI; CookieView also
+                           #   carries path/secure/same_site (M8.5.1, a local SameSite enum — semver hygiene) +
+                           #   upsert(CookieSpec) for the Settings panel's manual cookie add/edit form
       import.rs            # curl command → Endpoint (shlex + strict flag map; unknown flag = hard error;
                            #   -x/--proxy → session-scoped import note (not persisted), -k/--insecure → bakes
                            #   endpoint insecure=true (persisted, M8.1))
