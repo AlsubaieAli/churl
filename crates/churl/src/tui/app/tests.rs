@@ -4877,6 +4877,89 @@ fn upsert_cookie_via_panel_actually_grows_the_jar() {
     );
 }
 
+/// FIX A regression (P1 silent data-loss): editing ONE cookie's path must not
+/// delete a same-`(domain, name)` sibling at a DIFFERENT path. The old handler
+/// deleted the old coords with the domain+name-scoped `delete` BEFORE the
+/// upsert, so editing `sid@/app`'s path silently wiped `sid@/admin` too (and
+/// the list doesn't even render path, so the user couldn't tell them apart).
+/// The fix upserts first, then removes only the exact old coord via
+/// `delete_exact`. Driven through the real key-event → handler flow.
+#[test]
+fn editing_one_cookie_path_keeps_the_same_name_sibling() {
+    use churl_core::cookies::CookieSpec;
+
+    let jar = churl_core::cookies::ChurlCookieJar::new();
+    let spec = |path: &str, value: &str| CookieSpec {
+        domain: "a.example".to_owned(),
+        name: "sid".to_owned(),
+        value: value.to_owned(),
+        path: path.to_owned(),
+        secure: false,
+        same_site: None,
+    };
+    jar.upsert(spec("/app", "app-val")).unwrap();
+    jar.upsert(spec("/admin", "admin-val")).unwrap();
+
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.cookie_jar = std::sync::Arc::new(jar);
+    assert_eq!(
+        app.cookie_jar.list().len(),
+        2,
+        "two same-name cookies at two paths seeded"
+    );
+
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    press(&mut app, 'j'); // Tls -> Cookies
+    press(&mut app, 'l'); // descend into the cookie list (selects index 0)
+
+    // Which cookie is selected (index 0) and which is the untouched sibling.
+    let before = app.cookie_jar.list();
+    let edited_path = before[0].path.clone();
+    let sibling_path = before[1].path.clone();
+    let sibling_value = before[1].value.clone();
+
+    press(&mut app, 'e'); // open the edit form, prefilled from the selected cookie
+    press(&mut app, 'j'); // Domain -> Name
+    press(&mut app, 'j'); // Name -> Value
+    press(&mut app, 'j'); // Value -> Path
+    enter(&mut app); // begin editing Path (prefilled)
+    for _ in 0..12 {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "/moved".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit Path
+    press(&mut app, 's'); // submit the form
+
+    let after = app.cookie_jar.list();
+    assert_eq!(
+        after.len(),
+        2,
+        "editing one cookie's path must not delete the sibling (bug gave 1)"
+    );
+    assert!(
+        after.iter().any(|c| c.path == "/moved"),
+        "the edited cookie must have moved to its new path: {after:?}"
+    );
+    let sibling = after
+        .iter()
+        .find(|c| c.path == sibling_path)
+        .expect("the untouched sibling must survive");
+    assert_eq!(
+        sibling.value, sibling_value,
+        "the sibling's value must be untouched"
+    );
+    assert!(
+        !after.iter().any(|c| c.path == edited_path),
+        "the edited cookie's OLD path coordinate must be gone: {after:?}"
+    );
+}
+
 // ---- Save-as-default: FIX 1 (sparse, touched-only persistence) ----
 
 /// FIX 1 (a): a `-k` session that only edits theme in the panel must save

@@ -851,6 +851,69 @@ fn render_cookie_list_masks_values_and_marks_selection() {
     );
 }
 
+/// FIX C guard: the cookie ADD/EDIT FORM must mask the value field, exactly
+/// like the list does. Without this, a regression swapping the Value line's
+/// `masked_value()` back to a plaintext render would ship green (the recurring
+/// M8.2/M8.3/M8.5 secret-leak class). Opens an edit form prefilled with a
+/// distinctive value, renders it, and asserts the plaintext is absent while
+/// the mask is present.
+#[test]
+fn render_cookie_form_masks_the_value_field() {
+    use crate::tui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    let mut s = SettingsState::new(snapshot(
+        false,
+        vec![CookieView {
+            domain: "a.example".into(),
+            name: "sid".into(),
+            value: "SUPERSECRET".into(),
+            path: "/".into(),
+            secure: false,
+            same_site: None,
+        }],
+    ));
+    goto_network_cookies(&mut s);
+    s.handle_key(key(KeyCode::Char('l'))); // descend into the cookie list
+    s.handle_key(key(KeyCode::Char('e'))); // open the edit form, prefilled
+    assert!(
+        s.cookie_form.is_some(),
+        "the edit form must be open for this to test the form render"
+    );
+    assert_eq!(
+        s.cookie_form.as_ref().unwrap().value,
+        "SUPERSECRET",
+        "the form must actually hold the secret value it is masking"
+    );
+
+    let theme = Theme::dark();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, 80, 24), &s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = (0..24)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !text.contains("SUPERSECRET"),
+        "the cookie form must NEVER render the value in plaintext:\n{text}"
+    );
+    assert!(
+        text.contains("••••••"),
+        "the cookie form's value field must render masked:\n{text}"
+    );
+}
+
 #[test]
 fn mask_proxy_hides_userinfo() {
     assert_eq!(

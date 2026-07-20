@@ -186,23 +186,34 @@ impl ChurlCookieJar {
     /// evaporate before [`Self::to_json`] ever wrote it out, and a
     /// manually-entered cookie (often an auth token) must stick.
     ///
+    /// **Host-only scope.** The cookie is stored WITHOUT a `Domain=`
+    /// attribute, so the store scopes it host-only (RFC 6265): it is sent
+    /// back only to the exact host the user typed, never to a subdomain. This
+    /// is the browser default for a hand-typed host and the safe direction —
+    /// silently broadening an auth token to every `*.{domain}` subdomain is
+    /// the cross-origin over-scoping churl's redirect-strip policy (R3) exists
+    /// to prevent. Subdomain-wide (`Domain=`) manual cookies are a deliberate
+    /// non-goal for now. [`Self::list`] still shows the host in its `domain`
+    /// column.
+    ///
     /// Validates `name`/`domain` are non-empty and that `domain`+`path`
     /// resolve to a URL BEFORE touching the store. The cookie is inserted via
     /// `cookie_store::CookieStore::insert_raw` against a synthesized
     /// `https://{domain}{path}` request URL — always `https` so a `Secure`
-    /// cookie is never rejected at insert, and the domain in the URL matches
-    /// the cookie's own `Domain=` so the store's RFC 6265 domain-match
-    /// accepts it. **The store's rejection is never swallowed**: any `Err`
-    /// from `insert_raw` (domain mismatch, unparseable domain, …) is
-    /// propagated as `CookieError`, never reported as a silent success — a
-    /// cookie jar must never claim to hold something it doesn't.
+    /// cookie is never rejected at insert, and the request host IS the
+    /// cookie's scope (host-only), so the store accepts it. **The store's
+    /// rejection is never swallowed**: any `Err` from `insert_raw`
+    /// (unparseable host, mismatch, …) is propagated as `CookieError`, never
+    /// reported as a silent success — a cookie jar must never claim to hold
+    /// something it doesn't.
     ///
     /// **The store keys cookies on `(domain, path, name)`.** `upsert`
     /// REPLACES a same-key entry (the "edit in place" case). If the caller is
     /// editing an existing cookie and the user changed its domain, name, or
     /// path, the OLD entry is a *different* key and is left untouched by this
     /// call — the caller (the app's `UpsertCookie` handler) is responsible
-    /// for `delete`-ing the old coordinates itself.
+    /// for removing the old coordinates itself, via [`Self::delete_exact`]
+    /// and only AFTER this upsert succeeds.
     pub fn upsert(&self, spec: CookieSpec) -> Result<(), CookieError> {
         if spec.name.is_empty() {
             return Err(CookieError("cookie name cannot be empty".to_owned()));
@@ -222,7 +233,9 @@ impl ChurlCookieJar {
         raw.set_path(path.to_owned());
         raw.set_secure(spec.secure);
         raw.set_same_site(spec.same_site.map(SameSite::to_raw));
-        raw.set_domain(spec.domain);
+        // Deliberately NO `set_domain` — a host-only cookie (see the doc
+        // above). Adding `Domain={host}` would make it a `Suffix` cookie the
+        // store sends to every subdomain too.
         // RFC 6265 caps dates at year 9999; `set_expires` clamps to that
         // itself, so any comfortably-far-future date works here.
         raw.set_expires(OffsetDateTime::now_utc() + Duration::weeks(520));
@@ -260,6 +273,20 @@ impl ChurlCookieJar {
             store.remove(d, p, n);
         }
         true
+    }
+
+    /// Removes the ONE cookie at the exact `(domain, path, name)` key,
+    /// returning whether anything was removed. Unlike [`Self::delete`] (which
+    /// is domain+name-scoped and wipes every path under that pair), this is
+    /// path-precise — it surfaces the store's own `(domain, path, name)`
+    /// primitive so an edit that moves a cookie to a new path can drop just
+    /// the old coordinate without touching a sibling cookie of the same name
+    /// at a different path.
+    pub fn delete_exact(&self, domain: &str, path: &str, name: &str) -> bool {
+        // `remove` returns the removed cookie (or `None` if the exact key
+        // wasn't present), so a single write-lock pass answers "did anything
+        // go?" without a separate read scan.
+        self.store_write().remove(domain, path, name).is_some()
     }
 
     /// Empties the jar.
@@ -542,5 +569,57 @@ mod tests {
         assert_eq!(listed[0].path, "/app");
         assert!(listed[0].secure);
         assert_eq!(listed[0].same_site, Some(SameSite::Strict));
+    }
+
+    #[test]
+    fn upsert_is_host_only_not_sent_to_subdomain() {
+        // A hand-typed cookie must be host-only: sent back to the exact host,
+        // never silently broadened to every subdomain (the cross-origin
+        // over-scoping churl's R3 redirect policy guards against).
+        let jar = ChurlCookieJar::new();
+        jar.upsert(spec("a.example", "sid", "abc123")).unwrap();
+
+        assert!(
+            jar.cookies(&url("https://a.example/")).is_some(),
+            "a host-only cookie must still be offered back to its own host"
+        );
+        assert!(
+            jar.cookies(&url("https://sub.a.example/")).is_none(),
+            "a hand-typed cookie must NOT be broadened to a subdomain"
+        );
+        // And the list still shows the host in the domain column.
+        assert_eq!(jar.list()[0].domain, "a.example");
+    }
+
+    #[test]
+    fn delete_exact_removes_only_the_named_path() {
+        // The path-precise primitive: a sibling cookie of the same
+        // (domain, name) at a DIFFERENT path must survive.
+        let jar = ChurlCookieJar::new();
+        jar.upsert(CookieSpec {
+            path: "/app".to_owned(),
+            ..spec("a.example", "sid", "app-val")
+        })
+        .unwrap();
+        jar.upsert(CookieSpec {
+            path: "/admin".to_owned(),
+            ..spec("a.example", "sid", "admin-val")
+        })
+        .unwrap();
+        assert_eq!(jar.list().len(), 2, "two cookies, same name, two paths");
+
+        assert!(
+            jar.delete_exact("a.example", "/app", "sid"),
+            "the exact /app coordinate is removed"
+        );
+        assert!(
+            !jar.delete_exact("a.example", "/app", "sid"),
+            "a second delete_exact of the same coord finds nothing"
+        );
+
+        let listed = jar.list();
+        assert_eq!(listed.len(), 1, "the /admin sibling must survive");
+        assert_eq!(listed[0].path, "/admin");
+        assert_eq!(listed[0].value, "admin-val");
     }
 }

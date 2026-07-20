@@ -148,31 +148,31 @@ impl App {
                 // Jar CONTENTS are not a settings-panel-managed knob (mirrors
                 // DeleteCookie/ClearCookies above) — no `SettingKey` to mark.
                 let is_edit = previous.is_some();
-                if let Some((old_domain, old_name, old_path)) = &previous
-                    && (*old_domain != domain || *old_name != name || *old_path != path)
-                {
-                    // The edit changed the cookie's key (the store keys on
-                    // domain+path+name). Delete the OLD entry BEFORE the
-                    // upsert below, not after: `delete` is domain+name-scoped
-                    // (it removes every path under that pair — see its doc),
-                    // so deleting AFTER an upsert that only changed `path`
-                    // would nuke the row this call just added. The tradeoff:
-                    // if the upsert below then fails, the original cookie is
-                    // already gone — an accepted risk for a narrow case (the
-                    // form already validated non-empty name/domain; only a
-                    // still-unparseable domain reaches `upsert`'s own Err).
-                    self.cookie_jar.delete(old_domain, old_name);
-                }
                 let spec = CookieSpec {
                     domain: domain.clone(),
                     name: name.clone(),
                     value,
-                    path,
+                    path: path.clone(),
                     secure,
                     same_site,
                 };
                 match self.cookie_jar.upsert(spec) {
                     Ok(()) => {
+                        // Upsert FIRST, then remove the old coordinate — only
+                        // now that the new one is safely in. When an edit
+                        // changed the key (domain/name/path), drop the OLD
+                        // entry with the PATH-PRECISE `delete_exact`, never the
+                        // domain+name-scoped `delete` (which would wipe a
+                        // same-name sibling at another path). Because the new
+                        // key differs from the old by definition of "changed,"
+                        // deleting the exact old coord can't touch the row this
+                        // upsert just added, and a failed upsert (below) skips
+                        // the delete entirely, so the original always survives.
+                        if let Some((old_domain, old_name, old_path)) = &previous
+                            && (*old_domain != domain || *old_name != name || *old_path != path)
+                        {
+                            self.cookie_jar.delete_exact(old_domain, old_path, old_name);
+                        }
                         self.persist_cookie_jar();
                         let verb = if is_edit { "updated" } else { "added" };
                         // Never echo the value — it's credential-shaped, same
