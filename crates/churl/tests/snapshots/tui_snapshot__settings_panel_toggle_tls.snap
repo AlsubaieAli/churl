@@ -10,7 +10,7 @@ expression: snap
 │           ┃▸ ● TLS verification  OFF — certificates NOT verified ┃           │
 │           ┃    Cookies           off                             ┃           │
 │           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
-│           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
+│           ┃│(cookie jar is off — enable it above, or a to add on│┃           │
 │           ┃│                                                    │┃           │
 │           ┃│                                                    │┃           │
 │           ┃│                                                    │┃───────────┘
@@ -19,7 +19,7 @@ expression: snap
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit/toggle · l cookies · s save · e┃           │
+│           ┃ j/k move · enter edit/toggle · a add · l cookies · s ┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │

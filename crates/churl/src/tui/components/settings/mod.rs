@@ -15,17 +15,19 @@
 use std::collections::HashSet;
 
 use churl_core::config::{RedirectPolicy, ResolvedAdvancedLimits, UrlEditMode};
-use churl_core::cookies::CookieView;
+use churl_core::cookies::{CookieView, SameSite};
 use churl_core::load::LoadCaps;
 use churl_core::secrets::SecretPolicy;
 
 use super::line_editor::LineEditor;
 
+mod cookie_form;
 mod edit;
 mod render;
 #[cfg(test)]
 mod tests;
 
+pub use cookie_form::{CookieForm, CookieFormField};
 pub use render::render;
 
 /// The built-in default theme name, used both to seed a fresh session (when no
@@ -479,6 +481,30 @@ pub enum SettingsOutcome {
     },
     /// Clear the whole cookie jar.
     ClearCookies,
+    /// Add or edit a cookie by hand (the cookie form's `s` submit).
+    UpsertCookie {
+        /// The ORIGINAL `(domain, name, path)` of the cookie being edited, if
+        /// this is an edit — `None` for a brand-new add. Always `Some` for an
+        /// edit regardless of whether the key below actually differs from it;
+        /// the handler decides whether an old-key delete is needed.
+        previous: Option<(String, String, String)>,
+        /// The new/edited cookie's domain.
+        domain: String,
+        /// The new/edited cookie's name.
+        name: String,
+        /// The new/edited cookie's value — credential-shaped; never echo it
+        /// in a notification (reference the cookie by name+domain only, like
+        /// [`SettingsOutcome::DeleteCookie`] already does).
+        value: String,
+        /// The new/edited cookie's path (already defaulted to `/` if left
+        /// blank — see `CookieForm::commit`).
+        path: String,
+        /// Whether the `Secure` attribute is set.
+        secure: bool,
+        /// The `SameSite` attribute, or `None` if left unset (attribute
+        /// absent, not the RFC `SameSite=None` value).
+        same_site: Option<SameSite>,
+    },
     /// Apply a validated advanced-limit override. `value` is already
     /// range-checked (positive) by the inline editor; the app additionally
     /// refuses a concurrency/total value above `[load] max_*` through
@@ -580,6 +606,9 @@ pub struct SettingsState {
     pub cookies: Vec<CookieView>,
     pub network_row: NetworkRow,
     pub cookie_sel: usize,
+    /// The open cookie add/edit form, if any (`a`/`e` from the Cookies row
+    /// or its list). `None` when no form is open.
+    pub cookie_form: Option<CookieForm>,
 
     // Load category working copy.
     pub load_caps: LoadCaps,
@@ -634,6 +663,7 @@ impl SettingsState {
             cookies: snapshot.cookies,
             network_row: NetworkRow::Proxy,
             cookie_sel: 0,
+            cookie_form: None,
             load_caps: snapshot.load_caps,
             load_row: LoadRow::WarnTotal,
             theme_name: snapshot.theme_name,

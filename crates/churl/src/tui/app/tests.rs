@@ -4824,6 +4824,59 @@ fn delete_cookie_via_panel_actually_shrinks_the_jar() {
     );
 }
 
+/// `UpsertCookie` must actually grow the jar with a real, correctly-valued
+/// cookie — not just emit the outcome — mirroring
+/// `delete_cookie_via_panel_actually_shrinks_the_jar` for the add path
+/// (M8.5.1). Drives the whole add-form flow through real key events: open the
+/// form, fill Domain/Name/Value via the shared `LineEditor`, submit with `s`.
+#[test]
+fn upsert_cookie_via_panel_actually_grows_the_jar() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    assert_eq!(app.cookie_jar.list().len(), 0, "starts with an empty jar");
+
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    press(&mut app, 'j'); // Tls -> Cookies
+    press(&mut app, 'a'); // open the add-cookie form (starts on Domain)
+
+    enter(&mut app); // begin editing Domain
+    for c in "a.example".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit Domain
+
+    press(&mut app, 'j'); // Domain -> Name
+    enter(&mut app); // begin editing Name
+    for c in "sid".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit Name
+
+    press(&mut app, 'j'); // Name -> Value
+    enter(&mut app); // begin editing Value
+    for c in "abc123".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit Value
+
+    press(&mut app, 's'); // submit the form
+
+    let listed = app.cookie_jar.list();
+    assert_eq!(
+        listed.len(),
+        1,
+        "UpsertCookie must actually grow the jar, not just emit the outcome"
+    );
+    assert_eq!(listed[0].domain, "a.example");
+    assert_eq!(listed[0].name, "sid");
+    assert_eq!(
+        listed[0].value, "abc123",
+        "the value must round-trip intact, not be lost/masked in storage"
+    );
+}
+
 // ---- Save-as-default: FIX 1 (sparse, touched-only persistence) ----
 
 /// FIX 1 (a): a `-k` session that only edits theme in the panel must save

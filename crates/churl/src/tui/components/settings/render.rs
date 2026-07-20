@@ -4,6 +4,7 @@
 //! fields with no visibility widening.
 
 use churl_core::config::{RedirectPolicy, UrlEditMode};
+use churl_core::cookies::SameSite;
 use churl_core::secrets::SecretPolicy;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -11,8 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::{
-    AdvancedField, AppearanceRow, DebugRow, LoadRow, NetworkRow, PanelFocus, RequestRow,
-    SettingKey, SettingsCategory, SettingsLevel, SettingsState, mask_proxy, mask_proxy_password,
+    AdvancedField, AppearanceRow, CookieFormField, DebugRow, LoadRow, NetworkRow, PanelFocus,
+    RequestRow, SettingKey, SettingsCategory, SettingsLevel, SettingsState, mask_proxy,
+    mask_proxy_password,
 };
 use crate::tui::theme::Theme;
 
@@ -101,6 +103,17 @@ fn render_menu(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &The
 /// Renders the open category panel (level 2): its rows, plus a detail area
 /// (cookie list / advanced list) when relevant, plus the footer.
 fn render_panel(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
+    // The cookie form takes over the whole panel body — a 6-field form has no
+    // natural "rows + detail" split, and it's a modal sub-task within the
+    // modal panel, not another row list.
+    if state.cookie_form.is_some() {
+        let [body, footer] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+        render_cookie_form(frame, body, state, theme);
+        render_footer(frame, footer, state, theme);
+        return;
+    }
+
     let has_detail = matches!(
         (state.category, state.focus),
         (SettingsCategory::Network, _) | (SettingsCategory::Debug, PanelFocus::AdvancedList)
@@ -453,7 +466,8 @@ fn render_advanced_list(frame: &mut Frame, area: Rect, state: &SettingsState, th
 }
 
 /// Renders the cookie list beneath Network's Cookies row (domain · name ·
-/// masked value). Ported verbatim from the old Options overlay.
+/// masked value · Secure · SameSite). Ported verbatim from the old Options
+/// overlay, then extended (M8.5.1) with the Secure/SameSite columns.
 fn render_cookie_list(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
     let focused = state.focus == PanelFocus::CookieList;
     let border = if focused {
@@ -473,9 +487,9 @@ fn render_cookie_list(frame: &mut Frame, area: Rect, state: &SettingsState, them
 
     if state.cookies.is_empty() {
         let hint = if state.cookies_enabled {
-            "(no cookies yet — they accumulate as you send requests)"
+            "(no cookies yet — they accumulate as you send requests, or a to add one)"
         } else {
-            "(cookie jar is off — enable it on the Cookies row)"
+            "(cookie jar is off — enable it above, or a to add one anyway)"
         };
         frame.render_widget(
             Paragraph::new(Line::styled(hint, theme.auth_mask)),
@@ -503,10 +517,12 @@ fn render_cookie_list(frame: &mut Frame, area: Rect, state: &SettingsState, them
         .map(|(i, c)| {
             let selected = i == state.cookie_sel && focused;
             // Cookie values are credential-shaped — always masked in the TUI.
+            let secure_mark = if c.secure { "✓" } else { "✗" };
             let text = format!(
-                "{domain:<name_col$}  {name}  ••••••",
+                "{domain:<name_col$}  {name}  ••••••  secure:{secure_mark}  samesite:{same_site}",
                 domain = c.domain,
                 name = c.name,
+                same_site = same_site_label(c.same_site),
             );
             let l = Line::from(text);
             if selected {
@@ -517,6 +533,88 @@ fn render_cookie_list(frame: &mut Frame, area: Rect, state: &SettingsState, them
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Display label for a `SameSite` value — `—` for an absent attribute (not to
+/// be confused with the RFC `SameSite=None` value, labeled `None`).
+fn same_site_label(same_site: Option<SameSite>) -> &'static str {
+    match same_site {
+        None => "—",
+        Some(SameSite::Strict) => "Strict",
+        Some(SameSite::Lax) => "Lax",
+        Some(SameSite::None) => "None",
+    }
+}
+
+/// Renders the cookie add/edit form: one line per field, the focused field
+/// marked like every other row list, an inline editor for the field
+/// currently being typed into (mirrors [`editing_text`]'s shape but scoped to
+/// the form's own `editing`), Secure as a checkbox, SameSite as its label.
+/// The value field stays masked even while being edited — same stance as the
+/// Proxy row's password segment (`mask_proxy_password`): a secret is never
+/// shown in plaintext, including mid-type.
+fn render_cookie_form(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
+    let Some(form) = &state.cookie_form else {
+        return;
+    };
+    let title = if form.editing_existing.is_some() {
+        " Edit cookie "
+    } else {
+        " Add cookie "
+    };
+    let block = Block::bordered()
+        .border_style(theme.border_focused)
+        .title(title)
+        .title_style(theme.title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let editing_field = form.editing.as_ref().map(|_| form.focus);
+    let field_line = |field: CookieFormField, value: Span<'static>| {
+        row_line(field.label(), value, form.focus == field, false, theme)
+    };
+
+    let text_value = |field: CookieFormField| -> Span<'static> {
+        if editing_field == Some(field) {
+            let editor = form.editing.as_ref().expect("editing_field implies Some");
+            Span::raw(format!("{}█", editor.text()))
+        } else {
+            Span::raw(form.text(field).to_owned())
+        }
+    };
+    let masked_value = || -> Span<'static> {
+        if editing_field == Some(CookieFormField::Value) {
+            let editor = form.editing.as_ref().expect("editing_field implies Some");
+            Span::raw(if editor.text().is_empty() {
+                "█".to_owned()
+            } else {
+                "••••••█".to_owned()
+            })
+        } else if form.value.is_empty() {
+            Span::raw("(empty)".to_owned())
+        } else {
+            Span::raw("••••••".to_owned())
+        }
+    };
+
+    let lines = vec![
+        field_line(CookieFormField::Domain, text_value(CookieFormField::Domain)),
+        field_line(CookieFormField::Name, text_value(CookieFormField::Name)),
+        field_line(CookieFormField::Value, masked_value()),
+        field_line(CookieFormField::Path, text_value(CookieFormField::Path)),
+        field_line(
+            CookieFormField::Secure,
+            Span::raw(if form.secure { "[x]" } else { "[ ]" }),
+        ),
+        field_line(
+            CookieFormField::SameSite,
+            Span::raw(same_site_label(form.same_site)),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Renders the footer: a live message row plus the key hints for the current
@@ -531,18 +629,26 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
     };
     frame.render_widget(Paragraph::new(top), msg_row);
 
-    let hints = if state.editing.is_some() {
+    let hints = if let Some(form) = &state.cookie_form {
+        if form.editing.is_some() {
+            "enter apply · esc cancel".to_owned()
+        } else {
+            "j/k move · enter edit/toggle/cycle · s save cookie · esc cancel".to_owned()
+        }
+    } else if state.editing.is_some() {
         "enter apply · esc cancel".to_owned()
     } else {
         match state.focus {
             PanelFocus::Rows if state.category == SettingsCategory::Network => {
-                "j/k move · enter edit/toggle · l cookies · s save · esc menu · q close".to_owned()
+                "j/k move · enter edit/toggle · a add · l cookies · s save · esc menu · q close"
+                    .to_owned()
             }
             PanelFocus::Rows => {
                 "j/k move · enter edit/toggle/cycle · s save · esc menu · q close".to_owned()
             }
             PanelFocus::CookieList => {
-                "j/k move · d delete · x clear all · s save · h/esc back · q close".to_owned()
+                "j/k move · a add · e edit · d delete · x clear · s save · h/esc back · q close"
+                    .to_owned()
             }
             PanelFocus::AdvancedList => {
                 "j/k move · enter edit · s save · h/esc back · q close".to_owned()

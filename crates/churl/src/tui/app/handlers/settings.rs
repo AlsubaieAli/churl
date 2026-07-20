@@ -15,6 +15,7 @@
 
 use super::super::*;
 use crate::tui::components::settings::{AdvancedField, SettingKey, mask_proxy};
+use churl_core::cookies::CookieSpec;
 
 impl App {
     /// Opens the Settings panel over the current session settings. Captures the
@@ -133,6 +134,53 @@ impl App {
                 self.cookie_jar.clear();
                 self.persist_cookie_jar();
                 self.notify("cookies cleared");
+                self.refresh_settings_panel();
+            }
+            SettingsOutcome::UpsertCookie {
+                previous,
+                domain,
+                name,
+                value,
+                path,
+                secure,
+                same_site,
+            } => {
+                // Jar CONTENTS are not a settings-panel-managed knob (mirrors
+                // DeleteCookie/ClearCookies above) — no `SettingKey` to mark.
+                let is_edit = previous.is_some();
+                if let Some((old_domain, old_name, old_path)) = &previous
+                    && (*old_domain != domain || *old_name != name || *old_path != path)
+                {
+                    // The edit changed the cookie's key (the store keys on
+                    // domain+path+name). Delete the OLD entry BEFORE the
+                    // upsert below, not after: `delete` is domain+name-scoped
+                    // (it removes every path under that pair — see its doc),
+                    // so deleting AFTER an upsert that only changed `path`
+                    // would nuke the row this call just added. The tradeoff:
+                    // if the upsert below then fails, the original cookie is
+                    // already gone — an accepted risk for a narrow case (the
+                    // form already validated non-empty name/domain; only a
+                    // still-unparseable domain reaches `upsert`'s own Err).
+                    self.cookie_jar.delete(old_domain, old_name);
+                }
+                let spec = CookieSpec {
+                    domain: domain.clone(),
+                    name: name.clone(),
+                    value,
+                    path,
+                    secure,
+                    same_site,
+                };
+                match self.cookie_jar.upsert(spec) {
+                    Ok(()) => {
+                        self.persist_cookie_jar();
+                        let verb = if is_edit { "updated" } else { "added" };
+                        // Never echo the value — it's credential-shaped, same
+                        // stance as `DeleteCookie`'s notification.
+                        self.notify(format!("{verb} cookie {name} ({domain})"));
+                    }
+                    Err(err) => self.set_settings_message(format!("could not save cookie — {err}")),
+                }
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyAdvanced { field, value } => {
