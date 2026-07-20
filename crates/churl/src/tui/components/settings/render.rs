@@ -12,9 +12,19 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::{
     AdvancedField, AppearanceRow, DebugRow, LoadRow, NetworkRow, PanelFocus, RequestRow,
-    SettingsCategory, SettingsLevel, SettingsState, mask_proxy, mask_proxy_password,
+    SettingKey, SettingsCategory, SettingsLevel, SettingsState, mask_proxy, mask_proxy_password,
 };
 use crate::tui::theme::Theme;
+
+/// The dirty dot's actual predicate (FIX 2): touched AND differs from disk —
+/// NOT a bare value comparison. A knob the panel merely displays (CLI `-k`,
+/// a workspace override, an already-saved global default) must never show
+/// dirty just because it differs from `persisted`; only an ACTUAL panel edit
+/// this session can. Keeps Save and the dots perfectly consistent — a dot is
+/// lit if and only if Save would write something for that knob.
+fn dirty(state: &SettingsState, key: SettingKey, differs: bool) -> bool {
+    state.touched.contains(&key) && differs
+}
 
 /// Renders the Settings panel over `area`.
 pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
@@ -217,35 +227,55 @@ fn render_request_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
             RequestRow::Timeout.label(),
             Span::raw(timeout_display),
             sel(RequestRow::Timeout),
-            state.advanced.timeout_secs != state.persisted.timeout_secs,
+            dirty(
+                state,
+                SettingKey::Timeout,
+                state.advanced.timeout_secs != state.persisted.timeout_secs,
+            ),
             theme,
         ),
         row_line(
             RequestRow::MaxBodyBytes.label(),
             Span::raw(body_display),
             sel(RequestRow::MaxBodyBytes),
-            state.advanced.body_cap_bytes != state.persisted.max_body_bytes,
+            dirty(
+                state,
+                SettingKey::MaxBodyBytes,
+                state.advanced.body_cap_bytes != state.persisted.max_body_bytes,
+            ),
             theme,
         ),
         row_line(
             RequestRow::Redirect.label(),
             Span::raw(redirect_label(state.redirect)),
             sel(RequestRow::Redirect),
-            state.redirect != state.persisted.redirect,
+            dirty(
+                state,
+                SettingKey::Redirect,
+                state.redirect != state.persisted.redirect,
+            ),
             theme,
         ),
         row_line(
             RequestRow::UrlEdit.label(),
             Span::raw(url_edit_label(state.url_edit)),
             sel(RequestRow::UrlEdit),
-            state.url_edit != state.persisted.url_edit,
+            dirty(
+                state,
+                SettingKey::UrlEdit,
+                state.url_edit != state.persisted.url_edit,
+            ),
             theme,
         ),
         row_line(
             RequestRow::SecretPolicy.label(),
             Span::raw(secret_policy_label(state.secret_policy)),
             sel(RequestRow::SecretPolicy),
-            state.secret_policy != state.persisted.secret_policy,
+            dirty(
+                state,
+                SettingKey::SecretPolicy,
+                state.secret_policy != state.persisted.secret_policy,
+            ),
             theme,
         ),
     ];
@@ -283,21 +313,33 @@ fn render_network_rows(frame: &mut Frame, area: Rect, state: &SettingsState, the
             NetworkRow::Proxy.label(),
             Span::raw(proxy_display),
             sel(NetworkRow::Proxy),
-            state.proxy != state.persisted.proxy,
+            dirty(
+                state,
+                SettingKey::Proxy,
+                state.proxy != state.persisted.proxy,
+            ),
             theme,
         ),
         row_line(
             NetworkRow::Tls.label(),
             insecure_span,
             sel(NetworkRow::Tls),
-            state.insecure != state.persisted.insecure,
+            dirty(
+                state,
+                SettingKey::Insecure,
+                state.insecure != state.persisted.insecure,
+            ),
             theme,
         ),
         row_line(
             NetworkRow::Cookies.label(),
             Span::raw(cookies_display.to_owned()),
             sel(NetworkRow::Cookies),
-            state.cookies_enabled != state.persisted.cookies,
+            dirty(
+                state,
+                SettingKey::Cookies,
+                state.cookies_enabled != state.persisted.cookies,
+            ),
             theme,
         ),
     ];
@@ -311,8 +353,9 @@ fn render_load_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme:
         .map(|&row| {
             let display = editing_text(state, super::EditTarget::Load(row))
                 .unwrap_or_else(|| row.get(&state.load_caps).to_string());
-            let dirty = row.get(&state.load_caps) != row.get(&state.persisted.load_caps);
-            row_line(row.label(), Span::raw(display), sel(row), dirty, theme)
+            let differs = row.get(&state.load_caps) != row.get(&state.persisted.load_caps);
+            let is_dirty = dirty(state, row.setting_key(), differs);
+            row_line(row.label(), Span::raw(display), sel(row), is_dirty, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
@@ -327,14 +370,22 @@ fn render_appearance_rows(frame: &mut Frame, area: Rect, state: &SettingsState, 
             AppearanceRow::Theme.label(),
             Span::raw(state.theme_name.clone()),
             sel(AppearanceRow::Theme),
-            state.theme_name != state.persisted.theme,
+            dirty(
+                state,
+                SettingKey::Theme,
+                state.theme_name != state.persisted.theme,
+            ),
             theme,
         ),
         row_line(
             AppearanceRow::LeaderKey.label(),
             Span::raw(leader_display),
             sel(AppearanceRow::LeaderKey),
-            state.leader_key != state.persisted.leader_key,
+            dirty(
+                state,
+                SettingKey::LeaderKey,
+                state.leader_key != state.persisted.leader_key,
+            ),
             theme,
         ),
     ];
@@ -349,7 +400,11 @@ fn render_debug_rows(frame: &mut Frame, area: Rect, state: &SettingsState, theme
             DebugRow::DebugToggle.label(),
             Span::raw(debug_display.to_owned()),
             sel(DebugRow::DebugToggle),
-            state.debug_enabled != state.persisted.debug,
+            dirty(
+                state,
+                SettingKey::Debug,
+                state.debug_enabled != state.persisted.debug,
+            ),
             theme,
         ),
         row_line(
@@ -389,8 +444,9 @@ fn render_advanced_list(frame: &mut Frame, area: Rect, state: &SettingsState, th
             let selected = focused && state.advanced_field == field;
             let value = editing_text(state, super::EditTarget::Advanced(field))
                 .unwrap_or_else(|| field.get(&state.advanced).to_string());
-            let dirty = field.get(&state.advanced) != field.get(&state.persisted.advanced);
-            row_line(field.label(), Span::raw(value), selected, dirty, theme)
+            let differs = field.get(&state.advanced) != field.get(&state.persisted.advanced);
+            let is_dirty = dirty(state, field.setting_key(), differs);
+            row_line(field.label(), Span::raw(value), selected, is_dirty, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);

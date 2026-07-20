@@ -66,17 +66,6 @@ pub enum ConfigError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
-    /// [`save_defaults`] refuses to persist a credential-bearing proxy
-    /// (`user:pass@host`) — see [`proxy_has_credentials`]. The credentials stay
-    /// session-only; write the proxy without them, or leave it unset.
-    #[error(
-        "refusing to persist a credential-bearing proxy to {path} — remove the \
-         embedded username/password first (it can stay session-only)"
-    )]
-    ProxyCredentials {
-        /// The config path the write was refused for.
-        path: PathBuf,
-    },
     /// The platform config directory could not be determined (see
     /// [`global_config_path`]), so there is nowhere to write a default config
     /// without an explicit [`CONFIG_PATH_ENV`] override.
@@ -564,24 +553,26 @@ pub fn load_global_config() -> Result<Config, ConfigError> {
     }
 }
 
-/// The resolved values the settings panel (M8.5) manages and can persist to
-/// `config.toml` via [`save_defaults`]. Every field mirrors a resolved
-/// [`Config`] knob — the panel's *working copy*, not the raw optional-override
-/// shape [`Config`] itself uses for partial files.
+/// Every resolved value the settings panel (M8.5) manages, mirroring a
+/// resolved [`Config`] knob — the panel's *working copy* / dirty-indicator
+/// baseline, not the raw optional-override shape [`Config`] itself uses for
+/// partial files, and **not** what gets persisted (see [`SettingsDefaults`]
+/// for the sparse, touched-only shape [`save_defaults`] actually writes).
 ///
-/// Deliberately **not** `Config` (or a wrapper around it): the panel edits base
-/// knobs only — `[keys]` / `[theme_colors]` / `raw_keys` are owned by other
-/// subsystems and must never be touched by a settings-panel save. Using a
-/// dedicated struct with no fields for them makes that structurally impossible
-/// (there is nothing here to mistakenly serialize), rather than relying on
-/// every future call site to remember to skip them on a shared `Config`.
+/// Deliberately **not** `Config` (or a wrapper around it): the panel reads/
+/// compares base knobs only — `[keys]` / `[theme_colors]` / `raw_keys` are
+/// owned by other subsystems and must never be touched by a settings-panel
+/// save. Using a dedicated struct with no fields for them makes that
+/// structurally impossible (there is nothing here to mistakenly serialize),
+/// rather than relying on every future call site to remember to skip them on
+/// a shared `Config`.
 ///
-/// [`save_defaults`] compares each field against its built-in default (the same
-/// default [`Config`]'s own resolver methods fall back to) and **removes** the
-/// key when they match, so saving a knob back to its default cleans up any
-/// stale override rather than writing it out explicitly.
+/// Two uses: [`Self::from_config`] resolves a loaded [`Config`] into this
+/// shape as the panel's dirty-indicator baseline (`persisted`, re-read from
+/// disk on every open/refresh); [`Self::default`] is the built-in baseline a
+/// fresh install compares against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettingsDefaults {
+pub struct ResolvedSettings {
     /// The colour theme name (`"dark"` | `"light"`); compared against the
     /// built-in default `"dark"`.
     pub theme: String,
@@ -600,9 +591,7 @@ pub struct SettingsDefaults {
     pub secret_policy: crate::secrets::SecretPolicy,
     /// Cross-origin redirect policy.
     pub redirect: RedirectPolicy,
-    /// Global HTTP/HTTPS proxy URL; `None` writes no `proxy` key. A
-    /// credential-bearing proxy is refused by [`save_defaults`] rather than
-    /// silently stripped.
+    /// Global HTTP/HTTPS proxy URL, or `None` when unset.
     pub proxy: Option<String>,
     /// Whether TLS verification is off by default.
     pub insecure: bool,
@@ -618,11 +607,9 @@ pub struct SettingsDefaults {
     pub advanced: ResolvedAdvancedLimits,
 }
 
-impl Default for SettingsDefaults {
+impl Default for ResolvedSettings {
     /// The built-in defaults, expressed the same way [`Config::default`]'s own
-    /// resolvers would — round-tripping a default-valued [`SettingsDefaults`]
-    /// through [`save_defaults`] writes no keys at all (every field already
-    /// matches its default).
+    /// resolvers would.
     fn default() -> Self {
         let config = Config::default();
         Self {
@@ -643,8 +630,8 @@ impl Default for SettingsDefaults {
     }
 }
 
-impl SettingsDefaults {
-    /// Builds a [`SettingsDefaults`] from a loaded [`Config`]'s RESOLVED
+impl ResolvedSettings {
+    /// Builds a [`ResolvedSettings`] from a loaded [`Config`]'s RESOLVED
     /// values — e.g. so a live session's working copy can be compared
     /// against what is currently on disk (the M8.5 settings panel's
     /// best-effort dirty indicator). Fails on the same malformed-value cases
@@ -673,10 +660,96 @@ impl SettingsDefaults {
     }
 }
 
-/// Sets `doc[key]` to a string, or removes it when `value` is `None`.
+/// A SPARSE set of settings-panel edits: `Some` on a field means the user
+/// touched that knob in the panel this session and it should be persisted;
+/// `None` means the knob was never edited in the panel and [`save_defaults`]
+/// must leave its on-disk key completely untouched — even if the *session's*
+/// resolved value differs from disk (e.g. `-k`, a workspace override, or an
+/// already-saved global default). This is what closes the M8.5 footgun where
+/// Save used to snapshot the whole EFFECTIVE session (CLI/workspace-forced
+/// values included) and silently write them as new global defaults.
+///
+/// `proxy` is `Option<Option<String>>` because the underlying knob is itself
+/// optional: `None` (outer) = proxy untouched this session, do not read or
+/// write the key at all; `Some(None)` = the user cleared the proxy field in
+/// the panel, persist that as "no proxy" (remove the key); `Some(Some(url))`
+/// = the user set/edited a proxy value, persist it (unless it carries
+/// credentials — [`save_defaults`] skips just that key in that case, see
+/// [`SaveOutcome::proxy_skipped`]).
+///
+/// `timeout_secs`/`max_body_bytes` cover BOTH the top-level knob and the
+/// `[advanced]` timeout/body-cap override — they are the exact same live
+/// session field (see the Settings panel's `RequestRow` doc), so one touched
+/// flag and one value covers both; there is no separate
+/// `advanced_timeout`/`advanced_body_cap` field here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettingsDefaults {
+    /// The colour theme name, if edited this session.
+    pub theme: Option<String>,
+    /// The leader key combination string, if edited this session.
+    pub leader_key: Option<String>,
+    /// Per-request timeout in seconds, if edited this session (Request's
+    /// Timeout row OR Debug's Advanced `timeout` field — same live value).
+    pub timeout_secs: Option<u64>,
+    /// Response body-size cap in bytes, if edited this session (Request's
+    /// MaxBodyBytes row OR Debug's Advanced `body cap` field — same live
+    /// value).
+    pub max_body_bytes: Option<u64>,
+    /// URL-bar edit mode, if edited this session.
+    pub url_edit: Option<UrlEditMode>,
+    /// Save-time secret policy, if edited this session.
+    pub secret_policy: Option<crate::secrets::SecretPolicy>,
+    /// Cross-origin redirect policy, if edited this session.
+    pub redirect: Option<RedirectPolicy>,
+    /// The proxy edit, if any this session — see the struct doc for the
+    /// nested-`Option` shape.
+    pub proxy: Option<Option<String>>,
+    /// Whether TLS verification was toggled this session.
+    pub insecure: Option<bool>,
+    /// Whether the cookie jar on/off was toggled this session.
+    pub cookies: Option<bool>,
+    /// Whether debug capture was toggled FROM THE PANEL this session (the
+    /// global `<leader>D` shortcut shares the same underlying flag but does
+    /// NOT touch this — only the panel's Debug-category row does).
+    pub debug: Option<bool>,
+    /// [`crate::load::LoadCaps::warn_total`], if edited this session.
+    pub load_warn_total: Option<usize>,
+    /// [`crate::load::LoadCaps::warn_concurrency`], if edited this session.
+    pub load_warn_concurrency: Option<usize>,
+    /// [`crate::load::LoadCaps::max_total`], if edited this session.
+    pub load_max_total: Option<usize>,
+    /// [`crate::load::LoadCaps::max_concurrency`], if edited this session.
+    pub load_max_concurrency: Option<usize>,
+    /// [`ResolvedAdvancedLimits::concurrency`], if edited this session (Debug
+    /// category only — no top-level knob aliases this one).
+    pub advanced_concurrency: Option<usize>,
+    /// [`ResolvedAdvancedLimits::total`], if edited this session (Debug
+    /// category only — no top-level knob aliases this one).
+    pub advanced_total: Option<usize>,
+}
+
+/// What [`save_defaults`] actually did, beyond "it didn't error" — today just
+/// whether a credential-bearing proxy was present and therefore skipped (see
+/// [`SettingsDefaults::proxy`]'s doc and [`proxy_has_credentials`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SaveOutcome {
+    /// `true` when `edits.proxy` carried embedded credentials — the proxy key
+    /// was left completely untouched on disk (never written, never removed),
+    /// while every other touched knob in the same call still persisted.
+    pub proxy_skipped: bool,
+}
+
+/// Sets `doc[key]` to a string, or removes it when `value` is `None`. A
+/// no-op when the document already holds exactly `value` (FIX 3: avoids
+/// churning — and losing — that key's inline comment/decor on a write that
+/// doesn't actually change it).
 fn set_or_remove_str(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<&str>) {
     match value {
-        Some(v) => doc[key] = toml_edit::value(v),
+        Some(v) => {
+            if doc.get(key).and_then(|item| item.as_str()) != Some(v) {
+                doc[key] = toml_edit::value(v);
+            }
+        }
         None => {
             doc.remove(key);
         }
@@ -685,10 +758,16 @@ fn set_or_remove_str(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<
 
 /// Sets `doc[key]` to an integer, or removes it when `value` is `None`.
 /// `u64` values beyond `i64::MAX` saturate rather than panic — no real
-/// timeout/body-cap/limit knob approaches that range.
+/// timeout/body-cap/limit knob approaches that range. A no-op when the
+/// document already holds exactly `value` (see [`set_or_remove_str`]'s doc).
 fn set_or_remove_u64(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<u64>) {
     match value {
-        Some(v) => doc[key] = toml_edit::value(i64::try_from(v).unwrap_or(i64::MAX)),
+        Some(v) => {
+            let v = i64::try_from(v).unwrap_or(i64::MAX);
+            if doc.get(key).and_then(|item| item.as_integer()) != Some(v) {
+                doc[key] = toml_edit::value(v);
+            }
+        }
         None => {
             doc.remove(key);
         }
@@ -696,18 +775,21 @@ fn set_or_remove_u64(doc: &mut toml_edit::DocumentMut, key: &str, value: Option<
 }
 
 /// Sets `doc[key]` to `true`, or removes it when `value == default` (`false`
-/// for every panel-managed boolean today).
+/// for every panel-managed boolean today). A no-op when the document already
+/// holds exactly `value` (see [`set_or_remove_str`]'s doc).
 fn set_or_remove_bool(doc: &mut toml_edit::DocumentMut, key: &str, value: bool, default: bool) {
     if value == default {
         doc.remove(key);
-    } else {
+    } else if doc.get(key).and_then(|item| item.as_bool()) != Some(value) {
         doc[key] = toml_edit::value(value);
     }
 }
 
 /// Sets or removes `int_key` inside the `[table_key]` sub-table, creating the
 /// table on first use and removing it entirely once every managed field is
-/// back at its default (an empty override table is noise, not signal).
+/// back at its default (an empty override table is noise, not signal). A
+/// no-op when the table already holds exactly `value` at `int_key` (see
+/// [`set_or_remove_str`]'s doc).
 fn set_or_remove_subtable_u64(
     doc: &mut toml_edit::DocumentMut,
     table_key: &str,
@@ -716,8 +798,16 @@ fn set_or_remove_subtable_u64(
 ) {
     match value {
         Some(v) => {
+            let v = i64::try_from(v).unwrap_or(i64::MAX);
             let table = doc[table_key].or_insert(toml_edit::table());
-            table[int_key] = toml_edit::value(i64::try_from(v).unwrap_or(i64::MAX));
+            let unchanged = table
+                .as_table()
+                .and_then(|t| t.get(int_key))
+                .and_then(|item| item.as_integer())
+                == Some(v);
+            if !unchanged {
+                table[int_key] = toml_edit::value(v);
+            }
         }
         None => {
             if let Some(table) = doc.get_mut(table_key).and_then(|item| item.as_table_mut()) {
@@ -734,31 +824,39 @@ fn set_or_remove_subtable_u64(
     }
 }
 
-/// Persists `values` to `path`: reads the existing file into a
-/// [`toml_edit::DocumentMut`] (an empty document when the file is missing — a
-/// missing file is not an error, mirroring [`load_config`]), sets each
-/// panel-managed key that differs from its built-in default, **removes** any
-/// that now matches its default, and writes the result back **atomically**
-/// (temp file in the same directory, then rename over `path`; the parent
-/// directory is created if missing). `[keys]` / `[theme_colors]` / `raw_keys`
-/// are never read or touched — [`SettingsDefaults`] has no fields for them, so
-/// there is nothing here that could.
+/// Persists `edits` to `path` — ONLY the knobs `edits` marks touched
+/// (`Some`); every `None` field's on-disk key is left completely untouched,
+/// whatever the live session's resolved value for it is. This is the FIX 1
+/// contract: Save must never write a CLI/session-forced value the user never
+/// actually edited in the panel — the caller (the TUI's `settings_edits`) is
+/// responsible for only setting a field to `Some` when its
+/// `SettingKey` was recorded touched, and clearing that touched-set after a
+/// successful save so the working copy and the save target stay in sync.
 ///
-/// Every OTHER key already in the file — including ones churl doesn't model —
-/// and every comment/key-order in the document survive untouched: only the
-/// panel-managed keys are set via the DOM, never a wholesale re-serialize.
+/// Reads the existing file into a [`toml_edit::DocumentMut`] (an empty
+/// document when the file is missing — a missing file is not an error,
+/// mirroring [`load_config`]), sets each TOUCHED key that differs from its
+/// built-in default, **removes** a touched key that now matches its default
+/// (a deliberate reset), and writes the result back **atomically** (temp file
+/// in the same directory, then rename over `path`; the parent directory is
+/// created if missing). `[keys]` / `[theme_colors]` / `raw_keys` are never
+/// read or touched — [`SettingsDefaults`] has no fields for them, so there is
+/// nothing here that could.
 ///
-/// Refuses (never silently strips) a credential-bearing proxy
-/// ([`proxy_has_credentials`]) with [`ConfigError::ProxyCredentials`] before
-/// touching the file at all.
-pub fn save_defaults(values: &SettingsDefaults, path: &Path) -> Result<(), ConfigError> {
-    if let Some(proxy) = values.proxy.as_deref()
-        && proxy_has_credentials(proxy)
-    {
-        return Err(ConfigError::ProxyCredentials {
-            path: path.to_owned(),
-        });
-    }
+/// Every OTHER key already in the file — including ones churl doesn't model,
+/// and every untouched panel-managed key — survives byte-for-byte, comments
+/// and all: only touched keys are set via the DOM, never a wholesale
+/// re-serialize (and [`set_or_remove_str`]/[`set_or_remove_u64`]/etc. skip
+/// the DOM write entirely when the value would not actually change, so even
+/// a touched-but-unchanged key's decor survives).
+///
+/// A credential-bearing proxy ([`proxy_has_credentials`]) is never written —
+/// but unlike every other knob, it does not block the rest of the save: see
+/// [`SaveOutcome::proxy_skipped`] (FIX 4 — a save must not silently strip
+/// credentials, but refusing the WHOLE save over one knob is worse than
+/// skipping just that one).
+pub fn save_defaults(edits: &SettingsDefaults, path: &Path) -> Result<SaveOutcome, ConfigError> {
+    let proxy_skipped = matches!(&edits.proxy, Some(Some(p)) if proxy_has_credentials(p));
 
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|source| ConfigError::Write {
@@ -783,105 +881,128 @@ pub fn save_defaults(values: &SettingsDefaults, path: &Path) -> Result<(), Confi
         }
     };
 
-    let theme = (values.theme != "dark").then_some(values.theme.as_str());
-    set_or_remove_str(&mut doc, "theme", theme);
-    let leader_key = (values.leader_key != "space").then_some(values.leader_key.as_str());
-    set_or_remove_str(&mut doc, "leader_key", leader_key);
-    let timeout_secs = (values.timeout_secs != crate::http::DEFAULT_TIMEOUT.as_secs())
-        .then_some(values.timeout_secs);
-    set_or_remove_u64(&mut doc, "timeout_secs", timeout_secs);
-    let max_body_bytes = (values.max_body_bytes != crate::http::DEFAULT_MAX_BODY_BYTES)
-        .then_some(values.max_body_bytes);
-    set_or_remove_u64(&mut doc, "max_body_bytes", max_body_bytes);
-    let url_edit = (values.url_edit != UrlEditMode::default()).then_some(match values.url_edit {
-        UrlEditMode::Inline => "inline",
-        UrlEditMode::Popup => "popup",
-    });
-    set_or_remove_str(&mut doc, "url_edit", url_edit);
-    let secret_policy = (values.secret_policy != crate::secrets::SecretPolicy::default())
-        .then_some(match values.secret_policy {
-            crate::secrets::SecretPolicy::Strict => "strict",
-            crate::secrets::SecretPolicy::Warn => "warn",
+    if let Some(theme) = &edits.theme {
+        let v = (theme != "dark").then_some(theme.as_str());
+        set_or_remove_str(&mut doc, "theme", v);
+    }
+    if let Some(leader_key) = &edits.leader_key {
+        let v = (leader_key != "space").then_some(leader_key.as_str());
+        set_or_remove_str(&mut doc, "leader_key", v);
+    }
+    if let Some(timeout_secs) = edits.timeout_secs {
+        let v = (timeout_secs != crate::http::DEFAULT_TIMEOUT.as_secs()).then_some(timeout_secs);
+        set_or_remove_u64(&mut doc, "timeout_secs", v);
+    }
+    if let Some(max_body_bytes) = edits.max_body_bytes {
+        let v = (max_body_bytes != crate::http::DEFAULT_MAX_BODY_BYTES).then_some(max_body_bytes);
+        set_or_remove_u64(&mut doc, "max_body_bytes", v);
+    }
+    if let Some(url_edit) = edits.url_edit {
+        let v = (url_edit != UrlEditMode::default()).then_some(match url_edit {
+            UrlEditMode::Inline => "inline",
+            UrlEditMode::Popup => "popup",
         });
-    set_or_remove_str(&mut doc, "secret_policy", secret_policy);
-    let redirect =
-        (values.redirect != RedirectPolicy::default()).then_some(match values.redirect {
+        set_or_remove_str(&mut doc, "url_edit", v);
+    }
+    if let Some(secret_policy) = edits.secret_policy {
+        let v = (secret_policy != crate::secrets::SecretPolicy::default()).then_some(
+            match secret_policy {
+                crate::secrets::SecretPolicy::Strict => "strict",
+                crate::secrets::SecretPolicy::Warn => "warn",
+            },
+        );
+        set_or_remove_str(&mut doc, "secret_policy", v);
+    }
+    if let Some(redirect) = edits.redirect {
+        let v = (redirect != RedirectPolicy::default()).then_some(match redirect {
             RedirectPolicy::Strip => "strip",
             RedirectPolicy::Strict => "strict",
             RedirectPolicy::FollowAll => "follow-all",
         });
-    set_or_remove_str(&mut doc, "redirect", redirect);
-    set_or_remove_str(&mut doc, "proxy", values.proxy.as_deref());
-    set_or_remove_bool(&mut doc, "insecure", values.insecure, false);
-    set_or_remove_bool(&mut doc, "cookies", values.cookies, false);
-    set_or_remove_bool(&mut doc, "debug", values.debug, false);
+        set_or_remove_str(&mut doc, "redirect", v);
+    }
+    // Proxy: untouched (`None`) leaves the key alone entirely; touched-and-
+    // credentialed skips the key (never written, never removed — see
+    // `proxy_skipped` above); touched-and-clean sets or clears it normally.
+    if let Some(proxy) = &edits.proxy
+        && !proxy_skipped
+    {
+        set_or_remove_str(&mut doc, "proxy", proxy.as_deref());
+    }
+    if let Some(insecure) = edits.insecure {
+        set_or_remove_bool(&mut doc, "insecure", insecure, false);
+    }
+    if let Some(cookies) = edits.cookies {
+        set_or_remove_bool(&mut doc, "cookies", cookies, false);
+    }
+    if let Some(debug) = edits.debug {
+        set_or_remove_bool(&mut doc, "debug", debug, false);
+    }
 
     let load_defaults = crate::load::LoadCaps::default();
-    let caps = values.load_caps;
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "load",
-        "warn_total",
-        (caps.warn_total != load_defaults.warn_total).then_some(caps.warn_total as u64),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "load",
-        "warn_concurrency",
-        (caps.warn_concurrency != load_defaults.warn_concurrency)
-            .then_some(caps.warn_concurrency as u64),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "load",
-        "max_total",
-        (caps.max_total != load_defaults.max_total).then_some(caps.max_total as u64),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "load",
-        "max_concurrency",
-        (caps.max_concurrency != load_defaults.max_concurrency)
-            .then_some(caps.max_concurrency as u64),
-    );
+    if let Some(v) = edits.load_warn_total {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "load",
+            "warn_total",
+            (v != load_defaults.warn_total).then_some(v as u64),
+        );
+    }
+    if let Some(v) = edits.load_warn_concurrency {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "load",
+            "warn_concurrency",
+            (v != load_defaults.warn_concurrency).then_some(v as u64),
+        );
+    }
+    if let Some(v) = edits.load_max_total {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "load",
+            "max_total",
+            (v != load_defaults.max_total).then_some(v as u64),
+        );
+    }
+    if let Some(v) = edits.load_max_concurrency {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "load",
+            "max_concurrency",
+            (v != load_defaults.max_concurrency).then_some(v as u64),
+        );
+    }
 
-    // The [advanced] defaults mirror `Config::advanced_limits`'s own fallback:
-    // a fresh `LoadConfig::default()` for concurrency/total, and the ALREADY-
-    // panel-managed base timeout/body-cap for the other two — an advanced
-    // override is only meaningful relative to the base knob it overrides.
+    // `[advanced].concurrency`/`total` have no top-level alias — the ONLY
+    // place they live. `[advanced].timeout_secs`/`body_cap_bytes` are NOT
+    // written here at all: they would always equal the just-written top-level
+    // `timeout_secs`/`max_body_bytes` (same live field, see the struct doc),
+    // so an override would always immediately prune back to nothing anyway.
     let run_defaults = crate::load::LoadConfig::default();
-    let advanced = values.advanced;
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "advanced",
-        "concurrency",
-        (advanced.concurrency != run_defaults.concurrency).then_some(advanced.concurrency as u64),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "advanced",
-        "total",
-        (advanced.total != run_defaults.total).then_some(advanced.total as u64),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "advanced",
-        "body_cap_bytes",
-        (advanced.body_cap_bytes != values.max_body_bytes).then_some(advanced.body_cap_bytes),
-    );
-    set_or_remove_subtable_u64(
-        &mut doc,
-        "advanced",
-        "timeout_secs",
-        (advanced.timeout_secs != values.timeout_secs).then_some(advanced.timeout_secs),
-    );
+    if let Some(v) = edits.advanced_concurrency {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "advanced",
+            "concurrency",
+            (v != run_defaults.concurrency).then_some(v as u64),
+        );
+    }
+    if let Some(v) = edits.advanced_total {
+        set_or_remove_subtable_u64(
+            &mut doc,
+            "advanced",
+            "total",
+            (v != run_defaults.total).then_some(v as u64),
+        );
+    }
 
     crate::persistence::atomic_write(path, doc.to_string().as_bytes()).map_err(|source| {
         ConfigError::Write {
             path: path.to_owned(),
             source,
         }
-    })
+    })?;
+    Ok(SaveOutcome { proxy_skipped })
 }
 
 /// The path [`save_defaults`] should target: an explicit [`CONFIG_PATH_ENV`]
@@ -1737,8 +1858,33 @@ mod tests {
 
     /// Serializes access to the `CHURL_CONFIG` env var across the tests below
     /// that set it — `cargo test` runs this crate's tests on multiple threads
-    /// in one process, and env vars are process-global.
+    /// in one process, and env vars are process-global. `unwrap_or_else` on
+    /// lock rather than `unwrap`: a panic inside one guarded test must not
+    /// poison the mutex and cascade-fail every sibling that locks after it.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard for `CHURL_CONFIG`: sets it under [`ENV_LOCK`] on
+    /// construction, clears it on drop — so a test can never leave the env
+    /// var set for the next one (early return, assertion panic, or otherwise)
+    /// the way a bare `set_var`/`remove_var` pair could. Mirrors the TUI
+    /// crate's `SettingsEnvGuard`.
+    struct ConfigPathEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfigPathEnvGuard {
+        fn new(path: &Path) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe { std::env::set_var(CONFIG_PATH_ENV, path) };
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for ConfigPathEnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(CONFIG_PATH_ENV) };
+        }
+    }
 
     #[test]
     fn save_defaults_round_trip_preserves_comment_and_unknown_key() {
@@ -1750,12 +1896,12 @@ mod tests {
         )
         .unwrap();
 
-        // theme stays "light" (unchanged — still non-default, must survive).
-        let values = SettingsDefaults {
-            theme: "light".to_owned(),
+        // theme touched, still "light" — must survive alongside the comment.
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()),
             ..SettingsDefaults::default()
         };
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1769,17 +1915,65 @@ mod tests {
         assert!(text.contains("theme = \"light\""), "{text}");
     }
 
+    /// FIX 3's exact reviewer repro: editing ONE knob must never disturb an
+    /// untouched key's value OR its inline comment — with the sparse writer
+    /// this now holds structurally (an untouched field is never even passed
+    /// to `set_or_remove_*`), not just by the differs-check.
+    #[test]
+    fn save_defaults_editing_one_knob_preserves_another_untouched_keys_inline_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "timeout_secs = 90 # prod SLA\n").unwrap();
+
+        // Only theme is touched this session — timeout_secs must never be
+        // read from or written to the document at all.
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()),
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&edits, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("timeout_secs = 90 # prod SLA"),
+            "an untouched key's value AND inline comment must survive byte-for-byte:\n{text}"
+        );
+        assert!(text.contains("theme = \"light\""), "{text}");
+    }
+
+    /// FIX 3's differs-check: a touched key whose new value is IDENTICAL to
+    /// what's already on disk must not churn the DOM (and so must not lose
+    /// that key's inline comment either) — a no-op write stays a no-op.
+    #[test]
+    fn save_defaults_touched_but_unchanged_value_preserves_inline_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"light\" # matches my terminal\n").unwrap();
+
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()), // touched, but same value already on disk
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&edits, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("theme = \"light\" # matches my terminal"),
+            "a touched-but-unchanged value must not churn the key's decor:\n{text}"
+        );
+    }
+
     #[test]
     fn save_defaults_sets_a_non_default_value() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        let values = SettingsDefaults {
-            timeout_secs: 90,
-            proxy: Some("http://proxy.local:3128".to_owned()),
+        let edits = SettingsDefaults {
+            timeout_secs: Some(90),
+            proxy: Some(Some("http://proxy.local:3128".to_owned())),
             ..SettingsDefaults::default()
         };
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("timeout_secs = 90"), "{text}");
@@ -1790,34 +1984,45 @@ mod tests {
     }
 
     #[test]
-    fn save_defaults_setting_back_to_default_removes_the_key() {
+    fn save_defaults_touched_and_setting_back_to_default_removes_the_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "timeout_secs = 90\n").unwrap();
 
-        let values = SettingsDefaults::default(); // timeout_secs back at the built-in default
-        save_defaults(&values, &path).unwrap();
+        // Touched (the user reset it in the panel) and back at the built-in
+        // default — a deliberate reset prunes the stale key.
+        let edits = SettingsDefaults {
+            timeout_secs: Some(crate::http::DEFAULT_TIMEOUT.as_secs()),
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&edits, &path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             !text.contains("timeout_secs"),
-            "resetting to default must prune the stale key:\n{text}"
+            "resetting a touched key to its default must prune the stale key:\n{text}"
         );
     }
 
     #[test]
-    fn save_defaults_load_subtable_prunes_to_nothing_when_all_default() {
+    fn save_defaults_untouched_key_is_never_pruned_even_if_stale() {
+        // The old whole-snapshot writer would prune a stale [load] override
+        // the moment ANY save happened, even if the user never touched Load
+        // this session. The sparse writer must leave it alone entirely.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[load]\nwarn_total = 25\n").unwrap();
 
-        let values = SettingsDefaults::default(); // load_caps at the built-in default
-        save_defaults(&values, &path).unwrap();
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()), // touches a DIFFERENT knob
+            ..SettingsDefaults::default()
+        };
+        save_defaults(&edits, &path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !text.contains("[load]") && !text.contains("warn_total"),
-            "an all-default [load] table must be pruned entirely:\n{text}"
+            text.contains("[load]") && text.contains("warn_total = 25"),
+            "an untouched [load] override must survive a save that edits a different knob:\n{text}"
         );
     }
 
@@ -1826,14 +2031,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        let values = SettingsDefaults {
-            load_caps: crate::load::LoadCaps {
-                max_concurrency: 64,
-                ..crate::load::LoadCaps::default()
-            },
+        let edits = SettingsDefaults {
+            load_max_concurrency: Some(64),
             ..SettingsDefaults::default()
         };
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let load = doc["load"].as_table().expect("[load] table present");
@@ -1844,23 +2046,37 @@ mod tests {
         );
     }
 
+    /// FIX 4: a panel-typed credentialed proxy must never block the rest of
+    /// the save — only the proxy key is skipped (never written, never
+    /// removed), while every other touched knob in the same call persists.
     #[test]
-    fn save_defaults_refuses_credentialed_proxy() {
+    fn save_defaults_skips_credentialed_proxy_but_persists_other_touched_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        let values = SettingsDefaults {
-            proxy: Some("http://user:pass@proxy.local:3128".to_owned()),
+        let edits = SettingsDefaults {
+            proxy: Some(Some("http://user:pass@proxy.local:3128".to_owned())),
+            timeout_secs: Some(90),
             ..SettingsDefaults::default()
         };
-        let err = save_defaults(&values, &path).unwrap_err();
+        let outcome = save_defaults(&edits, &path).unwrap();
         assert!(
-            matches!(err, ConfigError::ProxyCredentials { .. }),
-            "expected ProxyCredentials, got {err:?}"
+            outcome.proxy_skipped,
+            "a credentialed proxy must be reported as skipped"
+        );
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("timeout_secs = 90"),
+            "other touched knobs must still persist:\n{text}"
         );
         assert!(
-            !path.exists(),
-            "a refused write must not touch the file at all"
+            !text.contains("proxy"),
+            "the proxy key must not be written at all:\n{text}"
+        );
+        assert!(
+            !text.contains("user:pass") && !text.contains("pass"),
+            "credentials must never reach disk:\n{text}"
         );
     }
 
@@ -1878,11 +2094,11 @@ mod tests {
         )
         .unwrap();
 
-        let values = SettingsDefaults {
-            timeout_secs: 45,
+        let edits = SettingsDefaults {
+            timeout_secs: Some(45),
             ..SettingsDefaults::default()
         };
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1897,12 +2113,10 @@ mod tests {
 
     #[test]
     fn resolve_settings_path_honors_churl_config_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("nested").join("config.toml");
-        unsafe { std::env::set_var(CONFIG_PATH_ENV, &target) };
+        let _env = ConfigPathEnvGuard::new(&target);
         let resolved = resolve_settings_path().unwrap();
-        unsafe { std::env::remove_var(CONFIG_PATH_ENV) };
         assert_eq!(resolved, target);
     }
 
@@ -1910,43 +2124,38 @@ mod tests {
     fn save_defaults_creates_missing_parent_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("config.toml");
-        let values = SettingsDefaults {
-            timeout_secs: 45,
+        let edits = SettingsDefaults {
+            timeout_secs: Some(45),
             ..SettingsDefaults::default()
         };
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
         assert!(path.exists());
     }
 
     #[test]
     fn save_defaults_via_churl_config_then_load_round_trips_resolved_values() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("config.toml");
-        unsafe { std::env::set_var(CONFIG_PATH_ENV, &target) };
+        let _env = ConfigPathEnvGuard::new(&target);
 
-        let values = SettingsDefaults {
-            theme: "light".to_owned(),
-            timeout_secs: 77,
-            max_body_bytes: 2_048,
-            url_edit: UrlEditMode::Popup,
-            secret_policy: crate::secrets::SecretPolicy::Warn,
-            redirect: RedirectPolicy::FollowAll,
-            insecure: true,
-            cookies: true,
-            load_caps: crate::load::LoadCaps {
-                max_concurrency: 64,
-                ..crate::load::LoadCaps::default()
-            },
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()),
+            timeout_secs: Some(77),
+            max_body_bytes: Some(2_048),
+            url_edit: Some(UrlEditMode::Popup),
+            secret_policy: Some(crate::secrets::SecretPolicy::Warn),
+            redirect: Some(RedirectPolicy::FollowAll),
+            insecure: Some(true),
+            cookies: Some(true),
+            load_max_concurrency: Some(64),
             ..SettingsDefaults::default()
         };
 
         let path = resolve_settings_path().unwrap();
         assert_eq!(path, target);
-        save_defaults(&values, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let loaded = load_global_config().unwrap();
-        unsafe { std::env::remove_var(CONFIG_PATH_ENV) };
 
         assert_eq!(loaded.theme.as_deref(), Some("light"));
         assert_eq!(loaded.timeout(), Duration::from_secs(77));
@@ -1964,11 +2173,11 @@ mod tests {
 
     #[test]
     fn settings_defaults_from_config_default_matches_default() {
-        // A default Config resolves to the exact same SettingsDefaults as
-        // SettingsDefaults::default() (both express the built-in defaults).
+        // A default Config resolves to the exact same ResolvedSettings as
+        // ResolvedSettings::default() (both express the built-in defaults).
         assert_eq!(
-            SettingsDefaults::from_config(&Config::default()).unwrap(),
-            SettingsDefaults::default()
+            ResolvedSettings::from_config(&Config::default()).unwrap(),
+            ResolvedSettings::default()
         );
     }
 
@@ -1976,23 +2185,23 @@ mod tests {
     fn settings_defaults_from_config_reflects_a_saved_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let saved = SettingsDefaults {
-            theme: "light".to_owned(),
-            timeout_secs: 45,
-            insecure: true,
+        let edits = SettingsDefaults {
+            theme: Some("light".to_owned()),
+            timeout_secs: Some(45),
+            insecure: Some(true),
             ..SettingsDefaults::default()
         };
-        save_defaults(&saved, &path).unwrap();
+        save_defaults(&edits, &path).unwrap();
 
         let loaded = load_config(&path).unwrap();
-        let resolved = SettingsDefaults::from_config(&loaded).unwrap();
+        let resolved = ResolvedSettings::from_config(&loaded).unwrap();
         assert_eq!(resolved.theme, "light");
         assert_eq!(resolved.timeout_secs, 45);
         assert!(resolved.insecure);
         // Untouched knobs stay at the built-in default.
         assert_eq!(
             resolved.max_body_bytes,
-            SettingsDefaults::default().max_body_bytes
+            ResolvedSettings::default().max_body_bytes
         );
     }
 
@@ -2002,7 +2211,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "redirect = \"nope\"\n").unwrap();
         let loaded = load_config(&path).unwrap();
-        let err = SettingsDefaults::from_config(&loaded).unwrap_err();
+        let err = ResolvedSettings::from_config(&loaded).unwrap_err();
         assert!(matches!(err, ConfigError::BadValue { .. }));
     }
 }

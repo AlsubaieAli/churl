@@ -1,12 +1,13 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
+assertion_line: 1905
 expression: snap
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
 │           ┏ Settings · Debug ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
-│           ┃  ● Debug capture     on                              ┃           │
+│           ┃    Debug capture     on                              ┃           │
 │           ┃    Advanced (debug)  ↳ concurrency/total/body-cap/tim┃           │
 │           ┃┌ Advanced limits (debug-gated) ─────────────────────┐┃           │
 │           ┃│▸   concurrency       5                             │┃           │

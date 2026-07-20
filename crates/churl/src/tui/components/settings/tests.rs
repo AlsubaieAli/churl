@@ -34,7 +34,8 @@ fn snapshot(debug_enabled: bool, cookies: Vec<CookieView>) -> SettingsSnapshot {
         leader_key: DEFAULT_LEADER_KEY.to_owned(),
         debug_enabled,
         advanced: default_limits(),
-        persisted: churl_core::config::SettingsDefaults::default(),
+        persisted: churl_core::config::ResolvedSettings::default(),
+        touched: std::collections::HashSet::new(),
     }
 }
 

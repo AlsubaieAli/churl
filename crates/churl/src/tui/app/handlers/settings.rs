@@ -38,7 +38,16 @@ impl App {
     /// installed), and the error is shown inline in the panel footer — it must
     /// NEVER propagate out of here, or the run loop's `handle_key(key)?` would tear
     /// down the whole session over a typo.
+    ///
+    /// FIX 1 (owner decision): every outcome arm below that actually applies a
+    /// change also inserts the matching [`crate::tui::components::settings::SettingKey`]
+    /// into [`App::settings_touched`] — ONLY on the branch that truly changed
+    /// state (never on a rejected/rolled-back edit), and marked HERE rather
+    /// than inside a shared helper (`toggle_debug`, `toggle_insecure`) that a
+    /// non-panel keybinding also calls, so a global shortcut never gets
+    /// mistaken for a panel edit.
     pub(in crate::tui::app) fn handle_settings_key(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::tui::components::settings::SettingKey;
         let Mode::Settings(state) = &mut self.mode else {
             return Ok(());
         };
@@ -49,6 +58,7 @@ impl App {
             SettingsOutcome::ApplyProxy(proxy) => {
                 match self.with_client_rebuild(|s| s.session_proxy = proxy) {
                     Ok(()) => {
+                        self.settings_touched.insert(SettingKey::Proxy);
                         let msg = match &self.session_proxy {
                             Some(p) => format!("proxy set: {}", mask_proxy(p)),
                             None => "proxy cleared (using env proxy)".to_owned(),
@@ -61,7 +71,10 @@ impl App {
             }
             SettingsOutcome::ToggleInsecure => {
                 match self.with_client_rebuild(|s| s.session_insecure = !s.session_insecure) {
-                    Ok(()) => self.notify(insecure_message(self.session_insecure)),
+                    Ok(()) => {
+                        self.settings_touched.insert(SettingKey::Insecure);
+                        self.notify(insecure_message(self.session_insecure));
+                    }
                     Err(err) => self.set_settings_message(format!("could not apply — {err}")),
                 }
                 self.refresh_settings_panel();
@@ -69,6 +82,7 @@ impl App {
             SettingsOutcome::ToggleCookies => {
                 match self.with_client_rebuild(|s| s.cookies_enabled = !s.cookies_enabled) {
                     Ok(()) => {
+                        self.settings_touched.insert(SettingKey::Cookies);
                         // Persist on the way off, so the in-RAM jar's persistent
                         // cookies are captured before the client stops receiving new
                         // ones. (Only after a successful rebuild — a rolled-back
@@ -87,6 +101,8 @@ impl App {
                 self.refresh_settings_panel();
             }
             SettingsOutcome::DeleteCookie { domain, name } => {
+                // Jar CONTENTS are not a settings-panel-managed knob (they live
+                // in `state.sqlite`, not `config.toml`) — no `SettingKey` to mark.
                 let removed = self.cookie_jar.delete(&domain, &name);
                 if removed {
                     self.persist_cookie_jar();
@@ -105,25 +121,34 @@ impl App {
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyAdvanced { field, value } => {
+                // Marks the right `SettingKey` internally, on exactly the
+                // branches that actually change state (see its doc).
                 self.apply_advanced_limit(field, value);
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ToggleDebug => {
+                // `toggle_debug` is SHARED with the global `<leader>D` shortcut
+                // (see its doc) — touched is marked HERE, not inside it, so
+                // `<leader>D` outside the panel never marks it.
                 self.toggle_debug();
+                self.settings_touched.insert(SettingKey::Debug);
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyRedirect(policy) => {
                 self.execute_options.redirect = policy;
+                self.settings_touched.insert(SettingKey::Redirect);
                 self.notify(format!("redirect policy set to {}", redirect_label(policy)));
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplyUrlEdit(mode) => {
                 self.set_url_edit_mode(mode);
+                self.settings_touched.insert(SettingKey::UrlEdit);
                 self.notify(format!("URL edit mode set to {}", url_edit_label(mode)));
                 self.refresh_settings_panel();
             }
             SettingsOutcome::ApplySecretPolicy(policy) => {
                 self.set_secret_policy(policy);
+                self.settings_touched.insert(SettingKey::SecretPolicy);
                 self.notify(format!(
                     "secret policy set to {}",
                     secret_policy_label(policy)
@@ -132,6 +157,7 @@ impl App {
             }
             SettingsOutcome::ApplyLoadCap { field, value } => {
                 field.set(&mut self.load_caps, value);
+                self.settings_touched.insert(field.setting_key());
                 self.notify(format!("{} set to {value}", field.label()));
                 self.refresh_settings_panel();
             }
@@ -140,6 +166,7 @@ impl App {
                     Ok(theme) => {
                         self.theme = theme;
                         self.theme_name = name.clone();
+                        self.settings_touched.insert(SettingKey::Theme);
                         self.highlight_tx =
                             highlight::spawn(self.tx.clone(), self.theme.is_light());
                         self.notify(format!("theme set to {name}"));
@@ -150,6 +177,7 @@ impl App {
             }
             SettingsOutcome::ApplyLeaderKey(combo) => {
                 self.leader_key = combo.clone();
+                self.settings_touched.insert(SettingKey::LeaderKey);
                 self.notify(format!(
                     "leader key set to {combo} (applies on next launch)"
                 ));
@@ -203,6 +231,13 @@ impl App {
     /// an in-flight run, so there is nothing to confirm y/n against).
     /// Body-cap/timeout have no guardrail cap to check — any positive value
     /// (already enforced by the panel's own edit gate) applies directly.
+    ///
+    /// This fn is reached ONLY from the panel's `ApplyAdvanced` outcome (see
+    /// its one call site in [`Self::handle_settings_key`]), so it is safe —
+    /// and the clearest place — to mark [`crate::tui::components::settings::SettingKey`]
+    /// touched here, on exactly the branches that actually change state (a
+    /// `Refuse`d concurrency/total edit changes nothing, so it must not mark
+    /// touched — that would let a REJECTED edit persist the prior value).
     fn apply_advanced_limit(&mut self, field: AdvancedField, value: u64) {
         match field {
             AdvancedField::Concurrency | AdvancedField::Total => {
@@ -224,6 +259,7 @@ impl App {
                     churl_core::load::LoadCheck::Ok | churl_core::load::LoadCheck::Warn(_) => {
                         self.advanced_limits.concurrency = candidate.concurrency;
                         self.advanced_limits.total = candidate.total;
+                        self.settings_touched.insert(field.setting_key());
                         self.notify(format!("advanced {} set to {value}", field.label()));
                     }
                 }
@@ -231,11 +267,17 @@ impl App {
             AdvancedField::BodyCapBytes => {
                 self.advanced_limits.body_cap_bytes = value;
                 self.execute_options.max_body_bytes = value;
+                self.settings_touched.insert(field.setting_key());
                 self.notify(format!("advanced body cap set to {value} bytes"));
             }
             AdvancedField::TimeoutSecs => {
                 self.advanced_limits.timeout_secs = value;
                 self.client_timeout = Duration::from_secs(value);
+                // Marked touched unconditionally, matching the (pre-existing)
+                // behaviour above: `advanced_limits.timeout_secs` is NOT
+                // rolled back on a rebuild failure, so the working copy really
+                // did change either way.
+                self.settings_touched.insert(field.setting_key());
                 match self.rebuild_client() {
                     Ok(()) => self.notify(format!("advanced timeout set to {value}s")),
                     Err(err) => self.set_settings_message(format!("could not apply — {err}")),
@@ -252,40 +294,90 @@ impl App {
         }
     }
 
-    /// The current session's working copy, assembled into the shape
-    /// [`churl_core::config::save_defaults`] persists (M8.5 Wave 3). Request's
-    /// `timeout_secs`/`max_body_bytes` and Debug's Advanced `timeout`/`body cap`
-    /// share the SAME live fields (`self.advanced_limits`, see
-    /// [`crate::tui::components::settings::RequestRow`]'s doc) — passing that
-    /// one resolved value into both `timeout_secs`/`max_body_bytes` AND
-    /// `advanced.timeout_secs`/`body_cap_bytes` here means the writer's own
-    /// equals-the-base-value pruning naturally drops the redundant `[advanced]`
-    /// override key, leaving a clean top-level `timeout_secs`/`max_body_bytes`.
-    fn settings_defaults(&self) -> churl_core::config::SettingsDefaults {
+    /// The current session's working copy, assembled into the SPARSE shape
+    /// [`churl_core::config::save_defaults`] persists (FIX 1: only a knob in
+    /// [`Self::settings_touched`] gets a `Some` here — everything else is
+    /// `None`, so the writer never even reads its on-disk key, whatever the
+    /// live session value is). Request's `timeout_secs`/`max_body_bytes` and
+    /// Debug's Advanced `timeout`/`body cap` alias the SAME live field
+    /// (`self.advanced_limits`, see
+    /// [`crate::tui::components::settings::RequestRow`]'s doc) — and the SAME
+    /// [`crate::tui::components::settings::SettingKey`] — so editing either
+    /// surface touches the one field this reads.
+    fn settings_edits(&self) -> churl_core::config::SettingsDefaults {
+        use crate::tui::components::settings::SettingKey;
+        let t = &self.settings_touched;
         churl_core::config::SettingsDefaults {
-            theme: self.theme_name.clone(),
-            leader_key: self.leader_key.clone(),
-            timeout_secs: self.advanced_limits.timeout_secs,
-            max_body_bytes: self.advanced_limits.body_cap_bytes,
-            url_edit: self.url_edit_mode,
-            secret_policy: self.secret_policy,
-            redirect: self.execute_options.redirect,
-            proxy: self.session_proxy.clone(),
-            insecure: self.session_insecure,
-            cookies: self.cookies_enabled,
-            debug: self.debug_enabled,
-            load_caps: self.load_caps,
-            advanced: self.advanced_limits,
+            theme: t
+                .contains(&SettingKey::Theme)
+                .then(|| self.theme_name.clone()),
+            leader_key: t
+                .contains(&SettingKey::LeaderKey)
+                .then(|| self.leader_key.clone()),
+            timeout_secs: t
+                .contains(&SettingKey::Timeout)
+                .then_some(self.advanced_limits.timeout_secs),
+            max_body_bytes: t
+                .contains(&SettingKey::MaxBodyBytes)
+                .then_some(self.advanced_limits.body_cap_bytes),
+            url_edit: t
+                .contains(&SettingKey::UrlEdit)
+                .then_some(self.url_edit_mode),
+            secret_policy: t
+                .contains(&SettingKey::SecretPolicy)
+                .then_some(self.secret_policy),
+            redirect: t
+                .contains(&SettingKey::Redirect)
+                .then_some(self.execute_options.redirect),
+            proxy: t
+                .contains(&SettingKey::Proxy)
+                .then(|| self.session_proxy.clone()),
+            insecure: t
+                .contains(&SettingKey::Insecure)
+                .then_some(self.session_insecure),
+            cookies: t
+                .contains(&SettingKey::Cookies)
+                .then_some(self.cookies_enabled),
+            debug: t.contains(&SettingKey::Debug).then_some(self.debug_enabled),
+            load_warn_total: t
+                .contains(&SettingKey::LoadWarnTotal)
+                .then_some(self.load_caps.warn_total),
+            load_warn_concurrency: t
+                .contains(&SettingKey::LoadWarnConcurrency)
+                .then_some(self.load_caps.warn_concurrency),
+            load_max_total: t
+                .contains(&SettingKey::LoadMaxTotal)
+                .then_some(self.load_caps.max_total),
+            load_max_concurrency: t
+                .contains(&SettingKey::LoadMaxConcurrency)
+                .then_some(self.load_caps.max_concurrency),
+            advanced_concurrency: t
+                .contains(&SettingKey::AdvancedConcurrency)
+                .then_some(self.advanced_limits.concurrency),
+            advanced_total: t
+                .contains(&SettingKey::AdvancedTotal)
+                .then_some(self.advanced_limits.total),
         }
     }
 
     /// Persists the current working copy to `config.toml` (M8.5 Wave 3,
-    /// `s` inside the Settings panel). Never silent: a confirm toast names the
-    /// written file on success; a failure — including a refused
-    /// credential-bearing proxy — surfaces as a loud inline error in the
-    /// panel's own message slot (visible regardless of which level/category
-    /// is open) rather than being swallowed.
+    /// `s` inside the Settings panel) — ONLY the knobs actually edited in the
+    /// panel this session (FIX 1: [`Self::settings_edits`] is sparse). Never
+    /// silent: a confirm toast names the written file on success; a write
+    /// failure surfaces as a loud inline error in the panel's own message
+    /// slot (visible regardless of which level/category is open) rather than
+    /// being swallowed.
+    ///
+    /// A panel-typed credentialed proxy does NOT fail the save (FIX 4): the
+    /// writer skips just that key and reports it via
+    /// [`churl_core::config::SaveOutcome::proxy_skipped`], surfaced here as a
+    /// toast rather than an error — every OTHER touched knob still persisted.
+    /// The touched-set clears on success EXCEPT `Proxy` when it was skipped:
+    /// that knob genuinely was not saved, so its dirty dot must stay lit
+    /// (clearing it would silently claim persistence that didn't happen) —
+    /// the next `s` retries it.
     fn save_settings_defaults(&mut self) {
+        use crate::tui::components::settings::SettingKey;
         let path = match churl_core::config::resolve_settings_path() {
             Ok(path) => path,
             Err(err) => {
@@ -293,9 +385,19 @@ impl App {
                 return;
             }
         };
-        let values = self.settings_defaults();
-        match churl_core::config::save_defaults(&values, &path) {
-            Ok(()) => self.notify(format!("saved defaults to {}", path.display())),
+        let edits = self.settings_edits();
+        match churl_core::config::save_defaults(&edits, &path) {
+            Ok(outcome) if outcome.proxy_skipped => {
+                self.settings_touched.retain(|k| *k == SettingKey::Proxy);
+                self.notify(format!(
+                    "saved defaults to {} — proxy not persisted (contains credentials)",
+                    path.display()
+                ));
+            }
+            Ok(_) => {
+                self.settings_touched.clear();
+                self.notify(format!("saved defaults to {}", path.display()));
+            }
             Err(err) => self.set_settings_message(format!("save failed — {err}")),
         }
     }
@@ -307,11 +409,13 @@ impl App {
     /// from disk every time (config.toml is tiny), so it never goes stale
     /// across a session even if something else edits the file; a read/parse
     /// failure degrades to the built-in defaults rather than blocking the
-    /// panel (the indicator is advisory, never load-bearing).
+    /// panel (the indicator is advisory, never load-bearing). `touched`
+    /// mirrors [`Self::settings_touched`] — see
+    /// [`crate::tui::components::settings::SettingKey`]'s doc.
     fn settings_snapshot(&self) -> crate::tui::components::settings::SettingsSnapshot {
         let persisted = churl_core::config::resolve_settings_path()
             .and_then(|path| churl_core::config::load_config(&path))
-            .and_then(|config| churl_core::config::SettingsDefaults::from_config(&config))
+            .and_then(|config| churl_core::config::ResolvedSettings::from_config(&config))
             .unwrap_or_default();
         crate::tui::components::settings::SettingsSnapshot {
             redirect: self.execute_options.redirect,
@@ -327,6 +431,7 @@ impl App {
             debug_enabled: self.debug_enabled,
             advanced: self.advanced_limits,
             persisted,
+            touched: self.settings_touched.clone(),
         }
     }
 

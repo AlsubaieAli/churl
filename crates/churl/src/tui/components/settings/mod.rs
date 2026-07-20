@@ -12,6 +12,8 @@
 //! did); a knob with no cheap live seam (only `leader_key` today) updates the
 //! working copy only and takes effect next launch — see [`SettingsOutcome::ApplyLeaderKey`].
 
+use std::collections::HashSet;
+
 use churl_core::config::{RedirectPolicy, ResolvedAdvancedLimits, UrlEditMode};
 use churl_core::cookies::CookieView;
 use churl_core::load::LoadCaps;
@@ -32,6 +34,48 @@ pub(crate) const DEFAULT_THEME_NAME: &str = "dark";
 
 /// The built-in default leader-key combo string (crokey's `key!(space)`).
 pub(crate) const DEFAULT_LEADER_KEY: &str = "space";
+
+/// Identifies one knob the Settings panel can persist independently — the
+/// unit of "touched this session" tracking (owner-decided fix: Save must
+/// persist ONLY the knobs the user actually edited IN THE PANEL this
+/// session, never a CLI/session/workspace-forced value the panel merely
+/// displays). `App` owns a `HashSet<SettingKey>` marking exactly which knobs
+/// were edited through a panel outcome; [`churl_core::config::SettingsDefaults`]
+/// (the sparse write-path shape) and the dirty-dot render both key off it.
+///
+/// `Copy + Eq + Hash` so a `HashSet<SettingKey>` is a cheap touched-set.
+/// Deliberately flat (no nested `Load(LoadRow)`/`Advanced(AdvancedField)`
+/// variants) so every call site that inserts into the touched-set is a
+/// direct, greppable `SettingKey::X` — easy to audit for a missed knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingKey {
+    Theme,
+    LeaderKey,
+    /// Request's Timeout row AND Debug's Advanced `timeout` field — same
+    /// live session value (see [`RequestRow::Timeout`]'s doc).
+    Timeout,
+    /// Request's MaxBodyBytes row AND Debug's Advanced `body cap` field —
+    /// same live session value (see [`RequestRow::MaxBodyBytes`]'s doc).
+    MaxBodyBytes,
+    Redirect,
+    UrlEdit,
+    SecretPolicy,
+    Proxy,
+    Insecure,
+    Cookies,
+    /// The panel's Debug-category toggle row ONLY — the global `<leader>D`
+    /// shortcut shares the same underlying `debug_enabled` flag but must
+    /// NOT mark this touched (it is not a panel edit).
+    Debug,
+    LoadWarnTotal,
+    LoadWarnConcurrency,
+    LoadMaxTotal,
+    LoadMaxConcurrency,
+    /// Debug-category only — no top-level knob aliases this one.
+    AdvancedConcurrency,
+    /// Debug-category only — no top-level knob aliases this one.
+    AdvancedTotal,
+}
 
 /// The top-level navigation level. Menu → Panel is the whole of the outer nav;
 /// "editing a knob" is a THIRD level represented by [`SettingsState::editing`]
@@ -245,6 +289,16 @@ impl LoadRow {
             LoadRow::MaxConcurrency => caps.max_concurrency = value,
         }
     }
+
+    /// The [`SettingKey`] this row's touched-flag lives under.
+    pub(crate) fn setting_key(self) -> SettingKey {
+        match self {
+            LoadRow::WarnTotal => SettingKey::LoadWarnTotal,
+            LoadRow::WarnConcurrency => SettingKey::LoadWarnConcurrency,
+            LoadRow::MaxTotal => SettingKey::LoadMaxTotal,
+            LoadRow::MaxConcurrency => SettingKey::LoadMaxConcurrency,
+        }
+    }
 }
 
 /// Which row is selected within the Appearance category panel.
@@ -354,6 +408,19 @@ impl AdvancedField {
             AdvancedField::Total => limits.total as u64,
             AdvancedField::BodyCapBytes => limits.body_cap_bytes,
             AdvancedField::TimeoutSecs => limits.timeout_secs,
+        }
+    }
+
+    /// The [`SettingKey`] this field's touched-flag lives under. `BodyCapBytes`/
+    /// `TimeoutSecs` map onto the SAME keys as the Request category's rows
+    /// (`MaxBodyBytes`/`Timeout`) — they are the identical live session field
+    /// (see [`RequestRow`]'s doc), so editing either surface marks the one key.
+    pub(crate) fn setting_key(self) -> SettingKey {
+        match self {
+            AdvancedField::Concurrency => SettingKey::AdvancedConcurrency,
+            AdvancedField::Total => SettingKey::AdvancedTotal,
+            AdvancedField::BodyCapBytes => SettingKey::MaxBodyBytes,
+            AdvancedField::TimeoutSecs => SettingKey::Timeout,
         }
     }
 }
@@ -482,7 +549,12 @@ pub struct SettingsSnapshot {
     /// The dirty-indicator baseline: what's currently on disk, freshly
     /// re-read by the app on every open/refresh (best-effort — see
     /// [`SettingsState::persisted`]'s doc).
-    pub persisted: churl_core::config::SettingsDefaults,
+    pub persisted: churl_core::config::ResolvedSettings,
+    /// Mirrors `App`'s touched-set: exactly which [`SettingKey`]s were
+    /// edited THROUGH THE PANEL this session — drives both the dirty dot
+    /// (touched AND differs from `persisted`) and what a Save actually
+    /// writes. See [`SettingKey`]'s doc.
+    pub touched: HashSet<SettingKey>,
 }
 
 /// Full state of the open Settings panel.
@@ -529,11 +601,19 @@ pub struct SettingsState {
     /// Inline status/error message shown in the footer.
     pub message: Option<String>,
     /// Dirty-indicator baseline (best-effort): what's currently on disk. A row
-    /// whose working value differs from the matching field here renders a
-    /// dirty dot, mirroring the URL bar's convention. Refreshed alongside
-    /// everything else, so it never drifts stale mid-session; cleared to
-    /// match the working copy immediately on a successful Save.
-    pub persisted: churl_core::config::SettingsDefaults,
+    /// renders its dirty dot when its [`SettingKey`] is in [`Self::touched`]
+    /// AND its working value differs from the matching field here — NOT from
+    /// a bare value comparison (see [`SettingKey`]'s doc for why: a
+    /// CLI/session-forced value differing from disk must NOT show dirty, or
+    /// Save would look safe to fire when it would write nothing for that
+    /// knob). Refreshed alongside everything else, so it never drifts stale
+    /// mid-session.
+    pub persisted: churl_core::config::ResolvedSettings,
+    /// Exactly which knobs were edited THROUGH THIS PANEL this session (see
+    /// [`SettingKey`]'s doc). Mirrors `App::settings_touched`; cleared there
+    /// on a successful Save (this mirror follows on the next refresh), which
+    /// is what makes every dirty dot disappear together.
+    pub touched: HashSet<SettingKey>,
 }
 
 impl SettingsState {
@@ -566,6 +646,7 @@ impl SettingsState {
             editing: None,
             message: None,
             persisted: snapshot.persisted,
+            touched: snapshot.touched,
         }
     }
 
@@ -586,6 +667,7 @@ impl SettingsState {
         self.debug_enabled = snapshot.debug_enabled;
         self.advanced = snapshot.advanced;
         self.persisted = snapshot.persisted;
+        self.touched = snapshot.touched;
         // Debug going off mid-session (`<leader>D`) must not strand the panel
         // inside the category/list that just became unreachable.
         if !self.debug_enabled && self.category == SettingsCategory::Debug {

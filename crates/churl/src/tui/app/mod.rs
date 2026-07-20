@@ -435,6 +435,16 @@ pub struct App {
     /// the caller to stderr *after* the terminal is restored, so a failed last
     /// write is reported loudly rather than swallowed.
     cookie_exit_error: Option<String>,
+    /// Exactly which Settings-panel knobs the user has edited THROUGH THE
+    /// PANEL this session (owner-decided fix: Save must persist only these,
+    /// never a CLI/workspace/global-config value the panel merely displays —
+    /// see [`super::components::settings::SettingKey`]'s doc). Populated by
+    /// `handlers::settings::handle_settings_key`'s outcome arms (the ONLY
+    /// place that inserts into it — never by [`Self::install_runtime`]'s
+    /// resolution, and never by a keybinding that bypasses the panel, e.g.
+    /// `<leader>k`/`<leader>D`); cleared by a successful Save.
+    pub(in crate::tui::app) settings_touched:
+        std::collections::HashSet<super::components::settings::SettingKey>,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -680,6 +690,7 @@ impl App {
             cookie_jar: Arc::new(ChurlCookieJar::new()),
             cookie_writer: None,
             cookie_exit_error: None,
+            settings_touched: std::collections::HashSet::new(),
         })
     }
 
