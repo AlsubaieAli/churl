@@ -1,6 +1,51 @@
 use super::*;
 use churl_core::model::{OnError, Timing};
 
+/// Serializes access to `CHURL_CONFIG` across tests that open the Settings
+/// panel — opening it reads whatever `churl_core::config::resolve_settings_path`
+/// resolves to, which MUST be a tempdir here, never the real machine's
+/// `~/.config/churl/config.toml` (mirrors `churl-core`'s own `ENV_LOCK`
+/// pattern in `config.rs`, and `tui_snapshot.rs`'s `SettingsEnvGuard`, for the
+/// same hermeticity reason — a separate lock because integration tests run in
+/// a separate process from this lib test binary).
+static SETTINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard: points `CHURL_CONFIG` at a fresh empty tempdir for the
+/// duration of a Settings-panel test, holding [`SETTINGS_ENV_LOCK`].
+struct SettingsEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl SettingsEnvGuard {
+    fn new() -> Self {
+        let lock = SETTINGS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        unsafe {
+            std::env::set_var(churl_core::config::CONFIG_PATH_ENV, &path);
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            path,
+        }
+    }
+
+    /// The resolved config path for this guard's tempdir — where a Save
+    /// writes to, so a test can assert on-disk content afterward.
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SettingsEnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(churl_core::config::CONFIG_PATH_ENV) };
+    }
+}
+
 #[test]
 fn export_target_stays_inside_workspace() {
     let dir = tempfile::tempdir().unwrap();
@@ -4652,33 +4697,35 @@ fn debug_toggle_flips_flag_and_badge() {
 /// the debug-gated Advanced UI cannot be used to bypass it.
 #[test]
 fn advanced_concurrency_above_guardrail_max_is_refused() {
+    let _settings_env = SettingsEnvGuard::new();
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
     app.load_caps.max_concurrency = 10;
-    app.open_options();
-    let Mode::Options(state) = &mut app.mode else {
-        panic!("expected Options mode");
+    app.open_settings();
+    let Mode::Settings(state) = &mut app.mode else {
+        panic!("expected Settings mode");
     };
-    state.row = crate::tui::components::options::OptionsRow::Advanced;
-    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    state.level = crate::tui::components::settings::SettingsLevel::Panel;
+    state.category = crate::tui::components::settings::SettingsCategory::Debug;
+    state.focus = crate::tui::components::settings::PanelFocus::AdvancedList;
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap(); // begin edit (seeded with the current default)
     for _ in 0..10 {
-        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .unwrap();
     }
     for c in "999".chars() {
-        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
             .unwrap();
     }
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(
         app.advanced_limits.concurrency, 5,
         "refused override must not change the resolved default"
     );
-    let Mode::Options(state) = &app.mode else {
-        panic!("expected Options mode");
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
     };
     assert!(
         state
@@ -4694,29 +4741,448 @@ fn advanced_concurrency_above_guardrail_max_is_refused() {
 /// same field a real send reads (`Self::send_request`).
 #[test]
 fn advanced_body_cap_override_applies_to_execute_options() {
+    let _settings_env = SettingsEnvGuard::new();
     let mut app = App::new(None, KeyMap::default()).unwrap();
     app.debug_enabled = true;
-    app.open_options();
-    let Mode::Options(state) = &mut app.mode else {
-        panic!("expected Options mode");
+    app.open_settings();
+    let Mode::Settings(state) = &mut app.mode else {
+        panic!("expected Settings mode");
     };
-    state.row = crate::tui::components::options::OptionsRow::Advanced;
-    state.focus = crate::tui::components::options::OptionsFocus::AdvancedList;
-    state.advanced_field = crate::tui::components::options::AdvancedField::BodyCapBytes;
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    state.level = crate::tui::components::settings::SettingsLevel::Panel;
+    state.category = crate::tui::components::settings::SettingsCategory::Debug;
+    state.focus = crate::tui::components::settings::PanelFocus::AdvancedList;
+    state.advanced_field = crate::tui::components::settings::AdvancedField::BodyCapBytes;
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     for _ in 0..20 {
-        app.handle_options_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .unwrap();
     }
     for c in "4096".chars() {
-        app.handle_options_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
             .unwrap();
     }
-    app.handle_options_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.advanced_limits.body_cap_bytes, 4096);
     assert_eq!(app.execute_options.max_body_bytes, 4096);
+}
+
+// ---- FIX 1 coverage gap: toggling insecure via the panel must actually
+// rebuild the client, not just emit an outcome ----
+
+/// `App::new` never installs a runtime client (`client: None`, "snapshot-test
+/// construction" — see its doc). Toggling insecure through the panel's `Tls`
+/// row must go all the way through `with_client_rebuild` → `rebuild_client`
+/// and actually install one — asserting the APPLIED effect (`client` goes
+/// `None` → `Some`), not just that the outcome was `ToggleInsecure` (a silent
+/// drop of the rebuild call would still emit the right outcome and pass a
+/// outcome-only test).
+#[test]
+fn toggle_insecure_via_panel_actually_rebuilds_the_client() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    assert!(
+        app.client.is_none(),
+        "no runtime client before any session-knob change"
+    );
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle insecure
+    assert!(app.session_insecure, "insecure must actually flip");
+    assert!(
+        app.client.is_some(),
+        "toggling insecure through the panel must actually rebuild the client"
+    );
+}
+
+/// `DeleteCookie` must actually shrink the jar, not just emit the outcome.
+#[test]
+fn delete_cookie_via_panel_actually_shrinks_the_jar() {
+    use reqwest::cookie::CookieStore as _;
+    let jar = churl_core::cookies::ChurlCookieJar::new();
+    let url = reqwest::Url::parse("https://a.example").unwrap();
+    let header = reqwest::header::HeaderValue::from_static("sid=abc123; Path=/");
+    jar.set_cookies(&mut std::iter::once(&header), &url);
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.cookie_jar = std::sync::Arc::new(jar);
+    assert_eq!(app.cookie_jar.list().len(), 1, "one cookie seeded");
+
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel
+    press(&mut app, 'j'); // Proxy -> Tls
+    press(&mut app, 'j'); // Tls -> Cookies
+    press(&mut app, 'l'); // descend into the cookie list
+    press(&mut app, 'd'); // delete the selected cookie
+
+    assert_eq!(
+        app.cookie_jar.list().len(),
+        0,
+        "DeleteCookie must actually shrink the jar, not just emit the outcome"
+    );
+}
+
+// ---- Save-as-default: FIX 1 (sparse, touched-only persistence) ----
+
+/// FIX 1 (a): a `-k` session that only edits theme in the panel must save
+/// theme WITHOUT ever writing `insecure` — the exact footgun the owner
+/// flagged (`churl -k` → change theme → Save silently disabling TLS
+/// permanently). `-k` resolves into `session_insecure` the same way
+/// `install_runtime` does, WITHOUT touching the panel.
+#[test]
+fn cli_insecure_plus_theme_edit_saves_theme_never_insecure() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_insecure = true; // simulates `-k` — never touched in the panel
+    app.open_settings();
+    for _ in 0..3 {
+        press(&mut app, 'j'); // Request -> Network -> Load -> Appearance
+    }
+    enter(&mut app); // -> Panel, Theme row
+    enter(&mut app); // cycle theme dark -> light (the only panel edit)
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(text.contains("theme"), "the edited knob must save:\n{text}");
+    assert!(
+        !text.contains("insecure"),
+        "a CLI-forced value never touched in the panel must never be written:\n{text}"
+    );
+}
+
+/// FIX 1 (b): toggling TLS in the panel and saving DOES write `insecure =
+/// true` — a deliberate panel edit is exactly what Save exists to persist.
+#[test]
+fn toggling_tls_in_panel_and_saving_writes_insecure_true() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle insecure ON
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(text.contains("insecure = true"), "{text}");
+}
+
+/// FIX 1 (c) / FIX 3: editing one knob in the panel must never disturb an
+/// untouched key's value OR its inline comment — the reviewer's exact repro,
+/// driven end-to-end through the App rather than `save_defaults` directly.
+#[test]
+fn editing_one_panel_knob_preserves_another_untouched_keys_comment() {
+    let env = SettingsEnvGuard::new();
+    std::fs::write(env.path(), "timeout_secs = 90 # prod SLA\n").unwrap();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    for _ in 0..3 {
+        press(&mut app, 'j'); // -> Appearance
+    }
+    enter(&mut app); // -> Panel, Theme row
+    enter(&mut app); // cycle theme (the only panel edit)
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("timeout_secs = 90 # prod SLA"),
+        "an untouched key's value AND inline comment must survive:\n{text}"
+    );
+}
+
+/// `s` inside the open Settings panel assembles the working copy and calls
+/// the config-writer — a proxy actually EDITED IN THE PANEL lands in the
+/// written `config.toml`, and the panel's own message slot confirms which
+/// file was written.
+#[test]
+fn settings_save_writes_the_working_copy_to_config_toml() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    enter(&mut app); // open the proxy editor
+    for c in "http://proxy.local:3128".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> ApplyProxy
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("proxy = \"http://proxy.local:3128\""),
+        "the panel-edited proxy must be written:\n{text}"
+    );
+
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        state.message.is_none(),
+        "a successful save must not show an error"
+    );
+}
+
+/// FIX 4: a credential-bearing proxy TYPED IN THE PANEL does not block the
+/// rest of the save — only the proxy key is skipped (never written, never
+/// leaking credentials), every other touched knob persists, and a clear
+/// toast names what was skipped and why.
+#[test]
+fn settings_save_skips_credentialed_proxy_but_persists_other_touched_knob() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    enter(&mut app); // open the proxy editor
+    for c in "http://user:pass@proxy.local:3128".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> ApplyProxy (credentialed)
+    esc(&mut app); // Panel -> Menu (still on Network — esc keeps the category)
+    for _ in 0..2 {
+        press(&mut app, 'j'); // Network -> Load -> Appearance
+    }
+    enter(&mut app); // -> Panel, Theme row
+    enter(&mut app); // cycle theme — a second, DIFFERENT touched knob
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("theme"),
+        "the other touched knob must still persist:\n{text}"
+    );
+    assert!(
+        !text.contains("proxy") && !text.contains("user:pass") && !text.contains("pass"),
+        "credentials must never reach disk, and the proxy key must not be written at all:\n{text}"
+    );
+    assert_eq!(
+        app.message
+            .as_ref()
+            .map(|m| m.text.contains("proxy") && m.text.contains("not persisted")),
+        Some(true),
+        "a clear toast must name what was skipped and why: {:?}",
+        app.message
+    );
+}
+
+/// After a successful save, the touched-set clears and the dirty dot follows
+/// it — a value just saved no longer shows dirty (a CLI/session-forced value
+/// that was NEVER touched must never show dirty in the first place; see
+/// [`cli_forced_insecure_never_touched_shows_no_dirty_dot`]).
+#[test]
+fn settings_save_clears_the_dirty_indicator() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle insecure ON — a real panel edit
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert_ne!(
+            state.insecure, state.persisted.insecure,
+            "insecure must start dirty relative to the (default, unsaved) baseline"
+        );
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Insecure),
+            "the panel edit must mark Insecure touched"
+        );
+    }
+    press(&mut app, 's');
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        state.touched.is_empty(),
+        "a successful save must clear the whole touched-set"
+    );
+    assert_eq!(
+        state.insecure, state.persisted.insecure,
+        "after a successful save the baseline must match the working copy"
+    );
+}
+
+/// FIX 2's whole point: a CLI/session-forced value the user never touched in
+/// the panel must NEVER show a dirty dot, even though it differs from the
+/// (default, unsaved) on-disk baseline — a dot implies "Save would persist
+/// this", and FIX 1 means Save will NOT.
+#[test]
+fn cli_forced_insecure_never_touched_shows_no_dirty_dot() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_insecure = true; // simulates `-k` — never touched in the panel
+    app.open_settings();
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert_ne!(
+        state.insecure, state.persisted.insecure,
+        "sanity: the value really does differ from the on-disk baseline"
+    );
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::Insecure),
+        "a CLI-forced value the panel merely displays must never be touched"
+    );
+}
+
+// ---- net-change guard: interaction without a net change persists nothing ----
+
+/// A forced `--proxy` re-committed UNCHANGED through the editor (open the
+/// proxy row, Enter to open the seeded editor, Enter to commit) is a net-zero
+/// interaction — Save must not write the forced proxy to global config. This
+/// is the residual footgun the re-review flagged (borderline P1 for proxy).
+#[test]
+fn forced_proxy_committed_unchanged_is_not_persisted() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_proxy = Some("http://workspace:3128".to_owned()); // forced (CLI/workspace)
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    enter(&mut app); // open editor, seeded with the forced proxy
+    enter(&mut app); // commit UNCHANGED -> ApplyProxy(Some(forced))
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            !state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Proxy),
+            "an unchanged commit of the forced proxy must not mark it touched"
+        );
+    }
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap_or_default();
+    assert!(
+        !text.contains("proxy"),
+        "a forced proxy merely re-committed must never reach global config:\n{text}"
+    );
+}
+
+/// A `-k` session where the user double-toggles TLS in the panel (off, then
+/// back on to the forced origin) is net-zero — Save must not write `insecure`.
+#[test]
+fn cli_insecure_double_toggle_back_is_not_persisted() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.session_insecure = true; // simulates `-k`
+    app.open_settings();
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle -> false
+    enter(&mut app); // toggle -> true (back to the forced origin)
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            !state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Insecure),
+            "a toggle back to the forced origin must net-zero (un-mark) the knob"
+        );
+    }
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap_or_default();
+    assert!(
+        !text.contains("insecure"),
+        "a double-toggle back to the forced value must never persist insecure:\n{text}"
+    );
+}
+
+/// The un-marking is general: change a knob then change it back to origin
+/// leaves the touched-set empty (nothing to persist, dirty dot clears). Uses
+/// redirect (a 3-way cycle: Strip -> Strict -> FollowAll -> Strip).
+#[test]
+fn toggle_back_to_origin_unmarks_the_knob() {
+    let _env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    // Request category is already the first/highlighted one.
+    enter(&mut app); // -> Panel, Request rows
+    for _ in 0..2 {
+        press(&mut app, 'j'); // Timeout -> MaxBodyBytes -> Redirect
+    }
+    // Cycle redirect a full loop back to its origin (Strip default).
+    enter(&mut app); // Strip -> Strict
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Redirect),
+            "a real change marks the knob touched"
+        );
+    }
+    enter(&mut app); // Strict -> FollowAll
+    enter(&mut app); // FollowAll -> Strip (back to origin)
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::Redirect),
+        "cycling a knob back to its panel-open origin must un-mark it"
+    );
+    assert!(
+        state.touched.is_empty(),
+        "no net change anywhere ⇒ nothing touched"
+    );
+}
+
+/// A genuine change still persists: a fresh (non-insecure) session toggling
+/// TLS on writes it, and changing timeout from its default writes that too —
+/// the net-change guard must not suppress real edits.
+#[test]
+fn genuine_changes_still_persist() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    // Timeout 30 (default) -> 60 via the Request/Timeout row editor.
+    enter(&mut app); // -> Panel, Request/Timeout row
+    enter(&mut app); // open the numeric editor (seeded with 30)
+    for _ in 0..6 {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "60".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> ApplyAdvanced { TimeoutSecs, 60 }
+    // Toggle TLS on from a non-insecure baseline.
+    esc(&mut app); // Panel -> Menu (still on Request)
+    press(&mut app, 'j'); // Request -> Network
+    enter(&mut app); // -> Panel, Proxy row
+    press(&mut app, 'j'); // Proxy -> Tls
+    enter(&mut app); // toggle insecure ON (a real change)
+    press(&mut app, 's');
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("timeout_secs = 60"),
+        "a genuine timeout change must persist:\n{text}"
+    );
+    assert!(
+        text.contains("insecure = true"),
+        "a genuine TLS toggle must persist:\n{text}"
+    );
 }
 
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)

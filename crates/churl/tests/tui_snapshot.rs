@@ -64,6 +64,48 @@ fn type_str(app: &mut App, text: &str) {
     }
 }
 
+/// Serializes access to `CHURL_CONFIG` across tests in this binary that open
+/// the Settings panel — opening it reads (and `s`/Save writes) whatever
+/// `churl_core::config::resolve_settings_path` resolves to, which MUST be a
+/// tempdir here, never the real machine's `~/.config/churl/config.toml`
+/// (`cargo test` must stay hermetic — see `churl-core`'s own `ENV_LOCK`
+/// pattern in `config.rs`, mirrored here for the same reason).
+static SETTINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard: points `CHURL_CONFIG` at a fresh empty tempdir for the
+/// duration of a Settings-panel test, holding [`SETTINGS_ENV_LOCK`] so no
+/// other such test's env mutation can interleave. Restores (removes) the env
+/// var on drop.
+struct SettingsEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+}
+
+impl SettingsEnvGuard {
+    fn new() -> Self {
+        let lock = SETTINGS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // Safety/isolation: no config.toml is created here, so the panel's
+        // dirty-indicator baseline resolves to the built-in defaults.
+        unsafe {
+            std::env::set_var(
+                churl_core::config::CONFIG_PATH_ENV,
+                dir.path().join("config.toml"),
+            );
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+        }
+    }
+}
+
+impl Drop for SettingsEnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(churl_core::config::CONFIG_PATH_ENV) };
+    }
+}
+
 fn snapshot(app: &mut App) -> String {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal init failed");
@@ -1548,37 +1590,56 @@ fn leader_which_key_popup() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// The session Options overlay (`<leader>o`): the three control rows (proxy /
-/// TLS / cookies) plus the (empty) cookie list.
+/// The Settings panel (`<leader>o`, M8.5): opens at the category menu
+/// (Request / Network / Load / Appearance / Debug — Debug hidden with debug
+/// capture off).
 #[test]
-fn options_overlay_open() {
+fn settings_panel_open() {
+    let _settings_env = SettingsEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('o'));
-    assert!(matches!(app.mode, Mode::Options(_)));
+    assert!(matches!(app.mode, Mode::Settings(_)));
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// A malformed proxy typed in the Options overlay must NOT crash the session:
+/// The Settings panel's Network category: the three control rows (proxy /
+/// TLS / cookies) plus the (empty) cookie list.
+#[test]
+fn settings_panel_network_category() {
+    let _settings_env = SettingsEnvGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('j')); // Request -> Network
+    press(&mut app, KeyCode::Enter); // open the panel
+    assert!(matches!(app.mode, Mode::Settings(_)));
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// A malformed proxy typed in the Settings panel must NOT crash the session:
 /// the rebuild error is caught, the change rolled back, and an inline error
 /// shown. (Regression: `rebuild_client()?` used to propagate out of `handle_key`
 /// and tear down the run loop.)
 #[test]
-fn options_malformed_proxy_does_not_crash() {
+fn settings_malformed_proxy_does_not_crash() {
+    let _settings_env = SettingsEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('o'));
-    // Proxy row is selected first; Enter opens the inline editor.
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j')); // Request -> Network
+    press(&mut app, KeyCode::Enter); // open the panel (Proxy row selected first)
+    press(&mut app, KeyCode::Enter); // opens the inline editor
     type_str(&mut app, "::: not a url :::");
     // Enter applies — this must return Ok (no crash) despite the bad proxy.
     press(&mut app, KeyCode::Enter);
-    // Session survives: still in the Options overlay, not torn down.
+    // Session survives: still in the Settings panel, not torn down.
     assert!(
-        matches!(app.mode, Mode::Options(_)),
-        "the overlay must stay open after a rejected proxy"
+        matches!(app.mode, Mode::Settings(_)),
+        "the panel must stay open after a rejected proxy"
     );
     let snap = snapshot(&mut app);
     // The rejection is shown inline, and the proxy row reverted to "none".
@@ -1592,15 +1653,18 @@ fn options_malformed_proxy_does_not_crash() {
     );
 }
 
-/// Toggling TLS verification in the Options overlay: move to the TLS row and
-/// activate it, then the row renders the loud "OFF" state. Exercises the full
-/// toggle path (including the client rebuild) end-to-end.
+/// Toggling TLS verification in the Settings panel's Network category: move
+/// to the TLS row and activate it, then the row renders the loud "OFF" state.
+/// Exercises the full toggle path (including the client rebuild) end-to-end.
 #[test]
-fn options_overlay_toggle_tls() {
+fn settings_panel_toggle_tls() {
+    let _settings_env = SettingsEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('j')); // Request -> Network
+    press(&mut app, KeyCode::Enter); // open the panel
     press(&mut app, KeyCode::Char('j')); // move to TLS row
     press(&mut app, KeyCode::Enter); // toggle insecure on
     let snap = snapshot(&mut app);
@@ -1810,11 +1874,13 @@ fn log_panel_parks_and_restores_load_runner() {
     );
 }
 
-/// The Options overlay's debug-gated Advanced section: only reachable with
-/// debug on (M8.3 Wave 4). Shows the four override fields with their
-/// resolved default values.
+/// The Settings panel's debug-gated Debug category: only reachable in the
+/// menu with debug on (M8.3 Wave 4; M8.5 re-homed). Descending into its
+/// Advanced row shows the four override fields with their resolved default
+/// values.
 #[test]
-fn options_overlay_advanced_section_when_debug_on() {
+fn settings_panel_advanced_section_when_debug_on() {
+    let _settings_env = SettingsEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_fixture(dir.path());
     press(&mut app, KeyCode::Char(' '));
@@ -1822,9 +1888,13 @@ fn options_overlay_advanced_section_when_debug_on() {
         .unwrap(); // <leader>D turns debug capture on
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('o'));
-    // Down to Advanced (Proxy -> TLS -> Cookies -> Advanced), then into the list.
-    press(&mut app, KeyCode::Char('j'));
-    press(&mut app, KeyCode::Char('j'));
+    // Down to the Debug category (Request -> Network -> Load -> Appearance ->
+    // Debug), open its panel (DebugToggle row first), down to Advanced, then
+    // into the field list.
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Tab);
     let snap = snapshot(&mut app);

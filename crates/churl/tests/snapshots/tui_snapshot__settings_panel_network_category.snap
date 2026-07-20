@@ -1,28 +1,28 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snap
+expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
-│           ┏ Options ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
-│           ┃  Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
-│           ┃  TLS verification  on                                ┃           │
-│           ┃  Cookies           off                               ┃           │
-│           ┃  Advanced (debug)  ↳ concurrency/total/body-cap/timeo┃           │
-│           ┃                                                      ┃           │
-│           ┃┌ Advanced limits (debug-gated) ─────────────────────┐┃           │
-│           ┃│▸ concurrency       5                               │┃           │
-│           ┃│  total             10                              │┃───────────┘
-│           ┃│  body cap (bytes)  10485760                        │┃───────────┐
-│           ┃│  timeout (s)       30                              │┃           │
+│           ┏ Settings · Network ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
+│           ┃▸   Proxy             (none — uses HTTP(S)_PROXY env) ┃           │
+│           ┃    TLS verification  on                              ┃           │
+│           ┃    Cookies           off                             ┃           │
+│           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
+│           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃           │
+│           ┃│                                                    │┃───────────┘
+│           ┃│                                                    │┃───────────┐
+│           ┃│                                                    │┃           │
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit · h back · q close             ┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · s save · e┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- debug capture ON — sends now build an inspectable trace                        
- EXPLORER · demo · DEBUG · ? help · space leader · / search · : palette
+ EXPLORER · demo · ? help · space leader · / search · : palette

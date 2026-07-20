@@ -245,8 +245,8 @@ pub struct EnvEditorState {
     cli_vars: BTreeMap<String, String>,
     /// The manifest's proxy/cookies settings, carried through verbatim so a
     /// var-only save never drops them (the editor doesn't touch these — they are
-    /// owned by the Options overlay — but `build_workspace` must round-trip them,
-    /// or the format-preserving merge would prune the on-disk keys).
+    /// owned by the Settings panel's Network category — but `build_workspace` must
+    /// round-trip them, or the format-preserving merge would prune the on-disk keys).
     ws_proxy: Option<String>,
     ws_cookies: bool,
 }
@@ -612,7 +612,7 @@ impl EnvEditorState {
             vars,
             profiles,
             // Carried through verbatim — the env editor never edits these (the
-            // Options overlay owns them), but they must survive a var-only save.
+            // Settings panel owns them), but they must survive a var-only save.
             proxy: self.ws_proxy.clone(),
             cookies: self.ws_cookies,
         }
@@ -873,7 +873,7 @@ fn save_error_message(err: &PersistenceError) -> String {
     match err {
         PersistenceError::ProxyCredentialsRefused { proxy } => format!(
             "save failed (churl.toml): refusing to persist a credentialed proxy URL ({})",
-            crate::tui::components::options::mask_proxy(proxy)
+            crate::tui::components::settings::mask_proxy(proxy)
         ),
         other => format!("save failed (churl.toml): {other}"),
     }

@@ -54,11 +54,11 @@ use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
 use super::components::log_panel::LogPanelState;
 use super::components::message::Message;
-use super::components::options::{OptionsOutcome, OptionsState};
 use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{
     ResponseGeometry, ResponseMeta, ResponseState, ResponseView, ViewMode,
 };
+use super::components::settings::{SettingsOutcome, SettingsState};
 use super::components::traffic::{self, TrafficEntry, TrafficOutcome};
 use churl_core::sequence::StepResult;
 
@@ -66,8 +66,8 @@ use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, inspector, load_runner, log_panel, message, method_menu, options,
-    palette, picker, prompt, request, response, sequence_editor, sequence_runner, statusline,
+    env_editor, explorer, help, inspector, load_runner, log_panel, message, method_menu, palette,
+    picker, prompt, request, response, sequence_editor, sequence_runner, settings, statusline,
     tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
@@ -155,6 +155,28 @@ pub struct App {
     keymap: KeyMap,
     /// The resolved colour theme, threaded through every render fn.
     pub theme: Theme,
+    /// The active theme's NAME (`"dark"` | `"light"`) — [`Self::theme`] is the
+    /// already-resolved style table with no way back to the name it came
+    /// from, so this is tracked separately (M8.5: the Settings panel's
+    /// Appearance category needs to display/cycle it). Seeded from
+    /// `Config::theme` (or the built-in default) by [`Self::install_runtime`];
+    /// updated by every live theme switch.
+    pub(in crate::tui::app) theme_name: String,
+    /// Per-slot colour overrides loaded from `config.toml`'s `[theme_colors]`
+    /// table, kept ONLY so a live Settings-panel theme-name switch can
+    /// re-resolve [`Self::theme`] without losing the user's overrides (the
+    /// panel edits the theme *name*; `[theme_colors]` stays out of scope —
+    /// M8.5 design). Seeded once by [`Self::install_runtime`]; never mutated
+    /// by the panel itself.
+    theme_colors: BTreeMap<String, String>,
+    /// The working-copy leader-key combo string (M8.5). Seeded from
+    /// `Config::leader_key` (or the built-in default `"space"`) by
+    /// [`Self::install_runtime`]; editable live in the Settings panel's
+    /// Appearance category, but — unlike every other session control — NOT
+    /// applied to the live [`Self::keymap`] (no cheap re-parse seam exists
+    /// yet): it takes effect on the next launch, and is what Save-as-default
+    /// persists.
+    pub(in crate::tui::app) leader_key: String,
     /// `--var key=value` overrides: the highest-precedence resolver scope.
     cli_vars: BTreeMap<String, String>,
     /// The active profile name, if any (`--profile` or the SwitchProfile picker).
@@ -364,9 +386,12 @@ pub struct App {
     /// default concurrency/total, the body-size cap, and the timeout.
     /// Session-scoped, mirroring `session_proxy`'s pattern — seeded from
     /// `Config::advanced_limits` in [`Self::install_runtime`], live-editable
-    /// from the Options overlay's Advanced section (reachable only when
-    /// [`Self::debug_enabled`]), never written back to `config.toml` by the
-    /// app itself.
+    /// from the Settings panel's Debug category (reachable only when
+    /// [`Self::debug_enabled`]) — also aliased directly by the Request
+    /// category's Timeout/MaxBodyBytes rows, which share these same two
+    /// fields (see [`crate::tui::components::settings::RequestRow`]'s doc).
+    /// Never written back to `config.toml` by the app itself (M8.5 Wave 3's
+    /// Save-as-default is an explicit user action, not automatic).
     pub(in crate::tui::app) advanced_limits: churl_core::config::ResolvedAdvancedLimits,
     /// The load runner's request, resolved ONCE at open time and cloned for every
     /// copy in a run (consistent batch — no per-copy re-resolution).
@@ -383,12 +408,12 @@ pub struct App {
     client_timeout: Duration,
     /// The active proxy URL (session state; masked in any UI display). Resolved at
     /// launch (CLI `--proxy` > workspace `churl.toml` > global config > env → the
-    /// env case is `None` here, reqwest honors it); editable live in the Options
-    /// overlay. Every change rebuilds the client via [`App::rebuild_client`].
+    /// env case is `None` here, reqwest honors it); editable live in the Settings
+    /// panel. Every change rebuilds the client via [`App::rebuild_client`].
     session_proxy: Option<String>,
     /// Whether TLS verification is OFF for this session (accepts invalid/self-signed
     /// certs and hostname mismatches). A loud RED indicator surfaces it in the
-    /// statusline. Toggled live by `<leader>k` / the Options overlay.
+    /// statusline. Toggled live by `<leader>k` / the Settings panel.
     session_insecure: bool,
     /// Whether the per-workspace persistent cookie jar is active this session.
     /// The jar itself ([`Self::cookie_jar`]) always exists and survives toggles;
@@ -410,6 +435,25 @@ pub struct App {
     /// the caller to stderr *after* the terminal is restored, so a failed last
     /// write is reported loudly rather than swallowed.
     cookie_exit_error: Option<String>,
+    /// Exactly which Settings-panel knobs the user has edited THROUGH THE
+    /// PANEL this session (owner-decided fix: Save must persist only these,
+    /// never a CLI/workspace/global-config value the panel merely displays —
+    /// see [`super::components::settings::SettingKey`]'s doc). Populated by
+    /// `handlers::settings::handle_settings_key`'s outcome arms (the ONLY
+    /// place that inserts into it — never by [`Self::install_runtime`]'s
+    /// resolution, and never by a keybinding that bypasses the panel, e.g.
+    /// `<leader>k`/`<leader>D`); cleared by a successful Save.
+    pub(in crate::tui::app) settings_touched:
+        std::collections::HashSet<super::components::settings::SettingKey>,
+    /// The net-change baseline for [`Self::settings_touched`]: every managed
+    /// knob's value at the moment the Settings panel last opened (re-captured
+    /// after a successful save). A panel edit marks its knob touched only when
+    /// the new value differs from THIS — so interacting with a knob without
+    /// net-changing it (a toggle round-trip, an Enter-commit that changed
+    /// nothing) leaves nothing to persist. Set by
+    /// `handlers::settings::open_settings`/`save_settings_defaults`; the value
+    /// while the panel is closed is inert (never read).
+    pub(in crate::tui::app) settings_baseline: churl_core::config::ResolvedSettings,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -591,6 +635,9 @@ impl App {
             jump: None,
             keymap,
             theme: Theme::default(),
+            theme_name: super::components::settings::DEFAULT_THEME_NAME.to_owned(),
+            theme_colors: BTreeMap::new(),
+            leader_key: super::components::settings::DEFAULT_LEADER_KEY.to_owned(),
             cli_vars: BTreeMap::new(),
             active_profile: None,
             finder: FuzzyFinder::new(),
@@ -652,6 +699,8 @@ impl App {
             cookie_jar: Arc::new(ChurlCookieJar::new()),
             cookie_writer: None,
             cookie_exit_error: None,
+            settings_touched: std::collections::HashSet::new(),
+            settings_baseline: churl_core::config::ResolvedSettings::default(),
         })
     }
 
@@ -1224,9 +1273,9 @@ impl App {
                     editor.paste(&s);
                 }
             }
-            Mode::Options(_) => {
+            Mode::Settings(_) => {
                 let s = normalize_paste_newlines(&text);
-                if let Mode::Options(state) = &mut self.mode {
+                if let Mode::Settings(state) = &mut self.mode {
                     state.paste(&s);
                 }
             }
@@ -1359,11 +1408,26 @@ impl App {
         cli_proxy: Option<String>,
         cli_insecure: bool,
     ) -> Result<()> {
+        // M8.5: seed the Settings panel's Appearance working copy — the theme
+        // NAME (Self::theme is already the resolved style table with no way
+        // back to the name) and the `[theme_colors]` overrides (kept only so
+        // a live theme-name switch can re-resolve without losing them), plus
+        // the leader-key working copy (not live-applied — see its field doc).
+        self.theme_name = config
+            .theme
+            .clone()
+            .unwrap_or_else(|| super::components::settings::DEFAULT_THEME_NAME.to_owned());
+        self.theme_colors = config.theme_colors.clone();
+        self.leader_key = config
+            .leader_key
+            .clone()
+            .unwrap_or_else(|| super::components::settings::DEFAULT_LEADER_KEY.to_owned());
+
         // M8.3 Wave 4: resolve the debug-gated advanced-limit overrides
         // BEFORE `execute_options`/`client_timeout` are built from them, so a
         // persisted `[advanced]` override (hand-edited `config.toml`, or a
-        // prior session's Options-overlay edit — never written back by the
-        // app itself today) takes effect from the very first send.
+        // prior session's Settings-panel edit) takes effect from the very
+        // first send.
         self.advanced_limits = config.advanced_limits();
         self.execute_options = ExecuteOptions {
             max_body_bytes: self.advanced_limits.body_cap_bytes,
@@ -1730,7 +1794,7 @@ impl App {
                 self.handle_confirm_key(key, purpose)
             }
             Mode::EnvEditor(_) => self.handle_env_editor_key(key),
-            Mode::Options(_) => self.handle_options_key(key),
+            Mode::Settings(_) => self.handle_settings_key(key),
             Mode::Sequence { .. } => self.handle_sequence_key(key),
             Mode::LoadRunner(_) => self.handle_load_runner_key(key),
             Mode::Inspector(_) => {
@@ -1943,7 +2007,7 @@ impl App {
             Action::Jump => self.open_jump(),
             Action::SwitchProfile => self.open_profile_picker(),
             Action::OpenEnvEditor => self.open_env_editor(),
-            Action::OpenOptions => self.open_options(),
+            Action::OpenSettings => self.open_settings(),
             Action::ToggleInsecure => self.toggle_insecure(),
             Action::ToggleEndpointInsecure => self.toggle_endpoint_insecure(),
             Action::OpenInspector => self.open_inspector(),

@@ -67,7 +67,12 @@ pub(super) fn save_value<T: Serialize>(path: &Path, value: &T) -> Result<(), Per
 /// `fsync` the data, then `rename` over `path`. Finally we `fsync` the parent
 /// directory so the rename itself survives power loss. On any error the temp file is
 /// removed best-effort and the underlying I/O error is returned.
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// `pub(crate)` (re-exported by `persistence::mod`) rather than `pub(super)`: the
+/// global-config settings writer (`crate::config::save_defaults`, M8.5) reuses this
+/// same durable-write primitive instead of duplicating it — the only cross-module
+/// caller, everything else in `persistence` reaches it via the local `use` below.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));

@@ -1,16 +1,14 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1539
-expression: snapshot(&mut app)
+expression: snap
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
 │> ▸ orders                  ││no endpoint selected                            │
 │  ▸ users                   │└────────────────────────────────────────────────┘
-│           ┏ Options ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
-│           ┃▸ Proxy             (none — uses HTTP(S)_PROXY env)   ┃           │
-│           ┃  TLS verification  on                                ┃           │
-│           ┃  Cookies           off                               ┃           │
-│           ┃                                                      ┃           │
+│           ┏ Settings · Network ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────────┐
+│           ┃    Proxy             (none — uses HTTP(S)_PROXY env) ┃           │
+│           ┃▸ ● TLS verification  OFF — certificates NOT verified ┃           │
+│           ┃    Cookies           off                             ┃           │
 │           ┃┌ Cookies ───────────────────────────────────────────┐┃           │
 │           ┃│(cookie jar is off — enable it on the Cookies row)  │┃           │
 │           ┃│                                                    │┃           │
@@ -21,9 +19,10 @@ expression: snapshot(&mut app)
 │           ┃│                                                    │┃           │
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
-│           ┃ j/k move · enter edit/toggle · l cookies · q close   ┃           │
+│           ┃ j/k move · enter edit/toggle · l cookies · s save · e┃           │
 └───────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- EXPLORER · demo · ? help · space leader · / search · : palette
+ ⚠ TLS verification OFF — certificates not checked                              
+ EXPLORER · demo · ⚠ TLS OFF · ? help · space leader · / search · : palette
