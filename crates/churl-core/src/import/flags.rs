@@ -1,4 +1,5 @@
 use super::{Args, ImportError, Parser};
+use crate::model::{Part, PartValue};
 
 impl Parser {
     /// Handles one `--flag` (with an optional inline `=value`).
@@ -24,9 +25,7 @@ impl Parser {
             }
             "data" | "data-raw" | "data-ascii" | "data-binary" => self.add_data(value(args)?),
             "json" => self.add_json(value(args)?),
-            "form" => Err(ImportError::Unsupported(
-                "multipart (-F) — model has no multipart body yet".to_owned(),
-            )),
+            "form" => self.add_form(value(args)?),
             "user" => {
                 self.add_basic_auth(&value(args)?);
                 Ok(())
@@ -106,9 +105,7 @@ impl Parser {
                                 .push(format!("ignored: -o output file {value:?} discarded"));
                             Ok(())
                         }
-                        'F' => Err(ImportError::Unsupported(
-                            "multipart (-F) — model has no multipart body yet".to_owned(),
-                        )),
+                        'F' => self.add_form(value),
                         _ => unreachable!("outer match already narrowed the flag"),
                     };
                 }
@@ -160,6 +157,57 @@ impl Parser {
     fn add_json(&mut self, value: String) -> Result<(), ImportError> {
         self.add_data(value)?;
         self.json = true;
+        Ok(())
+    }
+
+    /// Parses one `-F`/`--form` value (M8.6): `name=value` for an inline text
+    /// part, or `name=@path` for a file part, with optional curl `;filename=`
+    /// / `;type=` modifiers on the `@path` form (either order, unknown
+    /// modifiers ignored — churl models only those two). The `@path` string is
+    /// captured as-is and **never opened** here — reading happens only at
+    /// send time (`crate::http`), preserving "import never reads files".
+    /// Mixing `-F` with `-d`/`--data*`/`--json` is validated once, in
+    /// [`Parser::finish`] (a single check covers both flag orders).
+    fn add_form(&mut self, raw: String) -> Result<(), ImportError> {
+        let (name, rest) = raw
+            .split_once('=')
+            .ok_or_else(|| ImportError::Unsupported(format!("malformed -F value: {raw:?}")))?;
+        let mut segments = rest.split(';');
+        // curl allows `<@path` too (embed a file's content as the value) —
+        // out of scope: that WOULD require reading the file at import time,
+        // which churl's import contract forbids. Reject it explicitly rather
+        // than silently mis-storing the literal `<@path` string as text.
+        let primary = segments.next().unwrap_or("");
+        if primary.starts_with('<') {
+            return Err(ImportError::Unsupported(
+                "-F name=<@file (embed file content) — import never reads files".to_owned(),
+            ));
+        }
+        let mut filename = None;
+        let mut mime = None;
+        for modifier in segments {
+            if let Some(value) = modifier.strip_prefix("filename=") {
+                filename = Some(value.to_owned());
+            } else if let Some(value) = modifier.strip_prefix("type=") {
+                mime = Some(value.to_owned());
+            }
+            // Other curl -F modifiers (`headers=`, `encoder=`, …) have no
+            // churl model equivalent yet and are silently ignored, like other
+            // accepted-but-unmapped curl minutiae elsewhere in this importer.
+        }
+        let value = if let Some(path) = primary.strip_prefix('@') {
+            PartValue::File {
+                path: path.to_owned(),
+                filename,
+                mime,
+            }
+        } else {
+            PartValue::Text(primary.to_owned())
+        };
+        self.parts.push(Part {
+            name: name.to_owned(),
+            value,
+        });
         Ok(())
     }
 }
