@@ -270,12 +270,26 @@ pub async fn execute_traced(
     // added below. Compared case-insensitively at strip time.
     let mut auth_header_names: Vec<String> = vec!["authorization".to_owned(), "cookie".to_owned()];
 
+    // A user `Content-Type` header is meaningless on a `multipart/form-data`
+    // body: reqwest owns the `Content-Type` because it carries the boundary
+    // token the body is framed with, and the user cannot name that boundary —
+    // shipping their value would produce an UNPARSEABLE request (a
+    // Content-Type whose boundary doesn't match the body's). So a user CT
+    // header is dropped for a multipart body and reqwest's boundary-bearing
+    // one wins. For a `Simple` body the user's header still wins as before.
+    let is_multipart = matches!(request.body, Some(Body::Multipart(_)));
     let mut user_content_type = false;
     for header in &request.headers {
         if !header.enabled {
             continue;
         }
         if header.name.eq_ignore_ascii_case("content-type") {
+            if is_multipart {
+                // Dropped — see the block comment above. Do not mark
+                // `user_content_type` (the derived-CT skip is Simple-only) and
+                // do not apply the header.
+                continue;
+            }
             user_content_type = true;
         }
         if crate::config::looks_like_secret_name(&header.name) {
@@ -303,12 +317,9 @@ pub async fn execute_traced(
 
     // A user-supplied Content-Type header always wins on a `Simple` body (the
     // header loop above already applied it, and we simply skip the derived
-    // one). `.multipart()` below unconditionally *appends* its own
-    // boundary-bearing Content-Type (reqwest's `header()` appends, not
-    // replaces), so honouring a user override there takes a second step:
-    // capture the value now and `HeaderMap::insert` (replace-not-append) it
-    // back after `.build()`.
-    let mut multipart_content_type_override: Option<String> = None;
+    // one). On a `Multipart` body reqwest's `.multipart()` sets the
+    // boundary-bearing Content-Type itself and — because the user CT header was
+    // dropped in the loop above — it is the only one, exactly as it must be.
     if let Some(body) = &request.body {
         match body {
             Body::Simple { kind, content } => {
@@ -327,32 +338,16 @@ pub async fn execute_traced(
                         }
                     })?;
                 builder = builder.multipart(form);
-                if user_content_type {
-                    multipart_content_type_override = request
-                        .headers
-                        .iter()
-                        .find(|header| {
-                            header.enabled && header.name.eq_ignore_ascii_case("content-type")
-                        })
-                        .map(|header| header.value.clone());
-                }
             }
         }
     }
 
     let start = Instant::now();
-    let mut initial = builder.build().map_err(map_send_error).inspect_err(|err| {
+    let initial = builder.build().map_err(map_send_error).inspect_err(|err| {
         if let Some(trace) = sink.as_deref_mut() {
             trace.record_error(err);
         }
     })?;
-    if let Some(value) = multipart_content_type_override
-        && let Ok(header_value) = reqwest::header::HeaderValue::from_str(&value)
-    {
-        initial
-            .headers_mut()
-            .insert(reqwest::header::CONTENT_TYPE, header_value);
-    }
     let mut response = follow_redirects(
         client,
         initial,
@@ -705,12 +700,32 @@ async fn build_multipart_form(
                         name: part.name.clone(),
                         reason,
                     })?;
+                // `metadata` is a `stat(2)` — it does NOT block on a FIFO/pipe
+                // (unlike `File::open`, which blocks on a writer-less FIFO
+                // forever) and it does NOT read the file (the fstat-vs-read
+                // TOCTOU window is inherent to read-at-send streaming and
+                // accepted by the M8.6 spec — a file swapped between here and
+                // the actual stream read maps to the existing transport bands).
                 let metadata = tokio::fs::metadata(&resolved).await.map_err(|err| {
                     HttpError::MultipartFile {
                         name: part.name.clone(),
                         reason: format!("{path}: {err}"),
                     }
                 })?;
+                // Reject anything that is not a regular file BEFORE `File::open`.
+                // A directory `open(2)`s fine (O_RDONLY succeeds), so without
+                // this guard pre-flight would pass and reqwest would only error
+                // (`IsADirectory`) mid-stream — after headers + boundary +
+                // earlier parts are on the wire, the half-multipart the spec
+                // forbids. A FIFO would additionally hang `File::open`; because
+                // this guard runs on the (non-blocking) `metadata` result and
+                // before the open, it also prevents that hang.
+                if !metadata.file_type().is_file() {
+                    return Err(HttpError::MultipartFile {
+                        name: part.name.clone(),
+                        reason: format!("{path}: not a regular file"),
+                    });
+                }
                 let file = tokio::fs::File::open(&resolved).await.map_err(|err| {
                     HttpError::MultipartFile {
                         name: part.name.clone(),
