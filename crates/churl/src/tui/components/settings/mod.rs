@@ -540,11 +540,13 @@ pub enum SettingsOutcome {
     },
     /// Switch the live theme by name (`"dark"` | `"light"`).
     ApplyTheme(String),
-    /// Set the working-copy leader-key combo. No cheap live-reparse seam
-    /// exists for the keymap today, so this updates the session's working
-    /// copy only (shown/edited here, persisted by Save-as-default) — it takes
-    /// effect on the NEXT launch, not this session. The app surfaces that
-    /// with an inline hint rather than silently doing nothing.
+    /// Set the working-copy leader-key combo. A cheap live-reparse seam DOES
+    /// exist for the keymap (`KeyMap::set_leader`, M8.5.3), but this outcome
+    /// only updates the session's working copy (shown/edited here, persisted
+    /// by Save-as-default) — applying it is deferred to the explicit
+    /// `<leader>r` reload gate (or the next launch), never applied on this
+    /// keystroke, so a leader edit never changes the meaning of a key
+    /// mid-combo. The app surfaces that with an inline hint naming the gate.
     ApplyLeaderKey(String),
     /// Persist the current working copy to `config.toml` (M8.5 Wave 3).
     SaveDefaults,

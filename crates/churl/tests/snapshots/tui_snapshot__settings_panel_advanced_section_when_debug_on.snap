@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1905
 expression: snap
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -18,10 +17,10 @@ expression: snap
 │           ┃│                                                    │┃───────────┐
 │           ┃└────────────────────────────────────────────────────┘┃           │
 │           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
+│           ┃                                                      ┃           │
 │           ┃Default concurrent requests for a new load run.       ┃           │
-│           ┃                                                      ┃           │
-│           ┃                                                      ┃           │
-└───────────┗ j/k · J/K adjust · enter edit · s save · esc back ━━━┛           │
+└───────────┗━━━ j/k · J/K adjust · enter edit · s save · esc back ┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

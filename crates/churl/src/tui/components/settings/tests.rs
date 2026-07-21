@@ -640,6 +640,28 @@ fn request_max_body_quick_adjust_steps_by_one_mb() {
     );
 }
 
+/// M8.5.3 floor-clamp fix: decrementing THROUGH the grid floor must land on
+/// the smallest step-aligned value (`step` itself — 1 MB here), never the
+/// off-grid `1` byte the old `.max(1)` clamp produced. Repro: body cap at
+/// exactly 1 MB (already the smallest on-grid value above zero), `K` used to
+/// walk it down to a single byte.
+#[test]
+fn request_max_body_quick_adjust_floor_clamps_to_the_step_not_to_one_byte() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter));
+    s.handle_key(key(KeyCode::Char('j'))); // -> MaxBodyBytes row
+    s.advanced.body_cap_bytes = MB;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyAdvanced {
+            field: AdvancedField::BodyCapBytes,
+            value: MB,
+        },
+        "decrementing at the grid floor must stay on a step-aligned value (1 MB), \
+         not collapse to 1 byte"
+    );
+}
+
 #[test]
 fn request_redirect_quick_adjust_cycles_both_directions() {
     let mut s = state_no_cookies();
@@ -760,6 +782,28 @@ fn load_cap_quick_adjust_steps_by_family_and_clamps_at_one() {
             field: LoadRow::WarnConcurrency,
             value: 1,
         }
+    );
+}
+
+/// M8.5.3 floor-clamp fix, Total family (step 10): decrementing at the grid
+/// floor must land on 10 (the smallest step-aligned value), not the
+/// off-grid `1` the old `.max(1)` clamp produced.
+#[test]
+fn load_cap_quick_adjust_floor_clamps_total_to_the_step_not_to_one() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Char('j')));
+    s.handle_key(key(KeyCode::Char('j'))); // -> Load
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, WarnTotal row (step 10)
+    assert_eq!(s.load_row, LoadRow::WarnTotal);
+    s.load_caps.warn_total = 10;
+    assert_eq!(
+        s.handle_key(key(KeyCode::Char('K'))),
+        SettingsOutcome::ApplyLoadCap {
+            field: LoadRow::WarnTotal,
+            value: 10,
+        },
+        "decrementing a total-family cap at the grid floor must stay on a \
+         step-aligned value (10), not collapse to 1"
     );
 }
 
@@ -1456,6 +1500,63 @@ fn longest_description_does_not_clip_at_real_width() {
     );
 }
 
+/// M8.5.3 item D: a short (1-line) description must hug the BOTTOM of the
+/// footer's 3-row description area (directly above the modal's bottom
+/// border), not float at the top with a blank gap beneath it — the bug
+/// `render_footer` top-aligned the description into `desc_area` regardless
+/// of how many lines it actually needed.
+#[test]
+fn short_description_hugs_the_bottom_border_not_the_top_of_the_footer() {
+    use crate::tui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    let mut s = state_no_cookies();
+    for _ in 0..3 {
+        s.handle_key(key(KeyCode::Char('j'))); // -> Appearance
+    }
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Theme row: "The color theme (dark or light)." (1 line)
+
+    let theme = Theme::dark();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, 80, 24), &s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..24)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect();
+    let bottom = rows
+        .iter()
+        .position(|r| r.contains('┗'))
+        .expect("modal bottom border row");
+
+    // The 3-row description area sits directly above the bottom border:
+    // rows[bottom-3] (top) .. rows[bottom-1] (bottom, adjacent to the border).
+    let adjacent_to_border = &rows[bottom - 1];
+    let middle_of_area = &rows[bottom - 2];
+    let top_of_area = &rows[bottom - 3];
+
+    assert!(
+        adjacent_to_border.contains("The color theme"),
+        "a short description must hug the row directly above the bottom border:\n{adjacent_to_border}"
+    );
+    assert!(
+        !top_of_area.contains("The color theme"),
+        "a short description must NOT float at the top of the footer's description area:\n{top_of_area}"
+    );
+    assert!(
+        !middle_of_area.contains("The color theme"),
+        "a short description must not land mid-area either — it hugs the bottom:\n{middle_of_area}"
+    );
+}
+
 /// Mid-edit and mid-capture, the description row goes quiet rather than
 /// showing a stale or misleading line (the editor/capture prompt already
 /// occupies the row it describes).
@@ -1472,6 +1573,139 @@ fn footer_description_is_blank_while_editing_or_capturing() {
         !while_editing.contains("How long to wait for a response"),
         "the description must not linger once the editor is open:\n{while_editing}"
     );
+}
+
+/// Renders `s` at the REAL modal width (80×24) and returns the exact text of
+/// the modal's bottom border row — the row carrying the `title_bottom` key
+/// hint (`footer_hint`).
+fn bottom_border_row_at_80(s: &SettingsState) -> String {
+    use crate::tui::theme::Theme;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    let (w, h) = (80u16, 24u16);
+    let theme = Theme::dark();
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, w, h), s, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .find(|row| row.contains('┗'))
+        .expect("modal bottom border row")
+}
+
+/// M8.5.3 item C: the bottom-border hint is right-aligned (matching
+/// `footer_hint`'s own doc, which the `.left_aligned()` call contradicted).
+/// At the real 80-col modal width the flagship `j/k move`/`J/K adjust`
+/// discovery prefix must still be visible on the border — a right-aligned
+/// over-long hint clips on the LEFT, which would silently eat exactly that
+/// prefix if the hint didn't fit the available width.
+#[test]
+fn bottom_border_hint_is_right_aligned_and_shows_the_flagship_prefix() {
+    let mut s = state_no_cookies();
+    s.handle_key(key(KeyCode::Enter)); // -> Panel, Request rows (PanelFocus::Rows, non-Network)
+    let row = bottom_border_row_at_80(&s);
+    assert!(
+        row.contains("j/k move · J/K adjust · enter · s save · esc · q"),
+        "the FULL Rows-focus hint, flagship prefix included, must be on the \
+         border unclipped at 80 cols:\n{row}"
+    );
+    // Right-aligned: the hint sits flush against the closing corner (only
+    // the single padding space `footer_hint`'s caller adds before it).
+    let corner = row.rfind('┛').expect("bottom-right corner");
+    let hint_tail = row.rfind('q').map(|i| i + 1).unwrap_or(0);
+    assert!(
+        corner.saturating_sub(hint_tail) <= 2,
+        "the hint must be right-aligned flush against the border's closing corner:\n{row}"
+    );
+}
+
+/// Every `footer_hint` variant must fit within the real modal's inner border
+/// width at 80 cols, in FULL — otherwise right-alignment (item C) silently
+/// clips the flagship LEFT token instead of a harmless trailing one. Exercises
+/// every reachable panel/level/focus/sub-state combination the hint's `match`
+/// covers, asserting the exact full string (not a substring) is present.
+#[test]
+fn every_footer_hint_variant_fits_the_real_border_width_when_right_aligned() {
+    let menu = state_no_cookies();
+    let mut rows = state_no_cookies();
+    rows.handle_key(key(KeyCode::Enter)); // -> Panel, Request rows
+
+    let mut network_rows = state_no_cookies();
+    goto_network_cookies(&mut network_rows); // -> Panel, Network rows, Cookies row
+
+    let mut cookie_list = state_with_cookies();
+    goto_network_cookies(&mut cookie_list);
+    cookie_list.handle_key(key(KeyCode::Char('l'))); // -> CookieList
+
+    let mut advanced_list = SettingsState::new(snapshot(true, Vec::new())); // debug-enabled, so Debug is reachable
+    for _ in 0..4 {
+        advanced_list.handle_key(key(KeyCode::Char('j'))); // -> Debug
+    }
+    advanced_list.handle_key(key(KeyCode::Enter)); // -> Panel, Debug rows
+    advanced_list.handle_key(key(KeyCode::Char('j'))); // -> Advanced row
+    advanced_list.handle_key(key(KeyCode::Enter)); // -> AdvancedList
+
+    let mut editing = state_no_cookies();
+    editing.handle_key(key(KeyCode::Enter)); // -> Panel, Timeout row
+    editing.handle_key(key(KeyCode::Enter)); // open the Timeout editor
+
+    let mut capturing = state_no_cookies();
+    for _ in 0..3 {
+        capturing.handle_key(key(KeyCode::Char('j'))); // -> Appearance
+    }
+    capturing.handle_key(key(KeyCode::Enter)); // -> Panel (Appearance/Theme)
+    capturing.handle_key(key(KeyCode::Char('j'))); // -> LeaderKey row
+    capturing.handle_key(key(KeyCode::Enter)); // -> capture mode
+
+    let mut cookie_form = state_with_cookies();
+    goto_network_cookies(&mut cookie_form);
+    cookie_form.handle_key(key(KeyCode::Char('l'))); // -> CookieList
+    cookie_form.handle_key(key(KeyCode::Char('a'))); // open the add-cookie form
+
+    let mut cookie_form_editing = state_with_cookies();
+    goto_network_cookies(&mut cookie_form_editing);
+    cookie_form_editing.handle_key(key(KeyCode::Char('l')));
+    cookie_form_editing.handle_key(key(KeyCode::Char('a')));
+    cookie_form_editing.handle_key(key(KeyCode::Enter)); // begin editing Domain
+
+    let cases: [(&str, &SettingsState); 9] = [
+        ("j/k move · enter open · s save · q close", &menu),
+        ("j/k move · J/K adjust · enter · s save · esc · q", &rows),
+        (
+            "j/k · J/K adjust · enter · a add · l list · s save",
+            &network_rows,
+        ),
+        ("j/k · a add · e edit · d del · x clear · esc", &cookie_list),
+        (
+            "j/k · J/K adjust · enter edit · s save · esc back",
+            &advanced_list,
+        ),
+        ("enter apply · esc cancel", &editing),
+        ("press any key · tab to type · esc cancel", &capturing),
+        (
+            "j/k · enter edit · s save cookie · esc cancel",
+            &cookie_form,
+        ),
+        ("enter apply · esc cancel", &cookie_form_editing),
+    ];
+
+    for (expected, state) in cases {
+        let row = bottom_border_row_at_80(state);
+        assert!(
+            row.contains(expected),
+            "hint {expected:?} must render in FULL, unclipped, at the real 80-col \
+             modal width:\n{row}"
+        );
+    }
 }
 
 #[test]

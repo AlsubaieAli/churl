@@ -173,9 +173,12 @@ pub struct App {
     /// `Config::leader_key` (or the built-in default `"space"`) by
     /// [`Self::install_runtime`]; editable live in the Settings panel's
     /// Appearance category, but — unlike every other session control — NOT
-    /// applied to the live [`Self::keymap`] (no cheap re-parse seam exists
-    /// yet): it takes effect on the next launch, and is what Save-as-default
-    /// persists.
+    /// applied to the live [`Self::keymap`] on this keystroke: a cheap
+    /// re-parse seam DOES exist (`KeyMap::set_leader`, M8.5.3), but a leader
+    /// change is deliberately deferred to an explicit apply gate,
+    /// `<leader>r` (`Self::reload_workspace`), so it never changes the
+    /// meaning of a key mid-combo. It takes effect on the next `<leader>r`
+    /// or launch, and is what Save-as-default persists to disk.
     pub(in crate::tui::app) leader_key: String,
     /// `--var key=value` overrides: the highest-precedence resolver scope.
     cli_vars: BTreeMap<String, String>,
@@ -446,14 +449,29 @@ pub struct App {
     pub(in crate::tui::app) settings_touched:
         std::collections::HashSet<super::components::settings::SettingKey>,
     /// The net-change baseline for [`Self::settings_touched`]: every managed
-    /// knob's value at the moment the Settings panel last opened (re-captured
-    /// after a successful save). A panel edit marks its knob touched only when
-    /// the new value differs from THIS — so interacting with a knob without
-    /// net-changing it (a toggle round-trip, an Enter-commit that changed
-    /// nothing) leaves nothing to persist. Set by
-    /// `handlers::settings::open_settings`/`save_settings_defaults`; the value
-    /// while the panel is closed is inert (never read).
+    /// knob's value at **session start** (the panel's first-ever open) or at
+    /// the moment of the last successful Save — NOT re-captured on every
+    /// open (M8.5.3 fix; see [`Self::settings_baseline_established`]). A
+    /// panel edit marks its knob touched only when the new value differs
+    /// from THIS — so interacting with a knob without net-changing it (a
+    /// toggle round-trip, an Enter-commit that changed nothing) leaves
+    /// nothing to persist, while a genuinely changed-but-unsaved knob stays
+    /// touched across a close/reopen instead of being silently re-baselined
+    /// at its own dirty live value. Set by
+    /// `handlers::settings::open_settings` (first open only)/`save_settings_defaults`;
+    /// the value while the panel is closed is inert (never read).
     pub(in crate::tui::app) settings_baseline: churl_core::config::ResolvedSettings,
+    /// Guards [`Self::settings_baseline`] against being re-seeded from the
+    /// (possibly dirty, unsaved) live values on every Settings-panel open
+    /// (M8.5.3 fix for the cross-close desync: edit a knob live, close
+    /// without saving, reopen — the OLD code re-captured the baseline from
+    /// the now-dirty live value, so a later net-zero adjust silently
+    /// un-marked the knob and Save wrote nothing). `false` only before the
+    /// very first open this session; `open_settings` seeds the baseline and
+    /// flips this to `true` exactly once, then never re-seeds on a later
+    /// open — only `save_settings_defaults` re-seeds it after that (a real,
+    /// successful persistence, not a mere reopen).
+    pub(in crate::tui::app) settings_baseline_established: bool,
 }
 
 /// A minimal [`ResponseMeta`] for a sequence step's failed/error response view
@@ -701,6 +719,7 @@ impl App {
             cookie_exit_error: None,
             settings_touched: std::collections::HashSet::new(),
             settings_baseline: churl_core::config::ResolvedSettings::default(),
+            settings_baseline_established: false,
         })
     }
 

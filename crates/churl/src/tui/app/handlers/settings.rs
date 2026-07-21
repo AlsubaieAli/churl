@@ -9,23 +9,35 @@
 //!
 //! Most knobs apply live (a cheap existing seam — a direct field write, or a
 //! client rebuild exactly as the old Options overlay did). `leader_key` is the
-//! one exception: no cheap live-reparse seam exists for the keymap, so it
-//! updates the working copy only (see [`SettingsOutcome::ApplyLeaderKey`]'s doc)
-//! — Save-as-default (M8.5 Wave 3) is what actually persists it.
+//! one exception that does NOT apply on this keystroke: a cheap live-reparse
+//! seam DOES exist (`KeyMap::set_leader`, M8.5.3), but a panel edit only
+//! updates the working copy (see [`SettingsOutcome::ApplyLeaderKey`]'s doc) —
+//! the explicit apply gate is `<leader>r` (`App::reload_workspace`), which
+//! calls that seam. Save-as-default (M8.5 Wave 3) is what persists it to disk.
 
 use super::super::*;
 use crate::tui::components::settings::{AdvancedField, SettingKey, mask_proxy};
 use churl_core::cookies::CookieSpec;
 
 impl App {
-    /// Opens the Settings panel over the current session settings. Captures the
-    /// net-change **baseline** ([`Self::settings_baseline`]) from the session's
-    /// current effective values FIRST — every panel edit is then judged
-    /// net-changed-or-not against this snapshot, so a knob merely interacted
-    /// with (a toggle round-trip, an Enter-commit that changed nothing) never
-    /// ends up persisted.
+    /// Opens the Settings panel over the current session settings. Seeds the
+    /// net-change **baseline** ([`Self::settings_baseline`]) from the
+    /// session's effective values ONLY on the first-ever open this session
+    /// (M8.5.3 fix) — a later reopen leaves the baseline exactly as it was
+    /// (the session-start values, or the just-saved values if a Save
+    /// happened since). Every panel edit is judged net-changed-or-not
+    /// against this baseline, so a knob merely interacted with (a toggle
+    /// round-trip, an Enter-commit that changed nothing) never ends up
+    /// persisted — and, critically, a knob genuinely changed but never saved
+    /// stays touched across a close/reopen instead of being silently
+    /// re-baselined at its own dirty live value (which used to make a later
+    /// net-zero-looking adjust erase it and Save write nothing; see
+    /// [`Self::settings_baseline_established`]'s doc).
     pub(in crate::tui::app) fn open_settings(&mut self) {
-        self.settings_baseline = self.settings_working_copy();
+        if !self.settings_baseline_established {
+            self.settings_baseline = self.settings_working_copy();
+            self.settings_baseline_established = true;
+        }
         let state = SettingsState::new(self.settings_snapshot());
         // One transition — construct the state INTO the mode (no parallel field).
         self.mode = Mode::Settings(state);
@@ -257,7 +269,7 @@ impl App {
                 );
                 self.mark_setting(SettingKey::LeaderKey, differs);
                 self.notify(format!(
-                    "leader key set to {combo} (applies on next launch)"
+                    "leader key set to {combo} — press <leader>r (or restart) to apply"
                 ));
                 self.refresh_settings_panel();
             }
