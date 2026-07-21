@@ -4,6 +4,7 @@
 
 pub mod env_editor;
 pub mod explorer;
+pub mod file_picker;
 pub mod fold;
 pub mod help;
 pub mod inspector;

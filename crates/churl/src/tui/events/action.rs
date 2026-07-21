@@ -113,6 +113,11 @@ pub enum Action {
     RowToggle,
     /// Edit the selected row (or open the auth-kind picker on the Auth kind row).
     RowEdit,
+    /// Open the Body-type picker (M8.6: text/json/form/multipart) — reachable
+    /// from anywhere on the Body tab, unlike `RowEdit`'s row-0 special case
+    /// (the edtui surface swallows `i`/`Enter` on a non-multipart body, so the
+    /// type switch needs its own leader-key entry point).
+    OpenBodyTypePicker,
     /// Create a new endpoint under the selected collection.
     NewEndpoint,
     /// Create a new collection.
@@ -347,6 +352,11 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     (Action::RowDelete, "row-delete", "delete row"),
     (Action::RowToggle, "row-toggle", "toggle row enabled"),
     (Action::RowEdit, "row-edit", "edit row"),
+    (
+        Action::OpenBodyTypePicker,
+        "open-body-type-picker",
+        "body type",
+    ),
     (Action::NewEndpoint, "new-endpoint", "new endpoint"),
     (Action::NewCollection, "new-collection", "new collection"),
     (

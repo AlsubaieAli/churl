@@ -8787,3 +8787,356 @@ fn open_bare_request() -> Request {
         insecure: false,
     }
 }
+
+// ---- M8.6: multipart body-tab (type picker, parts row-list, file picker) ----
+
+/// Opens a real workspace at `root` and loads one POST endpoint whose body is
+/// `Body::Multipart(parts)`, focused on the Body tab. A real workspace (not
+/// `open_bare_endpoint`'s `None`) is required: the file picker resolves
+/// against `App::workspace`.
+fn multipart_app(root: &Path, parts: Vec<Part>) -> App {
+    std::fs::write(root.join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let ws = open_workspace(root).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    let endpoint = Endpoint {
+        seq: 0,
+        name: "upload".to_owned(),
+        assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
+        request: Request {
+            method: churl_core::model::Method::Post,
+            url: "https://api.test/upload".to_owned(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: Some(Body::Multipart(parts)),
+            auth: None,
+            insecure: false,
+        },
+    };
+    app.load_endpoint(SelectedEndpoint {
+        display_path: "upload".to_owned(),
+        file: root.join("upload.toml"),
+        collection: 0,
+        endpoint,
+    });
+    app.focus = Pane::Request;
+    app.test_tabs().active = RequestTab::Body;
+    app
+}
+
+fn multipart_parts(app: &mut App) -> Vec<Part> {
+    match &app.live_request().unwrap().body {
+        Some(Body::Multipart(parts)) => parts.clone(),
+        other => panic!("expected a Multipart body, got {other:?}"),
+    }
+}
+
+/// Regression twin of `body_tab_row_keys_reach_edtui`: on a MULTIPART Body
+/// tab, `i`/`a` must NOT reach edtui — they drive the row-list (RowEdit/
+/// RowAdd) exactly like Params/Headers/Auth.
+#[test]
+fn multipart_body_tab_row_keys_reach_row_list_not_edtui() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "field".into(),
+            value: PartValue::Text("hello".into()),
+        }],
+    );
+    assert_eq!(app.test_editor().mode, EditorMode::Normal);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.test_editor().mode,
+        EditorMode::Normal,
+        "'a' on a Multipart Body tab must NOT enter edtui insert mode"
+    );
+    assert!(
+        app.test_tabs().editing.is_some(),
+        "'a' must start a row edit (RowAdd) instead"
+    );
+}
+
+#[test]
+fn open_body_type_picker_lists_four_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    app.open_body_type_picker();
+    assert!(matches!(app.mode, Mode::Palette));
+    let Some(Picker::BodyType { state }) = &app.picker else {
+        panic!("expected Picker::BodyType");
+    };
+    assert_eq!(
+        state.items,
+        vec![
+            "text".to_owned(),
+            "json".to_owned(),
+            "form".to_owned(),
+            "multipart".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn set_body_type_preserves_content_among_simple_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    // Start from a Simple/Text body carrying content, seeded via the editor
+    // (mirrors real typing — `set_body_type` must sync it first).
+    app.active_endpoint_buffer_mut()
+        .unwrap()
+        .endpoint
+        .endpoint
+        .request
+        .body = Some(Body::Simple {
+        kind: BodyKind::Text,
+        content: String::new(),
+    });
+    app.test_editor().lines = edtui::Lines::from("hello world");
+    app.set_body_type(1); // -> json
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Json,
+            content: "hello world".into(),
+        }),
+        "content survives a Text<->Json switch"
+    );
+}
+
+#[test]
+fn set_body_type_to_multipart_then_back_discards_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    app.active_endpoint_buffer_mut()
+        .unwrap()
+        .endpoint
+        .endpoint
+        .request
+        .body = Some(Body::Simple {
+        kind: BodyKind::Text,
+        content: "will be discarded".into(),
+    });
+    app.set_body_type(3); // -> multipart
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Multipart(Vec::new()))
+    );
+    app.set_body_type(0); // -> text
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Text,
+            content: String::new(),
+        }),
+        "switching to/from Multipart is a different shape — content does not survive"
+    );
+}
+
+#[test]
+fn multipart_row_add_appends_part_and_opens_name_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    app.row_add();
+    assert_eq!(multipart_parts(&mut app).len(), 1);
+    assert_eq!(app.test_tabs().parts_sel, 1, "row 1 = the new part");
+    let editing = app.test_tabs().editing.clone().expect("editing a new row");
+    assert_eq!(editing.row, 1);
+    assert_eq!(editing.field, EditField::Name);
+}
+
+#[test]
+fn multipart_row_delete_removes_part_but_not_type_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "field".into(),
+            value: PartValue::Text("hello".into()),
+        }],
+    );
+    // Row 0 (type row) cannot be deleted.
+    app.test_tabs().parts_sel = 0;
+    app.row_delete();
+    assert_eq!(
+        multipart_parts(&mut app).len(),
+        1,
+        "type row is not deletable"
+    );
+    // Row 1 (the part) can be.
+    app.test_tabs().parts_sel = 1;
+    app.row_delete();
+    assert_eq!(multipart_parts(&mut app).len(), 0);
+}
+
+#[test]
+fn multipart_row_toggle_flips_text_and_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "field".into(),
+            value: PartValue::Text("hello".into()),
+        }],
+    );
+    app.test_tabs().parts_sel = 1;
+    app.row_toggle();
+    assert!(matches!(
+        multipart_parts(&mut app)[0].value,
+        PartValue::File { .. }
+    ));
+    app.row_toggle();
+    assert!(matches!(
+        multipart_parts(&mut app)[0].value,
+        PartValue::Text(_)
+    ));
+    // The type row (0) never toggles.
+    app.test_tabs().parts_sel = 0;
+    app.row_toggle();
+    assert!(
+        matches!(multipart_parts(&mut app)[0].value, PartValue::Text(_)),
+        "toggling row 0 must not touch the part"
+    );
+}
+
+#[test]
+fn multipart_row_edit_on_type_row_opens_body_type_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    app.test_tabs().parts_sel = 0;
+    app.row_edit();
+    assert!(matches!(app.picker, Some(Picker::BodyType { .. })));
+}
+
+#[test]
+fn multipart_ghost_part_is_discarded_on_cancelled_add() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = multipart_app(dir.path(), Vec::new());
+    app.row_add();
+    assert_eq!(multipart_parts(&mut app).len(), 1);
+    // Esc on the still-empty name field discards the ghost part (mirrors
+    // Params/Headers' `a`+Esc behaviour).
+    app.handle_field_edit_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(multipart_parts(&mut app).len(), 0);
+}
+
+/// Advancing past a File-part's NAME field opens the file picker instead of a
+/// plain value LineEditor — a File part's path is only ever set by browsing.
+#[test]
+fn multipart_file_part_name_edit_advance_opens_file_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.pdf"), b"x").unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "upload".into(),
+            value: PartValue::File {
+                path: String::new(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    app.test_tabs().parts_sel = 1;
+    app.row_edit(); // opens the Name field editor
+    assert_eq!(
+        app.test_tabs().editing.as_ref().unwrap().field,
+        EditField::Name
+    );
+    app.field_edit_advance(false); // Tab: Name -> (File part) file picker
+    assert!(app.test_tabs().editing.is_none(), "the inline edit closed");
+    assert!(matches!(app.mode, Mode::FilePicker(_)));
+}
+
+#[test]
+fn file_picker_accept_writes_chosen_path_and_esc_cancels_without_changing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.pdf"), b"x").unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "upload".into(),
+            value: PartValue::File {
+                path: String::new(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    app.open_file_picker(0);
+    // The root also holds `churl.toml` (written by `multipart_app`); find
+    // `report.pdf` among the entries rather than assuming it's the only one.
+    let Mode::FilePicker(state) = &mut app.mode else {
+        panic!("expected Mode::FilePicker");
+    };
+    let report_row = state
+        .entries
+        .iter()
+        .position(|e| e.name == "report.pdf")
+        .expect("report.pdf listed");
+    state.selected = report_row;
+    app.handle_file_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(
+        multipart_parts(&mut app)[0].value,
+        PartValue::File {
+            path: "report.pdf".into(),
+            filename: None,
+            mime: None,
+        }
+    );
+
+    // Esc cancels without writing anything.
+    app.open_file_picker(0);
+    app.handle_file_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(
+        multipart_parts(&mut app)[0].value,
+        PartValue::File {
+            path: "report.pdf".into(),
+            filename: None,
+            mime: None,
+        },
+        "Esc must not change the part"
+    );
+}
+
+#[test]
+fn file_picker_descends_into_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("assets")).unwrap();
+    std::fs::write(dir.path().join("assets/report.pdf"), b"x").unwrap();
+    let mut app = multipart_app(
+        dir.path(),
+        vec![Part {
+            name: "upload".into(),
+            value: PartValue::File {
+                path: String::new(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    app.open_file_picker(0);
+    // Row 0 is "assets" (dirs sort first, ahead of the root's `churl.toml`) —
+    // Enter descends.
+    app.handle_file_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Mode::FilePicker(state) = &app.mode else {
+        panic!("expected to still be in the picker");
+    };
+    assert_eq!(state.current_dir, dir.path().join("assets"));
+    // Enter again accepts the file.
+    app.handle_file_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(
+        multipart_parts(&mut app)[0].value,
+        PartValue::File {
+            path: "assets/report.pdf".into(),
+            filename: None,
+            mime: None,
+        }
+    );
+}

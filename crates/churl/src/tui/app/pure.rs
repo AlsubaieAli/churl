@@ -174,6 +174,17 @@ pub(super) fn toggle_auth_placement(auth: Option<&mut Auth>, row: usize) {
     }
 }
 
+/// Whether a multipart part's value carries no user content yet — an empty
+/// inline text, or a file part with an empty path (M8.6). Used the same way
+/// `discard_row_if_empty` uses "name and value both empty" for Params/Headers:
+/// a cancelled `a`(dd) must not leave a nameless ghost part behind.
+pub(super) fn part_value_is_empty(value: &PartValue) -> bool {
+    match value {
+        PartValue::Text(text) => text.is_empty(),
+        PartValue::File { path, .. } => path.is_empty(),
+    }
+}
+
 /// A sensible default export destination inside the workspace: `exports/<slug>.json`.
 pub(super) fn default_export_path(name: &str) -> String {
     let mut slug = String::with_capacity(name.len());

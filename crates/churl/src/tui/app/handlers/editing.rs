@@ -186,7 +186,10 @@ impl App {
         }
     }
 
-    /// The number of rows on the active tab of the live request.
+    /// The number of rows on the active tab of the live request. On the Body
+    /// tab this is `0` for a non-multipart body (no rows — the edtui surface
+    /// owns it) or `1 + parts.len()` for a `Multipart` one (the type row plus
+    /// one row per part).
     pub(in crate::tui::app) fn active_tab_row_count(&self) -> usize {
         let Some(b) = self.active_endpoint_buffer() else {
             return 0;
@@ -196,11 +199,15 @@ impl App {
             RequestTab::Params => request.params.len(),
             RequestTab::Headers => request.headers.len(),
             RequestTab::Auth => auth_field_count(request.auth.as_ref()),
-            RequestTab::Body => 0,
+            RequestTab::Body => match &request.body {
+                Some(Body::Multipart(parts)) => 1 + parts.len(),
+                _ => 0,
+            },
         }
     }
 
-    /// `a`: add a row on the Params/Headers tab and immediately edit its name.
+    /// `a`: add a row on the Params/Headers tab (or a part on the Body tab
+    /// when its kind is Multipart) and immediately edit its name.
     pub(in crate::tui::app) fn row_add(&mut self) {
         let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
@@ -223,15 +230,26 @@ impl App {
                 });
                 (request.headers.len() - 1, request.headers.len())
             }
-            // Auth/Body have no add-row.
-            _ => return,
+            RequestTab::Body => {
+                let Some(Body::Multipart(parts)) = request.body.as_mut() else {
+                    return; // no add-row on a non-multipart Body tab
+                };
+                parts.push(Part {
+                    name: String::new(),
+                    value: PartValue::Text(String::new()),
+                });
+                (parts.len(), parts.len() + 1) // +1 offset: row 0 is the type row
+            }
+            // Auth has no add-row.
+            RequestTab::Auth => return,
         };
         b.tabs.clamp(row_count);
         // Select and edit the new row's name field.
         match b.tabs.active {
             RequestTab::Params => b.tabs.params_sel = new_row,
             RequestTab::Headers => b.tabs.headers_sel = new_row,
-            _ => {}
+            RequestTab::Body => b.tabs.parts_sel = new_row,
+            RequestTab::Auth => {}
         }
         b.tabs.editing = Some(FieldEdit {
             row: new_row,
@@ -240,7 +258,9 @@ impl App {
         });
     }
 
-    /// `d`: delete the selected row on the Params/Headers tab (no confirm).
+    /// `d`: delete the selected row on the Params/Headers tab, or the selected
+    /// part on a Multipart Body tab (row 0, the type row, cannot be deleted —
+    /// mirrors the Auth kind row). No confirm.
     pub(in crate::tui::app) fn row_delete(&mut self) {
         let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
@@ -256,13 +276,27 @@ impl App {
                 request.headers.remove(sel);
                 request.headers.len()
             }
+            RequestTab::Body => {
+                let Some(Body::Multipart(parts)) = request.body.as_mut() else {
+                    return;
+                };
+                if sel == 0 || sel > parts.len() {
+                    return;
+                }
+                parts.remove(sel - 1);
+                1 + parts.len()
+            }
             _ => return,
         };
         b.tabs.clamp(row_count);
     }
 
-    /// `Space`: toggle the selected row's `enabled` flag (Params/Headers), or the
-    /// ApiKey placement on the Auth tab's placement row.
+    /// `t` (`Action::RowToggle`): toggle the selected row's `enabled` flag
+    /// (Params/Headers), the ApiKey placement on the Auth tab's placement
+    /// row, or a Multipart part's value kind (Text ⇄ File — the "type"
+    /// column, reset to default-empty on flip, same as `set_auth_kind`'s
+    /// swap-in-default-empty-fields). A no-op on the Body type row (row 0),
+    /// mirroring the Auth kind row.
     pub(in crate::tui::app) fn row_toggle(&mut self) {
         let Some(b) = self.active_endpoint_buffer_mut() else {
             return;
@@ -282,12 +316,29 @@ impl App {
                 }
             }
             RequestTab::Auth => toggle_auth_placement(request.auth.as_mut(), sel),
-            RequestTab::Body => {}
+            RequestTab::Body => {
+                if sel == 0 {
+                    return;
+                }
+                if let Some(Body::Multipart(parts)) = request.body.as_mut()
+                    && let Some(part) = parts.get_mut(sel - 1)
+                {
+                    part.value = match part.value {
+                        PartValue::Text(_) => PartValue::File {
+                            path: String::new(),
+                            filename: None,
+                            mime: None,
+                        },
+                        PartValue::File { .. } => PartValue::Text(String::new()),
+                    };
+                }
+            }
         }
     }
 
     /// `Enter`/`i`: edit the selected row. On the Auth kind row, opens the auth
-    /// kind picker instead.
+    /// kind picker instead; on the Body type row (row 0, Multipart only),
+    /// opens the Body-type picker instead.
     pub(in crate::tui::app) fn row_edit(&mut self) {
         let Some((sel, active)) = self
             .active_endpoint_buffer()
@@ -304,6 +355,15 @@ impl App {
         // pinned design: "placement row toggles header/query with Space/Enter").
         if active == RequestTab::Auth && sel == 3 {
             self.row_toggle();
+            return;
+        }
+        // The Body-tab type row (row 0, only reachable when Multipart — see
+        // `body_is_multipart`'s routing gate) opens the Body-type picker, same
+        // as the Auth kind row. `<leader>b` (`open_body_type_picker`) is the
+        // OTHER way in, needed because a non-multipart Body tab never reaches
+        // `RowEdit` at all (edtui owns `i`/`Enter` there).
+        if active == RequestTab::Body && sel == 0 {
+            self.open_body_type_picker();
             return;
         }
         // Auth fields have fixed labels — edit the value directly (no name→value
@@ -344,7 +404,21 @@ impl App {
                 (h.name.clone(), h.value.clone())
             }
             RequestTab::Auth => return auth_field_text(request.auth.as_ref(), row),
-            RequestTab::Body => return None,
+            RequestTab::Body => {
+                // Row 0 (the type row) has no text field — it opens a picker
+                // instead (see `row_edit`), never a `FieldEdit`.
+                let Some(Body::Multipart(parts)) = request.body.as_ref() else {
+                    return None;
+                };
+                let part = parts.get(row.checked_sub(1)?)?;
+                (
+                    part.name.clone(),
+                    match &part.value {
+                        PartValue::Text(text) => text.clone(),
+                        PartValue::File { path, .. } => path.clone(),
+                    },
+                )
+            }
         };
         Some(match field {
             EditField::Name => name,
@@ -408,6 +482,17 @@ impl App {
                 request.headers.remove(row);
                 Some(request.headers.len())
             }
+            RequestTab::Body if row >= 1 => match request.body.as_mut() {
+                Some(Body::Multipart(parts))
+                    if parts
+                        .get(row - 1)
+                        .is_some_and(|p| p.name.is_empty() && part_value_is_empty(&p.value)) =>
+                {
+                    parts.remove(row - 1);
+                    Some(1 + parts.len())
+                }
+                _ => None,
+            },
             _ => None,
         };
         if let Some(n) = removed {
@@ -429,6 +514,15 @@ impl App {
         self.write_field(active, edit.row, edit.field, text);
         match edit.field {
             EditField::Name => {
+                // A Multipart File-part's value is a PATH, set only via the
+                // file picker (never free-typed) — advancing past its name
+                // opens the picker instead of a plain value LineEditor. The
+                // row edit is already closed (`.take()` above); the path is
+                // written on the picker's own accept, not here.
+                if active == RequestTab::Body && self.body_part_is_file(edit.row) {
+                    self.open_file_picker(edit.row - 1);
+                    return;
+                }
                 // Advance to the value field, seeded with its text.
                 let value = self
                     .current_field_text(active, edit.row, EditField::Value)
@@ -490,7 +584,29 @@ impl App {
                 }
             }
             RequestTab::Auth => write_auth_field(request.auth.as_mut(), row, field, text),
-            RequestTab::Body => {}
+            RequestTab::Body => {
+                if row == 0 {
+                    return; // the type row has no text field
+                }
+                if let Some(Body::Multipart(parts)) = request.body.as_mut()
+                    && let Some(part) = parts.get_mut(row - 1)
+                {
+                    match field {
+                        EditField::Name => part.name = text,
+                        // A File part's value is normally set by the file
+                        // picker (see `field_edit_advance`), not here — but a
+                        // Text part's value DOES land here on Enter/commit,
+                        // and writing through for File too keeps this
+                        // function total or a stray manual `write_field` call
+                        // (e.g. a future direct binding) never silently drops
+                        // a value.
+                        EditField::Value => match &mut part.value {
+                            PartValue::Text(t) => *t = text,
+                            PartValue::File { path, .. } => *path = text,
+                        },
+                    }
+                }
+            }
         }
     }
 

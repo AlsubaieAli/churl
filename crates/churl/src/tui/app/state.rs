@@ -145,6 +145,11 @@ pub enum Mode {
     /// independent of whether this mode is active, so they cannot live
     /// inside the variant the way a snapshot-at-open trace does.
     LogPanel(LogPanelState),
+    /// The multipart file-part picker overlay (M8.6, Body tab `Enter` on a
+    /// File-type part's value field): a small directory browser. Owns its
+    /// [`file_picker::FilePickerState`] — including which part it is picking
+    /// FOR — so a picker with no target part is unconstructable.
+    FilePicker(file_picker::FilePickerState),
 }
 
 /// The state of the ONE open fuzzy-picker overlay, when `mode` is one of the
@@ -208,6 +213,10 @@ pub enum Picker {
     /// None / Basic / Bearer / ApiKey, addressed by the accepted item index
     /// directly (no side `Vec`).
     Auth { state: picker::PickerState },
+    /// The Body-type picker ([`Mode::Palette`], M8.6): text / json / form /
+    /// multipart, addressed by the accepted item index directly (no side
+    /// `Vec`) — the same shape as [`Picker::Auth`].
+    BodyType { state: picker::PickerState },
     /// The destination picker ([`Mode::Palette`]): a fuzzy list over every
     /// collection node **including the root** (root first). `dirs[i]` is the target
     /// directory for item `i` (the workspace root for the root entry); `purpose`
@@ -250,7 +259,8 @@ impl Picker {
             | Picker::Workspace { state, .. }
             | Picker::Sequence { state, .. }
             | Picker::Destination { state, .. }
-            | Picker::Auth { state } => state,
+            | Picker::Auth { state }
+            | Picker::BodyType { state } => state,
         }
     }
 
@@ -263,7 +273,8 @@ impl Picker {
             | Picker::Workspace { state, .. }
             | Picker::Sequence { state, .. }
             | Picker::Destination { state, .. }
-            | Picker::Auth { state } => state,
+            | Picker::Auth { state }
+            | Picker::BodyType { state } => state,
         }
     }
 }
