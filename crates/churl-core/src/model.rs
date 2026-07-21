@@ -330,6 +330,14 @@ impl TryFrom<BodyWire> for Body {
     fn try_from(wire: BodyWire) -> Result<Self, Self::Error> {
         match wire.kind {
             BodyWireKind::Multipart => {
+                // Fail loud on a shape mismatch rather than silently dropping
+                // data (mirrors `PartWire`'s both/neither strictness): a
+                // hand-edited `type = "multipart"` that also carries a
+                // top-level `content` is malformed — the `content` would
+                // otherwise vanish without a trace.
+                if wire.content.is_some() {
+                    return Err("multipart body must not have a top-level `content` key".to_owned());
+                }
                 let parts = wire
                     .part
                     .into_iter()
@@ -344,6 +352,20 @@ impl TryFrom<BodyWire> for Body {
                     BodyWireKind::Form => BodyKind::Form,
                     BodyWireKind::Multipart => unreachable!("handled above"),
                 };
+                // Symmetric strictness: a simple (text/json/form) body carrying
+                // a `[[part]]` array is malformed — the parts would otherwise be
+                // silently discarded.
+                if !wire.part.is_empty() {
+                    return Err(format!(
+                        "a `{}` body must not have `[[part]]` entries (that shape is `type = \"multipart\"`)",
+                        match simple {
+                            BodyWireKind::Text => "text",
+                            BodyWireKind::Json => "json",
+                            BodyWireKind::Form => "form",
+                            BodyWireKind::Multipart => unreachable!(),
+                        }
+                    ));
+                }
                 let content = wire
                     .content
                     .ok_or_else(|| "body is missing `content`".to_owned())?;
@@ -833,14 +855,45 @@ mod tests {
     /// `Simple` must serialize byte-identical to the pre-M8.6 `{ type, content }`
     /// shape so every existing endpoint round-trips unchanged — the M8.6 model
     /// split's core back-compat contract.
+    ///
+    /// N3: asserts byte-identity through the REAL save serialization path
+    /// (`persistence::endpoint_to_toml`, the no-disk twin of `save_endpoint`'s
+    /// `to_document` + `normalize_table` + `to_string`), not a bare
+    /// `toml_edit::ser::to_string` on the `Body` alone — so it fails if the
+    /// on-disk Simple shape ever drifts, not merely if the raw serde repr does.
+    /// A byte-exact `import(export)` round-trip through that path is the proof.
     #[test]
     fn body_simple_toml_shape_is_byte_identical_to_pre_multipart() {
-        let body = Body::Simple {
-            kind: BodyKind::Json,
-            content: r#"{"name":"ada"}"#.into(),
-        };
-        let toml = toml_edit::ser::to_string(&body).unwrap();
-        assert_eq!(toml, "type = \"json\"\ncontent = '{\"name\":\"ada\"}'\n");
+        // A canonical pre-M8.6 endpoint file, in the exact shape `save_endpoint`
+        // produces (array-of-tables headers, `[request.body]` with only
+        // `type` + `content`).
+        const PRE_M86: &str = "seq = 0\n\
+             name = \"create\"\n\n\
+             [request]\n\
+             method = \"POST\"\n\
+             url = \"https://api.example.com/users\"\n\n\
+             [[request.headers]]\n\
+             name = \"Content-Type\"\n\
+             value = \"application/json\"\n\n\
+             [request.body]\n\
+             type = \"json\"\n\
+             content = '{\"name\":\"ada\"}'\n";
+        let ep: Endpoint = toml_edit::de::from_str(PRE_M86).unwrap();
+        // The parsed body is exactly a `Simple` (no multipart machinery).
+        assert_eq!(
+            ep.request.body,
+            Some(Body::Simple {
+                kind: BodyKind::Json,
+                content: "{\"name\":\"ada\"}".into(),
+            })
+        );
+        // Re-serializing through the real save path reproduces the file
+        // byte-for-byte — the on-disk Simple shape did not drift.
+        let rendered = crate::persistence::endpoint_to_toml(&ep).unwrap();
+        assert_eq!(
+            rendered, PRE_M86,
+            "on-disk Simple body shape drifted:\n{rendered}"
+        );
     }
 
     #[test]
@@ -914,6 +967,27 @@ mod tests {
     fn body_simple_missing_content_key_errors() {
         let err = toml_edit::de::from_str::<Body>("type = \"json\"\n").unwrap_err();
         assert!(err.to_string().contains("content"), "{err}");
+    }
+
+    /// N1 (data safety): a `type = "multipart"` body carrying a stray
+    /// top-level `content` is malformed — deserializing it must FAIL loudly,
+    /// never silently drop the `content` (the pre-fix behaviour branched only
+    /// on `kind`).
+    #[test]
+    fn body_multipart_with_stray_content_key_errors_not_drops() {
+        let toml = "type = \"multipart\"\ncontent = \"dropped?\"\n\n[[part]]\nname = \"f\"\ntext = \"v\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("content"), "{err}");
+    }
+
+    /// N1 (data safety): a simple (text/json/form) body carrying a `[[part]]`
+    /// array is malformed — deserializing must FAIL loudly, never silently
+    /// discard the parts.
+    #[test]
+    fn body_simple_with_part_array_errors_not_drops() {
+        let toml = "type = \"json\"\ncontent = \"{}\"\n\n[[part]]\nname = \"f\"\ntext = \"v\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("part"), "{err}");
     }
 
     #[test]

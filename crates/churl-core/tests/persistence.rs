@@ -243,19 +243,29 @@ fn multipart_body_saves_as_array_of_tables_and_round_trips() {
 }
 
 /// A `Simple` endpoint saved BEFORE M8.6 (no `Multipart` variant existed) must
-/// still load correctly under the new model — the byte-identical TOML shape
-/// means an old file was never touched by the migration, so this is really a
-/// parse-forward-compat check: today's loader reads yesterday's file.
+/// still load correctly under the new model AND re-save byte-for-byte
+/// unchanged — the byte-identical TOML shape means an old file is never
+/// touched by the migration.
+///
+/// N3: asserts full **byte-identity** through the real `load_endpoint` →
+/// `save_endpoint` round-trip (not a substring `!contains("part")` check), so
+/// it fails on ANY on-disk drift of the Simple body shape, not just the
+/// appearance of a `part`/`multipart` token.
 #[test]
 fn pre_multipart_simple_body_fixture_still_loads() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy_body.toml");
-    // Exactly the pre-M8.6 shape: `[request.body]` with only `type` + `content`.
-    fs::write(
-        &path,
-        "seq = 0\nname = \"legacy\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/x\"\n\n[request.body]\ntype = \"json\"\ncontent = '{\"a\":1}'\n",
-    )
-    .unwrap();
+    // Exactly the pre-M8.6 shape a real endpoint file had, in canonical
+    // (save-produced) form so the round-trip is stable.
+    const PRE_M86: &str = "seq = 0\n\
+         name = \"legacy\"\n\n\
+         [request]\n\
+         method = \"POST\"\n\
+         url = \"https://api.test/x\"\n\n\
+         [request.body]\n\
+         type = \"json\"\n\
+         content = '{\"a\":1}'\n";
+    fs::write(&path, PRE_M86).unwrap();
     let loaded = load_endpoint(&path).unwrap();
     assert_eq!(
         loaded.request.body,
@@ -264,12 +274,14 @@ fn pre_multipart_simple_body_fixture_still_loads() {
             content: "{\"a\":1}".into(),
         })
     );
-    // Re-saving an untouched Simple body must not introduce any multipart
-    // machinery (no stray `part` key, no format drift).
+    // Re-saving the untouched Simple body reproduces the file byte-for-byte:
+    // no multipart machinery introduced, no format drift whatsoever.
     save_endpoint(&path, &loaded).unwrap();
     let resaved = fs::read_to_string(&path).unwrap();
-    assert!(!resaved.contains("part"), "{resaved}");
-    assert!(!resaved.contains("multipart"), "{resaved}");
+    assert_eq!(
+        resaved, PRE_M86,
+        "pre-M8.6 Simple body did not round-trip byte-identical"
+    );
 }
 
 #[test]
