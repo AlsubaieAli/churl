@@ -34,6 +34,14 @@ pub struct RequestSummary {
     pub url: String,
     pub headers: Vec<HeaderPair>,
     pub body_present: bool,
+    /// M8.6, additive (`schema_version` stays 1): the part count of a
+    /// `multipart/form-data` body, `None` for anything else (no body, or a
+    /// `Simple` one — `body_present` already covers those). Omitted from the
+    /// JSON envelope when `None` so a non-multipart `send`/`run` payload is
+    /// byte-identical to before this field existed. File-part contents are
+    /// never echoed — only the count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_parts: Option<usize>,
 }
 
 /// Coarse timing, milliseconds — the JSON-friendly projection of
@@ -225,6 +233,10 @@ pub fn shape_exec_data(
             })
             .collect(),
         body_present: request.body.is_some(),
+        body_parts: match &request.body {
+            Some(churl_core::model::Body::Multipart(parts)) => Some(parts.len()),
+            _ => None,
+        },
     };
 
     // An empty set stays `None` (the M8.2 back-compat contract for an

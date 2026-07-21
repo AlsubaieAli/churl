@@ -699,3 +699,99 @@ async fn run_ignores_endpoint_extract_rules_headless() {
         );
     }
 }
+
+/// M8.6: `run`ning a saved endpoint with a `Multipart` body reports
+/// `request.body_parts` (the part count) alongside `body_present`, additive
+/// and `schema_version`-stable — the "more useful than a bare bool" headless
+/// contract from the M8.6 spec.
+#[tokio::test]
+async fn run_multipart_endpoint_reports_body_parts_count() {
+    use churl_core::model::{Body, Part, PartValue};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wpath("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+    // The file part resolves against the workspace root (M8.6 send-time
+    // resolution) — write a real file there so the pre-flight `fstat`
+    // succeeds and the request actually goes out.
+    std::fs::write(dir.path().join("report.pdf"), b"%PDF-fake").unwrap();
+
+    let ep_path = create_endpoint(dir.path(), "Upload").unwrap();
+    save_endpoint(
+        &ep_path,
+        &Endpoint {
+            seq: 0,
+            name: "Upload".to_owned(),
+            assertions: Vec::new(),
+            extract: std::collections::BTreeMap::new(),
+            persist: Vec::new(),
+            request: Request {
+                method: Method::Post,
+                url: "{{base_url}}/upload".to_owned(),
+                headers: vec![],
+                params: vec![],
+                body: Some(Body::Multipart(vec![
+                    Part {
+                        name: "field".to_owned(),
+                        value: PartValue::Text("hello".to_owned()),
+                    },
+                    Part {
+                        name: "upload".to_owned(),
+                        value: PartValue::File {
+                            path: "report.pdf".to_owned(),
+                            filename: None,
+                            mime: None,
+                        },
+                    },
+                ])),
+                auth: None,
+                insecure: false,
+            },
+        },
+    )
+    .unwrap();
+
+    let output = churl_in(dir.path(), &["--json", "run", "Upload"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = envelope(&output);
+    assert_eq!(env["data"]["response"]["status"], 200);
+    assert_eq!(env["data"]["request"]["body_present"], true);
+    assert_eq!(env["data"]["request"]["body_parts"], 2);
+    assert_eq!(env["schema_version"], 1, "schema_version stays frozen at 1");
+}
+
+/// A non-multipart `run` never gains a `body_parts` key at all (not even
+/// `null`) — additive means the pre-M8.6 envelope shape is untouched for
+/// every endpoint that isn't multipart.
+#[tokio::test]
+async fn run_non_multipart_endpoint_omits_body_parts_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(dir.path(), &["--json", "run", "Ping"]);
+    let env = envelope(&output);
+    let request = env["data"]["request"]
+        .as_object()
+        .expect("request is an object");
+    assert!(
+        !request.contains_key("body_parts"),
+        "body_parts must be omitted, not null, for a non-multipart request: {env}"
+    );
+}
