@@ -25,8 +25,9 @@ impl App {
 
     /// Re-reads the workspace manifest (`churl.toml`) from disk and rebuilds the
     /// explorer, so external edits to `churl.toml`/`folder.toml` (another editor,
-    /// or a second churl instance) are picked up without a restart. Bound to
-    /// `<leader>r`.
+    /// or a second churl instance) are picked up without a restart. ALSO the
+    /// explicit live-apply gate for a leader key edited in the Settings panel
+    /// (M8.5.3 — see the inline comment below). Bound to `<leader>r`.
     ///
     /// Dirty-guard: reuses [`App::guarded_load`]'s dirty *predicate*
     /// ([`App::any_buffer_dirty`]) but NOT its resolution. A workspace *switch*
@@ -36,30 +37,48 @@ impl App {
     /// refuses in place ("save first") and applies nothing, preserving every
     /// edit. Re-reading the manifest and remapping buffers can shift collection
     /// indices under an open editor, so refusing while dirty is the safe default.
+    /// The leader-key live-apply is unconditional regardless of this guard — it
+    /// is orthogonal to the workspace reload.
     ///
     /// On a failed manifest re-open the current workspace is left intact and the
     /// error is surfaced (fail loudly, never half-swap).
     pub(in crate::tui::app) fn reload_workspace(&mut self) -> Result<()> {
+        // M8.5.3: `<leader>r` doubles as the explicit LIVE-APPLY gate for a
+        // leader key edited in the Settings panel (`ApplyLeaderKey` updates
+        // only the working copy, since a leader edit takes effect on THIS
+        // keystroke, not immediately, to avoid changing the meaning of keys
+        // mid-combo). A cheap seam already exists (`KeyMap::set_leader`), so
+        // this applies unconditionally on every `<leader>r` — independent of
+        // whether a workspace reload below actually proceeds. Parse-guarded:
+        // a bad working-copy combo keeps the OLD leader and reports the
+        // error rather than propagating it or bricking input.
+        let leader_note = match self.keymap.set_leader(&self.leader_key) {
+            Ok(()) => format!("leader key applied: {}", self.leader_key),
+            Err(err) => format!("leader key NOT applied — {err} (kept previous)"),
+        };
+
         let Some(root) = self.workspace.as_ref().map(|ws| ws.root().to_owned()) else {
-            self.notify("no workspace to reload");
+            self.notify(format!("no workspace to reload; {leader_note}"));
             return Ok(());
         };
         // Refuse in place rather than discard: same dirty check as guarded_load,
         // different resolution (a refresh must never destroy open buffers).
         if self.any_buffer_dirty() {
-            self.notify("unsaved changes — save before reloading from disk");
+            self.notify(format!(
+                "unsaved changes — save before reloading from disk; {leader_note}"
+            ));
             return Ok(());
         }
         let reopened = match OpenWorkspace::open(&root) {
             Ok(ws) => ws,
             Err(err) => {
-                self.notify(format!("failed to reload workspace: {err}"));
+                self.notify(format!("failed to reload workspace: {err}; {leader_note}"));
                 return Ok(());
             }
         };
         self.workspace = Some(reopened);
         self.reload_explorer()?;
-        self.notify("reloaded from disk");
+        self.notify(format!("reloaded from disk; {leader_note}"));
         Ok(())
     }
 

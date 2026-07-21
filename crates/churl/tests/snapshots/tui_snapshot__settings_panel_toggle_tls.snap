@@ -1,6 +1,5 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 1675
 expression: snap
 ---
 ┌ Explorer ──────────────────┐┌ URL ───────────────────────────────────────────┐
@@ -21,7 +20,7 @@ expression: snap
 │           ┃Certificate verification for HTTPS. Turning this OFF  ┃           │
 │           ┃accepts ANY certificate — only for trusted            ┃           │
 │           ┃environments.                                         ┃           │
-└───────────┗ j/k · J/K adjust · enter · a add · l list · s save ━━┛           │
+└───────────┗━━ j/k · J/K adjust · enter · a add · l list · s save ┛           │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘

@@ -62,13 +62,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Them
         .border_style(theme.border_focused)
         .title(title)
         .title_style(theme.title)
-        // LEFT-aligned (mirrors the top title's placement) so an over-long
-        // hint clips its TRAILING, least-important token instead of eating the
-        // flagship `j/k · J/K adjust` prefix — a right-aligned bottom hint
-        // clipped the left, hiding exactly the token users most need to
-        // discover. Strings are also kept within the border width so nothing
-        // clips at the real modal size (`footer_hint`).
-        .title_bottom(Line::from(format!(" {hint} ")).left_aligned());
+        // RIGHT-aligned (M8.5.3): every `footer_hint` string is kept within
+        // the real modal's border width (verified at 80 cols — see
+        // `footer_hint`'s doc and its regression tests), so a right-aligned
+        // hint never clips at all, on either end. Right-aligned reads better
+        // against the bottom-right corner convention this modal already uses
+        // for the top title; a PRIOR left-aligned placement existed only to
+        // dodge a since-fixed over-long hint that would have clipped the
+        // flagship `j/k`/`J/K adjust` LEFT token under right-alignment.
+        .title_bottom(Line::from(format!(" {hint} ")).right_aligned());
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     if inner.width == 0 || inner.height == 0 {
@@ -682,8 +684,8 @@ fn footer_hint(state: &SettingsState) -> &'static str {
 }
 
 /// A one-line description of the currently-hovered setting — what it does,
-/// plus anything useful a value alone doesn't convey (units, "applies on
-/// next launch", a security note). `None` when nothing meaningful is hovered
+/// plus anything useful a value alone doesn't convey (units, when it takes
+/// effect, a security note). `None` when nothing meaningful is hovered
 /// (the category menu, a form/list with its own detail, or mid-edit/-capture
 /// where the description would just repeat what's already on screen).
 fn setting_description(state: &SettingsState) -> Option<&'static str> {
@@ -741,7 +743,8 @@ fn setting_description(state: &SettingsState) -> Option<&'static str> {
         (SettingsCategory::Appearance, PanelFocus::Rows) => Some(match state.appearance_row {
             AppearanceRow::Theme => "The color theme (dark or light).",
             AppearanceRow::LeaderKey => {
-                "The leader key that opens the which-key menu. Applies on next launch."
+                "The leader key that opens the which-key menu. Live-applies on <leader>r \
+                 (or restart)."
             }
         }),
         (SettingsCategory::Debug, PanelFocus::Rows) => Some(match state.debug_row {
@@ -765,11 +768,15 @@ fn setting_description(state: &SettingsState) -> Option<&'static str> {
 }
 
 /// Renders the footer: a live message row, then a WORD-WRAPPED description of
-/// the currently-hovered setting across the remaining rows (freed up by
-/// moving the key hints to the modal's bottom-right border — see
+/// the currently-hovered setting, BOTTOM-ANCHORED within the remaining rows
+/// (freed up by moving the key hints to the modal's bottom-right border — see
 /// `footer_hint`). The description wraps rather than clipping, so the full
 /// text (units, the TLS-off security note, the redirect-policy summary) is on
 /// screen even at the real modal width where a single line would truncate.
+/// Bottom-anchoring (M8.5.3) means a short 1/2-line description sits directly
+/// above the modal's bottom border, matching the border's own key-hint line,
+/// rather than floating at the top of the description area with a blank gap
+/// beneath it.
 fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
     let [msg_row, desc_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
@@ -781,9 +788,59 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
     frame.render_widget(Paragraph::new(top), msg_row);
 
     let desc = setting_description(state).unwrap_or("");
-    frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {desc}"), theme.statusline))
-            .wrap(Wrap { trim: true }),
-        desc_area,
-    );
+    let desc_line = format!(" {desc}");
+    let paragraph =
+        Paragraph::new(Line::styled(desc_line.clone(), theme.statusline)).wrap(Wrap { trim: true });
+    // `wrapped_line_count` mirrors the SAME greedy word-wrap this Paragraph
+    // renders with, so the offset always matches what actually gets drawn —
+    // a 1-line description gets pushed down by (height - 1) rows, a 3-line
+    // one fills the area exactly as before (pad = 0).
+    let needed = wrapped_line_count(&desc_line, desc_area.width).min(desc_area.height);
+    let pad = desc_area.height.saturating_sub(needed);
+    let anchored = Rect {
+        y: desc_area.y + pad,
+        height: desc_area.height - pad,
+        ..desc_area
+    };
+    frame.render_widget(paragraph, anchored);
+}
+
+/// Counts how many rows a `Wrap { trim: true }` render of `text` needs at
+/// `width` columns — a greedy word-wrap mirroring the algorithm
+/// `ratatui-widgets`' `Paragraph` itself renders with (its own `line_count`
+/// is gated behind the `unstable-rendered-line-info` cargo feature, which
+/// this crate does not enable). Used only to POSITION the description
+/// (bottom-anchor it in [`render_footer`]). The break condition matches
+/// `WordWrapper`'s exactly: it flushes a line when
+/// `line_width + whitespace + word_width >= max_line_width` (reflow.rs), so a
+/// word fits only while `current_width + 1 + word_width < width` — the STRICT
+/// `<` matters, because a non-strict `<=` here would UNDERCOUNT by a line at an
+/// exact-width boundary, shrinking the anchored rect below the real render and
+/// clipping the description's last line (the same off-screen-note class the
+/// M8.5.2 gate caught). Undercount is the only unsafe direction; matching the
+/// library boundary keeps the count exact for the plain-text descriptions here.
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let width = width as usize;
+    let mut lines: u16 = 0;
+    let mut current_width = 0usize;
+    let mut line_has_content = false;
+    for word in text.split_whitespace() {
+        let word_width = unicode_width::UnicodeWidthStr::width(word);
+        if !line_has_content {
+            // The first word on a line is always placed, even if it alone
+            // overflows the width (matches WordWrapper's own overflow rule).
+            current_width = word_width;
+            line_has_content = true;
+            lines += 1;
+        } else if current_width + 1 + word_width < width {
+            current_width += 1 + word_width;
+        } else {
+            lines += 1;
+            current_width = word_width;
+        }
+    }
+    lines.max(1)
 }

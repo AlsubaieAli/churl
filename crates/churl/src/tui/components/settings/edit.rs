@@ -703,23 +703,28 @@ fn prev_redirect(policy: RedirectPolicy) -> RedirectPolicy {
     }
 }
 
-/// Steps a `u64` knob by `step` (forward = increment, backward = decrement),
-/// clamped at 1 — the same "positive whole number" floor `commit_edit`
-/// enforces on every numeric edit, so quick-adjust can never walk a knob down
-/// to (or through) zero.
+/// Steps a `u64` knob by `step` (forward = increment, backward = decrement).
+/// The floor is `step` itself, not the bare positive-whole-number floor `1`
+/// `commit_edit` enforces on a typed edit — every quick-adjusted value here
+/// is a multiple of `step` (M8.5.3 fix: the old `.max(1)` floor let a
+/// decrement walk an on-grid value like `10`/`1 MB` down to the off-grid `1`,
+/// e.g. a single byte for a MB-stepped body cap), so the smallest value the
+/// grid can land on above zero is `step` — clamping there instead keeps every
+/// quick-adjusted value step-aligned.
 fn step_u64(current: u64, step: u64, forward: bool) -> u64 {
     if forward {
         current.saturating_add(step)
     } else {
-        current.saturating_sub(step).max(1)
+        current.saturating_sub(step).max(step)
     }
 }
 
-/// `usize` counterpart of [`step_u64`], for the Load category's caps.
+/// `usize` counterpart of [`step_u64`], for the Load category's caps — same
+/// step-aligned floor fix (clamps at `step`, not the off-grid `1`).
 fn step_usize(current: usize, step: usize, forward: bool) -> usize {
     if forward {
         current.saturating_add(step)
     } else {
-        current.saturating_sub(step).max(1)
+        current.saturating_sub(step).max(step)
     }
 }

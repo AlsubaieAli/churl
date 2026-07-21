@@ -5449,6 +5449,208 @@ fn genuine_changes_still_persist() {
     );
 }
 
+// ---- M8.5.3: the net-change baseline is session-lifetime, not per-open ----
+
+/// The core save-fidelity bug: `open_settings` used to re-capture the
+/// baseline from the LIVE (possibly still-unsaved) working copy on every
+/// open, not just the first. Repro: edit timeout 30 -> 60, close WITHOUT
+/// saving (live stays 60, unpersisted), reopen (baseline must still read 30,
+/// NOT re-seeded from the dirty live 60), net-zero-adjust (J then K, both
+/// landing back on 60) — this must stay net-CHANGED against the true
+/// session-start baseline (30), so Save actually persists the 60 the user
+/// already committed to. Under the bug, reopening re-baselines at 60, the
+/// J/K net-zero-adjust un-marks the knob, and Save silently writes nothing —
+/// the live 60 never reaches disk.
+#[test]
+fn baseline_survives_close_reopen_so_an_unsaved_edit_still_persists() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    enter(&mut app); // -> Panel, Request/Timeout row
+    enter(&mut app); // open the numeric editor (seeded with the default 30)
+    for _ in 0..10 {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "60".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> ApplyAdvanced { TimeoutSecs, 60 }
+    assert_eq!(
+        app.advanced_limits.timeout_secs, 60,
+        "sanity: live value is 60"
+    );
+
+    // Close WITHOUT saving (esc twice: Panel -> Menu -> Normal).
+    esc(&mut app);
+    esc(&mut app);
+    assert!(matches!(app.mode, Mode::Normal), "sanity: panel is closed");
+
+    // Reopen. The live value (60) is unchanged, but the baseline must NOT
+    // have been re-seeded from it — it must still be the session-start 30.
+    app.open_settings();
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert_eq!(
+            state.advanced.timeout_secs, 60,
+            "the unsaved live value survives close/reopen"
+        );
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Timeout),
+            "reopening must NOT re-baseline from the dirty live value — the \
+             still-unsaved 30->60 edit must remain touched across close/reopen"
+        );
+    }
+
+    // Net-zero-adjust relative to the CURRENT live value (J then K, both
+    // landing back on 60) must stay touched, because it is still a real
+    // change against the TRUE session baseline (30) — only a round-trip
+    // against the panel-open baseline may un-mark a knob. `SettingsState::new`
+    // always starts at Menu level (position is never preserved across a
+    // reopen), so re-enter the panel before quick-adjusting.
+    enter(&mut app); // Menu -> Panel, Request/Timeout row
+    press(&mut app, 'J'); // 60 -> 61
+    press(&mut app, 'K'); // 61 -> 60
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert_eq!(state.advanced.timeout_secs, 60);
+        assert!(
+            state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Timeout),
+            "a net-zero adjust relative to the reopened panel must not erase a \
+             real, still-unsaved change from the true session baseline"
+        );
+    }
+
+    press(&mut app, 's');
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(
+        text.contains("timeout_secs = 60"),
+        "the live-but-previously-unsaved value must actually reach disk on save:\n{text}"
+    );
+}
+
+/// The baseline IS re-captured on a successful save (unlike a bare reopen) —
+/// saving 30 -> 60 then setting it back to 60 (a no-op edit against the
+/// freshly-saved baseline) must be net-zero and not re-touch the knob.
+#[test]
+fn baseline_re_seeds_on_successful_save_not_on_reopen() {
+    let env = SettingsEnvGuard::new();
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_settings();
+    enter(&mut app); // -> Panel, Request/Timeout row
+    enter(&mut app);
+    for _ in 0..10 {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+    }
+    for c in "60".chars() {
+        press(&mut app, c);
+    }
+    enter(&mut app); // commit -> 60
+    press(&mut app, 's'); // saved; baseline re-captured at 60
+
+    let text = std::fs::read_to_string(env.path()).unwrap();
+    assert!(text.contains("timeout_secs = 60"), "{text}");
+
+    esc(&mut app);
+    esc(&mut app);
+    app.open_settings(); // established baseline stays; not re-seeded from live
+    {
+        let Mode::Settings(state) = &app.mode else {
+            panic!("expected Settings mode");
+        };
+        assert!(
+            !state
+                .touched
+                .contains(&crate::tui::components::settings::SettingKey::Timeout),
+            "the just-saved value must start clean on reopen"
+        );
+    }
+    // Re-committing 60 (net-zero against the post-save baseline) stays clean.
+    // `SettingsState::new` always starts at Menu level, so re-enter the panel
+    // first, then open the editor, then commit unchanged.
+    enter(&mut app); // Menu -> Panel, Request/Timeout row
+    enter(&mut app); // open the numeric editor, seeded with 60
+    enter(&mut app); // commit unchanged
+    let Mode::Settings(state) = &app.mode else {
+        panic!("expected Settings mode");
+    };
+    assert!(
+        !state
+            .touched
+            .contains(&crate::tui::components::settings::SettingKey::Timeout),
+        "re-committing the just-saved value must be net-zero against the \
+         post-save baseline"
+    );
+}
+
+// ---- M8.5.3: leader key live-applies via `<leader>r` ----
+
+/// `<leader>r` (`reload_workspace`) is the explicit apply gate for a leader
+/// key edited in the Settings panel — a cheap seam (`KeyMap::set_leader`)
+/// already exists, so the new leader takes effect immediately rather than
+/// waiting for a restart. Parse-guarded elsewhere (see
+/// `leader_r_with_a_bad_leader_key_keeps_the_old_one_and_notifies`); this
+/// covers the success path.
+#[test]
+fn leader_r_live_applies_a_panel_set_leader_key() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    let old_combo = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(
+        app.keymap.is_leader(old_combo),
+        "sanity: space is the default leader"
+    );
+
+    // Simulate a leader key set in the Settings panel (working copy only,
+    // not yet live) — this is exactly what `ApplyLeaderKey` writes.
+    app.leader_key = "ctrl-b".to_owned();
+    let new_combo = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert!(
+        !app.keymap.is_leader(new_combo),
+        "sanity: the new combo is not yet live before reload"
+    );
+
+    app.reload_workspace().unwrap();
+
+    assert!(
+        app.keymap.is_leader(new_combo),
+        "<leader>r must live-apply the panel-set leader key"
+    );
+    assert!(
+        !app.keymap.is_leader(old_combo),
+        "the OLD leader must no longer be recognized once the new one is live"
+    );
+}
+
+/// A parse error in the working-copy leader key must never brick input:
+/// `reload_workspace` keeps the OLD leader live and reports the error rather
+/// than propagating it or leaving the keymap in a half-applied state.
+#[test]
+fn leader_r_with_a_bad_leader_key_keeps_the_old_one_and_notifies() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    let old_combo = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    app.leader_key = "not a combo".to_owned();
+
+    app.reload_workspace().unwrap();
+
+    assert!(
+        app.keymap.is_leader(old_combo),
+        "a bad working-copy leader key must never brick the old, still-valid leader"
+    );
+    assert!(
+        app.message.is_some(),
+        "a parse failure must be surfaced, not swallowed"
+    );
+}
+
 /// Horizontal pan (`L`) pans the runner view's `h_scroll`, and copy (`y`/`Y`)
 /// returns the BYTE-EXACT raw wire bytes (byte-exactness invariant holds in the runner).
 #[test]
@@ -7001,7 +7203,9 @@ fn reload_rereads_manifest_from_disk() {
     );
     assert_eq!(
         app.message.as_ref().map(|m| m.text.as_str()),
-        Some("reloaded from disk")
+        Some("reloaded from disk; leader key applied: space"),
+        "M8.5.3: <leader>r's notify also confirms the (unchanged, default) \
+         leader key was live-applied"
     );
 }
 
@@ -7034,7 +7238,9 @@ fn reload_while_dirty_defers_and_preserves_edit() {
     );
     assert_eq!(
         app.message.as_ref().map(|m| m.text.as_str()),
-        Some("unsaved changes — save before reloading from disk")
+        Some("unsaved changes — save before reloading from disk; leader key applied: space"),
+        "M8.5.3: the leader-key live-apply is unconditional, independent of the \
+         dirty-guard refusal"
     );
 }
 
