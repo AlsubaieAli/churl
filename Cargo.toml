@@ -31,7 +31,9 @@ crokey = "1.4"
 nucleo-matcher = "0.3"
 
 # Async
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# `fs` added for M8.6: multipart file parts are opened/streamed via
+# `tokio::fs::File` (async `fstat` + read), never blocking the runtime.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
 futures = "0.3"
 
 # Debug tracing (churl bin only; never churl-core — M8.3 Log panel). The
@@ -41,7 +43,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies"] }
+# `multipart` + `stream` added for M8.6: `reqwest::multipart::Form` +
+# streaming a `tokio::fs::File` part body (`Part::stream_with_length`).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies", "multipart", "stream"] }
 # Owned cookie jar we can serialize to JSON (the store behind reqwest's own
 # `Jar`); declared explicitly so `ChurlCookieJar` can hold + persist it. Pinned
 # to the exact version reqwest's `cookies` feature resolves (see Cargo.lock).

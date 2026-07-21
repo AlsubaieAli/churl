@@ -232,7 +232,7 @@ impl Parser {
             } else {
                 derive_body_kind(&content, &self.headers)
             };
-            Some(Body { kind, content })
+            Some(Body::Simple { kind, content })
         };
         if self.json
             && !self
@@ -368,6 +368,22 @@ mod tests {
         import_curl(command).unwrap_or_else(|err| panic!("import failed for {command:?}: {err}"))
     }
 
+    /// `send`/curl-import bodies are always `Simple` — a `Multipart` body here
+    /// is a test-authoring bug, not a case these helpers need to handle.
+    fn simple_kind(body: &Body) -> BodyKind {
+        match body {
+            Body::Simple { kind, .. } => *kind,
+            Body::Multipart(_) => panic!("expected a Simple body, got Multipart"),
+        }
+    }
+
+    fn simple_content(body: &Body) -> &str {
+        match body {
+            Body::Simple { content, .. } => content,
+            Body::Multipart(_) => panic!("expected a Simple body, got Multipart"),
+        }
+    }
+
     #[test]
     fn plain_url_is_a_get() {
         let result = import("curl https://example.com/health");
@@ -421,7 +437,10 @@ mod tests {
         // Inside single quotes, `\`+newline is literal (bash), NOT a line
         // continuation — the body must survive byte-for-byte, not be collapsed.
         let result = import("curl https://e.com/n --data-raw 'text=a\\\nb'");
-        assert_eq!(result.endpoint.request.body.unwrap().content, "text=a\\\nb");
+        assert_eq!(
+            simple_content(&result.endpoint.request.body.unwrap()),
+            "text=a\\\nb"
+        );
     }
 
     #[test]
@@ -429,7 +448,10 @@ mod tests {
         // A continuation joins with nothing (bash), so a double-quoted value split
         // across a continuation rejoins seamlessly — no stray space injected.
         let result = import("curl https://e.com/n --data-raw \"a=1\\\nb=2\"");
-        assert_eq!(result.endpoint.request.body.unwrap().content, "a=1b=2");
+        assert_eq!(
+            simple_content(&result.endpoint.request.body.unwrap()),
+            "a=1b=2"
+        );
     }
 
     #[test]
@@ -496,8 +518,8 @@ mod tests {
     fn multiple_data_parts_join_with_ampersand() {
         let result = import("curl -d a=1 --data b=2 --data-raw c=3 https://e.com/f");
         let body = result.endpoint.request.body.unwrap();
-        assert_eq!(body.content, "a=1&b=2&c=3");
-        assert_eq!(body.kind, BodyKind::Form);
+        assert_eq!(simple_content(&body), "a=1&b=2&c=3");
+        assert_eq!(simple_kind(&body), BodyKind::Form);
     }
 
     #[test]
@@ -507,13 +529,13 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&body), BodyKind::Json);
         let array = import("curl -d '[1, 2]' https://e.com/f")
             .endpoint
             .request
             .body
             .unwrap();
-        assert_eq!(array.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&array), BodyKind::Json);
     }
 
     #[test]
@@ -523,7 +545,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&body), BodyKind::Json);
     }
 
     #[test]
@@ -533,7 +555,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Text);
+        assert_eq!(simple_kind(&body), BodyKind::Text);
     }
 
     #[test]
@@ -543,7 +565,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Text);
+        assert_eq!(simple_kind(&body), BodyKind::Text);
     }
 
     #[test]
@@ -565,7 +587,7 @@ mod tests {
         let result = import(r#"curl --json '{"q": true}' https://e.com/search"#);
         let request = &result.endpoint.request;
         assert_eq!(request.method, Method::Post);
-        assert_eq!(request.body.as_ref().unwrap().kind, BodyKind::Json);
+        assert_eq!(simple_kind(request.body.as_ref().unwrap()), BodyKind::Json);
         assert!(
             request
                 .headers

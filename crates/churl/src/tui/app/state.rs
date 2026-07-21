@@ -538,12 +538,18 @@ impl EndpointBuffer {
     /// edtui body from the request, a reset vim state, and a pristine snapshot
     /// clone for dirty derivation.
     pub(in crate::tui::app) fn new(selected: SelectedEndpoint) -> Self {
+        // A multipart body has no free-text edtui surface (M8.6's parts
+        // editor takes over the Body tab instead — see `request_tabs.rs`), so
+        // the edtui buffer seeds empty for it, same as no body at all.
         let body = selected
             .endpoint
             .request
             .body
             .as_ref()
-            .map(|body| body.content.as_str())
+            .and_then(|body| match body {
+                Body::Simple { content, .. } => Some(content.as_str()),
+                Body::Multipart(_) => None,
+            })
             .unwrap_or("");
         // Clipboard: see `new_editor_state` in `app/mod.rs` — in-memory, not the OS clipboard.
         let editor = new_editor_state(body);
@@ -641,18 +647,23 @@ impl Buffer {
 /// save**: an empty body drops the `Body` entirely; otherwise it seeds or
 /// updates a text body. (The send/curl path uses [`overwrite_body_text`], which
 /// keeps an existing empty body instead of dropping it — preserving the two
-/// pre-refactor behaviours exactly.)
+/// pre-refactor behaviours exactly.) A `Multipart` body has no edtui text
+/// surface (the parts row-editor owns it instead — M8.6) so it is left
+/// untouched here; this fold only ever runs while the Body tab shows the
+/// edtui surface, which the body-type selector only does for a non-multipart
+/// kind.
 pub(in crate::tui::app) fn fold_body_text(request: &mut Request, text: String) {
     match request.body.as_mut() {
-        Some(body) => {
+        Some(Body::Simple { content, .. }) => {
             if text.is_empty() {
                 request.body = None;
             } else {
-                body.content = text;
+                *content = text;
             }
         }
+        Some(Body::Multipart(_)) => {}
         None if !text.is_empty() => {
-            request.body = Some(Body {
+            request.body = Some(Body::Simple {
                 kind: BodyKind::Text,
                 content: text,
             });
@@ -664,12 +675,14 @@ pub(in crate::tui::app) fn fold_body_text(request: &mut Request, text: String) {
 /// Folds edtui body text into a request's `body` for a **send / curl copy**: an
 /// existing body is overwritten in place (even with empty text); a missing body
 /// is seeded only when the text is non-empty. Matches the pre-refactor
-/// `send_request`/`copy_as_curl` inline behaviour.
+/// `send_request`/`copy_as_curl` inline behaviour. A `Multipart` body is left
+/// untouched, same rationale as [`fold_body_text`].
 pub(in crate::tui::app) fn overwrite_body_text(request: &mut Request, text: String) {
     match request.body.as_mut() {
-        Some(body) => body.content = text,
+        Some(Body::Simple { content, .. }) => *content = text,
+        Some(Body::Multipart(_)) => {}
         None if !text.is_empty() => {
-            request.body = Some(Body {
+            request.body = Some(Body::Simple {
                 kind: BodyKind::Text,
                 content: text,
             });

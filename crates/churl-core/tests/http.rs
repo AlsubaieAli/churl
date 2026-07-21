@@ -75,7 +75,7 @@ async fn post_body_derives_content_type() {
 
     let mut request = get(format!("{}/items", server.uri()));
     request.method = Method::Post;
-    request.body = Some(Body {
+    request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: r#"{"a":1}"#.to_owned(),
     });
@@ -104,7 +104,7 @@ async fn user_content_type_header_overrides_derived() {
         value: "application/vnd.custom+json".to_owned(),
         enabled: true,
     }];
-    request.body = Some(Body {
+    request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: "{}".to_owned(),
     });
@@ -955,7 +955,7 @@ async fn strip_307_preserves_body_but_strips_auth_cross_origin() {
 
     let mut request = get_with_auth_headers(format!("{}/start", origin_a.uri()));
     request.method = Method::Post;
-    request.body = Some(Body {
+    request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: r#"{"k":"v"}"#.to_owned(),
     });
@@ -1413,4 +1413,294 @@ async fn traced_execute_captures_auth_injection_decision() {
     );
     assert!(trace.redirect_hops.is_empty());
     assert!(trace.error.is_none());
+}
+
+// ---- M8.6: multipart/form-data ---------------------------------------------
+
+use churl_core::model::{Part, PartValue};
+
+fn post_multipart(url: String, parts: Vec<Part>) -> Request {
+    Request {
+        method: Method::Post,
+        url,
+        headers: Vec::new(),
+        params: Vec::new(),
+        body: Some(Body::Multipart(parts)),
+        auth: None,
+        insecure: false,
+    }
+}
+
+#[tokio::test]
+async fn multipart_sends_text_and_file_parts_with_boundary_content_type() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.pdf"), b"%PDF-fake-bytes").unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![
+            Part {
+                name: "field".to_owned(),
+                value: PartValue::Text("hello world".to_owned()),
+            },
+            Part {
+                name: "upload".to_owned(),
+                value: PartValue::File {
+                    path: "report.pdf".to_owned(),
+                    filename: Some("report.pdf".to_owned()),
+                    mime: Some("application/pdf".to_owned()),
+                },
+            },
+        ],
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root: dir.path().to_path_buf(),
+        ..ExecuteOptions::default()
+    };
+    let response = execute(&client, &request, &options).await.unwrap();
+    assert_eq!(response.status, 200);
+
+    let received = only_request(&server).await;
+    let content_type = received
+        .headers
+        .get("content-type")
+        .expect("Content-Type header present")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "{content_type}"
+    );
+    let body = String::from_utf8_lossy(&received.body);
+    assert!(body.contains("name=\"field\""), "{body}");
+    assert!(body.contains("hello world"), "{body}");
+    assert!(body.contains("name=\"upload\""), "{body}");
+    assert!(body.contains("filename=\"report.pdf\""), "{body}");
+    assert!(body.contains("%PDF-fake-bytes"), "{body}");
+}
+
+#[tokio::test]
+async fn multipart_file_part_default_filename_is_the_path_basename() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("no_override.txt"), b"data").unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: "no_override.txt".to_owned(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root: dir.path().to_path_buf(),
+        ..ExecuteOptions::default()
+    };
+    execute(&client, &request, &options).await.unwrap();
+
+    let received = only_request(&server).await;
+    let body = String::from_utf8_lossy(&received.body);
+    assert!(body.contains("filename=\"no_override.txt\""), "{body}");
+}
+
+/// Pre-flight = clean-rollback: a missing file part must fire **zero bytes**
+/// (the mock server is never hit at all) and surface as
+/// `HttpError::MultipartFile`, never a transport error from a half-sent request.
+#[tokio::test]
+async fn multipart_missing_file_fires_zero_bytes_and_errors() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: "does-not-exist.bin".to_owned(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root: dir.path().to_path_buf(),
+        ..ExecuteOptions::default()
+    };
+    let err = execute(&client, &request, &options).await.unwrap_err();
+    assert!(
+        matches!(&err, HttpError::MultipartFile { name, .. } if name == "upload"),
+        "{err:?}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "a missing file part must never reach the wire"
+    );
+}
+
+/// A relative file part path that climbs above the workspace root is rejected
+/// pre-flight — zero bytes on the wire, same as a missing file.
+#[tokio::test]
+async fn multipart_relative_path_traversal_is_rejected() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    // A real file that exists OUTSIDE root, reachable only via `..` traversal.
+    std::fs::write(workspace.path().join("secret.txt"), b"top secret").unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: "../secret.txt".to_owned(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root,
+        ..ExecuteOptions::default()
+    };
+    let err = execute(&client, &request, &options).await.unwrap_err();
+    assert!(
+        matches!(&err, HttpError::MultipartFile { name, reason } if name == "upload" && reason.contains("escapes")),
+        "{err:?}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        0,
+        "a traversal-escaping file part must never reach the wire"
+    );
+}
+
+/// Absolute file part paths are allowed as-is (M8.6 locked decision) even when
+/// they point outside the workspace root — the personal-tool convenience the
+/// spec calls for; only *relative* paths are traversal-guarded.
+#[tokio::test]
+async fn multipart_absolute_path_outside_root_is_allowed() {
+    let outside = tempfile::tempdir().unwrap();
+    let file_path = outside.path().join("anywhere.bin");
+    std::fs::write(&file_path, b"payload").unwrap();
+
+    let workspace_root = tempfile::tempdir().unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: file_path.to_string_lossy().into_owned(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root: workspace_root.path().to_path_buf(),
+        ..ExecuteOptions::default()
+    };
+    let response = execute(&client, &request, &options).await.unwrap();
+    assert_eq!(response.status, 200);
+    let received = only_request(&server).await;
+    let body = String::from_utf8_lossy(&received.body);
+    assert!(body.contains("payload"), "{body}");
+}
+
+/// A user-supplied `Content-Type` header on a multipart request must WIN as
+/// the single surviving header — `.multipart()` unconditionally *appends* its
+/// own boundary-bearing Content-Type (reqwest's `header()` appends, not
+/// replaces), so without the post-`.build()` fixup this would ship as two
+/// Content-Type headers.
+#[tokio::test]
+async fn multipart_user_content_type_header_wins_and_is_not_duplicated() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut request = post_multipart(
+        format!("{}/upload", server.uri()),
+        vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: "a.txt".to_owned(),
+                filename: None,
+                mime: None,
+            },
+        }],
+    );
+    request.headers.push(Header {
+        name: "Content-Type".to_owned(),
+        value: "multipart/form-data; boundary=CUSTOM-BOUNDARY".to_owned(),
+        enabled: true,
+    });
+    let client = build_client(DEFAULT_TIMEOUT).unwrap();
+    let options = ExecuteOptions {
+        root: dir.path().to_path_buf(),
+        ..ExecuteOptions::default()
+    };
+    execute(&client, &request, &options).await.unwrap();
+
+    let received = only_request(&server).await;
+    let content_types: Vec<&str> = received
+        .headers
+        .get_all("content-type")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        content_types,
+        vec!["multipart/form-data; boundary=CUSTOM-BOUNDARY"],
+        "exactly one Content-Type header, the user's own value"
+    );
 }

@@ -6367,7 +6367,7 @@ fn selected_with(file: &str, body: Option<&str>) -> SelectedEndpoint {
                 url: "https://api.test/x".to_owned(),
                 headers: Vec::new(),
                 params: Vec::new(),
-                body: body.map(|c| Body {
+                body: body.map(|c| Body::Simple {
                     kind: BodyKind::Text,
                     content: c.to_owned(),
                 }),
@@ -6391,8 +6391,11 @@ fn open_or_focus_buffer_seeds_editor_and_snapshot() {
     let b = app.active_endpoint_buffer().unwrap();
     assert_eq!(String::from(b.editor.lines.clone()), "hello body");
     assert_eq!(
-        b.loaded_snapshot.request.body.as_ref().unwrap().content,
-        "hello body"
+        b.loaded_snapshot.request.body.as_ref().unwrap(),
+        &Body::Simple {
+            kind: BodyKind::Text,
+            content: "hello body".to_owned(),
+        }
     );
     assert!(!app.is_dirty(), "freshly opened buffer is not dirty");
 

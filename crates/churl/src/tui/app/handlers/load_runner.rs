@@ -125,7 +125,7 @@ impl App {
             return;
         };
         let tx = self.tx.clone();
-        let options = self.execute_options;
+        let options = self.execute_options.clone();
         let total = cfg.total;
         let concurrency = cfg.concurrency.max(1);
         let interval = cfg.interval;
@@ -148,6 +148,7 @@ impl App {
                     let client = client.clone();
                     let request = request.clone();
                     let tx = tx.clone();
+                    let options = options.clone();
                     async move {
                         // Absolute-target pacing (mirrors `run_load`): a hard floor
                         // on when copy `index` may launch.

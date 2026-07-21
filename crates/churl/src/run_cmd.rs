@@ -94,6 +94,7 @@ pub async fn run(args: RunArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exec
         exec_opts: ExecuteOptions {
             max_body_bytes: runtime.max_body_bytes,
             redirect: runtime.redirect,
+            root: workspace.root().to_path_buf(),
         },
     };
 

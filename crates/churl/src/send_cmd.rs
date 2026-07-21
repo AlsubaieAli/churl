@@ -81,7 +81,7 @@ pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exe
     });
     let body = args.body.map(|content| {
         let kind = churl_core::import::derive_body_kind(&content, &headers);
-        Body { kind, content }
+        Body::Simple { kind, content }
     });
 
     let request = Request {
@@ -110,6 +110,14 @@ pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exe
         exec_opts: ExecuteOptions {
             max_body_bytes: runtime.max_body_bytes,
             redirect: runtime.redirect,
+            // `send` has no saved endpoint (so no multipart body from the
+            // CLI — `--body` only ever builds `Simple`, see `derive_body_kind`
+            // above), but an open workspace's root is still the sensible
+            // resolution base when one happens to be at `cwd`.
+            root: workspace
+                .as_ref()
+                .map(|w| w.root().to_path_buf())
+                .unwrap_or_else(|| cwd.to_path_buf()),
         },
     };
 

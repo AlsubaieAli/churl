@@ -17,7 +17,7 @@
 //! included.
 
 use crate::auth::{AuthWire, apply_auth};
-use crate::model::{Auth, Endpoint, Method, Request};
+use crate::model::{Auth, Body, Endpoint, Method, PartValue, Request};
 
 /// Renders `endpoint` as a one-line `curl` command.
 ///
@@ -56,8 +56,37 @@ pub fn export_curl(endpoint: &Endpoint) -> String {
         args.push(format!("{}: {}", header.name, header.value));
     }
     if let Some(body) = &request.body {
-        args.push("--data".to_owned());
-        args.push(body.content.clone());
+        match body {
+            Body::Simple { content, .. } => {
+                args.push("--data".to_owned());
+                args.push(content.clone());
+            }
+            // One `-F` per part (M8.6): `name=value` for inline text, or
+            // `name=@path[;filename=…][;type=…]` for a file — the path only,
+            // never the file's contents (mirrors "import never reads files").
+            Body::Multipart(parts) => {
+                for part in parts {
+                    args.push("-F".to_owned());
+                    args.push(match &part.value {
+                        PartValue::Text(text) => format!("{}={}", part.name, text),
+                        PartValue::File {
+                            path,
+                            filename,
+                            mime,
+                        } => {
+                            let mut value = format!("{}=@{}", part.name, path);
+                            if let Some(filename) = filename {
+                                value.push_str(&format!(";filename={filename}"));
+                            }
+                            if let Some(mime) = mime {
+                                value.push_str(&format!(";type={mime}"));
+                            }
+                            value
+                        }
+                    });
+                }
+            }
+        }
     }
     args.push(url_with_params(request));
 
@@ -180,7 +209,7 @@ mod tests {
     #[test]
     fn get_with_body_keeps_explicit_method() {
         let mut request = get("https://e.com/x");
-        request.body = Some(Body {
+        request.body = Some(Body::Simple {
             kind: BodyKind::Text,
             content: "ping".to_owned(),
         });
@@ -197,7 +226,7 @@ mod tests {
             value: "application/json".to_owned(),
             enabled: true,
         }];
-        request.body = Some(Body {
+        request.body = Some(Body::Simple {
             kind: BodyKind::Json,
             content: r#"{"name": "Ada Lovelace"}"#.to_owned(),
         });
@@ -206,6 +235,54 @@ mod tests {
             cmd,
             r#"curl -X POST -H 'Content-Type: application/json' --data '{"name": "Ada Lovelace"}' https://e.com/x"#
         );
+    }
+
+    #[test]
+    fn multipart_body_emits_one_dash_f_per_part() {
+        use crate::model::{Part, PartValue};
+
+        let mut request = get("https://e.com/upload");
+        request.method = Method::Post;
+        request.body = Some(Body::Multipart(vec![
+            Part {
+                name: "field".to_owned(),
+                value: PartValue::Text("hello world".to_owned()),
+            },
+            Part {
+                name: "upload".to_owned(),
+                value: PartValue::File {
+                    path: "assets/report.pdf".to_owned(),
+                    filename: Some("report.pdf".to_owned()),
+                    mime: Some("application/pdf".to_owned()),
+                },
+            },
+        ]));
+        let cmd = export_curl(&endpoint(request));
+        assert_eq!(
+            cmd,
+            "curl -X POST -F 'field=hello world' -F 'upload=@assets/report.pdf;filename=report.pdf;type=application/pdf' https://e.com/upload"
+        );
+    }
+
+    #[test]
+    fn multipart_file_part_without_optional_modifiers_omits_filename_and_type() {
+        use crate::model::{Part, PartValue};
+
+        let mut request = get("https://e.com/upload");
+        request.method = Method::Post;
+        request.body = Some(Body::Multipart(vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                path: "a.txt".to_owned(),
+                filename: None,
+                mime: None,
+            },
+        }]));
+        let cmd = export_curl(&endpoint(request));
+        // `@` makes shlex quote the whole `-F` value (like any other arg here) —
+        // the point of this test is the absence of `;filename=`/`;type=`, not
+        // the quoting style.
+        assert_eq!(cmd, "curl -X POST -F 'upload=@a.txt' https://e.com/upload");
     }
 
     #[test]

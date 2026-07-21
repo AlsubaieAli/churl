@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 
 use churl_core::model::{
-    ApiKeyPlacement, Auth, Body, BodyKind, CollectionMeta, Endpoint, Header, Method, Param,
-    Profile, Request, Workspace,
+    ApiKeyPlacement, Auth, Body, BodyKind, CollectionMeta, Endpoint, Header, Method, Param, Part,
+    PartValue, Profile, Request, Workspace,
 };
 use churl_core::persistence::endpoint_to_toml;
 use churl_core::persistence::{
@@ -163,7 +163,7 @@ fn headers_render_as_array_of_tables() {
                 value: "1".into(),
                 enabled: false,
             }],
-            body: Some(Body {
+            body: Some(Body::Simple {
                 kind: BodyKind::Json,
                 content: "{}".into(),
             }),
@@ -183,6 +183,93 @@ fn headers_render_as_array_of_tables() {
     );
     assert!(!text.contains("headers = ["), "no inline arrays:\n{text}");
     assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+}
+
+/// M8.6: a `Body::Multipart` saves as `[[request.body.part]]` — real disk
+/// behaviour, not just the wire-shape a bare `toml_edit::ser` call would
+/// produce (`normalize_table`'s array-of-tables promotion, exercised via
+/// `save_endpoint`, is what actually renders the block form) — and loads back
+/// byte-for-byte equal, proving the M8.6 model split didn't just change the
+/// Rust shape but the real on-disk save/load path too.
+#[test]
+fn multipart_body_saves_as_array_of_tables_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("upload.toml");
+    let endpoint = Endpoint {
+        seq: 0,
+        name: "upload".into(),
+        assertions: Vec::new(),
+        extract: std::collections::BTreeMap::new(),
+        persist: Vec::new(),
+        request: Request {
+            method: Method::Post,
+            url: "https://api.example.com/upload".into(),
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: Some(Body::Multipart(vec![
+                Part {
+                    name: "field".into(),
+                    value: PartValue::Text("hello".into()),
+                },
+                Part {
+                    name: "upload".into(),
+                    value: PartValue::File {
+                        path: "assets/report.pdf".into(),
+                        filename: Some("report.pdf".into()),
+                        mime: Some("application/pdf".into()),
+                    },
+                },
+            ])),
+            auth: None,
+            insecure: false,
+        },
+    };
+    save_endpoint(&path, &endpoint).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("[[request.body.part]]"),
+        "parts must be array-of-tables:\n{text}"
+    );
+    assert!(!text.contains("part = ["), "no inline arrays:\n{text}");
+    assert!(text.contains("type = \"multipart\""), "{text}");
+    // No `content` key on a multipart body (that key belongs to `Simple` only).
+    assert!(!text.contains("content ="), "{text}");
+    assert_eq!(load_endpoint(&path).unwrap(), endpoint);
+
+    // `endpoint_to_toml` (the no-disk-write projection used by `churl export`
+    // native-dialect and the TUI's raw-TOML preview) must agree byte-for-byte
+    // with what actually landed on disk.
+    assert_eq!(endpoint_to_toml(&endpoint).unwrap(), text);
+}
+
+/// A `Simple` endpoint saved BEFORE M8.6 (no `Multipart` variant existed) must
+/// still load correctly under the new model — the byte-identical TOML shape
+/// means an old file was never touched by the migration, so this is really a
+/// parse-forward-compat check: today's loader reads yesterday's file.
+#[test]
+fn pre_multipart_simple_body_fixture_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy_body.toml");
+    // Exactly the pre-M8.6 shape: `[request.body]` with only `type` + `content`.
+    fs::write(
+        &path,
+        "seq = 0\nname = \"legacy\"\n\n[request]\nmethod = \"POST\"\nurl = \"https://api.test/x\"\n\n[request.body]\ntype = \"json\"\ncontent = '{\"a\":1}'\n",
+    )
+    .unwrap();
+    let loaded = load_endpoint(&path).unwrap();
+    assert_eq!(
+        loaded.request.body,
+        Some(Body::Simple {
+            kind: BodyKind::Json,
+            content: "{\"a\":1}".into(),
+        })
+    );
+    // Re-saving an untouched Simple body must not introduce any multipart
+    // machinery (no stray `part` key, no format drift).
+    save_endpoint(&path, &loaded).unwrap();
+    let resaved = fs::read_to_string(&path).unwrap();
+    assert!(!resaved.contains("part"), "{resaved}");
+    assert!(!resaved.contains("multipart"), "{resaved}");
 }
 
 #[test]
@@ -1703,7 +1790,7 @@ fn body_secret_shaped_value_warns_not_blocks() {
         "https://api.example.com/",
         Vec::new(),
         Vec::new(),
-        Some(Body {
+        Some(Body::Simple {
             kind: BodyKind::Json,
             content: r#"{"token": "ghp_0123456789abcdefABCDEF0123456789abcd"}"#.into(),
         }),

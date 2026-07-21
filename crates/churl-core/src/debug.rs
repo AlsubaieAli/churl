@@ -25,7 +25,7 @@ use serde::Serialize;
 use crate::auth::{AuthWire, apply_auth};
 use crate::export;
 use crate::http::HttpError;
-use crate::model::{Endpoint, Header, Method, Param, Request};
+use crate::model::{Body, Endpoint, Header, Method, Param, PartValue, Request};
 use crate::secrets;
 
 /// A masked, display-safe projection of a resolved request. Never carries a
@@ -268,7 +268,21 @@ impl DebugTrace {
             }
         }
         if let Some(body) = masked.body.as_mut() {
-            body.content = secrets::mask_secret_tokens(&body.content);
+            match body {
+                Body::Simple { content, .. } => {
+                    *content = secrets::mask_secret_tokens(content);
+                }
+                // File contents are never touched (never read here at all);
+                // only inline text parts are token-masked, mirroring the
+                // `Simple` body's masking exactly.
+                Body::Multipart(parts) => {
+                    for part in parts.iter_mut() {
+                        if let PartValue::Text(text) = &mut part.value {
+                            *text = secrets::mask_secret_tokens(text);
+                        }
+                    }
+                }
+            }
         }
 
         let endpoint = Endpoint {
@@ -434,7 +448,7 @@ mod tests {
     #[test]
     fn body_present_reflects_body_without_echoing_content() {
         let mut request = get("https://example.com");
-        request.body = Some(Body {
+        request.body = Some(Body::Simple {
             kind: BodyKind::Json,
             content: r#"{"secret":"sk-live-abcdefghijklmnopqrstuvwx"}"#.to_owned(),
         });
@@ -446,7 +460,7 @@ mod tests {
     fn masked_curl_masks_secret_shaped_body_token() {
         let mut request = get("https://example.com/x");
         request.method = Method::Post;
-        request.body = Some(Body {
+        request.body = Some(Body::Simple {
             kind: BodyKind::Json,
             content: r#"{"token":"sk-live-abcdefghijklmnopqrstuvwx"}"#.to_owned(),
         });
@@ -463,7 +477,7 @@ mod tests {
     fn masked_curl_preserves_structural_body() {
         let mut request = get("https://example.com/x");
         request.method = Method::Post;
-        request.body = Some(Body {
+        request.body = Some(Body::Simple {
             kind: BodyKind::Json,
             content: r#"{"page":1,"q":"orders"}"#.to_owned(),
         });

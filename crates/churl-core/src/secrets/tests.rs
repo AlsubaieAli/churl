@@ -154,7 +154,7 @@ fn param_secret_key_blocks() {
 #[test]
 fn body_secret_shaped_value_warns_not_blocks() {
     let mut ep = endpoint(None);
-    ep.request.body = Some(Body {
+    ep.request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: r#"{"token": "ghp_0123456789abcdefABCDEF0123456789abcd"}"#.to_owned(),
     });
@@ -163,7 +163,7 @@ fn body_secret_shaped_value_warns_not_blocks() {
     assert_eq!(f[0].severity, Severity::Warn);
 
     // An innocent body produces nothing.
-    ep.request.body = Some(Body {
+    ep.request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: r#"{"name": "alice"}"#.to_owned(),
     });

@@ -295,7 +295,7 @@ fn prepare_step_session_scope_precedence() {
             url: "{{x}}".into(),
             headers: vec![],
             params: vec![],
-            body: Some(Body {
+            body: Some(Body::Simple {
                 kind: BodyKind::Text,
                 content: String::new(),
             }),

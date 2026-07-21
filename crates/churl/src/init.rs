@@ -182,7 +182,7 @@ fn scaffold_demo_endpoints(coll_dir: &Path) -> Result<()> {
                     enabled: true,
                 }],
                 params: vec![],
-                body: Some(Body {
+                body: Some(Body::Simple {
                     kind: BodyKind::Json,
                     content: r#"{"greeting": "hello"}"#.to_owned(),
                 }),

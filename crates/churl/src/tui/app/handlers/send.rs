@@ -143,7 +143,7 @@ impl App {
 
         let tx = self.tx.clone();
         let task_meta = meta.clone();
-        let options = self.execute_options;
+        let options = self.execute_options.clone();
         // `execute_traced` has no access to the `ClientConfig` used to build
         // `client` (see `AuthCookieProxyDecisions`'s docs) — the session
         // fields are the one place both are in scope, so read them here

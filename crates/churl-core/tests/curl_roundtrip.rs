@@ -7,7 +7,7 @@
 
 use churl_core::export::export_curl;
 use churl_core::import::import_curl;
-use churl_core::model::{ApiKeyPlacement, Auth, BodyKind, Endpoint, Method, Request};
+use churl_core::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, Request};
 
 /// Realistic curl commands (GitHub/Stripe/Slack-style APIs) with mixed flags
 /// and quoting edge cases.
@@ -80,9 +80,13 @@ fn stripe_style_form_post_imports_faithfully() {
     let request = &result.endpoint.request;
     assert_eq!(request.method, Method::Post);
     assert_eq!(request.url, "https://api.stripe.com/v1/charges");
-    let body = request.body.as_ref().unwrap();
-    assert_eq!(body.content, "amount=2000&currency=usd");
-    assert_eq!(body.kind, BodyKind::Form);
+    assert_eq!(
+        request.body,
+        Some(Body::Simple {
+            kind: BodyKind::Form,
+            content: "amount=2000&currency=usd".to_owned(),
+        })
+    );
     // -u with an empty password: username kept, password placeholder-ized.
     assert_eq!(
         request.auth,

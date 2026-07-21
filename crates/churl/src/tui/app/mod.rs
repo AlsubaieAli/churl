@@ -1451,6 +1451,15 @@ impl App {
         self.execute_options = ExecuteOptions {
             max_body_bytes: self.advanced_limits.body_cap_bytes,
             redirect: config.redirect()?,
+            // M8.6: the root a relative multipart file-part path resolves
+            // against. A workspace is optional in the TUI too (the
+            // empty-state screen); cwd is the sensible fallback, matching
+            // `send`'s "workspace optional" contract.
+            root: self
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root().to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
         };
         self.load_caps = config.load_caps();
         // M8.3: seed the session debug-capture toggle from the persisted

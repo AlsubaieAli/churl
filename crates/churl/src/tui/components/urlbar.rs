@@ -6,7 +6,7 @@
 //!
 //! [`LineEditor`]: crate::tui::components::line_editor::LineEditor
 
-use churl_core::model::{Auth, Request};
+use churl_core::model::{Auth, Body, PartValue, Request};
 use edtui::{EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -66,7 +66,23 @@ fn request_placeholder_count(request: &Request) -> usize {
         }
     }
     if let Some(body) = &request.body {
-        total += count_placeholders(&body.content);
+        match body {
+            Body::Simple { content, .. } => total += count_placeholders(content),
+            Body::Multipart(parts) => {
+                for part in parts {
+                    total += count_placeholders(&part.name);
+                    match &part.value {
+                        PartValue::Text(text) => total += count_placeholders(text),
+                        PartValue::File { path, filename, .. } => {
+                            total += count_placeholders(path);
+                            if let Some(filename) = filename {
+                                total += count_placeholders(filename);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     if let Some(auth) = &request.auth {
         match auth {

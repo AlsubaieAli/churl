@@ -265,7 +265,7 @@ impl App {
                     return;
                 };
                 let tx = self.tx.clone();
-                let options = self.execute_options;
+                let options = self.execute_options.clone();
                 let request = prepared.request;
                 // Mirrors `churl_core::sequence::run_sequence`'s per-step
                 // `sink.is_some().then(|| DebugTrace::from_request(...))` +

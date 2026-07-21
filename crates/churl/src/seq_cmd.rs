@@ -241,11 +241,12 @@ pub async fn run(args: SeqArgs, cwd: &Path, runtime: &crate::RuntimeCfg, json: b
         .clone()
         .or_else(|| workspace.manifest().proxy.clone())
         .or_else(|| runtime.proxy.clone());
+    let root = workspace.root().to_path_buf();
     let exec_opts = ExecuteOptions {
         max_body_bytes: runtime.max_body_bytes,
         redirect: runtime.redirect,
+        root: root.clone(),
     };
-    let root = workspace.root().to_path_buf();
 
     // --- stream: run each step, emitting its line as it completes ---
     let mut extracted: BTreeMap<String, String> = BTreeMap::new();
