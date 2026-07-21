@@ -810,9 +810,15 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &SettingsState, theme: &T
 /// `ratatui-widgets`' `Paragraph` itself renders with (its own `line_count`
 /// is gated behind the `unstable-rendered-line-info` cargo feature, which
 /// this crate does not enable). Used only to POSITION the description
-/// (bottom-anchor it in [`render_footer`]) — the actual wrap/render is still
-/// done by `Paragraph` itself, so any edge-case divergence here could only
-/// shift the anchor by a row, never change what's drawn.
+/// (bottom-anchor it in [`render_footer`]). The break condition matches
+/// `WordWrapper`'s exactly: it flushes a line when
+/// `line_width + whitespace + word_width >= max_line_width` (reflow.rs), so a
+/// word fits only while `current_width + 1 + word_width < width` — the STRICT
+/// `<` matters, because a non-strict `<=` here would UNDERCOUNT by a line at an
+/// exact-width boundary, shrinking the anchored rect below the real render and
+/// clipping the description's last line (the same off-screen-note class the
+/// M8.5.2 gate caught). Undercount is the only unsafe direction; matching the
+/// library boundary keeps the count exact for the plain-text descriptions here.
 fn wrapped_line_count(text: &str, width: u16) -> u16 {
     if width == 0 {
         return 0;
@@ -829,7 +835,7 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
             current_width = word_width;
             line_has_content = true;
             lines += 1;
-        } else if current_width + 1 + word_width <= width {
+        } else if current_width + 1 + word_width < width {
             current_width += 1 + word_width;
         } else {
             lines += 1;
