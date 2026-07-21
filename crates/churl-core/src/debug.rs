@@ -272,13 +272,31 @@ impl DebugTrace {
                 Body::Simple { content, .. } => {
                     *content = secrets::mask_secret_tokens(content);
                 }
-                // File contents are never touched (never read here at all);
-                // only inline text parts are token-masked, mirroring the
-                // `Simple` body's masking exactly.
+                // File CONTENTS are never touched (never read here at all), but
+                // the part's path / filename / mime STRINGS can carry a resolved
+                // `{{secret}}` template (`-F name=@{{token}}` → `export_curl`
+                // emits `-F name=@<secret>`), so token-mask each of them — the
+                // same leak class as the M8.3 query-param P0. Inline text parts
+                // are masked exactly like a `Simple` body.
                 Body::Multipart(parts) => {
                     for part in parts.iter_mut() {
-                        if let PartValue::Text(text) = &mut part.value {
-                            *text = secrets::mask_secret_tokens(text);
+                        match &mut part.value {
+                            PartValue::Text(text) => {
+                                *text = secrets::mask_secret_tokens(text);
+                            }
+                            PartValue::File {
+                                path,
+                                filename,
+                                mime,
+                            } => {
+                                *path = secrets::mask_secret_tokens(path);
+                                if let Some(filename) = filename {
+                                    *filename = secrets::mask_secret_tokens(filename);
+                                }
+                                if let Some(mime) = mime {
+                                    *mime = secrets::mask_secret_tokens(mime);
+                                }
+                            }
                         }
                     }
                 }
@@ -315,7 +333,7 @@ impl DebugTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Auth, Body, BodyKind, Header as ModelHeader};
+    use crate::model::{Auth, Body, BodyKind, Header as ModelHeader, Part, PartValue};
 
     fn get(url: &str) -> Request {
         Request {
@@ -488,5 +506,50 @@ mod tests {
             curl.contains(r#"{"page":1,"q":"orders"}"#),
             "structural body over-masked: {curl}"
         );
+    }
+
+    /// F1 (security): a resolved `{{secret}}` in a multipart FILE part's
+    /// `path`/`filename`/`mime` must be masked in `masked_curl` (which
+    /// `export_curl`s the parts as `-F name=@path;filename=…;type=…`) — the
+    /// same leak class as the M8.3 query-param P0. File CONTENTS are never
+    /// read here, but these path/filename/mime STRINGS can carry a templated
+    /// credential.
+    #[test]
+    fn masked_curl_masks_secret_in_file_part_path_filename_and_mime() {
+        const SECRET: &str = "sk-live-abcdefghijklmnopqrstuvwx";
+        let mut request = get("https://example.com/upload");
+        request.method = Method::Post;
+        request.body = Some(Body::Multipart(vec![Part {
+            name: "upload".to_owned(),
+            value: PartValue::File {
+                // Each of these stands in for a resolved `{{secret}}` template.
+                path: SECRET.to_owned(),
+                filename: Some(SECRET.to_owned()),
+                mime: Some(SECRET.to_owned()),
+            },
+        }]));
+        let trace = DebugTrace::from_request(&request);
+        let curl = trace.masked_curl();
+        assert!(
+            !curl.contains(SECRET),
+            "a secret in a file part path/filename/mime leaked into masked_curl: {curl}"
+        );
+        assert!(curl.contains(secrets::SECRET_MASK), "{curl}");
+    }
+
+    /// A multipart TEXT part's secret value stays masked too (unchanged from
+    /// before F1 — asserts the Text arm didn't regress alongside the File fix).
+    #[test]
+    fn masked_curl_masks_secret_in_text_part() {
+        const SECRET: &str = "sk-live-abcdefghijklmnopqrstuvwx";
+        let mut request = get("https://example.com/upload");
+        request.method = Method::Post;
+        request.body = Some(Body::Multipart(vec![Part {
+            name: "token".to_owned(),
+            value: PartValue::Text(SECRET.to_owned()),
+        }]));
+        let curl = DebugTrace::from_request(&request).masked_curl();
+        assert!(!curl.contains(SECRET), "{curl}");
+        assert!(curl.contains(secrets::SECRET_MASK), "{curl}");
     }
 }
