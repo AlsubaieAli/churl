@@ -856,6 +856,26 @@ impl App {
     /// over ([`Self::body_search_return`]), so search-into-view keeps targeting the
     /// runner response the `/` was launched from.
     fn active_response_surface(&self) -> ResponseSurface {
+        // M8.6.1: the Body tab's own browse view takes priority — it is a
+        // request-pane-local surface, orthogonal to the LoadRunner/Sequence
+        // resolution below (which only ever applies while a runner overlay is
+        // open, i.e. NOT `Mode::Normal`/`Mode::BodySearch`, so the two can never
+        // both match).
+        if self.body_browse_active() {
+            return ResponseSurface::RequestBody;
+        }
+        self.runner_or_main_surface()
+    }
+
+    /// The pre-M8.6.1 surface resolution (LoadRunner/Sequence/Main only, never
+    /// `RequestBody`) — used by [`Self::response`], the "give me the actual
+    /// loaded HTTP response" reader that tests/snapshot drivers rely on. It
+    /// must NEVER redirect to the Body tab's own browse view just because the
+    /// user happens to be idly browsing it when a response arrives/cancels —
+    /// `cancel_request`/`send_request` already write `b.response` directly
+    /// (bypassing surface resolution entirely), so this keeps the READER
+    /// consistent with what the WRITER actually touched.
+    fn runner_or_main_surface(&self) -> ResponseSurface {
         // When body-search is open, resolve against the mode it was opened over —
         // parked in `body_search_return` (it holds the whole mode, incl.
         // the `LoadRunner(state)` / `Sequence{..}` payloads, so the runner surface
@@ -892,10 +912,21 @@ impl App {
 
     /// The active response state for internal readers (render + `response_*`
     /// handlers). Resolves the runner's selected row/step when a runner Response
-    /// region is focused, else the active endpoint buffer, else the
-    /// test-only orphan slot (isolation snapshots) when nothing is loaded.
+    /// region is focused, else the Body tab's own browse view while browsing,
+    /// else the active endpoint buffer, else the test-only orphan slot
+    /// (isolation snapshots) when nothing is loaded.
     fn active_response(&self) -> &ResponseState {
-        match self.active_response_surface() {
+        self.response_for_surface(self.active_response_surface())
+    }
+
+    /// Resolves a given [`ResponseSurface`] to its `ResponseState`, shared by
+    /// [`Self::active_response`] (surface = [`Self::active_response_surface`],
+    /// RequestBody-aware) and [`Self::response`] (surface =
+    /// [`Self::runner_or_main_surface`], never RequestBody) so the two
+    /// resolution policies can never drift on what each `ResponseSurface`
+    /// variant actually means.
+    fn response_for_surface(&self, surface: ResponseSurface) -> &ResponseState {
+        match surface {
             ResponseSurface::LoadRunner => self
                 .load_runner()
                 .and_then(|r| r.selected_response())
@@ -906,6 +937,15 @@ impl App {
                 .unwrap_or(&self.orphan_response),
             ResponseSurface::Main => match self.active_endpoint_buffer() {
                 Some(b) => &b.response,
+                None => &self.orphan_response,
+            },
+            // M8.6.1: the Body tab's own browse view (built lazily — see
+            // `ensure_body_browse_built`). Falls back to the orphan slot on the
+            // same "nothing loaded" contract as `Main` (unreachable in practice:
+            // `body_browse_active` already requires a non-multipart Body tab,
+            // which requires a loaded buffer).
+            ResponseSurface::RequestBody => match self.active_endpoint_buffer() {
+                Some(b) => &b.body_browse,
                 None => &self.orphan_response,
             },
         }
@@ -937,6 +977,14 @@ impl App {
                 Some(b) => &mut b.response,
                 None => &mut self.orphan_response,
             },
+            ResponseSurface::RequestBody => match self
+                .buffers
+                .get_mut(self.active)
+                .and_then(Buffer::as_endpoint_mut)
+            {
+                Some(b) => &mut b.body_browse,
+                None => &mut self.orphan_response,
+            },
         }
     }
 
@@ -956,6 +1004,10 @@ impl App {
                 .unwrap_or(&self.orphan_geometry),
             ResponseSurface::Main => match self.active_endpoint_buffer() {
                 Some(b) => &b.geometry,
+                None => &self.orphan_geometry,
+            },
+            ResponseSurface::RequestBody => match self.active_endpoint_buffer() {
+                Some(b) => &b.body_geometry,
                 None => &self.orphan_geometry,
             },
         }
@@ -982,6 +1034,14 @@ impl App {
                 Some(b) => &mut b.geometry,
                 None => &mut self.orphan_geometry,
             },
+            ResponseSurface::RequestBody => match self
+                .buffers
+                .get_mut(self.active)
+                .and_then(Buffer::as_endpoint_mut)
+            {
+                Some(b) => &mut b.body_geometry,
+                None => &mut self.orphan_geometry,
+            },
         }
     }
 
@@ -996,9 +1056,18 @@ impl App {
         }
     }
 
-    /// The active buffer's response state (tests / snapshot drivers).
+    /// The active buffer's ACTUAL loaded HTTP response state (tests / snapshot
+    /// drivers) — resolves the runner's selected row/step when a runner
+    /// Response region is focused, else the active endpoint buffer, else the
+    /// orphan slot. Deliberately does NOT go through `active_response`/
+    /// `active_response_surface`: those additionally redirect to the Body
+    /// tab's own browse view (M8.6.1) while it is being browsed, which would
+    /// be wrong here — this reader must keep meaning "the response", matching
+    /// what `send_request`/`cancel_request` actually write to (`b.response`,
+    /// bypassing surface resolution), regardless of which tab happens to be
+    /// focused when a caller asks.
     pub fn response(&self) -> &ResponseState {
-        self.active_response()
+        self.response_for_surface(self.runner_or_main_surface())
     }
 
     /// Sets the active buffer's response state, or the orphan slot when nothing
@@ -1132,6 +1201,109 @@ impl App {
     fn body_editor_non_normal(&self) -> bool {
         self.active_endpoint_buffer()
             .is_some_and(|b| b.editor.mode != EditorMode::Normal)
+    }
+
+    /// Whether the active buffer's Body tab is in EDIT mode (M8.6.1: edtui owns
+    /// the keys) rather than browse. `false` when nothing is loaded — the
+    /// default, browse-first state.
+    fn body_editing_active(&self) -> bool {
+        self.active_endpoint_buffer()
+            .is_some_and(|b| b.body_editing)
+    }
+
+    /// Whether the Body tab's own browse view (M8.6.1) is the surface the
+    /// shared `response_*` handlers (and the browse-key router) should act on:
+    /// the Request pane is focused, the active tab is Body, the live body is
+    /// not `Multipart` (that tab is its own row-list, untouched by this gate),
+    /// and the buffer is browsing rather than editing. `Mode::BodySearch` is
+    /// allowed alongside `Mode::Normal` because opening `/` never changes
+    /// `self.focus`/`active_tab` — the body-search overlay for the Body tab must
+    /// keep resolving to this surface exactly as the Response pane's does today.
+    fn body_browse_active(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::BodySearch)
+            && self.focus == Pane::Request
+            && self.active_tab() == RequestTab::Body
+            && !self.body_is_multipart()
+            && !self.body_editing_active()
+    }
+
+    /// The active buffer's current live body text — the source
+    /// [`Self::rebuild_body_browse`] builds the browse view from. Reads the
+    /// SAME text `is_dirty`/`sync_body_into_selected` use (the edtui buffer,
+    /// not `request.body`, which may be stale until the next sync) — so a
+    /// browse rebuild always reflects the latest typed-but-unsynced edit.
+    /// Empty when nothing is loaded.
+    fn live_body_text(&self) -> String {
+        self.active_endpoint_buffer()
+            .map(|b| String::from(b.editor.lines.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The [`crate::tui::highlight::SyntaxToken`] the Body-browse view should
+    /// use for its current kind: `Json` for a JSON body (fold/pretty
+    /// meaningful, matching the Response pane's own JSON gate), `Plain`
+    /// otherwise (Text/Form/no body — `p`/`o`/`J` correctly no-op, mirroring a
+    /// non-JSON response).
+    fn body_browse_syntax(&self) -> highlight::SyntaxToken {
+        match BodyTypeUi::from_body(self.live_request().and_then(|r| r.body.as_ref())) {
+            BodyTypeUi::Json => highlight::SyntaxToken::Json,
+            BodyTypeUi::Text | BodyTypeUi::Form | BodyTypeUi::Multipart => {
+                highlight::SyntaxToken::Plain
+            }
+        }
+    }
+
+    /// Force-rebuilds the active buffer's Body-browse view from the current
+    /// live body text/kind, resetting its geometry (fresh cursor/scroll — the
+    /// content just changed, so any prior position is meaningless). Called
+    /// whenever the underlying text/kind actually changes: on entering browse
+    /// from edit (`Esc`) and after a body-type switch. A no-op with nothing
+    /// loaded.
+    fn rebuild_body_browse(&mut self) {
+        let text = self.live_body_text();
+        let syntax = self.body_browse_syntax();
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.body_browse = ResponseState::Done {
+                view: ResponseView::build_over_text(&text, syntax, 0),
+            };
+            b.body_geometry = ResponseGeometry::default();
+        }
+    }
+
+    /// Lazily builds the active buffer's Body-browse view the first time it is
+    /// needed (still `Idle`) — the safety net for a buffer whose Body tab has
+    /// never been rebuilt yet (fresh load, or a build predating M8.6.1's
+    /// fields). Idempotent: a no-op once the view is `Done`.
+    fn ensure_body_browse_built(&mut self) {
+        let needs_build = self
+            .active_endpoint_buffer()
+            .is_some_and(|b| matches!(b.body_browse, ResponseState::Idle));
+        if needs_build {
+            self.rebuild_body_browse();
+        }
+    }
+
+    /// `Esc` from edtui-Normal mode (M8.6.1): syncs the just-edited text into
+    /// the live request (so a browse rebuild never drops typed-but-unsynced
+    /// text), rebuilds the browse view from it, and flips the gate back to
+    /// browse. The edit→browse half of the "insert→Normal→browse" double-`Esc`.
+    fn exit_body_edit_to_browse(&mut self) {
+        self.sync_body_into_selected();
+        self.rebuild_body_browse();
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.body_editing = false;
+        }
+    }
+
+    /// `i`/`a`/`Enter` from browse (M8.6.1): flips the gate to edit and places
+    /// edtui in the given mode — `Insert` for `i`/`a` (vim-faithful: from a
+    /// read view, `i` starts typing), `Normal` for `Enter` (consistent with how
+    /// Params/Headers rows enter a field edit). A no-op with nothing loaded.
+    fn enter_body_edit(&mut self, mode: EditorMode) {
+        if let Some(b) = self.active_endpoint_buffer_mut() {
+            b.body_editing = true;
+            b.editor.mode = mode;
+        }
     }
 
     /// Whether a request-row field edit is in progress on the active buffer.
@@ -1348,9 +1520,13 @@ impl App {
             }
             return;
         }
+        // M8.6.1: gated on `body_editing_active` too — while browsing, edtui is
+        // hidden (the browse view is on screen), so a paste must never land in
+        // its buffer invisibly regardless of edtui's own last internal mode.
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
             && !self.body_is_multipart()
+            && self.body_editing_active()
             && self.body_editor_non_normal()
             && let Some(b) = self.active_endpoint_buffer_mut()
         {
@@ -1863,33 +2039,47 @@ impl App {
             }
             return self.handle_field_edit_key(key);
         }
-        // 3. edtui insert/visual mode on the Body tab (interception exception).
-        //    Multipart (M8.6): the Body tab has no edtui surface at all — it
-        //    behaves like Params/Headers/Auth (a row-list), so every Body-tab
-        //    edtui branch below is gated off when the live body is Multipart,
+        // 3. Body tab in EDIT mode (M8.6.1): edtui owns every key — the browse/
+        //    edit gate's edit half. Multipart (M8.6): the Body tab has no edtui
+        //    surface at all — it behaves like Params/Headers/Auth (a row-list),
+        //    so this whole branch is gated off when the live body is Multipart,
         //    falling through to the normal keymap → Action::Row* dispatch.
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
             && !self.body_is_multipart()
-            && self.body_editor_non_normal()
+            && self.body_editing_active()
         {
             if let Some(action) = self.control_intercept(key) {
                 return self.dispatch(action, Some(key));
             }
+            // `Esc` from edtui-Normal returns to browse (today it stays in the
+            // editor) — the edit half of the "insert→Normal→browse" double-`Esc`.
+            // Guarded on edtui already being Normal so `Esc` from Insert/Visual
+            // still reaches edtui below and does edtui's OWN Insert/Visual→Normal
+            // transition first (the double-hop), never skipping straight to browse.
+            if key.code == KeyCode::Esc && !self.body_editor_non_normal() {
+                self.exit_body_edit_to_browse();
+                return Ok(());
+            }
+            // Churl-side vim motions (W/B/^/f/F/t/T) win before falling through to
+            // edtui, same precedence pre-M8.6.1 had — only reachable in edtui-
+            // Normal (a motion mid-Insert would just type the letter).
+            if !self.body_editor_non_normal() && self.body_vim_handle_key(key) {
+                return Ok(());
+            }
+            // Every other key belongs to edtui: edit mode owns the keyboard, so
+            // (unlike browse) nothing here falls through to leader/keymap — `b`
+            // types a literal `b`, matching the design's collision rule.
             self.body_editor_on_key(key);
             return Ok(());
         }
-        // 3b. Body tab in Normal mode: churl-side vim motions (W/B/^/f/F/t/T) win
-        //     before leader/keymap. `f` becomes find-char, shadowing the global
-        //     Jump key there (DECISIONS.md shadowing precedent). Precedes
-        //     leader/keymap so a pending find's next char reaches vim_ext even
-        //     when it's Space or a mapped key.
-        if self.focus == Pane::Request
-            && self.active_tab() == RequestTab::Body
-            && !self.body_is_multipart()
-            && !self.body_editor_non_normal()
-            && self.body_vim_handle_key(key)
-        {
+        // 3b. Body tab in BROWSE mode (M8.6.1): churl owns the full
+        //     response-parity key set (scroll/copy/search/wrap/pretty/fold/jump/
+        //     pan) plus the edit-enter keys (`i`/`a`/`Enter`), all claimed before
+        //     leader/keymap so they can never be shadowed by the Request-pane
+        //     overlay's row bindings. Keys it doesn't claim (`]`/`[`/digits/`b`/
+        //     leader) fall through to steps 4/5 below, unchanged.
+        if self.body_browse_active() && self.body_browse_handle_key(key) {
             return Ok(());
         }
         // 4. Leader key: outside every text-edit context (guarded above), Space
@@ -1899,18 +2089,14 @@ impl App {
             self.leader = Some(LeaderState::Root);
             return Ok(());
         }
-        // 5. Keymap: the focused pane's overlay wins over the global map.
-        if let Some(action) = self.keymap.lookup_ctx(key, self.focus.ctx()) {
-            self.dispatch(action, Some(key))
-        } else if self.focus == Pane::Request
-            && self.active_tab() == RequestTab::Body
-            && !self.body_is_multipart()
-        {
-            // Unmapped key on a non-multipart Body tab falls through to edtui.
-            self.body_editor_on_key(key);
-            Ok(())
-        } else {
-            Ok(())
+        // 5. Keymap: the focused pane's overlay wins over the global map. Unlike
+        //    pre-M8.6.1, an unmapped key on a non-multipart Body tab is simply
+        //    inert here — while editing, step 3 already consumed everything;
+        //    while browsing, churl owns the keys (there is no more "everything
+        //    else falls through to edtui").
+        match self.keymap.lookup_ctx(key, self.focus.ctx()) {
+            Some(action) => self.dispatch(action, Some(key)),
+            None => Ok(()),
         }
     }
 
@@ -2075,14 +2261,20 @@ impl App {
             Action::Tab2 => self.with_active_tabs(|t| t.tab_jump(1)),
             Action::Tab3 => self.with_active_tabs(|t| t.tab_jump(2)),
             Action::Tab4 => self.with_active_tabs(|t| t.tab_jump(3)),
-            // On a NON-multipart Body tab there are no rows: the originating
-            // key (i/a/d/…) belongs to edtui, same as the motion keys in
-            // `request_nav`. A Multipart Body tab falls through to the normal
-            // row handlers below, same as Params/Headers/Auth.
+            // On a NON-multipart Body tab in EDIT mode there are no rows: the
+            // originating key (a/d/t/i) belongs to edtui, same as the motion keys
+            // in `request_nav`. In BROWSE mode these keys must NOT leak into the
+            // hidden edtui buffer (the browse view is what's on screen) — they
+            // fall through to the row handlers below, which already no-op safely
+            // for a non-multipart Body (verified: `row_add`/`row_delete` early-
+            // return, `row_toggle`'s `Body` arm no-ops without a `Multipart`
+            // match, `row_edit` finds no field text and no-ops). A Multipart Body
+            // tab always falls through here too, same as Params/Headers/Auth.
             Action::RowAdd | Action::RowDelete | Action::RowToggle | Action::RowEdit
                 if self.focus == Pane::Request
                     && self.active_tab() == RequestTab::Body
-                    && !self.body_is_multipart() =>
+                    && !self.body_is_multipart()
+                    && self.body_editing_active() =>
             {
                 if let Some(key) = key {
                     self.body_editor_on_key(key);
@@ -2123,7 +2315,11 @@ impl App {
             Action::MoveUp => self.reorder_selected(persistence::ReorderDir::Up)?,
             Action::MoveDown => self.reorder_selected(persistence::ReorderDir::Down)?,
             Action::HalfPageDown | Action::HalfPageUp => {
-                if self.focus == Pane::Response {
+                // M8.6.1: `Ctrl-d`/`Ctrl-u` also half-page the Body tab's browse
+                // view, routed through the same `response_half_page` (it already
+                // operates on whichever surface `active_response_geometry`
+                // resolves to — see `ResponseSurface::RequestBody`).
+                if self.focus == Pane::Response || self.body_browse_active() {
                     self.response_half_page(matches!(action, Action::HalfPageDown));
                 }
             }
@@ -2177,13 +2373,29 @@ impl App {
         Ok(())
     }
 
-    /// Navigation within the Request pane. On a non-multipart Body tab the
-    /// motion keys forward to edtui; on the row-list tabs (Params/Headers/
-    /// Auth, or a Multipart Body tab) `j`/`k` move the selection, `Enter` edits.
+    /// Navigation within the Request pane. On a non-multipart Body tab in EDIT
+    /// mode the motion keys forward to edtui; in BROWSE mode (M8.6.1)
+    /// `j`/`k`/`g`/`G` scroll the body-browse view instead (full response
+    /// parity), same as `response_scroll` does for the Response pane; on the
+    /// row-list tabs (Params/Headers/Auth, or a Multipart Body tab) `j`/`k` move
+    /// the selection, `Enter` edits.
     fn request_nav(&mut self, action: Action, key: Option<KeyEvent>) {
         if self.active_tab() == RequestTab::Body && !self.body_is_multipart() {
-            if let Some(key) = key {
-                self.body_editor_on_key(key);
+            if self.body_editing_active() {
+                if let Some(key) = key {
+                    self.body_editor_on_key(key);
+                }
+            } else {
+                self.ensure_body_browse_built();
+                if matches!(
+                    action,
+                    Action::Up | Action::Down | Action::Top | Action::Bottom
+                ) {
+                    self.response_scroll(action);
+                }
+                // Collapse/Expand (`h`/`l`) and Select (claimed earlier by
+                // `body_browse_handle_key`'s `Enter`/`i`/`a`) have no job while
+                // browsing a flat body — inert, mirroring the Response pane.
             }
             return;
         }

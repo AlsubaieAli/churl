@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-assertion_line: 999
+assertion_line: 1048
 expression: snapshot(&mut app)
 ---
 ┌ Explorer ──────────────────┐  Create user                                     

@@ -195,11 +195,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // cleanly. With no buffer loaded we render fresh defaults — byte-identical to
     // the pre-refactor flat fields, always default with nothing loaded.
     let active = app.active;
+    // M8.6.1: lazily (re)build the active buffer's Body-browse view BEFORE the
+    // borrow-split below (this needs `&mut App`; the split's disjoint-field
+    // borrows can't coexist with it). A no-op once already built — see
+    // `ensure_body_browse_built`.
+    app.ensure_body_browse_built();
     // No-buffer response fallback. In production `orphan_response` is always Idle
     // (a response requires a loaded endpoint); the response-pane isolation
     // snapshots set it to render a response with no endpoint. Bound before `buf`
     // (disjoint field) so both borrows coexist.
     let default_response: &ResponseState = &app.orphan_response;
+    let default_body_view: ResponseState = ResponseState::Idle;
     let buf = app
         .buffers
         .get_mut(active)
@@ -209,29 +215,47 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let default_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
 
     // Split the buffer into the disjoint pieces the render fns take.
-    let (selected_request, editor, tabs, response, cache, url_editor, resp_scroll, resp_cursor) =
-        match buf {
-            Some(b) => (
-                Some(&b.endpoint.endpoint.request),
-                &mut b.editor,
-                &mut b.tabs,
-                &b.response,
-                &b.highlight_cache,
-                b.url_editor.as_mut(),
-                b.geometry.scroll,
-                b.geometry.cursor,
-            ),
-            None => (
-                None,
-                &mut default_editor,
-                &mut default_tabs,
-                default_response,
-                &default_cache,
-                None,
-                0,
-                0,
-            ),
-        };
+    #[allow(clippy::type_complexity)]
+    let (
+        selected_request,
+        editor,
+        tabs,
+        response,
+        cache,
+        url_editor,
+        resp_scroll,
+        resp_cursor,
+        body_editing,
+        body_view,
+        body_geometry,
+    ) = match buf {
+        Some(b) => (
+            Some(&b.endpoint.endpoint.request),
+            &mut b.editor,
+            &mut b.tabs,
+            &b.response,
+            &b.highlight_cache,
+            b.url_editor.as_mut(),
+            b.geometry.scroll,
+            b.geometry.cursor,
+            b.body_editing,
+            &b.body_browse,
+            b.body_geometry,
+        ),
+        None => (
+            None,
+            &mut default_editor,
+            &mut default_tabs,
+            default_response,
+            &default_cache,
+            None,
+            0,
+            0,
+            false,
+            &default_body_view,
+            ResponseGeometry::default(),
+        ),
+    };
     let req_focused = app.focus == Pane::Request && matches!(app.mode, Mode::Normal);
     let resp_focused =
         app.focus == Pane::Response && matches!(app.mode, Mode::Normal | Mode::BodySearch);
@@ -253,9 +277,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Captured from `response::render`'s outcome so the buffer's response
     // geometry + highlight guard can be written back after the buffer borrow.
     let mut resp_outcome: Option<response::RenderOutcome> = None;
+    // M8.6.1: captured from `request::render`'s Body-browse outcome (`Some`
+    // only when the Body tab rendered in BROWSE mode) so `body_geometry` and
+    // the view's `h_scroll` can be written back the same way `resp_outcome` is.
+    let mut body_outcome: Option<response::RenderOutcome> = None;
     match app.zoom {
         Some(ZoomPane::Request) => {
-            request::render(
+            body_outcome = request::render(
                 frame,
                 request_area,
                 request::RenderCtx {
@@ -265,6 +293,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     focused: req_focused,
                     theme: &theme,
                     jump,
+                    body_editing,
+                    body_view,
+                    body_geometry,
                 },
             );
             let summary = response::collapsed_summary(response, &theme);
@@ -304,7 +335,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ));
         }
         None => {
-            request::render(
+            body_outcome = request::render(
                 frame,
                 request_area,
                 request::RenderCtx {
@@ -314,6 +345,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     focused: req_focused,
                     theme: &theme,
                     jump,
+                    body_editing,
+                    body_view,
+                    body_geometry,
                 },
             );
             resp_outcome = Some(response::render(
@@ -358,6 +392,21 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     b.pending_highlight = Some(hash);
                 }
             }
+        }
+    }
+    // M8.6.1: same write-back for the Body-browse outcome, onto `body_geometry`/
+    // `body_browse` instead. `outcome.job` is always `None` here (syntax
+    // highlighting is out of scope for the Body tab this milestone — see
+    // `render_body_browse`'s doc), so there is nothing to enqueue.
+    if let Some(outcome) = body_outcome
+        && let Some(b) = app
+            .buffers
+            .get_mut(active)
+            .and_then(Buffer::as_endpoint_mut)
+    {
+        b.body_geometry.apply_render_outcome(&outcome);
+        if let ResponseState::Done { view } = &mut b.body_browse {
+            view.set_h_scroll(outcome.clamped_h_scroll);
         }
     }
     // The statusline keeps *only* persistent state: focus,

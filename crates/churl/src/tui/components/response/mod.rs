@@ -25,6 +25,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::time::Duration;
 
 use churl_core::model::{Response, Timing};
 
@@ -43,6 +44,9 @@ mod text;
 // unchanged after the split. Visibilities match the originals exactly.
 pub(crate) use render::build_search_spans;
 pub use render::{RenderCtx, RenderOutcome, collapsed_summary, fmt_bytes, render};
+// `render_done` (M8.6.1): reused directly by `components::request`'s Body-tab
+// browse renderer — see `render_done`'s doc for why it bypasses `render`.
+pub(in crate::tui::components) use render::render_done;
 pub use text::clamp_scroll;
 pub(crate) use text::smart_case_matches;
 
@@ -202,6 +206,56 @@ impl ResponseView {
             raw_text,
             headers_text,
             headers_offsets,
+            view_mode: ViewMode::Body,
+            folds: None,
+            folded: HashSet::new(),
+            wrap: false,
+            line_numbers: true,
+            h_scroll: 0,
+            pretty,
+            sort_keys,
+            search: None,
+            geom_cache: RefCell::new(GeomCache::default()),
+        }
+    }
+
+    /// Builds a view directly over arbitrary text — no HTTP response involved.
+    /// Used by the Body-tab browse mode (M8.6.1) to reuse this exact
+    /// fold/pretty/wrap/search pipeline over the *request* body instead of a
+    /// response. `status`/`timing`/`header_count`/`truncated` have no meaning
+    /// here and are zeroed; callers that draw this view must NOT go through the
+    /// response `render()` entry point (which reads them for the status-bar
+    /// title) — call `render_done` directly instead, as the Body-tab renderer
+    /// does. `generation` should be bumped by the caller on every rebuild, so a
+    /// stale render-geometry memo elsewhere is never mistaken for this
+    /// instance's (though a fresh `Self` always starts with an empty memo
+    /// regardless).
+    pub fn build_over_text(text: &str, syntax: SyntaxToken, generation: u64) -> Self {
+        let raw_text = text.to_owned();
+        let pretty = syntax == SyntaxToken::Json;
+        let sort_keys = false;
+        let text = sanitize_for_display(&reformat_body_if_needed(
+            &raw_text, syntax, pretty, sort_keys,
+        ));
+        let line_offsets = index_lines(&text);
+        let raw_line_offsets = index_lines(&raw_text);
+        Self {
+            syntax,
+            byte_size: raw_text.len(),
+            truncated: false,
+            status: 0,
+            timing: Timing {
+                connect: None,
+                total: Duration::ZERO,
+            },
+            header_count: 0,
+            generation,
+            line_offsets,
+            raw_line_offsets,
+            text,
+            raw_text,
+            headers_text: String::new(),
+            headers_offsets: Vec::new(),
             view_mode: ViewMode::Body,
             folds: None,
             folded: HashSet::new(),

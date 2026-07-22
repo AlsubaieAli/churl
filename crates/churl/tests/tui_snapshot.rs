@@ -999,10 +999,83 @@ fn request_tab_body() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
-/// M8.6: driven entirely through real key events — `<leader>b` opens the
-/// Body-type picker, typing "multipart" filters to it, Enter accepts, then
-/// `a` adds a part and types its name/value — proving the whole selector +
-/// row-list flow end to end, not just its individual handlers.
+/// Loads the "Create user" endpoint (JSON body `{"name": "Ada"}`), focuses
+/// Request + the Body tab — the M8.6.1 browse-fixture shared by the tests
+/// below (mirrors `request_tab_body`'s own navigation exactly).
+fn body_tab_on_create_user(root: &Path) -> App {
+    let mut app = app_with_fixture(root);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // Create user (JSON body)
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('4')); // Body tab
+    app
+}
+
+/// M8.6.1: `o` folds the request body's outer JSON object — the exact same
+/// ellipsis marker the Response pane's own fold renders (full response
+/// parity), reached via the Body tab's default BROWSE state (no `<leader>b`,
+/// no edit-enter needed).
+#[test]
+fn request_tab_body_browse_fold_renders_ellipsis_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = body_tab_on_create_user(dir.path());
+    press(&mut app, KeyCode::Char('o'));
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('⋯'),
+        "folding the request body must render the same ellipsis marker as the \
+         response viewer:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// M8.6.1: `p` (raw<->pretty) and `W` (wrap) both operate on the Body tab's
+/// browse view while it is focused, through the same `response_*` handlers
+/// the Response pane uses (`ResponseSurface::RequestBody`).
+#[test]
+fn request_tab_body_browse_pretty_and_wrap_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = body_tab_on_create_user(dir.path());
+    press(&mut app, KeyCode::Char('p')); // pretty JSON is already on by default;
+    // toggling raw<->pretty and back proves the toggle reaches the body view
+    // without crashing/no-op'ing silently.
+    press(&mut app, KeyCode::Char('p'));
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT))
+        .unwrap();
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// M8.6.1 end to end: browse -> `i` (edit, insert) -> type -> `Esc` `Esc`
+/// (edit -> browse) shows the just-typed content through the browse pipeline
+/// — the full round trip a real drive-test would exercise, not just the
+/// individual handlers.
+#[test]
+fn request_tab_body_edit_then_browse_shows_typed_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = body_tab_on_create_user(dir.path());
+    press(&mut app, KeyCode::Char('i')); // -> edit, insert (cursor at start)
+    type_str(&mut app, "// ");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap(); // insert -> edtui Normal
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap(); // edtui Normal -> browse
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains("// "),
+        "the browse view must show the just-typed, unsaved text:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
+/// M8.6 / M8.6.1: driven entirely through real key events — `b` (de-globalized
+/// off the leader in M8.6.1: `PaneCtx::Request`-scoped, fires from the Body
+/// tab's default BROWSE state) opens the Body-type picker, typing "multipart"
+/// filters to it, Enter accepts, then `a` adds a part and types its
+/// name/value — proving the whole selector + row-list flow end to end, not
+/// just its individual handlers.
 #[test]
 fn request_tab_body_multipart_parts_editor() {
     let dir = tempfile::tempdir().unwrap();
@@ -1014,8 +1087,8 @@ fn request_tab_body_multipart_parts_editor() {
     app.focus = Pane::Request;
     press(&mut app, KeyCode::Char('4')); // Body tab
 
-    // Open the Body-type picker and switch to multipart.
-    press(&mut app, KeyCode::Char(' ')); // leader
+    // Open the Body-type picker and switch to multipart. Body tab starts in
+    // BROWSE (M8.6.1 default) with a fresh JSON body — `b` is churl-owned there.
     press(&mut app, KeyCode::Char('b'));
     assert!(matches!(app.mode, Mode::Palette));
     type_str(&mut app, "multipart");
@@ -1054,7 +1127,8 @@ fn multipart_file_picker_overlay() {
     app.focus = Pane::Request;
     press(&mut app, KeyCode::Char('4')); // Body tab
 
-    press(&mut app, KeyCode::Char(' ')); // leader
+    // M8.6.1: `b` opens the picker directly from the Body tab's default
+    // BROWSE state — no more `<leader>b`.
     press(&mut app, KeyCode::Char('b'));
     type_str(&mut app, "multipart");
     press(&mut app, KeyCode::Enter);

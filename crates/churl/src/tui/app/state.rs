@@ -496,6 +496,16 @@ pub(in crate::tui::app) enum ResponseSurface {
     LoadRunner,
     /// The sequence runner's selected step.
     Sequence,
+    /// The Body tab's own browse view (M8.6.1) — the request body rendered
+    /// through the exact same fold/pretty/wrap/search pipeline, while the Body
+    /// tab is focused, browsing (not editing), and non-multipart. Reusing this
+    /// surface (rather than a parallel set of handlers) is what gives the Body
+    /// tab full response-parity browsing for free: every `response_*` handler
+    /// (scroll, copy, search, pretty, fold, structural jump, h-pan) already
+    /// routes through [`super::App::active_response`] /
+    /// [`super::App::active_response_geometry`] and their `_mut` twins, so this
+    /// variant is the only new plumbing they need.
+    RequestBody,
 }
 
 /// Bookkeeping for the single in-flight request.
@@ -523,6 +533,26 @@ pub(in crate::tui::app) struct EndpointBuffer {
     pub(in crate::tui::app) editor_events: EditorEventHandler,
     /// Normal-mode motion extensions (W/B/^/f/F/t/T) for the Body editor.
     pub(in crate::tui::app) editor_vim: VimExt,
+    /// Body-tab browse/edit gate (M8.6.1): `false` (browse, the default) means
+    /// churl owns the keys and the body renders read-only through
+    /// [`Self::body_browse`]; `true` (edit) means edtui owns the keys, exactly
+    /// as the Body tab behaved pre-M8.6.1. Irrelevant (never consulted) while
+    /// the live body is `Multipart` — that surface has its own row-list gate.
+    /// A light per-buffer flag rather than a new top-level `Mode` variant,
+    /// mirroring how response-browse is just `Normal` + focus, not its own
+    /// mode.
+    pub(in crate::tui::app) body_editing: bool,
+    /// The Body tab's browse view (M8.6.1): the request body rendered through
+    /// the exact same [`ResponseView`] pipeline the Response pane uses —
+    /// `Idle` until first built, `Done` once it holds a view. Rebuilt (never
+    /// mutated in place) whenever the underlying body text/kind changes so it
+    /// never drifts from the authoritative text in `editor`/`endpoint`; the
+    /// view itself never writes back (pretty/fold/wrap are read-only, same
+    /// invariant as the Response pane).
+    pub(in crate::tui::app) body_browse: ResponseState,
+    /// Cursor/scroll/viewport geometry for [`Self::body_browse`] — the request
+    /// body's own copy of what [`Self::geometry`] is for the response.
+    pub(in crate::tui::app) body_geometry: ResponseGeometry,
     /// Request-pane tab state (active tab + per-tab selection + field edit).
     pub(in crate::tui::app) tabs: RequestTabs,
     /// The inline URL-bar editor while editing the URL; `None` otherwise.
@@ -572,6 +602,9 @@ impl EndpointBuffer {
             editor,
             editor_events: EditorEventHandler::default(),
             editor_vim,
+            body_editing: false,
+            body_browse: ResponseState::Idle,
+            body_geometry: ResponseGeometry::default(),
             tabs: RequestTabs::default(),
             url_editor: None,
             url_popup: None,

@@ -182,12 +182,16 @@ async fn stale_generation_response_is_dropped() {
 
 /// Puts a fresh app in insert mode on the request pane's Body tab (where the
 /// edtui editor lives). A bare endpoint buffer is loaded so the per-buffer
-/// editor/tabs exist (they moved off `App` into the active buffer).
+/// editor/tabs exist (they moved off `App` into the active buffer). M8.6.1:
+/// the Body tab defaults to BROWSE, so entering the pre-existing "insert mode"
+/// fixture also has to flip the buffer's `body_editing` gate — otherwise these
+/// keys would route through the browse key handler instead of reaching edtui.
 fn insert_mode_app(keymap: KeyMap) -> App {
     let mut app = App::new(None, keymap).unwrap();
     open_bare_endpoint(&mut app);
     app.focus = Pane::Request;
     app.test_tabs().active = RequestTab::Body;
+    app.active_endpoint_buffer_mut().unwrap().body_editing = true;
     app.test_editor().mode = EditorMode::Insert;
     app
 }
@@ -3506,14 +3510,18 @@ fn url_popup_esc_aborts_pending_find_not_popup() {
     );
 }
 
-/// Body tab in Normal mode: `W` moves the editor cursor, and `f`+char is
-/// find-char inside the editor — it does NOT open jump-mode.
+/// Body tab in EDIT mode, edtui-Normal: `W` moves the editor cursor, and
+/// `f`+char is find-char inside the editor — it does NOT open jump-mode.
+/// (M8.6.1: these churl-side vim motions only apply while editing — the Body
+/// tab defaults to BROWSE, where the same letters mean browse actions
+/// instead, e.g. `W` toggles wrap — see `body_tab_browse_w_toggles_wrap_not_word_motion`.)
 #[test]
 fn body_tab_vim_motions_and_f_shadows_jump() {
     let mut app = App::new(None, KeyMap::default()).unwrap();
     open_bare_endpoint(&mut app);
     app.focus = Pane::Request;
     app.test_tabs().active = RequestTab::Body;
+    app.active_endpoint_buffer_mut().unwrap().body_editing = true;
     *app.test_editor() = EditorState::new(Lines::from("foo bar baz"));
     app.test_editor().mode = EditorMode::Normal;
 
@@ -8932,6 +8940,398 @@ fn set_body_type_to_multipart_then_back_discards_content() {
             content: String::new(),
         }),
         "switching to/from Multipart is a different shape — content does not survive"
+    );
+}
+
+// ---- M8.6.1: Body-tab browse/edit gate ----
+
+/// A loaded endpoint with a `Simple` body of the given kind, Request pane
+/// focused, Body tab active — the M8.6.1 fixture. Browsing is the buffer's
+/// default state (no `body_editing` flip needed); `body_browse` is built
+/// eagerly (unit tests never render, so the render-time lazy build never
+/// runs).
+fn body_browse_app_kind(content: &str, kind: BodyKind) -> App {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.active_endpoint_buffer_mut()
+        .unwrap()
+        .endpoint
+        .endpoint
+        .request
+        .body = Some(Body::Simple {
+        kind,
+        content: content.to_owned(),
+    });
+    app.test_editor().lines = edtui::Lines::from(content);
+    app.focus = Pane::Request;
+    app.test_tabs().active = RequestTab::Body;
+    app.rebuild_body_browse();
+    app
+}
+
+/// [`body_browse_app_kind`] with `BodyKind::Json` (fold/pretty are meaningful).
+fn body_browse_app(content: &str) -> App {
+    body_browse_app_kind(content, BodyKind::Json)
+}
+
+#[test]
+fn body_tab_defaults_to_browse_and_owns_keys() {
+    let mut app = body_browse_app("{\n  \"a\": 1\n}");
+    assert!(
+        !app.active_endpoint_buffer().unwrap().body_editing,
+        "browse is the default state when the Body tab is focused"
+    );
+    // 'x' is unmapped everywhere (global map, the Request overlay, and the
+    // browse key set) — it must be a pure no-op, never leaking into the
+    // hidden edtui buffer the way pre-M8.6.1 "everything falls through to
+    // edtui" behaviour would have.
+    press(&mut app, 'x');
+    assert_eq!(
+        String::from(app.test_editor().lines.clone()),
+        "{\n  \"a\": 1\n}",
+        "an unmapped key while browsing must never reach the hidden edtui buffer"
+    );
+    assert!(!app.active_endpoint_buffer().unwrap().body_editing);
+}
+
+#[test]
+fn body_tab_enter_opens_edtui_in_normal_mode() {
+    let mut app = body_browse_app_kind("hello", BodyKind::Text);
+    enter(&mut app);
+    assert!(
+        app.active_endpoint_buffer().unwrap().body_editing,
+        "Enter must flip the gate to edit"
+    );
+    assert_eq!(
+        app.test_editor().mode,
+        EditorMode::Normal,
+        "Enter opens edtui already in NORMAL mode"
+    );
+}
+
+/// The "insert→Normal→browse" double-`Esc`: the FIRST `Esc` (from edtui
+/// Insert) must stay in edit mode and let edtui do its own Insert→Normal
+/// transition — never skip straight to browse. Only the SECOND `Esc` (now
+/// that edtui is already Normal) returns to browse.
+#[test]
+fn body_tab_esc_double_hop_insert_to_normal_to_browse() {
+    let mut app = body_browse_app_kind("hello", BodyKind::Text);
+    press(&mut app, 'i');
+    assert!(app.active_endpoint_buffer().unwrap().body_editing);
+    assert_eq!(app.test_editor().mode, EditorMode::Insert);
+
+    esc(&mut app);
+    assert!(
+        app.active_endpoint_buffer().unwrap().body_editing,
+        "the FIRST Esc (from Insert) must not strand — sorry, must not skip — \
+         straight to browse; it is edtui's own Insert->Normal hop"
+    );
+    assert_eq!(app.test_editor().mode, EditorMode::Normal);
+
+    esc(&mut app);
+    assert!(
+        !app.active_endpoint_buffer().unwrap().body_editing,
+        "the SECOND Esc (from edtui-Normal) returns to browse"
+    );
+}
+
+/// `b` is a literal character while editing (edtui owns every key — the
+/// picker must never open), but opens the Body-type picker from browse. Both
+/// halves of the locked collision rule, in one test.
+#[test]
+fn body_tab_b_is_literal_in_edit_and_opens_picker_in_browse() {
+    let mut app = body_browse_app_kind("x", BodyKind::Text);
+    press(&mut app, 'i');
+    press(&mut app, 'b');
+    assert_eq!(
+        String::from(app.test_editor().lines.clone()),
+        "bx",
+        "'b' must type a literal 'b' while editing (inserted before the cursor, \
+         which `i` places at the start of the existing text)"
+    );
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "the picker must not open while editing"
+    );
+    esc(&mut app);
+    esc(&mut app);
+    assert!(!app.active_endpoint_buffer().unwrap().body_editing);
+
+    press(&mut app, 'b');
+    assert!(
+        matches!(app.mode, Mode::Palette),
+        "'b' opens the body-type picker from browse"
+    );
+}
+
+/// Locked-design collision (see `body_browse.rs`'s module doc): `o`/`O` mean
+/// fold in browse — full response parity — NOT edit-enter, even though the
+/// design also lists `o` alongside `i`/`a` as an edit-enter key. `o` must
+/// never flip the gate to edit, and must actually fold the region at the
+/// cursor (proven by the display-row count shrinking).
+#[test]
+fn body_tab_browse_o_folds_and_never_enters_edit() {
+    let mut app = body_browse_app("{\n  \"a\": 1,\n  \"b\": 2\n}");
+    let rows_before = match &app.active_endpoint_buffer().unwrap().body_browse {
+        ResponseState::Done { view } => view.total_display_rows(0),
+        other => panic!("expected body_browse to be Done, got {other:?}"),
+    };
+    press(&mut app, 'o');
+    assert!(
+        !app.active_endpoint_buffer().unwrap().body_editing,
+        "'o' must fold, never enter edit mode"
+    );
+    let rows_after = match &app.active_endpoint_buffer().unwrap().body_browse {
+        ResponseState::Done { view } => view.total_display_rows(0),
+        other => panic!("expected body_browse to be Done, got {other:?}"),
+    };
+    assert!(
+        rows_after < rows_before,
+        "the outer object must actually fold: before={rows_before} after={rows_after}"
+    );
+}
+
+/// `f` is UNSHADOWED while browsing (opens jump-mode, the global default) —
+/// it only becomes vim find-char, shadowing jump, while actually editing (see
+/// `body_tab_vim_motions_and_f_shadows_jump`). Locks in the collision
+/// watch-out: browse and edit never fight over the same key because the two
+/// states are mutually exclusive.
+#[test]
+fn body_tab_browse_f_is_unshadowed_jump() {
+    let mut app = body_browse_app_kind("hello world", BodyKind::Text);
+    press(&mut app, 'f');
+    assert!(
+        app.jump.is_some(),
+        "f opens jump-mode while browsing (unshadowed — browse doesn't claim f)"
+    );
+    assert!(!app.active_endpoint_buffer().unwrap().body_editing);
+}
+
+/// Pretty/fold/wrap toggles are strictly VIEW-ONLY: they change how the
+/// browse view DISPLAYS the body, never the stored body itself (the request's
+/// `body.content`, nor the edtui buffer it is synced from/to).
+#[test]
+fn body_tab_browse_pretty_and_fold_never_mutate_stored_body() {
+    let raw = "{\"a\":1,\"b\":2}"; // compact — pretty is ON by default for JSON
+    let mut app = body_browse_app(raw);
+    press(&mut app, 'p'); // raw <-> pretty
+    press(&mut app, 'o'); // fold
+    press(&mut app, 'O'); // fold/unfold all
+    press(&mut app, 'p'); // toggle pretty again
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Json,
+            content: raw.to_owned(),
+        }),
+        "pretty/fold must never mutate the stored request body"
+    );
+    assert_eq!(
+        String::from(app.test_editor().lines.clone()),
+        raw,
+        "pretty/fold must never mutate the edtui buffer either"
+    );
+}
+
+/// On a non-JSON body, `p`/`o`/`J` are no-ops — exactly mirroring the
+/// Response pane's own non-JSON guard (same `fold_unsupported_notice`).
+#[test]
+fn body_tab_browse_pretty_fold_jump_noop_on_text_kind() {
+    let mut app = body_browse_app_kind("plain text, not json", BodyKind::Text);
+    press(&mut app, 'p');
+    assert!(
+        app.message
+            .as_ref()
+            .is_some_and(|m| m.text.contains("JSON body only")),
+        "pretty must notify a no-op on a Text body: {:?}",
+        app.message
+    );
+    app.message = None;
+    press(&mut app, 'o');
+    assert!(
+        app.message
+            .as_ref()
+            .is_some_and(|m| m.text.contains("JSON")),
+        "fold must notify a no-op on a Text body: {:?}",
+        app.message
+    );
+    // The stored body is obviously untouched (no toggle could have applied).
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Text,
+            content: "plain text, not json".to_owned(),
+        })
+    );
+}
+
+/// The "don't drop typed-but-unsynced text" watch-out: text typed in an edit
+/// session that is never explicitly saved must survive the edit->browse
+/// transition intact — both in the live request and in the rebuilt browse
+/// view.
+#[test]
+fn body_tab_edit_to_browse_round_trip_preserves_typed_text() {
+    let mut app = body_browse_app_kind("initial", BodyKind::Text);
+    press(&mut app, 'i');
+    for c in "XYZ".chars() {
+        press(&mut app, c);
+    }
+    let typed = String::from(app.test_editor().lines.clone());
+    assert_ne!(
+        typed, "initial",
+        "sanity: typing actually changed the buffer"
+    );
+
+    esc(&mut app); // Insert -> Normal
+    esc(&mut app); // Normal -> browse (sync + rebuild)
+    assert!(!app.active_endpoint_buffer().unwrap().body_editing);
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Text,
+            content: typed.clone(),
+        }),
+        "typed-but-unsynced text must survive the edit->browse transition"
+    );
+    match &app.active_endpoint_buffer().unwrap().body_browse {
+        ResponseState::Done { view } => assert_eq!(
+            view.copy_all(),
+            typed,
+            "the rebuilt browse view must reflect the just-typed text too"
+        ),
+        other => panic!("expected body_browse to be Done, got {other:?}"),
+    }
+}
+
+/// The editor-rebuild wart fix: a content-preserving switch (Text<->Json<->
+/// Form all carry the same content) must NOT reset the edtui editor's cursor
+/// (or, by the same code path, its undo/redo stacks) — only a hop to/from
+/// Multipart legitimately rebuilds it (different shape).
+#[test]
+fn set_body_type_among_simple_kinds_preserves_editor_cursor() {
+    let mut app = body_browse_app_kind("hello world", BodyKind::Text);
+    app.test_editor().cursor = edtui::Index2::new(0, 6);
+    app.set_body_type(1); // -> json (Simple<->Simple: content-preserving)
+    assert_eq!(
+        app.live_request().unwrap().body,
+        Some(Body::Simple {
+            kind: BodyKind::Json,
+            content: "hello world".to_owned(),
+        })
+    );
+    assert_eq!(
+        app.test_editor().cursor,
+        edtui::Index2::new(0, 6),
+        "a content-preserving switch must not reset the editor's cursor"
+    );
+}
+
+/// The editor-rebuild wart fix, negative case: a Multipart hop legitimately
+/// still discards/rebuilds the editor (different shape — carried content is
+/// necessarily empty).
+#[test]
+fn set_body_type_to_multipart_resets_editor_cursor() {
+    let mut app = body_browse_app_kind("hello world", BodyKind::Text);
+    app.test_editor().cursor = edtui::Index2::new(0, 6);
+    app.set_body_type(3); // -> multipart
+    assert_eq!(
+        app.test_editor().cursor,
+        edtui::Index2::new(0, 0),
+        "a Multipart hop legitimately rebuilds the editor (cursor resets)"
+    );
+}
+
+/// De-globalize `b` (M8.6.1): `<leader>b` no longer opens the Body-type
+/// picker — the leader-root binding was removed in favour of the
+/// `PaneCtx::Request` overlay entry below.
+#[test]
+fn leader_b_no_longer_opens_body_type_picker() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.focus = Pane::Request;
+    press(&mut app, ' '); // leader
+    press(&mut app, 'b');
+    assert!(
+        !matches!(app.mode, Mode::Palette),
+        "<leader>b must no longer open the picker"
+    );
+}
+
+/// De-globalize `b` (M8.6.1): plain `b` opens the Body-type picker from ANY
+/// request sub-tab (not just the Body tab) — the ask was "while focused on
+/// the request pane", not "only from Body".
+#[test]
+fn b_opens_body_type_picker_from_any_request_subtab() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    open_bare_endpoint(&mut app);
+    app.focus = Pane::Request;
+    app.test_tabs().active = RequestTab::Params;
+    press(&mut app, 'b');
+    assert!(
+        matches!(app.mode, Mode::Palette),
+        "b opens the body-type picker from the Params tab too"
+    );
+}
+
+/// `d`/`t` (RowDelete/RowToggle) must NOT leak into the hidden edtui buffer
+/// while browsing — only `body_editing` gates that forward (the guard this
+/// regression-tests: pre-fix, the dispatch-level "forward to edtui" arm did
+/// not check `body_editing`, so these row-list keys would have silently typed
+/// into the editor the user isn't even looking at).
+#[test]
+fn body_tab_browse_row_keys_do_not_leak_into_edtui() {
+    let mut app = body_browse_app_kind("untouched", BodyKind::Text);
+    press(&mut app, 'd');
+    press(&mut app, 't');
+    assert_eq!(
+        String::from(app.test_editor().lines.clone()),
+        "untouched",
+        "'d'/'t' must not reach the hidden edtui buffer while browsing"
+    );
+    assert!(!app.active_endpoint_buffer().unwrap().body_editing);
+}
+
+/// `Ctrl-d`/`Ctrl-u` half-page the Body tab's own browse geometry (not the
+/// actual response's) while browsing — the `ResponseSurface::RequestBody`
+/// routing this milestone adds to `dispatch`'s `HalfPageDown`/`HalfPageUp` arm.
+#[test]
+fn body_tab_browse_ctrl_d_scrolls_body_geometry_not_response() {
+    let long = (0..50)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = body_browse_app_kind(&long, BodyKind::Text);
+    {
+        let b = app.active_endpoint_buffer_mut().unwrap();
+        b.body_geometry.total_rows = 50;
+        b.body_geometry.viewport_height = 10;
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    let b = app.active_endpoint_buffer().unwrap();
+    assert!(
+        b.body_geometry.cursor > 0,
+        "Ctrl-d must move the body-browse cursor"
+    );
+    assert_eq!(
+        b.geometry.cursor, 0,
+        "the ACTUAL response geometry must be untouched by a Body-browse half-page"
+    );
+}
+
+/// `app.response()` (the "actual loaded HTTP response" reader tests/snapshot
+/// drivers rely on) must NEVER be redirected to the Body tab's own browse
+/// view just because the user happens to be browsing it — regression test
+/// for the surface-resolution split (`response_for_surface` /
+/// `runner_or_main_surface` vs `active_response_surface`).
+#[test]
+fn response_accessor_ignores_body_browse_surface() {
+    let mut app = body_browse_app("{}");
+    *app.response_mut() = ResponseState::Cancelled;
+    assert!(
+        matches!(app.response(), ResponseState::Cancelled),
+        "app.response() must read the ACTUAL response, not the Body-browse view, \
+         even while the Body tab is being browsed"
     );
 }
 
