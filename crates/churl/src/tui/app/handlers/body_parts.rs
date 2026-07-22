@@ -32,8 +32,10 @@ impl App {
                 .is_some_and(|part| matches!(part.value, PartValue::File { .. }))
     }
 
-    /// Opens the Body-type picker (`<leader>b`): text / json / form /
-    /// multipart. A no-op with nothing loaded.
+    /// Opens the Body-type picker (plain `b`, `PaneCtx::Request`-scoped —
+    /// fires from any Request sub-tab, not a global leader binding — see
+    /// `events/mod.rs`'s `overlay(PaneCtx::Request, key!(b), ...)`): text /
+    /// json / form / multipart. A no-op with nothing loaded.
     pub(in crate::tui::app) fn open_body_type_picker(&mut self) {
         if self.selected().is_none() {
             return;
@@ -48,14 +50,6 @@ impl App {
         self.mode = Mode::Palette;
     }
 
-    /// Applies a Body-type picker choice. Switching among Text/Json/Form
-    /// preserves the current content (only `kind` changes, like flipping a
-    /// tag); switching to/from Multipart necessarily discards it (different
-    /// shape — mirrors `set_auth_kind`'s "swap in default-empty fields").
-    /// Re-seeds the edtui buffer from the (possibly new) `Simple` content so
-    /// the Body tab reflects the switch immediately. Syncs any in-progress
-    /// edtui edit into the request FIRST, so typed-but-unsynced text is never
-    /// silently dropped by the switch.
     pub(in crate::tui::app) fn set_body_type(&mut self, index: usize) {
         let Some(kind) = BodyTypeUi::ALL.get(index).copied() else {
             return;
@@ -65,7 +59,8 @@ impl App {
             return;
         };
         let request = &mut b.endpoint.endpoint.request;
-        if BodyTypeUi::from_body(request.body.as_ref()) == kind {
+        let old_kind = BodyTypeUi::from_body(request.body.as_ref());
+        if old_kind == kind {
             return; // already this kind — nothing to convert
         }
         let carried_content = match &request.body {
@@ -88,12 +83,25 @@ impl App {
             BodyTypeUi::Multipart => Body::Multipart(Vec::new()),
         });
         b.tabs.parts_sel = 0;
-        let editor_text = match &request.body {
-            Some(Body::Simple { content, .. }) => content.clone(),
-            _ => String::new(),
-        };
-        b.editor = new_editor_state(&editor_text);
-        b.editor_vim.reset();
+        // Content-preserving switch (M8.6.1 wart fix): Text/Json/Form all carry
+        // the SAME `carried_content` (just synced above, so it already equals
+        // the editor's live text byte-for-byte) — only a Multipart hop actually
+        // changes shape, so only that hop rebuilds the edtui editor. Rebuilding
+        // unconditionally used to reset cursor/undo on every kind switch even
+        // when the content never moved.
+        if matches!(old_kind, BodyTypeUi::Multipart) || matches!(kind, BodyTypeUi::Multipart) {
+            let editor_text = match &request.body {
+                Some(Body::Simple { content, .. }) => content.clone(),
+                _ => String::new(),
+            };
+            b.editor = new_editor_state(&editor_text);
+            b.editor_vim.reset();
+        }
+        // The browse view's syntax token (JSON fold/pretty support) depends on
+        // the kind, so it is force-rebuilt on every switch regardless of whether
+        // the editor was — a Text→Json hop must start supporting fold/pretty
+        // immediately even though the text itself didn't change.
+        self.rebuild_body_browse();
     }
 
     /// Opens the file picker for the multipart part at `part_index` (`<Enter>`

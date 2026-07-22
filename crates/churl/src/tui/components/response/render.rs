@@ -245,7 +245,15 @@ fn dropped_status(status: u16, timing: Option<Duration>, size: usize) -> String 
 
 /// Renders the body of a `Done` response through the full pipeline
 /// (fold → wrap → viewport), overlaying the cursor row and search highlights.
-fn render_done(
+///
+/// `pub(in crate::tui::components)` (not private): the Body-tab browse mode
+/// (M8.6.1) calls this directly for the request body's `ResponseView`,
+/// bypassing the outer [`render`] entry point (whose block title/footer are
+/// response-specific — status code, header count, the `h` header-toggle hint —
+/// none of which apply to a request body). Reusing this fn rather than a
+/// parallel copy is what gives the Body tab byte-identical
+/// fold/wrap/search/cursor/gutter behaviour to the Response pane.
+pub(in crate::tui::components) fn render_done(
     frame: &mut Frame,
     body_area: Rect,
     view: &ResponseView,

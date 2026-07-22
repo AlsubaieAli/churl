@@ -359,9 +359,10 @@ impl App {
         }
         // The Body-tab type row (row 0, only reachable when Multipart — see
         // `body_is_multipart`'s routing gate) opens the Body-type picker, same
-        // as the Auth kind row. `<leader>b` (`open_body_type_picker`) is the
-        // OTHER way in, needed because a non-multipart Body tab never reaches
-        // `RowEdit` at all (edtui owns `i`/`Enter` there).
+        // as the Auth kind row. The plain, `PaneCtx::Request`-scoped `b`
+        // binding (`open_body_type_picker`) is the OTHER way in, needed
+        // because a non-multipart Body tab never reaches `RowEdit` at all
+        // (edtui owns `i`/`Enter` there).
         if active == RequestTab::Body && sel == 0 {
             self.open_body_type_picker();
             return;

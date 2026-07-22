@@ -233,6 +233,14 @@ impl Default for KeyMap {
         // `t` so Space stays free everywhere (DECISIONS.md).
         overlay(PaneCtx::Request, key!(t), Action::RowToggle);
         overlay(PaneCtx::Request, key!(i), Action::RowEdit);
+        // `b` opens the Body-type picker (M8.6.1: de-globalized off the leader —
+        // it now fires while focused on ANY request sub-tab, per the ask, not
+        // just from a global `<leader>b`). On a non-multipart Body tab this only
+        // ever reaches the keymap from BROWSE (edit mode's edtui owns every key,
+        // so `b` types a literal `b` there — see `handle_normal_key`'s Body-tab
+        // EDIT branch, which never falls through to this overlay). `b` was free
+        // on every Request sub-tab (Params/Headers/Auth had no plain-`b` bind).
+        overlay(PaneCtx::Request, key!(b), Action::OpenBodyTypePicker);
         // Copy-as-curl is `<leader>y` (see the leader binds below): leader keys are
         // inert during text edits, so it never shadows body-editor input. The
         // resolved-vars variant and the interchange import/export actions stay
@@ -351,13 +359,10 @@ impl Default for KeyMap {
         // are cursor-context creates, a distinct non-leader state).
         root_bind(key!(n), LeaderEntry::Act(Action::NewEndpointPick));
         root_bind(key!(shift - n), LeaderEntry::Act(Action::NewCollectionPick));
-        // `<leader>b` opens the Body-type picker (M8.6: text/json/form/multipart)
-        // — `RowEdit`'s row-0 special case (mirroring the Auth kind row) is
-        // unreachable on a non-multipart Body tab because edtui owns
-        // `i`/`Enter` there, so switching kind needs a leader entry that works
-        // regardless of the current kind. `b` is free at root (the Explorer/
-        // Request pane overlays have no plain-`b` binding).
-        root_bind(key!(b), LeaderEntry::Act(Action::OpenBodyTypePicker));
+        // M8.6.1: `<leader>b` retired — `OpenBodyTypePicker` moved to a plain
+        // `b` on the `PaneCtx::Request` overlay above (fires on any request
+        // sub-tab, browse-only on the Body tab), de-globalizing the leader root
+        // now that the Body tab owns its own keys in browse.
         // Submenu descents (two-level which-key). The submenu names match the
         // seeded `submenus` keys below; config can point new keys at them or
         // create fresh submenus.

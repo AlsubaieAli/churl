@@ -1,8 +1,13 @@
 //! Request pane: a tab bar (Params / Headers / Auth / Body) over the active
-//! tab's content. Params/Headers/Auth are row-list editors; Body is the edtui
-//! editor for a `Simple` body, or (M8.6) a row-list parts editor for a
-//! `Multipart` one. Editing is driven by `app.rs`; this module only renders
+//! tab's content. Params/Headers/Auth are row-list editors; Body is a
+//! browse/edit gate (M8.6.1) over the edtui editor for a `Simple` body — browse
+//! is the default, reusing the Response pane's exact fold/pretty/wrap/search
+//! render pipeline (`response::render_done`) over the request body, and `i`/
+//! `a`/`Enter` hand control to edtui — or (M8.6) a row-list parts editor for a
+//! `Multipart` body. Editing is driven by `app.rs`; this module only renders
 //! the state.
+
+use std::collections::HashMap;
 
 use churl_core::config::{is_template_placeholder, looks_like_secret_name};
 use churl_core::model::{ApiKeyPlacement, Auth, Body, Header, Param, Part, PartValue, Request};
@@ -15,6 +20,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
 use super::jump::JumpState;
 use super::request_tabs::{BodyTypeUi, EditField, FieldEdit, RequestTab, RequestTabs};
+use super::response::{self, ResponseGeometry, ResponseState};
 use super::tab_strip::{CHIP_OVERHEAD, chip_window};
 use crate::tui::theme::Theme;
 
@@ -22,7 +28,7 @@ use crate::tui::theme::Theme;
 pub struct RenderCtx<'a> {
     /// The selected request, or `None` for the empty state.
     pub request: Option<&'a Request>,
-    /// The edtui body editor (rendered on the Body tab).
+    /// The edtui body editor (rendered on the Body tab in EDIT mode).
     pub editor: &'a mut EditorState,
     /// Tab state (active tab, per-tab selection, in-progress edit). Mutable so the
     /// row-list vertical scroll offset can be adjusted to keep the selection in
@@ -34,10 +40,24 @@ pub struct RenderCtx<'a> {
     pub theme: &'a Theme,
     /// Jump-mode state (for the pane label).
     pub jump: Option<&'a JumpState>,
+    /// M8.6.1: whether the Body tab is in EDIT mode (renders the edtui editor)
+    /// rather than BROWSE (renders `body_view` through `response::render_done`).
+    /// Irrelevant when the live body is `Multipart` (its own row-list, unaffected).
+    pub body_editing: bool,
+    /// The Body tab's browse view (M8.6.1) — `Done` once built (see
+    /// `App::ensure_body_browse_built`), `Idle` otherwise (rendered as an empty
+    /// body, same as a response that hasn't arrived).
+    pub body_view: &'a ResponseState,
+    /// Cursor/scroll/viewport geometry for `body_view`.
+    pub body_geometry: ResponseGeometry,
 }
 
-/// Renders the request pane: tab bar + active tab content.
-pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
+/// Renders the request pane: tab bar + active tab content. Returns the
+/// Body-browse render outcome when the Body tab was rendered in BROWSE mode
+/// (`None` otherwise, incl. EDIT mode and every other tab) — the caller writes
+/// the clamped geometry back onto `body_geometry`/`body_view`'s `h_scroll`,
+/// mirroring exactly how the Response pane's own outcome is handled.
+pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> Option<response::RenderOutcome> {
     let RenderCtx {
         request,
         editor,
@@ -45,6 +65,9 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
         focused,
         theme,
         jump,
+        body_editing,
+        body_view,
+        body_geometry,
     } = ctx;
 
     let (border_type, border_style) = if focused {
@@ -69,7 +92,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
             Paragraph::new(vec![Line::from(""), Line::from("no endpoint selected")]),
             inner,
         );
-        return;
+        return None;
     };
 
     let [tabbar_area, content_area] =
@@ -95,6 +118,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
                 rows.drain(..offset);
             }
             frame.render_widget(Paragraph::new(rows), content_area);
+            None
         }
         RequestTab::Headers => {
             let n = request.headers.len();
@@ -104,10 +128,12 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
                 rows.drain(..offset);
             }
             frame.render_widget(Paragraph::new(rows), content_area);
+            None
         }
         RequestTab::Auth => {
             let rows = auth_rows(request.auth.as_ref(), tabs, focused, theme);
             frame.render_widget(Paragraph::new(rows), content_area);
+            None
         }
         RequestTab::Body => match &request.body {
             // M8.6: a Multipart body is a row-list, same shape as Params/Headers
@@ -121,18 +147,20 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
                     rows.drain(..offset);
                 }
                 frame.render_widget(Paragraph::new(rows), content_area);
+                None
             }
-            // Non-multipart: a one-line type indicator (switched via
-            // `<leader>b`, not row selection — edtui owns every other key
-            // here) above the edtui free-text surface.
-            _ => {
+            // Non-multipart, EDIT mode (M8.6.1): a one-line type indicator (`b`
+            // to change — only reachable from BROWSE, since edit mode's edtui
+            // owns every other key) above the edtui free-text surface, exactly
+            // as pre-M8.6.1 except the hint text (no longer a global leader).
+            _ if body_editing => {
                 let [type_row_area, body_area] =
                     Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
                         .areas(content_area);
                 let kind = BodyTypeUi::from_body(request.body.as_ref());
                 frame.render_widget(
                     Paragraph::new(Line::styled(
-                        format!("  type: {}  (<leader>b to change)", kind.label()),
+                        format!("  type: {}  (b to change)", kind.label()),
                         theme.border_unfocused,
                     )),
                     type_row_area,
@@ -142,9 +170,86 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
                     .theme(editor_theme)
                     .wrap(true)
                     .render(body_area, frame.buffer_mut());
+                None
+            }
+            // Non-multipart, BROWSE mode (M8.6.1, the default): same type-row
+            // hint, but the body itself renders through the exact response
+            // fold/pretty/wrap/search/cursor pipeline (`render_body_browse`)
+            // instead of the edtui editor — churl owns the keys here.
+            _ => {
+                let [type_row_area, body_area] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
+                        .areas(content_area);
+                let kind = BodyTypeUi::from_body(request.body.as_ref());
+                frame.render_widget(
+                    Paragraph::new(Line::styled(
+                        format!("  type: {}  (b to change)", kind.label()),
+                        theme.border_unfocused,
+                    )),
+                    type_row_area,
+                );
+                Some(render_body_browse(
+                    frame,
+                    body_area,
+                    body_view,
+                    body_geometry,
+                    focused,
+                    theme,
+                ))
             }
         },
     }
+}
+
+/// Renders the Body tab's BROWSE view (M8.6.1): the request body through the
+/// exact same fold/pretty/wrap/search/cursor/gutter pipeline the Response pane
+/// uses (`response::render_done`), over a [`ResponseView`](super::response::ResponseView)
+/// built from the request body text rather than an HTTP response (see
+/// `App::rebuild_body_browse`). Deliberately bypasses the Response pane's own
+/// `render()` entry point — its block title/stats/footer are response-specific
+/// (status code, header count, the `h` header-toggle hint) and don't apply
+/// here; the "type: … (b to change)" row drawn just above already carries the
+/// Body tab's own framing. Never enqueues a highlight job: `cache` is always
+/// empty, so syntax highlighting is deliberately out of scope for M8.6.1 (a
+/// documented scope-trim, not an oversight — see the milestone's build report).
+fn render_body_browse(
+    frame: &mut Frame,
+    area: Rect,
+    body_view: &ResponseState,
+    body_geometry: ResponseGeometry,
+    focused: bool,
+    theme: &Theme,
+) -> response::RenderOutcome {
+    let mut outcome = response::RenderOutcome {
+        job: None,
+        clamped_scroll: body_geometry.scroll,
+        clamped_cursor: body_geometry.cursor,
+        viewport_height: area.height as usize,
+        viewport_width: area.width as usize,
+        total_rows: 0,
+        clamped_h_scroll: 0,
+    };
+    let ResponseState::Done { view } = body_view else {
+        // Not yet built (shouldn't happen once `ensure_body_browse_built` has
+        // run before every frame, but stay honest rather than panicking): an
+        // empty body reads fine as a blank pane.
+        frame.render_widget(Paragraph::new(""), area);
+        return outcome;
+    };
+    let empty_cache: HashMap<u64, Vec<Line<'static>>> = HashMap::new();
+    let ctx = response::RenderCtx {
+        state: body_view,
+        request: None,
+        focused,
+        scroll: body_geometry.scroll,
+        cursor: body_geometry.cursor,
+        cache: &empty_cache,
+        theme,
+        jump_label: None,
+        tick_count: 0,
+    };
+    response::render_done(frame, area, view, &ctx, &mut outcome);
+    outcome
 }
 
 /// A one-line summary of the request pane for the collapsed (1-row) zoom stub.

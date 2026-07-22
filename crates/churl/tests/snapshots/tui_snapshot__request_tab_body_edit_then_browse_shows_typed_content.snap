@@ -1,17 +1,18 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snapshot(&mut app)
+assertion_line: 1070
+expression: rendered
 ---
-┌ Explorer ──────────────────┐  Create user                                     
+┌ Explorer ──────────────────┐  Create user ●                                   
 │  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
-│  ▾ users                   ││POST  https://api.test/users                    │
+│  ▾ users                   ││POST  https://api.test/users                ●   │
 │    List users              │└────────────────────────────────────────────────┘
-│>   Create user             │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│>   Create user ●           │┏ Request ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 │    Get user                │┃‹  [2] Headers(1)     [3] Auth     [4] Body     ┃
 │                            │┃  type: json  (b to change)                     ┃
-│                            │┃1 {                                             ┃
-│                            │┃2   "name": "Ada"                               ┃
-│                            │┃3 }                                             ┃
+│                            │┃1 // {"name": "Ada"}                            ┃
+│                            │┃                                                ┃
+│                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┃                                                ┃
 │                            │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
@@ -25,4 +26,4 @@ expression: snapshot(&mut app)
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
- REQUEST · demo · ? help · space leader · / search · : palette
+ REQUEST · demo · ● unsaved · w save · ? help · space leader · / search · : pale
