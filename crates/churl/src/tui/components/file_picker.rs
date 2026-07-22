@@ -130,6 +130,31 @@ impl FilePickerState {
             Err(_) => chosen.to_string_lossy().into_owned(),
         }
     }
+
+    /// The header label for the currently-listed directory: a `.`-anchored
+    /// path **relative to `root`** (`.` at root, `./sub/dir` below it,
+    /// POSIX-separated), falling back to the absolute path only when browsing
+    /// ABOVE `root` (via `..`) or an absolute location where no relative form
+    /// exists. This keeps the overlay header **machine-independent** — it never
+    /// renders the raw tempdir/OS prefix — so snapshot tests are hermetic
+    /// across the CI OS matrix, and it reads better (a short workspace-relative
+    /// path, not `/var/folders/…`).
+    pub fn display_dir(&self) -> String {
+        match self.current_dir.strip_prefix(&self.root) {
+            Ok(relative) => {
+                let posix: Vec<&str> = relative
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect();
+                if posix.is_empty() {
+                    ".".to_owned()
+                } else {
+                    format!("./{}", posix.join("/"))
+                }
+            }
+            Err(_) => self.current_dir.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 /// Lists `dir`'s entries: directories first, then files, each group
@@ -168,7 +193,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FilePickerState, theme: &Th
         .areas(modal);
 
     frame.render_widget(Clear, modal);
-    let title = format!(" Choose file — {} ", state.current_dir.display());
+    let title = format!(" Choose file — {} ", state.display_dir());
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(theme.border_focused)
@@ -306,5 +331,32 @@ mod tests {
     fn unreadable_or_missing_directory_lists_empty_not_panicking() {
         let entries = list_dir(Path::new("/definitely/does/not/exist/at/all"));
         assert!(entries.is_empty());
+    }
+
+    /// The header label is machine-independent: `.` at root, `./sub` below it,
+    /// and only an out-of-root (`..`) location falls back to an absolute path.
+    /// This is what keeps the overlay snapshot hermetic across the CI OS matrix.
+    #[test]
+    fn display_dir_is_root_relative_and_never_leaks_the_tempdir_prefix() {
+        let dir = scaffold();
+        let root = dir.path().to_path_buf();
+
+        // At root -> ".".
+        let at_root = FilePickerState::open(root.clone(), root.clone(), 0);
+        assert_eq!(at_root.display_dir(), ".");
+        assert!(
+            !at_root.display_dir().contains(&*root.to_string_lossy()),
+            "header must not contain the absolute root prefix"
+        );
+
+        // One level down -> "./assets".
+        let mut descended = at_root.clone();
+        descended.descend(); // "assets" is row 0
+        assert_eq!(descended.display_dir(), "./assets");
+
+        // Above root (a `..` escape the browser allows) -> absolute fallback.
+        let mut up = FilePickerState::open(root.clone(), root.clone(), 0);
+        up.go_up();
+        assert_eq!(up.display_dir(), up.current_dir.to_string_lossy());
     }
 }
