@@ -256,7 +256,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ResponseGeometry::default(),
         ),
     };
-    let req_focused = app.focus == Pane::Request && matches!(app.mode, Mode::Normal);
+    let req_focused =
+        app.focus == Pane::Request && matches!(app.mode, Mode::Normal | Mode::BodySearch);
     let resp_focused =
         app.focus == Pane::Response && matches!(app.mode, Mode::Normal | Mode::BodySearch);
     let jump = app.jump.as_ref();

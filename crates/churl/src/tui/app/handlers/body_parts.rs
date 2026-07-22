@@ -32,8 +32,10 @@ impl App {
                 .is_some_and(|part| matches!(part.value, PartValue::File { .. }))
     }
 
-    /// Opens the Body-type picker (`<leader>b`): text / json / form /
-    /// multipart. A no-op with nothing loaded.
+    /// Opens the Body-type picker (plain `b`, `PaneCtx::Request`-scoped —
+    /// fires from any Request sub-tab, not a global leader binding — see
+    /// `events/mod.rs`'s `overlay(PaneCtx::Request, key!(b), ...)`): text /
+    /// json / form / multipart. A no-op with nothing loaded.
     pub(in crate::tui::app) fn open_body_type_picker(&mut self) {
         if self.selected().is_none() {
             return;

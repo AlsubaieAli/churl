@@ -1032,6 +1032,37 @@ fn request_tab_body_browse_fold_renders_ellipsis_marker() {
     insta::assert_snapshot!(rendered);
 }
 
+/// M8.6.1 adversarial-gate fix (search-focus parity): pressing `/` to search
+/// the request body while browsing must keep the Request pane's *focused*
+/// chrome (thick border + the `[4]`-prefixed Body tab) exactly as
+/// `Mode::BodySearch` already does for the Response pane's own search —
+/// `req_focused` previously excluded `Mode::BodySearch`, so an active
+/// request-body search silently dropped the pane back to its *unfocused*
+/// chrome (thin border, no digit prefix) until the search was committed,
+/// while the Response pane's own search never lost focus styling. See
+/// `render.rs`'s `req_focused`/`resp_focused`.
+#[test]
+fn request_tab_body_browse_search_active_keeps_focused_chrome() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = body_tab_on_create_user(dir.path());
+    // `/` opens the incremental search input over the browsed request body.
+    press(&mut app, KeyCode::Char('/'));
+    assert!(matches!(app.mode, Mode::BodySearch));
+    type_str(&mut app, "Ada");
+    let rendered = snapshot(&mut app);
+    assert!(
+        rendered.contains('┏'),
+        "an active request-body search must keep the Request pane's focused \
+         (thick) border, matching the Response pane's own search-focus parity:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("[4] Body"),
+        "an active request-body search must keep the focused tab bar's \
+         1-based digit prefix on the Body tab:\n{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
 /// M8.6.1: `p` (raw<->pretty) and `W` (wrap) both operate on the Body tab's
 /// browse view while it is focused, through the same `response_*` handlers
 /// the Response pane uses (`ResponseSurface::RequestBody`).

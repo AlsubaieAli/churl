@@ -1,6 +1,6 @@
 ---
 source: crates/churl/tests/tui_snapshot.rs
-expression: snapshot(&mut app)
+expression: rendered
 ---
 ┌ Explorer ──────────────────┐  Create user                                     
 │  ▸ orders                  │┌ URL ───────────────────────────────────────────┐
@@ -20,9 +20,9 @@ expression: snapshot(&mut app)
 │                            ││POST https://api.test/users                     │
 │                            ││                                                │
 │                            ││press ctrl-s to send                            │
-│                            ││                                                │
 └────────────────────────────┘│                                                │
 ┌ Sequences ─────────────────┐│                                                │
 │<leader>s n to add          ││                                                │
 └────────────────────────────┘└────────────────────────────────────────────────┘
+ /Ada    1 matches                                                              
  REQUEST · demo · ? help · space leader · / search · : palette

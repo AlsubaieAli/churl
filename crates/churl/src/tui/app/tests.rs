@@ -9273,20 +9273,40 @@ fn b_opens_body_type_picker_from_any_request_subtab() {
     );
 }
 
-/// `d`/`t` (RowDelete/RowToggle) must NOT leak into the hidden edtui buffer
-/// while browsing — only `body_editing` gates that forward (the guard this
-/// regression-tests: pre-fix, the dispatch-level "forward to edtui" arm did
-/// not check `body_editing`, so these row-list keys would have silently typed
-/// into the editor the user isn't even looking at).
+/// `d` (RowDelete) must NOT leak into the hidden edtui buffer while browsing
+/// — only `body_editing` gates that forward (the guard this regression-tests:
+/// pre-fix, the dispatch-level "forward to edtui" arm did not check
+/// `body_editing`, so this row-list key would have silently reached the
+/// editor the user isn't even looking at).
+///
+/// Guard-sensitivity note (adversarial-gate fix): a LONE `d` (or `t`, as the
+/// original version of this test used) is a non-mutating PENDING vim
+/// delete-operator/find-till motion in edtui — it stays pending awaiting a
+/// second key, so forwarding just one to edtui changes nothing either way,
+/// which made the original `d`, `t` sequence pass regardless of whether the
+/// guard existed. Two presses of `d` (vim's `dd`, which edtui's key registry
+/// binds to `DeleteLine(1)` — see `edtui::events::key::vim_keybindings`) DOES
+/// mutate the instant it completes: if the `body_editing_active()` guard at
+/// `mod.rs:2277` (the `RowAdd|RowDelete|RowToggle|RowEdit` match arm) were
+/// removed, both `d` presses below would forward to
+/// `editor_events.on_key_event` and the second would execute `DeleteLine(1)`
+/// against this single-line "untouched" buffer, clearing it — so this
+/// specific sequence fails without the guard and passes with it. Verified for
+/// real: temporarily replacing the guard's `&& self.body_editing_active()`
+/// with `&& true` and running just this test fails with
+/// `assertion `left == right` failed` (`left` was blank/empty, not
+/// `"untouched"`); restoring the guard makes it pass again (see the session
+/// report for the exact captured failure).
 #[test]
 fn body_tab_browse_row_keys_do_not_leak_into_edtui() {
     let mut app = body_browse_app_kind("untouched", BodyKind::Text);
     press(&mut app, 'd');
-    press(&mut app, 't');
+    press(&mut app, 'd');
     assert_eq!(
         String::from(app.test_editor().lines.clone()),
         "untouched",
-        "'d'/'t' must not reach the hidden edtui buffer while browsing"
+        "'d' 'd' (vim's line-delete `dd`) must not reach the hidden edtui \
+         buffer while browsing"
     );
     assert!(!app.active_endpoint_buffer().unwrap().body_editing);
 }
@@ -9332,6 +9352,65 @@ fn response_accessor_ignores_body_browse_surface() {
         matches!(app.response(), ResponseState::Cancelled),
         "app.response() must read the ACTUAL response, not the Body-browse view, \
          even while the Body tab is being browsed"
+    );
+}
+
+/// Defensive regression test for the M8.3/M8.6 secret-leak class: browse-mode
+/// copy (`y`, dispatched to `response_copy_view`/`view.copy_all()` over the
+/// Body tab's browse surface) must copy the STORED, literal request body —
+/// never a resolved/substituted one — even when a live Session var of the
+/// same name exists and WOULD resolve the placeholder if the request were
+/// actually sent (`build_resolver`/`Resolver::substitute_request`, see
+/// `handlers/vars.rs`). The Body-browse view is built straight from
+/// `request.body` (`rebuild_body_browse`), never routed through the
+/// resolver, but this pins that invariant explicitly against regression.
+#[test]
+fn body_tab_browse_copy_never_resolves_template_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("churl.toml"), "name = \"demo\"\n").unwrap();
+    let coll = dir.path().join("users");
+    std::fs::create_dir(&coll).unwrap();
+    std::fs::write(
+        coll.join("create.toml"),
+        concat!(
+            "seq = 0\nname = \"Create user\"\n\n[request]\nmethod = \"POST\"\n",
+            "url = \"https://api.test/users\"\n\n[request.body]\ntype = \"json\"\n",
+            "content = '{\"token\": \"{{api_key}}\"}'\n",
+        ),
+    )
+    .unwrap();
+    let ws = open_workspace(dir.path()).unwrap();
+    let mut app = App::new(ws, KeyMap::default()).unwrap();
+    app.guarded_load(PendingLoad::File(coll.join("create.toml")))
+        .unwrap();
+    // A live Session var named `api_key`, holding a real secret — the same
+    // in-memory store `build_resolver` reads highest-precedence from at send
+    // time (mirrors `importing_curl_captures_bearer_token_into_session_var`'s
+    // Session-store fixture pattern above), so `{{api_key}}` IS genuinely
+    // resolvable; browse-copy must ignore that entirely.
+    app.write_session_var("api_key".to_owned(), "sk-test-12345".to_owned());
+    app.focus = Pane::Request;
+    app.test_tabs().active = RequestTab::Body;
+    app.rebuild_body_browse();
+    assert!(
+        !app.active_endpoint_buffer().unwrap().body_editing,
+        "browse is the Body tab's default state"
+    );
+    press(&mut app, 'y'); // response_copy_view() over the body-browse surface
+    let copied = app
+        .pending_clipboard
+        .as_ref()
+        .expect("'y' must enqueue a copy of the browsed body")
+        .payload
+        .clone();
+    assert!(
+        copied.contains("{{api_key}}"),
+        "browse-mode copy must keep the literal template placeholder: {copied:?}"
+    );
+    assert!(
+        !copied.contains("sk-test-12345"),
+        "browse-mode copy must NEVER resolve/substitute a template variable, \
+         even a genuinely-resolvable secret: {copied:?}"
     );
 }
 
