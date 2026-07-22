@@ -13,6 +13,7 @@
 //! (skipped when an enabled user header with the same name exists; the user's
 //! header always wins) or a query pair appended after enabled params.
 
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::auth::{AuthWire, apply_auth};
 use crate::config::RedirectPolicy;
 use crate::cookies::ChurlCookieJar;
 use crate::debug::DebugTrace;
-use crate::model::{BodyKind, Header, Method, Request, Response, Timing};
+use crate::model::{Body, BodyKind, Header, Method, Part, PartValue, Request, Response, Timing};
 
 /// Default per-request timeout applied to the shared client; the config knob is
 /// `timeout_secs` (see [`crate::config::Config::timeout`]).
@@ -47,7 +48,7 @@ pub fn follow_all_warned() -> bool {
 }
 
 /// Per-execution knobs, resolved by the caller (config → defaults).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteOptions {
     /// Maximum number of body bytes to read; the rest of the stream is dropped
     /// and the response is marked `truncated`.
@@ -55,6 +56,12 @@ pub struct ExecuteOptions {
     /// How redirects are followed and whether auth-bearing headers survive a
     /// cross-origin hop. Defaults to [`RedirectPolicy::Strip`].
     pub redirect: RedirectPolicy,
+    /// The workspace root a relative [`crate::model::PartValue::File`] path
+    /// resolves against (M8.6). Irrelevant for a request with no multipart
+    /// file parts; the caller resolves this from the open workspace (falling
+    /// back to `cwd` when none is open, matching `send`'s "workspace
+    /// optional" contract) — see [`crate::model::Body::Multipart`].
+    pub root: std::path::PathBuf,
 }
 
 impl Default for ExecuteOptions {
@@ -62,6 +69,7 @@ impl Default for ExecuteOptions {
         Self {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             redirect: RedirectPolicy::default(),
+            root: std::path::PathBuf::new(),
         }
     }
 }
@@ -84,6 +92,18 @@ pub enum HttpError {
     /// The request failed for any other reason (connection, TLS, protocol, …).
     #[error("request failed: {0}")]
     Request(#[source] reqwest::Error),
+    /// A `multipart/form-data` file part (M8.6) could not be prepared: a
+    /// missing/unreadable file, or a relative path that resolves outside the
+    /// workspace root. Raised during the pre-flight Form build, strictly
+    /// before `.send()` — so a bad file part fires **zero bytes** on the wire,
+    /// never a half-multipart request.
+    #[error("multipart part {name:?}: {reason}")]
+    MultipartFile {
+        /// The offending part's name.
+        name: String,
+        /// Human-readable failure reason (not-found, permission, traversal).
+        reason: String,
+    },
 }
 
 /// Builds the shared [`reqwest::Client`]: rustls TLS, the given per-request
@@ -250,12 +270,26 @@ pub async fn execute_traced(
     // added below. Compared case-insensitively at strip time.
     let mut auth_header_names: Vec<String> = vec!["authorization".to_owned(), "cookie".to_owned()];
 
+    // A user `Content-Type` header is meaningless on a `multipart/form-data`
+    // body: reqwest owns the `Content-Type` because it carries the boundary
+    // token the body is framed with, and the user cannot name that boundary —
+    // shipping their value would produce an UNPARSEABLE request (a
+    // Content-Type whose boundary doesn't match the body's). So a user CT
+    // header is dropped for a multipart body and reqwest's boundary-bearing
+    // one wins. For a `Simple` body the user's header still wins as before.
+    let is_multipart = matches!(request.body, Some(Body::Multipart(_)));
     let mut user_content_type = false;
     for header in &request.headers {
         if !header.enabled {
             continue;
         }
         if header.name.eq_ignore_ascii_case("content-type") {
+            if is_multipart {
+                // Dropped — see the block comment above. Do not mark
+                // `user_content_type` (the derived-CT skip is Simple-only) and
+                // do not apply the header.
+                continue;
+            }
             user_content_type = true;
         }
         if crate::config::looks_like_secret_name(&header.name) {
@@ -281,11 +315,31 @@ pub async fn execute_traced(
         }
     }
 
+    // A user-supplied Content-Type header always wins on a `Simple` body (the
+    // header loop above already applied it, and we simply skip the derived
+    // one). On a `Multipart` body reqwest's `.multipart()` sets the
+    // boundary-bearing Content-Type itself and — because the user CT header was
+    // dropped in the loop above — it is the only one, exactly as it must be.
     if let Some(body) = &request.body {
-        if !user_content_type {
-            builder = builder.header(reqwest::header::CONTENT_TYPE, content_type_for(body.kind));
+        match body {
+            Body::Simple { kind, content } => {
+                if !user_content_type {
+                    builder =
+                        builder.header(reqwest::header::CONTENT_TYPE, content_type_for(*kind));
+                }
+                builder = builder.body(content.clone().into_bytes());
+            }
+            Body::Multipart(parts) => {
+                let form = build_multipart_form(parts, &options.root)
+                    .await
+                    .inspect_err(|err| {
+                        if let Some(trace) = sink.as_deref_mut() {
+                            trace.record_error(err);
+                        }
+                    })?;
+                builder = builder.multipart(form);
+            }
         }
-        builder = builder.body(body.content.clone().into_bytes());
     }
 
     let start = Instant::now();
@@ -614,6 +668,174 @@ fn content_type_for(kind: BodyKind) -> &'static str {
         BodyKind::Json => "application/json",
         BodyKind::Form => "application/x-www-form-urlencoded",
         BodyKind::Text => "text/plain",
+    }
+}
+
+/// Builds a `reqwest` multipart [`Form`](reqwest::multipart::Form) from the
+/// model's [`Part`]s (M8.6) — the pre-flight seam: every file part is
+/// resolved, traversal-guarded, and `fstat`-ed here, entirely before the
+/// caller sends anything. A missing/unreadable/out-of-guard file returns
+/// [`HttpError::MultipartFile`] and the Form (hence the request) is never
+/// built — zero bytes reach the wire for a bad part; nothing to unwind. Inline
+/// text parts are buffered (`Part::text`); file parts stream from disk
+/// (`Part::stream_with_length`, `len` from the pre-flight `fstat`) so a large
+/// upload is never buffered whole in memory.
+async fn build_multipart_form(
+    parts: &[Part],
+    root: &Path,
+) -> Result<reqwest::multipart::Form, HttpError> {
+    let mut form = reqwest::multipart::Form::new();
+    for part in parts {
+        match &part.value {
+            PartValue::Text(text) => {
+                form = form.text(part.name.clone(), text.clone());
+            }
+            PartValue::File {
+                path,
+                filename,
+                mime,
+            } => {
+                let resolved =
+                    resolve_part_path(root, path).map_err(|reason| HttpError::MultipartFile {
+                        name: part.name.clone(),
+                        reason,
+                    })?;
+                // `metadata` is a `stat(2)` — it does NOT block on a FIFO/pipe
+                // (unlike `File::open`, which blocks on a writer-less FIFO
+                // forever) and it does NOT read the file (the fstat-vs-read
+                // TOCTOU window is inherent to read-at-send streaming and
+                // accepted by the M8.6 spec — a file swapped between here and
+                // the actual stream read maps to the existing transport bands).
+                let metadata = tokio::fs::metadata(&resolved).await.map_err(|err| {
+                    HttpError::MultipartFile {
+                        name: part.name.clone(),
+                        reason: format!("{path}: {err}"),
+                    }
+                })?;
+                // Reject anything that is not a regular file BEFORE `File::open`.
+                // A directory `open(2)`s fine (O_RDONLY succeeds), so without
+                // this guard pre-flight would pass and reqwest would only error
+                // (`IsADirectory`) mid-stream — after headers + boundary +
+                // earlier parts are on the wire, the half-multipart the spec
+                // forbids. A FIFO would additionally hang `File::open`; because
+                // this guard runs on the (non-blocking) `metadata` result and
+                // before the open, it also prevents that hang.
+                if !metadata.file_type().is_file() {
+                    return Err(HttpError::MultipartFile {
+                        name: part.name.clone(),
+                        reason: format!("{path}: not a regular file"),
+                    });
+                }
+                let file = tokio::fs::File::open(&resolved).await.map_err(|err| {
+                    HttpError::MultipartFile {
+                        name: part.name.clone(),
+                        reason: format!("{path}: {err}"),
+                    }
+                })?;
+                let mut reqwest_part =
+                    reqwest::multipart::Part::stream_with_length(file, metadata.len());
+                // Default filename mirrors curl's own `-F name=@path` default
+                // (the local file's basename) when no explicit `filename` is set.
+                let display_name = filename.clone().unwrap_or_else(|| {
+                    resolved
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone())
+                });
+                reqwest_part = reqwest_part.file_name(display_name);
+                if let Some(mime) = mime {
+                    reqwest_part =
+                        reqwest_part
+                            .mime_str(mime)
+                            .map_err(|err| HttpError::MultipartFile {
+                                name: part.name.clone(),
+                                reason: format!("invalid mime {mime:?}: {err}"),
+                            })?;
+                }
+                form = form.part(part.name.clone(), reqwest_part);
+            }
+        }
+    }
+    Ok(form)
+}
+
+/// Resolves a multipart file part's `path` against `root` — the same
+/// lexical-then-canonical traversal guard [`crate::sequence`]'s
+/// `resolve_step_path` applies to sequence step endpoints, with one
+/// deliberate difference: an **absolute** path is allowed through as-is (M8.6
+/// locked decision — personal-tool convenience; not flagged here, the TUI
+/// surfaces the non-portability). A relative path is lexically normalized
+/// against `root` and rejected if it would escape (`..` climbing above the
+/// root, or an in-workspace symlink pointing outside it). Resolution happens
+/// here, at send time — never at import or save.
+fn resolve_part_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let input = Path::new(path);
+    if input.is_absolute() {
+        return Ok(input.to_path_buf());
+    }
+    for component in input.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err(format!("{path:?} escapes the workspace root"));
+        }
+    }
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    let joined = root.join(input);
+    let normalized = lexical_normalize(&joined);
+    if !normalized.starts_with(&root) {
+        return Err(format!("{path:?} escapes the workspace root"));
+    }
+    // The lexical check above can be fooled by a symlinked component *inside*
+    // root that points elsewhere; canonicalize the deepest existing ancestor
+    // of the target and re-check it against root, so an in-workspace symlink
+    // can't tunnel a relative path out.
+    if part_path_escapes_root(&root, &normalized) {
+        return Err(format!(
+            "{path:?} escapes the workspace root (symlinked component)"
+        ));
+    }
+    Ok(normalized)
+}
+
+/// Resolves `.`/`..` components without touching the filesystem (the target
+/// usually does not exist yet, so `Path::canonicalize` cannot be used on it
+/// directly). A leading `..` that would climb above the path root simply pops
+/// nothing further, so an escaping path fails the later `starts_with` check.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether `path` canonically resolves outside `root` (catches an
+/// in-workspace symlink escape the lexical check above cannot see).
+/// Canonicalizes the deepest existing ancestor of `path` — following
+/// symlinks — and re-appends the not-yet-existing tail, then checks
+/// containment. Conservative: returns `false` when nothing resolves (the
+/// lexical pre-check already ran; a genuinely missing file fails later at the
+/// `fstat` step with a distinct not-found reason).
+fn part_path_escapes_root(root: &Path, path: &Path) -> bool {
+    let mut ancestor = path;
+    let mut tail = PathBuf::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            return !canonical.join(&tail).starts_with(root);
+        }
+        let Some(name) = ancestor.file_name() else {
+            return false;
+        };
+        tail = Path::new(name).join(&tail);
+        match ancestor.parent() {
+            Some(parent) => ancestor = parent,
+            None => return false,
+        }
     }
 }
 

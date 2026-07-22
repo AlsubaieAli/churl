@@ -28,7 +28,7 @@
 //! is a save-time concern only.
 
 use crate::config::{is_template_placeholder, looks_like_secret_name};
-use crate::model::{Auth, CollectionMeta, Endpoint, Workspace};
+use crate::model::{Auth, Body, CollectionMeta, Endpoint, PartValue, Workspace};
 use crate::template::contains_placeholder;
 
 /// How a *newly-introduced* secret finding is treated under [`SecretPolicy::Strict`].
@@ -276,12 +276,28 @@ pub fn scan_endpoint(ep: &Endpoint) -> Vec<SecretFinding> {
         }
     }
 
-    // Body — value-only, always a warn (no reliable name anchor).
-    if let Some(body) = &req.body
-        && !is_template_placeholder(&body.content)
-        && looks_like_secret_value_in_text(&body.content)
-    {
-        findings.push(SecretFinding::warn("body"));
+    // Body — value-only, always a warn (no reliable name anchor). A
+    // multipart body (M8.6) scans each part's *inline text* value the same
+    // way; a file part's contents are never read, so never scanned — only
+    // the path/filename/mime strings exist in memory, and none of those are
+    // secret-shaped body content.
+    match &req.body {
+        Some(Body::Simple { content, .. })
+            if !is_template_placeholder(content) && looks_like_secret_value_in_text(content) =>
+        {
+            findings.push(SecretFinding::warn("body"));
+        }
+        Some(Body::Multipart(parts)) => {
+            for part in parts {
+                if let PartValue::Text(text) = &part.value
+                    && !is_template_placeholder(text)
+                    && looks_like_secret_value_in_text(text)
+                {
+                    findings.push(SecretFinding::warn(format!("body.part.{}", part.name)));
+                }
+            }
+        }
+        _ => {}
     }
 
     findings

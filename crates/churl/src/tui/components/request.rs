@@ -1,9 +1,11 @@
 //! Request pane: a tab bar (Params / Headers / Auth / Body) over the active
 //! tab's content. Params/Headers/Auth are row-list editors; Body is the edtui
-//! editor. Editing is driven by `app.rs`; this module only renders the state.
+//! editor for a `Simple` body, or (M8.6) a row-list parts editor for a
+//! `Multipart` one. Editing is driven by `app.rs`; this module only renders
+//! the state.
 
 use churl_core::config::{is_template_placeholder, looks_like_secret_name};
-use churl_core::model::{ApiKeyPlacement, Auth, Header, Param, Request};
+use churl_core::model::{ApiKeyPlacement, Auth, Body, Header, Param, Part, PartValue, Request};
 use edtui::{EditorState, EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -12,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 
 use super::jump::JumpState;
-use super::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
+use super::request_tabs::{BodyTypeUi, EditField, FieldEdit, RequestTab, RequestTabs};
 use super::tab_strip::{CHIP_OVERHEAD, chip_window};
 use crate::tui::theme::Theme;
 
@@ -107,13 +109,41 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) {
             let rows = auth_rows(request.auth.as_ref(), tabs, focused, theme);
             frame.render_widget(Paragraph::new(rows), content_area);
         }
-        RequestTab::Body => {
-            let editor_theme = EditorTheme::default().base(Style::default());
-            EditorView::new(editor)
-                .theme(editor_theme)
-                .wrap(true)
-                .render(content_area, frame.buffer_mut());
-        }
+        RequestTab::Body => match &request.body {
+            // M8.6: a Multipart body is a row-list, same shape as Params/Headers
+            // (row 0 = the type row, mirroring the Auth kind row; rows 1.. =
+            // parts).
+            Some(Body::Multipart(parts)) => {
+                let n = 1 + parts.len();
+                let offset = tabs.scroll_to_fit(n, height);
+                let mut rows = body_multipart_rows(parts, tabs, focused, theme);
+                if offset < rows.len() {
+                    rows.drain(..offset);
+                }
+                frame.render_widget(Paragraph::new(rows), content_area);
+            }
+            // Non-multipart: a one-line type indicator (switched via
+            // `<leader>b`, not row selection — edtui owns every other key
+            // here) above the edtui free-text surface.
+            _ => {
+                let [type_row_area, body_area] =
+                    Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
+                        .areas(content_area);
+                let kind = BodyTypeUi::from_body(request.body.as_ref());
+                frame.render_widget(
+                    Paragraph::new(Line::styled(
+                        format!("  type: {}  (<leader>b to change)", kind.label()),
+                        theme.border_unfocused,
+                    )),
+                    type_row_area,
+                );
+                let editor_theme = EditorTheme::default().base(Style::default());
+                EditorView::new(editor)
+                    .theme(editor_theme)
+                    .wrap(true)
+                    .render(body_area, frame.buffer_mut());
+            }
+        },
     }
 }
 
@@ -157,6 +187,12 @@ fn tab_bar_line(
         (Some(req), RequestTab::Params) => Some(req.params.len()),
         (Some(req), RequestTab::Headers) => Some(req.headers.len()),
         (Some(req), RequestTab::Auth) => req.auth.as_ref().map(|_| 1),
+        // M8.6: a Multipart body shows its part count, same as Params/Headers;
+        // a Simple (or absent) body shows no count, same as before.
+        (Some(req), RequestTab::Body) => match &req.body {
+            Some(Body::Multipart(parts)) => Some(parts.len()),
+            _ => None,
+        },
         _ => None,
     };
     // Build each tab's label first (padding, focused `[N]` prefix, `(n)` counts).
@@ -395,6 +431,44 @@ fn auth_rows<'a>(
                 theme,
             ));
         }
+    }
+    rows
+}
+
+/// The Body tab's rows when its kind is `Multipart` (M8.6): a type row (row
+/// 0, `enter to change` — mirrors the Auth tab's kind row) plus one row per
+/// part (`name [text|file] = value-or-path`). An empty part list still shows
+/// the type row plus an `a to add` hint, mirroring `param_rows`/`header_rows`.
+fn body_multipart_rows<'a>(
+    parts: &[Part],
+    tabs: &RequestTabs,
+    focused: bool,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    let mut rows: Vec<Line> = vec![row_line(
+        format!("type: {}  (enter to change)", BodyTypeUi::Multipart.label()),
+        is_selected(tabs, 0, focused),
+        true,
+        theme,
+    )];
+    if parts.is_empty() {
+        rows.push(Line::styled(
+            "  (no parts — a to add)",
+            theme.border_unfocused,
+        ));
+        return rows;
+    }
+    for (i, part) in parts.iter().enumerate() {
+        let row = i + 1;
+        let name = field_display(tabs, row, EditField::Name, &part.name);
+        let (kind, value) = match &part.value {
+            PartValue::Text(text) => ("text", field_display(tabs, row, EditField::Value, text)),
+            PartValue::File { path, .. } => {
+                ("file", field_display(tabs, row, EditField::Value, path))
+            }
+        };
+        let text = format!("{name} [{kind}] = {value}");
+        rows.push(row_line(text, is_selected(tabs, row, focused), true, theme));
     }
     rows
 }

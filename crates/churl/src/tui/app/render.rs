@@ -417,6 +417,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         LoadRunner,
         Inspector,
         LogPanel,
+        FilePicker,
         None,
     }
     let body_searching = matches!(app.mode, Mode::BodySearch);
@@ -447,6 +448,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // The Log panel is likewise read-only with no response body of its
         // own to search, so it never hosts body-search either.
         Mode::LogPanel(_) => Overlay::LogPanel,
+        // The file picker is read-only browsing too — no response body of its
+        // own, so it never hosts body-search either.
+        Mode::FilePicker(_) => Overlay::FilePicker,
         _ => Overlay::None,
     };
     match overlay {
@@ -603,6 +607,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Overlay::Inspector => {
             if let Mode::Inspector(state) = &app.mode {
                 inspector::render(frame, main, state, &theme);
+            }
+        }
+        Overlay::FilePicker => {
+            if let Mode::FilePicker(state) = &app.mode {
+                file_picker::render(frame, main, state, &theme);
             }
         }
         Overlay::LogPanel => {

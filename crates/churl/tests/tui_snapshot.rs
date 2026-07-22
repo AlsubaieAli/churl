@@ -999,6 +999,79 @@ fn request_tab_body() {
     insta::assert_snapshot!(snapshot(&mut app));
 }
 
+/// M8.6: driven entirely through real key events — `<leader>b` opens the
+/// Body-type picker, typing "multipart" filters to it, Enter accepts, then
+/// `a` adds a part and types its name/value — proving the whole selector +
+/// row-list flow end to end, not just its individual handlers.
+#[test]
+fn request_tab_body_multipart_parts_editor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // List users
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('4')); // Body tab
+
+    // Open the Body-type picker and switch to multipart.
+    press(&mut app, KeyCode::Char(' ')); // leader
+    press(&mut app, KeyCode::Char('b'));
+    assert!(matches!(app.mode, Mode::Palette));
+    type_str(&mut app, "multipart");
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(app.mode, Mode::Normal));
+
+    // Add a text part.
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "field");
+    press(&mut app, KeyCode::Tab);
+    type_str(&mut app, "hello");
+    press(&mut app, KeyCode::Enter);
+
+    // Add a second part named "upload", commit it with an empty value (still
+    // Text-kind at this point), then toggle it to the File kind.
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "upload");
+    press(&mut app, KeyCode::Tab); // commit the name, advance to value
+    press(&mut app, KeyCode::Enter); // commit the (empty) value, close the edit
+    press(&mut app, KeyCode::Char('t')); // 't' toggles Text -> File
+
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
+/// M8.6: the file-picker overlay, reached the real way — build a Multipart
+/// body, add a part, toggle it to File, then `Enter` past its (unchanged)
+/// name opens the picker (a File part's path is only ever set by browsing).
+#[test]
+fn multipart_file_picker_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_fixture(dir.path());
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // List users
+    app.focus = Pane::Request;
+    press(&mut app, KeyCode::Char('4')); // Body tab
+
+    press(&mut app, KeyCode::Char(' ')); // leader
+    press(&mut app, KeyCode::Char('b'));
+    type_str(&mut app, "multipart");
+    press(&mut app, KeyCode::Enter);
+
+    press(&mut app, KeyCode::Char('a'));
+    type_str(&mut app, "upload");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('t')); // 't' toggles Text -> File
+
+    press(&mut app, KeyCode::Enter); // row_edit: opens the Name field ("upload")
+    press(&mut app, KeyCode::Tab); // advance past Name -> opens the file picker
+    assert!(matches!(app.mode, Mode::FilePicker(_)));
+
+    insta::assert_snapshot!(snapshot(&mut app));
+}
+
 #[test]
 fn method_menu_overlay() {
     let dir = tempfile::tempdir().unwrap();

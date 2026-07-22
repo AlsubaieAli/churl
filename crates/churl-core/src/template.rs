@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{Auth, Request};
+use crate::model::{Auth, Body, PartValue, Request};
 
 /// One named lookup layer inside a [`Resolver`]: a flat variable map. Scopes are
 /// ordered by precedence in the resolver (earlier scopes win).
@@ -70,9 +70,11 @@ impl Resolver {
     }
 
     /// Substitutes placeholders across a request's templatable fields in place:
-    /// `url`, every header *value*, every param *value*, the body content, and
-    /// all auth string fields (basic username + password, bearer token, apikey
-    /// name + value). Header and param *names* are never substituted.
+    /// `url`, every header *value*, every param *value*, the body content
+    /// (or, for a multipart body (M8.6), each part's `name`, inline text
+    /// value, `filename`, and `path`), and all auth string fields (basic
+    /// username + password, bearer token, apikey name + value). Header and
+    /// param *names* are never substituted.
     pub fn substitute_request(&self, req: &mut Request) {
         req.url = self.substitute(&req.url);
         for header in &mut req.headers {
@@ -82,7 +84,25 @@ impl Resolver {
             param.value = self.substitute(&param.value);
         }
         if let Some(body) = req.body.as_mut() {
-            body.content = self.substitute(&body.content);
+            match body {
+                Body::Simple { content, .. } => {
+                    *content = self.substitute(content);
+                }
+                Body::Multipart(parts) => {
+                    for part in parts.iter_mut() {
+                        part.name = self.substitute(&part.name);
+                        match &mut part.value {
+                            PartValue::Text(text) => *text = self.substitute(text),
+                            PartValue::File { path, filename, .. } => {
+                                *path = self.substitute(path);
+                                if let Some(filename) = filename.as_mut() {
+                                    *filename = self.substitute(filename);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Some(auth) = req.auth.as_mut() {
             match auth {
@@ -120,7 +140,25 @@ impl Resolver {
             param.value = self.substitute_traced(&param.value, sink);
         }
         if let Some(body) = req.body.as_mut() {
-            body.content = self.substitute_traced(&body.content, sink);
+            match body {
+                Body::Simple { content, .. } => {
+                    *content = self.substitute_traced(content, sink);
+                }
+                Body::Multipart(parts) => {
+                    for part in parts.iter_mut() {
+                        part.name = self.substitute_traced(&part.name, sink);
+                        match &mut part.value {
+                            PartValue::Text(text) => *text = self.substitute_traced(text, sink),
+                            PartValue::File { path, filename, .. } => {
+                                *path = self.substitute_traced(path, sink);
+                                if let Some(filename) = filename.as_mut() {
+                                    *filename = self.substitute_traced(filename, sink);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Some(auth) = req.auth.as_mut() {
             match auth {
@@ -190,8 +228,9 @@ impl Resolver {
 /// so what it flags is exactly what substitution would have replaced — a malformed
 /// brace run (`{{ }}`, `{{a b}}`, an unclosed `{{`) is literal text at both stages,
 /// never flagged. Fields scanned mirror [`Resolver::substitute_request`] exactly:
-/// `url`, every header *value*, every param *value*, the body content, and all
-/// auth string fields (basic username + password, bearer token, apikey name +
+/// `url`, every header *value*, every param *value*, the body content (or, for a
+/// multipart body, each part's `name`/text/`filename`/`path`), and all auth
+/// string fields (basic username + password, bearer token, apikey name +
 /// value). Header and param *names* are not substituted, so they are not scanned.
 pub fn unresolved_placeholders(req: &Request) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
@@ -205,7 +244,23 @@ pub fn unresolved_placeholders(req: &Request) -> Vec<String> {
         push_from(&param.value);
     }
     if let Some(body) = req.body.as_ref() {
-        push_from(&body.content);
+        match body {
+            Body::Simple { content, .. } => push_from(content),
+            Body::Multipart(parts) => {
+                for part in parts {
+                    push_from(&part.name);
+                    match &part.value {
+                        PartValue::Text(text) => push_from(text),
+                        PartValue::File { path, filename, .. } => {
+                            push_from(path);
+                            if let Some(filename) = filename {
+                                push_from(filename);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     if let Some(auth) = req.auth.as_ref() {
         match auth {
@@ -451,7 +506,7 @@ mod tests {
                 value: "{{pv}}".into(),
                 enabled: true,
             }],
-            body: Some(Body {
+            body: Some(Body::Simple {
                 kind: BodyKind::Text,
                 content: "{{body}}".into(),
             }),
@@ -468,7 +523,13 @@ mod tests {
         assert_eq!(req.headers[0].value, "app/json");
         assert_eq!(req.params[0].name, "{{hname}}");
         assert_eq!(req.params[0].value, "42");
-        assert_eq!(req.body.unwrap().content, "payload");
+        assert_eq!(
+            req.body.unwrap(),
+            Body::Simple {
+                kind: BodyKind::Text,
+                content: "payload".into(),
+            }
+        );
         match req.auth.unwrap() {
             Auth::Basic { username, password } => {
                 assert_eq!(username, "alice");
@@ -506,7 +567,7 @@ mod tests {
                 value: "{{pv}}".into(),
                 enabled: true,
             }],
-            body: Some(Body {
+            body: Some(Body::Simple {
                 kind: BodyKind::Text,
                 content: "{{body}}".into(),
             }),
@@ -619,7 +680,7 @@ mod tests {
                 value: "{{pval}}".into(),
                 enabled: true,
             }],
-            body: Some(Body {
+            body: Some(Body::Simple {
                 kind: BodyKind::Json,
                 // `host` again — proves dedup across fields.
                 content: "{\"a\": \"{{bodyvar}}\", \"b\": \"{{host}}\"}".into(),
@@ -774,6 +835,132 @@ mod tests {
                 value: "VALUE".into(),
                 placement: ApiKeyPlacement::Header,
             }
+        );
+    }
+
+    fn multipart_request(parts: Vec<crate::model::Part>) -> Request {
+        Request {
+            method: Method::Post,
+            url: "https://e.com/x".into(),
+            headers: vec![],
+            params: vec![],
+            body: Some(Body::Multipart(parts)),
+            auth: None,
+            insecure: false,
+        }
+    }
+
+    #[test]
+    fn substitute_request_templates_every_multipart_part_field() {
+        use crate::model::{Part, PartValue};
+
+        let resolver = Resolver::new(vec![scope(
+            "workspace",
+            &[
+                ("fname", "field"),
+                ("fval", "hello"),
+                ("upath", "assets/report.pdf"),
+                ("ufile", "report.pdf"),
+            ],
+        )]);
+        let mut req = multipart_request(vec![
+            Part {
+                name: "{{fname}}".into(),
+                value: PartValue::Text("{{fval}}".into()),
+            },
+            Part {
+                name: "upload".into(),
+                value: PartValue::File {
+                    path: "{{upath}}".into(),
+                    filename: Some("{{ufile}}".into()),
+                    mime: Some("application/pdf".into()),
+                },
+            },
+        ]);
+        resolver.substitute_request(&mut req);
+        assert_eq!(
+            req.body.unwrap(),
+            Body::Multipart(vec![
+                Part {
+                    name: "field".into(),
+                    value: PartValue::Text("hello".into()),
+                },
+                Part {
+                    name: "upload".into(),
+                    value: PartValue::File {
+                        path: "assets/report.pdf".into(),
+                        filename: Some("report.pdf".into()),
+                        mime: Some("application/pdf".into()),
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn substitute_request_traced_multipart_matches_untraced_and_records_steps() {
+        use crate::model::{Part, PartValue};
+
+        let resolver = Resolver::new(vec![scope(
+            "workspace",
+            &[("fval", "hello"), ("upath", "a.txt")],
+        )]);
+        let build = || {
+            multipart_request(vec![
+                Part {
+                    name: "field".into(),
+                    value: PartValue::Text("{{fval}}".into()),
+                },
+                Part {
+                    name: "upload".into(),
+                    value: PartValue::File {
+                        path: "{{upath}}".into(),
+                        filename: None,
+                        mime: None,
+                    },
+                },
+            ])
+        };
+
+        let mut untraced = build();
+        resolver.substitute_request(&mut untraced);
+
+        let mut traced = build();
+        let mut var_steps = Vec::new();
+        resolver.substitute_request_traced(&mut traced, &mut var_steps);
+
+        assert_eq!(traced, untraced);
+        let names: Vec<&str> = var_steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["fval", "upath"]);
+    }
+
+    #[test]
+    fn unresolved_placeholders_flags_multipart_fields() {
+        use crate::model::{Part, PartValue};
+
+        let req = multipart_request(vec![
+            Part {
+                name: "{{missing_name}}".into(),
+                value: PartValue::Text("{{missing_text}}".into()),
+            },
+            Part {
+                name: "upload".into(),
+                value: PartValue::File {
+                    path: "{{missing_path}}".into(),
+                    filename: Some("{{missing_filename}}".into()),
+                    mime: None,
+                },
+            },
+        ]);
+        let names = unresolved_placeholders(&req);
+        assert_eq!(
+            names,
+            vec![
+                "missing_filename",
+                "missing_name",
+                "missing_path",
+                "missing_text",
+            ]
         );
     }
 }

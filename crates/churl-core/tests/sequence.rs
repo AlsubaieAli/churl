@@ -810,7 +810,7 @@ async fn step_with_body_runs() {
     write_manifest(root, &[]);
     let mut ep = get_endpoint("create", &format!("{}/create", server.uri()));
     ep.request.method = Method::Post;
-    ep.request.body = Some(Body {
+    ep.request.body = Some(Body::Simple {
         kind: BodyKind::Json,
         content: r#"{"name":"x"}"#.into(),
     });

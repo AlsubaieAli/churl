@@ -1,7 +1,8 @@
 //! Property test: any `Endpoint` survives a save → load round-trip unchanged.
 
 use churl_core::model::{
-    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Method, Param, Request,
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Method, Param, Part, PartValue,
+    Request,
 };
 use churl_core::persistence::{load_endpoint, save_endpoint};
 use proptest::prelude::*;
@@ -43,8 +44,38 @@ fn param() -> impl Strategy<Value = Param> {
     })
 }
 
+fn simple_body() -> impl Strategy<Value = Body> {
+    (body_kind(), text()).prop_map(|(kind, content)| Body::Simple { kind, content })
+}
+
+/// M8.6: an inline-text or file-reference part value. File `path`/`filename`
+/// reuse the same printable-ASCII generator as everything else here — the
+/// save/load round-trip never validates or resolves a path (that's a
+/// send-time-only concern, see `http::resolve_part_path`), so any string is a
+/// valid persisted value.
+fn part_value() -> impl Strategy<Value = PartValue> {
+    prop_oneof![
+        text().prop_map(PartValue::Text),
+        (text(), prop::option::of(text()), prop::option::of(text())).prop_map(
+            |(path, filename, mime)| PartValue::File {
+                path,
+                filename,
+                mime,
+            }
+        ),
+    ]
+}
+
+fn part() -> impl Strategy<Value = Part> {
+    (text(), part_value()).prop_map(|(name, value)| Part { name, value })
+}
+
+fn multipart_body() -> impl Strategy<Value = Body> {
+    prop::collection::vec(part(), 0..=4).prop_map(Body::Multipart)
+}
+
 fn body() -> impl Strategy<Value = Body> {
-    (body_kind(), text()).prop_map(|(kind, content)| Body { kind, content })
+    prop_oneof![simple_body(), multipart_body()]
 }
 
 /// A `{{var}}` template placeholder — secret-valued auth fields must hold one,

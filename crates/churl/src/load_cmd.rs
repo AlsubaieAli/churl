@@ -201,6 +201,7 @@ pub async fn run(args: LoadArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Loa
     let exec_opts = ExecuteOptions {
         max_body_bytes: runtime.max_body_bytes,
         redirect: runtime.redirect,
+        root: workspace.root().to_path_buf(),
     };
 
     // `run_load` returns no elapsed (it uses `start.elapsed()` only for

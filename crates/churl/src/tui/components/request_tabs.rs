@@ -3,7 +3,72 @@
 //! state machine (no rendering, no I/O) so it is unit-testable; `request.rs`
 //! renders it and `app.rs` drives the key handling against the live request.
 
+use churl_core::model::{Body, BodyKind};
+
 use super::line_editor::LineEditor;
+
+/// The four selectable Body-tab kinds (M8.6) — the UI-facing superset of
+/// [`BodyKind`] (which only names the three `Simple` kinds) plus `Multipart`.
+/// Kept as its own type rather than folding `Multipart` into `BodyKind`
+/// itself: `BodyKind` is the *simple*-body kind `content_type_for` and the
+/// TUI's pre-M8.6 code reason about, and it has no `content_type_for` mapping
+/// of its own (reqwest derives the multipart Content-Type) — see
+/// `churl_core::model::BodyWireKind`'s doc for the same reasoning on the wire
+/// side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyTypeUi {
+    /// Plain text (`BodyKind::Text`).
+    Text,
+    /// JSON (`BodyKind::Json`).
+    Json,
+    /// URL-encoded form (`BodyKind::Form`).
+    Form,
+    /// `multipart/form-data` (`Body::Multipart`).
+    Multipart,
+}
+
+impl BodyTypeUi {
+    /// The four kinds, in display/cycle order.
+    pub const ALL: [BodyTypeUi; 4] = [
+        BodyTypeUi::Text,
+        BodyTypeUi::Json,
+        BodyTypeUi::Form,
+        BodyTypeUi::Multipart,
+    ];
+
+    /// The short label shown in the picker / type row.
+    pub fn label(self) -> &'static str {
+        match self {
+            BodyTypeUi::Text => "text",
+            BodyTypeUi::Json => "json",
+            BodyTypeUi::Form => "form",
+            BodyTypeUi::Multipart => "multipart",
+        }
+    }
+
+    /// Derives the current UI kind from the live body. `None` (no body yet)
+    /// reads as `Text` — the same default `BodyKind`/`BodyWireKind` use when
+    /// a `type` key is absent, so a fresh endpoint's Body tab starts on the
+    /// same kind a bare `[request.body]` table with no `type` would load as.
+    pub fn from_body(body: Option<&Body>) -> Self {
+        match body {
+            None => BodyTypeUi::Text,
+            Some(Body::Simple {
+                kind: BodyKind::Text,
+                ..
+            }) => BodyTypeUi::Text,
+            Some(Body::Simple {
+                kind: BodyKind::Json,
+                ..
+            }) => BodyTypeUi::Json,
+            Some(Body::Simple {
+                kind: BodyKind::Form,
+                ..
+            }) => BodyTypeUi::Form,
+            Some(Body::Multipart(_)) => BodyTypeUi::Multipart,
+        }
+    }
+}
 
 /// The four request-pane tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +149,12 @@ pub struct RequestTabs {
     pub headers_sel: usize,
     /// Selected row on the Auth tab.
     pub auth_sel: usize,
+    /// Selected row on the Body tab when its kind is `Multipart` (M8.6): row 0
+    /// is the type-selector row (mirrors the Auth tab's kind row), rows 1..N
+    /// are the parts (row `i` = part `i - 1`). Unused (stays whatever it was)
+    /// on a non-multipart Body — same "persists per tab" contract as the
+    /// other three selections.
+    pub parts_sel: usize,
     /// An in-progress row field edit, if any.
     pub editing: Option<FieldEdit>,
     /// Vertical scroll offset (first visible row index) for the active row-list
@@ -99,6 +170,7 @@ impl Default for RequestTabs {
             params_sel: 0,
             headers_sel: 0,
             auth_sel: 0,
+            parts_sel: 0,
             editing: None,
             row_scroll: 0,
         }
@@ -126,14 +198,14 @@ impl RequestTabs {
         }
     }
 
-    /// The selected-row index for the active row-list tab (Params/Headers/Auth).
-    /// Body has no row selection; returns 0.
+    /// The selected-row index for the active row-list tab (Params/Headers/Auth,
+    /// or Body when its kind is Multipart — see [`Self::parts_sel`]).
     pub fn selection(&self) -> usize {
         match self.active {
             RequestTab::Params => self.params_sel,
             RequestTab::Headers => self.headers_sel,
             RequestTab::Auth => self.auth_sel,
-            RequestTab::Body => 0,
+            RequestTab::Body => self.parts_sel,
         }
     }
 
@@ -143,7 +215,7 @@ impl RequestTabs {
             RequestTab::Params => self.params_sel = sel,
             RequestTab::Headers => self.headers_sel = sel,
             RequestTab::Auth => self.auth_sel = sel,
-            RequestTab::Body => {}
+            RequestTab::Body => self.parts_sel = sel,
         }
     }
 
@@ -291,5 +363,65 @@ mod tests {
         };
         tabs.tab_next();
         assert!(tabs.editing.is_none());
+    }
+
+    #[test]
+    fn body_type_ui_from_body_matches_every_variant() {
+        use churl_core::model::{Part, PartValue};
+
+        assert_eq!(BodyTypeUi::from_body(None), BodyTypeUi::Text);
+        assert_eq!(
+            BodyTypeUi::from_body(Some(&Body::Simple {
+                kind: BodyKind::Text,
+                content: String::new(),
+            })),
+            BodyTypeUi::Text
+        );
+        assert_eq!(
+            BodyTypeUi::from_body(Some(&Body::Simple {
+                kind: BodyKind::Json,
+                content: String::new(),
+            })),
+            BodyTypeUi::Json
+        );
+        assert_eq!(
+            BodyTypeUi::from_body(Some(&Body::Simple {
+                kind: BodyKind::Form,
+                content: String::new(),
+            })),
+            BodyTypeUi::Form
+        );
+        assert_eq!(
+            BodyTypeUi::from_body(Some(&Body::Multipart(vec![Part {
+                name: "f".into(),
+                value: PartValue::Text("v".into()),
+            }]))),
+            BodyTypeUi::Multipart
+        );
+    }
+
+    #[test]
+    fn every_body_type_ui_has_exactly_one_label() {
+        let labels: Vec<&str> = BodyTypeUi::ALL.iter().map(|k| k.label()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), labels.len(), "labels must be unique");
+    }
+
+    #[test]
+    fn body_tab_selection_routes_through_parts_sel() {
+        let mut tabs = RequestTabs::default();
+        tabs.tab_jump(3); // Body
+        assert_eq!(tabs.active, RequestTab::Body);
+        assert_eq!(tabs.selection(), 0);
+        tabs.move_down(5);
+        tabs.move_down(5);
+        assert_eq!(tabs.parts_sel, 2);
+        assert_eq!(tabs.selection(), 2);
+        // Switching away and back preserves it, same as every other tab.
+        tabs.tab_prev();
+        tabs.tab_next();
+        assert_eq!(tabs.selection(), 2);
     }
 }

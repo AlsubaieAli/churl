@@ -351,6 +351,13 @@ impl Default for KeyMap {
         // are cursor-context creates, a distinct non-leader state).
         root_bind(key!(n), LeaderEntry::Act(Action::NewEndpointPick));
         root_bind(key!(shift - n), LeaderEntry::Act(Action::NewCollectionPick));
+        // `<leader>b` opens the Body-type picker (M8.6: text/json/form/multipart)
+        // — `RowEdit`'s row-0 special case (mirroring the Auth kind row) is
+        // unreachable on a non-multipart Body tab because edtui owns
+        // `i`/`Enter` there, so switching kind needs a leader entry that works
+        // regardless of the current kind. `b` is free at root (the Explorer/
+        // Request pane overlays have no plain-`b` binding).
+        root_bind(key!(b), LeaderEntry::Act(Action::OpenBodyTypePicker));
         // Submenu descents (two-level which-key). The submenu names match the
         // seeded `submenus` keys below; config can point new keys at them or
         // create fresh submenus.

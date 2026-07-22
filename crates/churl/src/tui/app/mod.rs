@@ -26,7 +26,8 @@ use churl_core::http::{ClientConfig, DEFAULT_TIMEOUT, ExecuteOptions, build_clie
 use churl_core::interchange::{self, JsonDialect};
 use churl_core::load::{LoadCheck, LoadConfig, ReqOutcome};
 use churl_core::model::{
-    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Request, Response,
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Header, Param, Part, PartValue, Request,
+    Response,
 };
 use churl_core::persistence::{self, OpenWorkspace, PersistenceError};
 use churl_core::template::{Resolver, Scope};
@@ -54,7 +55,7 @@ use super::components::line_editor::LineEditor;
 use super::components::load_runner::{LoadOutcome, LoadRunnerState, LoadStatus};
 use super::components::log_panel::LogPanelState;
 use super::components::message::Message;
-use super::components::request_tabs::{EditField, FieldEdit, RequestTab, RequestTabs};
+use super::components::request_tabs::{BodyTypeUi, EditField, FieldEdit, RequestTab, RequestTabs};
 use super::components::response::{
     ResponseGeometry, ResponseMeta, ResponseState, ResponseView, ViewMode,
 };
@@ -66,9 +67,9 @@ use super::components::sequence_editor::{EditorOutcome, SequenceEditorState};
 use super::components::sequence_runner::{RunnerOutcome, SequenceRunnerState, StepStatus};
 use super::components::vim_ext::{self, VimExt};
 use super::components::{
-    env_editor, explorer, help, inspector, load_runner, log_panel, message, method_menu, palette,
-    picker, prompt, request, response, sequence_editor, sequence_runner, settings, statusline,
-    tab_strip, urlbar,
+    env_editor, explorer, file_picker, help, inspector, load_runner, log_panel, message,
+    method_menu, palette, picker, prompt, request, response, sequence_editor, sequence_runner,
+    settings, statusline, tab_strip, urlbar,
 };
 use super::events::{Action, FuzzyFinder, KeyMap, LeaderEntry, PaneCtx};
 use super::highlight::{self, HighlightJob};
@@ -1310,14 +1311,15 @@ impl App {
                     state.paste(&s);
                 }
             }
-            // The Inspector and Log panel are read-only (no text-input
-            // surface), same as Jump/MethodMenu/Confirm — a paste while
-            // either is open has nowhere to land.
+            // The Inspector, Log panel, and file picker are read-only (no
+            // text-input surface), same as Jump/MethodMenu/Confirm — a paste
+            // while any of them is open has nowhere to land.
             Mode::Jump
             | Mode::MethodMenu
             | Mode::Confirm(_)
             | Mode::Inspector(_)
-            | Mode::LogPanel(_) => {}
+            | Mode::LogPanel(_)
+            | Mode::FilePicker(_) => {}
             Mode::Normal => self.handle_paste_normal(text),
         }
     }
@@ -1348,6 +1350,7 @@ impl App {
         }
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
+            && !self.body_is_multipart()
             && self.body_editor_non_normal()
             && let Some(b) = self.active_endpoint_buffer_mut()
         {
@@ -1451,6 +1454,15 @@ impl App {
         self.execute_options = ExecuteOptions {
             max_body_bytes: self.advanced_limits.body_cap_bytes,
             redirect: config.redirect()?,
+            // M8.6: the root a relative multipart file-part path resolves
+            // against. A workspace is optional in the TUI too (the
+            // empty-state screen); cwd is the sensible fallback, matching
+            // `send`'s "workspace optional" contract.
+            root: self
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root().to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
         };
         self.load_caps = config.load_caps();
         // M8.3: seed the session debug-capture toggle from the persisted
@@ -1824,6 +1836,10 @@ impl App {
                 self.handle_log_panel_key(key);
                 Ok(())
             }
+            Mode::FilePicker(_) => {
+                self.handle_file_picker_key(key);
+                Ok(())
+            }
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1848,8 +1864,13 @@ impl App {
             return self.handle_field_edit_key(key);
         }
         // 3. edtui insert/visual mode on the Body tab (interception exception).
+        //    Multipart (M8.6): the Body tab has no edtui surface at all — it
+        //    behaves like Params/Headers/Auth (a row-list), so every Body-tab
+        //    edtui branch below is gated off when the live body is Multipart,
+        //    falling through to the normal keymap → Action::Row* dispatch.
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
+            && !self.body_is_multipart()
             && self.body_editor_non_normal()
         {
             if let Some(action) = self.control_intercept(key) {
@@ -1865,6 +1886,7 @@ impl App {
         //     when it's Space or a mapped key.
         if self.focus == Pane::Request
             && self.active_tab() == RequestTab::Body
+            && !self.body_is_multipart()
             && !self.body_editor_non_normal()
             && self.body_vim_handle_key(key)
         {
@@ -1880,8 +1902,11 @@ impl App {
         // 5. Keymap: the focused pane's overlay wins over the global map.
         if let Some(action) = self.keymap.lookup_ctx(key, self.focus.ctx()) {
             self.dispatch(action, Some(key))
-        } else if self.focus == Pane::Request && self.active_tab() == RequestTab::Body {
-            // Unmapped key on the Body tab falls through to edtui.
+        } else if self.focus == Pane::Request
+            && self.active_tab() == RequestTab::Body
+            && !self.body_is_multipart()
+        {
+            // Unmapped key on a non-multipart Body tab falls through to edtui.
             self.body_editor_on_key(key);
             Ok(())
         } else {
@@ -2050,10 +2075,14 @@ impl App {
             Action::Tab2 => self.with_active_tabs(|t| t.tab_jump(1)),
             Action::Tab3 => self.with_active_tabs(|t| t.tab_jump(2)),
             Action::Tab4 => self.with_active_tabs(|t| t.tab_jump(3)),
-            // On the Body tab there are no rows: the originating key (i/a/d/…)
-            // belongs to edtui, same as the motion keys in `request_nav`.
+            // On a NON-multipart Body tab there are no rows: the originating
+            // key (i/a/d/…) belongs to edtui, same as the motion keys in
+            // `request_nav`. A Multipart Body tab falls through to the normal
+            // row handlers below, same as Params/Headers/Auth.
             Action::RowAdd | Action::RowDelete | Action::RowToggle | Action::RowEdit
-                if self.focus == Pane::Request && self.active_tab() == RequestTab::Body =>
+                if self.focus == Pane::Request
+                    && self.active_tab() == RequestTab::Body
+                    && !self.body_is_multipart() =>
             {
                 if let Some(key) = key {
                     self.body_editor_on_key(key);
@@ -2063,6 +2092,7 @@ impl App {
             Action::RowDelete => self.row_delete(),
             Action::RowToggle => self.row_toggle(),
             Action::RowEdit => self.row_edit(),
+            Action::OpenBodyTypePicker => self.open_body_type_picker(),
             // On the sequences sub-pane, tree-mutating keys must NEVER touch the
             // hidden endpoints tree cursor: `n` creates a new sequence (parallels
             // endpoints `n`), `N`/`d` no-op with a note.
@@ -2147,10 +2177,11 @@ impl App {
         Ok(())
     }
 
-    /// Navigation within the Request pane. On the Body tab the motion keys forward
-    /// to edtui; on the row-list tabs `j`/`k` move the selection, `Enter` edits.
+    /// Navigation within the Request pane. On a non-multipart Body tab the
+    /// motion keys forward to edtui; on the row-list tabs (Params/Headers/
+    /// Auth, or a Multipart Body tab) `j`/`k` move the selection, `Enter` edits.
     fn request_nav(&mut self, action: Action, key: Option<KeyEvent>) {
-        if self.active_tab() == RequestTab::Body {
+        if self.active_tab() == RequestTab::Body && !self.body_is_multipart() {
             if let Some(key) = key {
                 self.body_editor_on_key(key);
             }
@@ -2655,6 +2686,7 @@ impl App {
                 }
             }
             Picker::Auth { .. } => self.set_auth_kind(index),
+            Picker::BodyType { .. } => self.set_body_type(index),
             Picker::Destination {
                 dirs,
                 purpose,
@@ -2841,7 +2873,7 @@ pub use state::{
 // `tests` — resolve them unqualified, exactly as before the split.
 use pure::{
     auth_field_count, auth_field_text, default_export_path, export_target, merge_query_params,
-    split_query, toggle_auth_placement, write_auth_field,
+    part_value_is_empty, split_query, toggle_auth_placement, write_auth_field,
 };
 pub use render::render;
 // Only the `tests` child module calls this render helper directly; re-exported

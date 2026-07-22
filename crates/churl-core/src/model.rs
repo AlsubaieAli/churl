@@ -199,14 +199,234 @@ pub enum Auth {
     },
 }
 
-/// A request body: raw content plus its [`BodyKind`].
+/// A request body: either a simple raw-content body ([`BodyKind`]-tagged text /
+/// json / form) or a `multipart/form-data` body made of named [`Part`]s.
+///
+/// Wire shape (TOML, `[request.body]`): `Simple` serializes exactly as the
+/// pre-M8.6 `{ type, content }` shape (`type` one of `text`/`json`/`form`,
+/// defaulting to `text` when the key is absent) — every existing endpoint
+/// round-trips byte-identical. `Multipart` is `type = "multipart"` plus a
+/// `[[request.body.part]]` array (see [`Part`]). The wire adapter lives in
+/// [`BodyWire`]/[`PartWire`]; this is the same "extend the existing serde
+/// representation" contract [`Auth`] uses for its own `type`-tagged shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Body {
-    /// Body kind; stored under the TOML key `type`. Defaults to [`BodyKind::Text`].
+#[serde(try_from = "BodyWire", into = "BodyWire")]
+pub enum Body {
+    /// A raw-content body: text, JSON, or URL-encoded form.
+    Simple {
+        /// Body kind; stored under the TOML key `type`. Defaults to [`BodyKind::Text`].
+        kind: BodyKind,
+        /// Raw body content; may contain `{{var}}` template placeholders.
+        content: String,
+    },
+    /// A `multipart/form-data` body: named parts, each inline text or a file
+    /// reference resolved and read from disk at send time (never at import or
+    /// save — see [`Part`]).
+    Multipart(Vec<Part>),
+}
+
+/// One named part of a [`Body::Multipart`] body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    /// The multipart field name; may contain `{{var}}` template placeholders.
+    pub name: String,
+    /// The part's value: inline text or a file reference.
+    pub value: PartValue,
+}
+
+/// The value of a multipart [`Part`]: inline text, or a file read from disk at
+/// send time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartValue {
+    /// Inline text content; may contain `{{var}}` template placeholders and is
+    /// scanned by the secret gate (unlike a file's contents, which are not).
+    Text(String),
+    /// A file reference: the path is stored as given (never read at import or
+    /// save) and resolved + read only at send time. Relative paths resolve
+    /// against the workspace root with a traversal guard; absolute paths are
+    /// allowed as-is. `filename`/`mime` are optional wire overrides for the
+    /// part's `Content-Disposition`/`Content-Type`; `path` may contain
+    /// `{{var}}` placeholders (templated at send time, same as `filename`).
+    File {
+        /// The file path as given (relative-to-workspace or absolute).
+        path: String,
+        /// Optional `Content-Disposition` filename override; defaults to the
+        /// path's basename when absent.
+        filename: Option<String>,
+        /// Optional `Content-Type` override for this part.
+        mime: Option<String>,
+    },
+}
+
+/// Serde wire shape for [`Body`] and [`Part`] — the "extend, don't fork" seam
+/// that keeps `Simple` byte-identical to the pre-M8.6 `{ type, content }`
+/// representation while adding a `type = "multipart"` variant. See [`Body`]'s
+/// docs for the full contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BodyWire {
     #[serde(rename = "type", default)]
-    pub kind: BodyKind,
-    /// Raw body content; may contain `{{var}}` template placeholders.
-    pub content: String,
+    kind: BodyWireKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    part: Vec<PartWire>,
+}
+
+/// The wire-level `type` tag for [`BodyWire`]: [`BodyKind`]'s three variants
+/// plus `multipart`. Kept distinct from `BodyKind` (rather than adding a
+/// `Multipart` variant there) because `BodyKind` is the *simple*-body kind the
+/// TUI/`content_type_for` reason about — folding multipart into it would force
+/// every `BodyKind` match site to handle a kind with no `content_type_for`
+/// mapping of its own (reqwest derives the multipart Content-Type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BodyWireKind {
+    #[default]
+    Text,
+    Json,
+    Form,
+    Multipart,
+}
+
+/// Serde wire shape for one [`Part`]: `name` plus exactly one of `text` /
+/// `file`. `file` may carry optional `filename`/`mime`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartWire {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mime: Option<String>,
+}
+
+impl From<Body> for BodyWire {
+    fn from(body: Body) -> Self {
+        match body {
+            Body::Simple { kind, content } => BodyWire {
+                kind: match kind {
+                    BodyKind::Text => BodyWireKind::Text,
+                    BodyKind::Json => BodyWireKind::Json,
+                    BodyKind::Form => BodyWireKind::Form,
+                },
+                content: Some(content),
+                part: Vec::new(),
+            },
+            Body::Multipart(parts) => BodyWire {
+                kind: BodyWireKind::Multipart,
+                content: None,
+                part: parts.into_iter().map(PartWire::from).collect(),
+            },
+        }
+    }
+}
+
+impl TryFrom<BodyWire> for Body {
+    type Error = String;
+
+    fn try_from(wire: BodyWire) -> Result<Self, Self::Error> {
+        match wire.kind {
+            BodyWireKind::Multipart => {
+                // Fail loud on a shape mismatch rather than silently dropping
+                // data (mirrors `PartWire`'s both/neither strictness): a
+                // hand-edited `type = "multipart"` that also carries a
+                // top-level `content` is malformed — the `content` would
+                // otherwise vanish without a trace.
+                if wire.content.is_some() {
+                    return Err("multipart body must not have a top-level `content` key".to_owned());
+                }
+                let parts = wire
+                    .part
+                    .into_iter()
+                    .map(Part::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Body::Multipart(parts))
+            }
+            simple => {
+                let kind = match simple {
+                    BodyWireKind::Text => BodyKind::Text,
+                    BodyWireKind::Json => BodyKind::Json,
+                    BodyWireKind::Form => BodyKind::Form,
+                    BodyWireKind::Multipart => unreachable!("handled above"),
+                };
+                // Symmetric strictness: a simple (text/json/form) body carrying
+                // a `[[part]]` array is malformed — the parts would otherwise be
+                // silently discarded.
+                if !wire.part.is_empty() {
+                    return Err(format!(
+                        "a `{}` body must not have `[[part]]` entries (that shape is `type = \"multipart\"`)",
+                        match simple {
+                            BodyWireKind::Text => "text",
+                            BodyWireKind::Json => "json",
+                            BodyWireKind::Form => "form",
+                            BodyWireKind::Multipart => unreachable!(),
+                        }
+                    ));
+                }
+                let content = wire
+                    .content
+                    .ok_or_else(|| "body is missing `content`".to_owned())?;
+                Ok(Body::Simple { kind, content })
+            }
+        }
+    }
+}
+
+impl From<Part> for PartWire {
+    fn from(part: Part) -> Self {
+        match part.value {
+            PartValue::Text(text) => PartWire {
+                name: part.name,
+                text: Some(text),
+                file: None,
+                filename: None,
+                mime: None,
+            },
+            PartValue::File {
+                path,
+                filename,
+                mime,
+            } => PartWire {
+                name: part.name,
+                text: None,
+                file: Some(path),
+                filename,
+                mime,
+            },
+        }
+    }
+}
+
+impl TryFrom<PartWire> for Part {
+    type Error = String;
+
+    fn try_from(wire: PartWire) -> Result<Self, Self::Error> {
+        match (wire.text, wire.file) {
+            (Some(_), Some(_)) => Err(format!(
+                "part {:?} sets both `text` and `file` — exactly one is required",
+                wire.name
+            )),
+            (Some(text), None) => Ok(Part {
+                name: wire.name,
+                value: PartValue::Text(text),
+            }),
+            (None, Some(path)) => Ok(Part {
+                name: wire.name,
+                value: PartValue::File {
+                    path,
+                    filename: wire.filename,
+                    mime: wire.mime,
+                },
+            }),
+            (None, None) => Err(format!(
+                "part {:?} sets neither `text` nor `file` — exactly one is required",
+                wire.name
+            )),
+        }
+    }
 }
 
 /// An HTTP request definition: everything needed to execute a call.
@@ -611,12 +831,179 @@ mod tests {
     #[test]
     fn body_kind_lowercase_and_type_key() {
         let body: Body = toml_edit::de::from_str("type = \"json\"\ncontent = \"{}\"\n").unwrap();
-        assert_eq!(body.kind, BodyKind::Json);
+        assert_eq!(
+            body,
+            Body::Simple {
+                kind: BodyKind::Json,
+                content: "{}".into()
+            }
+        );
 
         let missing_type: Body = toml_edit::de::from_str("content = \"hi\"\n").unwrap();
-        assert_eq!(missing_type.kind, BodyKind::Text);
+        assert_eq!(
+            missing_type,
+            Body::Simple {
+                kind: BodyKind::Text,
+                content: "hi".into()
+            }
+        );
 
         let toml = toml_edit::ser::to_string(&body).unwrap();
         assert!(toml.contains("type = \"json\""));
+    }
+
+    /// `Simple` must serialize byte-identical to the pre-M8.6 `{ type, content }`
+    /// shape so every existing endpoint round-trips unchanged — the M8.6 model
+    /// split's core back-compat contract.
+    ///
+    /// N3: asserts byte-identity through the REAL save serialization path
+    /// (`persistence::endpoint_to_toml`, the no-disk twin of `save_endpoint`'s
+    /// `to_document` + `normalize_table` + `to_string`), not a bare
+    /// `toml_edit::ser::to_string` on the `Body` alone — so it fails if the
+    /// on-disk Simple shape ever drifts, not merely if the raw serde repr does.
+    /// A byte-exact `import(export)` round-trip through that path is the proof.
+    #[test]
+    fn body_simple_toml_shape_is_byte_identical_to_pre_multipart() {
+        // A canonical pre-M8.6 endpoint file, in the exact shape `save_endpoint`
+        // produces (array-of-tables headers, `[request.body]` with only
+        // `type` + `content`).
+        const PRE_M86: &str = "seq = 0\n\
+             name = \"create\"\n\n\
+             [request]\n\
+             method = \"POST\"\n\
+             url = \"https://api.example.com/users\"\n\n\
+             [[request.headers]]\n\
+             name = \"Content-Type\"\n\
+             value = \"application/json\"\n\n\
+             [request.body]\n\
+             type = \"json\"\n\
+             content = '{\"name\":\"ada\"}'\n";
+        let ep: Endpoint = toml_edit::de::from_str(PRE_M86).unwrap();
+        // The parsed body is exactly a `Simple` (no multipart machinery).
+        assert_eq!(
+            ep.request.body,
+            Some(Body::Simple {
+                kind: BodyKind::Json,
+                content: "{\"name\":\"ada\"}".into(),
+            })
+        );
+        // Re-serializing through the real save path reproduces the file
+        // byte-for-byte — the on-disk Simple shape did not drift.
+        let rendered = crate::persistence::endpoint_to_toml(&ep).unwrap();
+        assert_eq!(
+            rendered, PRE_M86,
+            "on-disk Simple body shape drifted:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn body_multipart_round_trip_toml() {
+        let body = Body::Multipart(vec![
+            Part {
+                name: "field".into(),
+                value: PartValue::Text("hello".into()),
+            },
+            Part {
+                name: "upload".into(),
+                value: PartValue::File {
+                    path: "assets/report.pdf".into(),
+                    filename: Some("report.pdf".into()),
+                    mime: Some("application/pdf".into()),
+                },
+            },
+        ]);
+        // Bare `to_string` renders `part` as an inline array of inline
+        // tables (`part = [{ ... }, { ... }]`) — logically identical TOML,
+        // just not the `[[request.body.part]]` block-array-of-tables shape a
+        // saved workspace file actually gets. That block shape is produced
+        // by `persistence::atomic::normalize_table`'s post-pass over
+        // `save_value`'s freshly-serialized document — see
+        // `persistence.rs`'s `multipart_body_round_trips_through_save_and_reads_as_array_of_tables`
+        // for that real-path assertion. This unit test only needs the wire
+        // KEYS and round-trip data fidelity, not the array syntax.
+        let toml = toml_edit::ser::to_string(&body).unwrap();
+        assert!(toml.contains("type = \"multipart\""), "{toml}");
+        assert!(toml.contains("name = \"field\""), "{toml}");
+        assert!(toml.contains("text = \"hello\""), "{toml}");
+        assert!(toml.contains("name = \"upload\""), "{toml}");
+        assert!(toml.contains("file = \"assets/report.pdf\""), "{toml}");
+        assert!(toml.contains("filename = \"report.pdf\""), "{toml}");
+        assert!(toml.contains("mime = \"application/pdf\""), "{toml}");
+        // `content` never appears on a multipart body.
+        assert!(!toml.contains("content"), "{toml}");
+
+        let back: Body = toml_edit::de::from_str(&toml).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn body_multipart_minimal_text_only_part() {
+        let toml = "type = \"multipart\"\n\n[[part]]\nname = \"field\"\ntext = \"v\"\n";
+        let body: Body = toml_edit::de::from_str(toml).unwrap();
+        assert_eq!(
+            body,
+            Body::Multipart(vec![Part {
+                name: "field".into(),
+                value: PartValue::Text("v".into()),
+            }])
+        );
+    }
+
+    #[test]
+    fn body_part_rejects_both_text_and_file() {
+        let toml = "type = \"multipart\"\n\n[[part]]\nname = \"x\"\ntext = \"a\"\nfile = \"b\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("both"), "{err}");
+    }
+
+    #[test]
+    fn body_part_rejects_neither_text_nor_file() {
+        let toml = "type = \"multipart\"\n\n[[part]]\nname = \"x\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("neither"), "{err}");
+    }
+
+    #[test]
+    fn body_simple_missing_content_key_errors() {
+        let err = toml_edit::de::from_str::<Body>("type = \"json\"\n").unwrap_err();
+        assert!(err.to_string().contains("content"), "{err}");
+    }
+
+    /// N1 (data safety): a `type = "multipart"` body carrying a stray
+    /// top-level `content` is malformed — deserializing it must FAIL loudly,
+    /// never silently drop the `content` (the pre-fix behaviour branched only
+    /// on `kind`).
+    #[test]
+    fn body_multipart_with_stray_content_key_errors_not_drops() {
+        let toml = "type = \"multipart\"\ncontent = \"dropped?\"\n\n[[part]]\nname = \"f\"\ntext = \"v\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("content"), "{err}");
+    }
+
+    /// N1 (data safety): a simple (text/json/form) body carrying a `[[part]]`
+    /// array is malformed — deserializing must FAIL loudly, never silently
+    /// discard the parts.
+    #[test]
+    fn body_simple_with_part_array_errors_not_drops() {
+        let toml = "type = \"json\"\ncontent = \"{}\"\n\n[[part]]\nname = \"f\"\ntext = \"v\"\n";
+        let err = toml_edit::de::from_str::<Body>(toml).unwrap_err();
+        assert!(err.to_string().contains("part"), "{err}");
+    }
+
+    #[test]
+    fn body_multipart_file_part_omits_optional_filename_and_mime() {
+        let body = Body::Multipart(vec![Part {
+            name: "upload".into(),
+            value: PartValue::File {
+                path: "a.txt".into(),
+                filename: None,
+                mime: None,
+            },
+        }]);
+        let toml = toml_edit::ser::to_string(&body).unwrap();
+        assert!(!toml.contains("filename"), "{toml}");
+        assert!(!toml.contains("mime"), "{toml}");
+        let back: Body = toml_edit::de::from_str(&toml).unwrap();
+        assert_eq!(back, body);
     }
 }

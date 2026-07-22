@@ -3,10 +3,15 @@
 //! Tokenisation is shell-accurate via `shlex`; the flag map is hand-rolled and
 //! deliberately strict — any flag outside the supported set is a hard
 //! [`ImportError::UnknownFlag`], never silently dropped (flag policy pinned in
-//! DECISIONS.md). File payloads (`@file`) and multipart (`-F`) are recognised
-//! and rejected as [`ImportError::Unsupported`]; churl never reads files during
-//! an import. The query string stays in the URL — import does not explode it
-//! into [`crate::model::Param`]s (lossless and simple).
+//! DECISIONS.md). A `-d`/`--data*` `@file` body is recognised and rejected as
+//! [`ImportError::Unsupported`] — churl never reads files during an import.
+//! `-F`/`--form` (M8.6) is the one file-carrying flag import DOES accept: it
+//! captures the `@path` string into a [`crate::model::PartValue::File`]
+//! without ever opening it, preserving the same "import never reads files"
+//! rule. `-F` mixed with `-d`/`--data*`/`--json` in the same command is a hard
+//! [`ImportError::MixedFormAndData`] (curl itself does not allow both body
+//! kinds on one request). The query string stays in the URL — import does not
+//! explode it into [`crate::model::Param`]s (lossless and simple).
 //!
 //! Auth remap: `-u user:pass` becomes first-class [`Auth::Basic`] and an
 //! `Authorization: Bearer …` header becomes [`Auth::Bearer`]; literal secret
@@ -15,7 +20,7 @@
 //! auth sources, the first one in the command takes the first-class slot and
 //! the rest stay plain headers, with a warning.
 
-use crate::model::{Auth, Body, BodyKind, Endpoint, Header, Method, Request};
+use crate::model::{Auth, Body, BodyKind, Endpoint, Header, Method, Part, Request};
 
 mod auth;
 mod flags;
@@ -58,12 +63,16 @@ pub enum ImportError {
     /// A value-taking flag appeared at the end of the arguments.
     #[error("flag {0} is missing its value")]
     MissingValue(String),
-    /// A recognised but unsupported construct (`-F` multipart, `@file` bodies).
+    /// A recognised but unsupported construct (an `@file` `-d`/`--data*` body).
     #[error("unsupported: {0}")]
     Unsupported(String),
     /// The `-X`/`--request` value is not a known HTTP method.
     #[error("invalid HTTP method: {0:?}")]
     InvalidMethod(String),
+    /// `-F`/`--form` (multipart) appeared alongside `-d`/`--data*`/`--json` —
+    /// curl itself rejects mixing the two body kinds on one request (M8.6).
+    #[error("cannot mix -F/--form with -d/--data/--json in the same command")]
+    MixedFormAndData,
 }
 
 /// Parses a curl command STRING into an [`Endpoint`]. Strips bash
@@ -188,6 +197,9 @@ struct Parser {
     headers: Vec<Header>,
     /// `-d`/`--data*`/`--json` values in order; joined with `&` (curl semantics).
     data_parts: Vec<String>,
+    /// `-F`/`--form` parts in order (M8.6). Mutually exclusive with
+    /// `data_parts`/`json` — curl itself rejects mixing `-F` with `-d`.
+    parts: Vec<Part>,
     /// Set by `--json`: forces [`BodyKind::Json`] and an `Accept` header.
     json: bool,
     /// First-class auth (`-u` or a `Authorization: Bearer …` header); the slot
@@ -219,11 +231,17 @@ impl Parser {
         }
     }
 
-    /// Assembles the final [`Endpoint`]: joins data parts, derives the body
-    /// kind and method, and names the endpoint from the URL.
+    /// Assembles the final [`Endpoint`]: joins data parts (or the `-F` parts,
+    /// M8.6 — mutually exclusive), derives the body kind and method, and names
+    /// the endpoint from the URL.
     fn finish(mut self) -> Result<ImportResult, ImportError> {
         let url = self.url.ok_or(ImportError::MissingUrl)?;
-        let body = if self.data_parts.is_empty() {
+        if !self.parts.is_empty() && (!self.data_parts.is_empty() || self.json) {
+            return Err(ImportError::MixedFormAndData);
+        }
+        let body = if !self.parts.is_empty() {
+            Some(Body::Multipart(self.parts))
+        } else if self.data_parts.is_empty() {
             None
         } else {
             let content = self.data_parts.join("&");
@@ -232,7 +250,7 @@ impl Parser {
             } else {
                 derive_body_kind(&content, &self.headers)
             };
-            Some(Body { kind, content })
+            Some(Body::Simple { kind, content })
         };
         if self.json
             && !self
@@ -363,9 +381,26 @@ pub(crate) fn derive_name(method: Method, url: &str, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::PartValue;
 
     fn import(command: &str) -> ImportResult {
         import_curl(command).unwrap_or_else(|err| panic!("import failed for {command:?}: {err}"))
+    }
+
+    /// `send`/curl-import bodies are always `Simple` — a `Multipart` body here
+    /// is a test-authoring bug, not a case these helpers need to handle.
+    fn simple_kind(body: &Body) -> BodyKind {
+        match body {
+            Body::Simple { kind, .. } => *kind,
+            Body::Multipart(_) => panic!("expected a Simple body, got Multipart"),
+        }
+    }
+
+    fn simple_content(body: &Body) -> &str {
+        match body {
+            Body::Simple { content, .. } => content,
+            Body::Multipart(_) => panic!("expected a Simple body, got Multipart"),
+        }
     }
 
     #[test]
@@ -421,7 +456,10 @@ mod tests {
         // Inside single quotes, `\`+newline is literal (bash), NOT a line
         // continuation — the body must survive byte-for-byte, not be collapsed.
         let result = import("curl https://e.com/n --data-raw 'text=a\\\nb'");
-        assert_eq!(result.endpoint.request.body.unwrap().content, "text=a\\\nb");
+        assert_eq!(
+            simple_content(&result.endpoint.request.body.unwrap()),
+            "text=a\\\nb"
+        );
     }
 
     #[test]
@@ -429,7 +467,10 @@ mod tests {
         // A continuation joins with nothing (bash), so a double-quoted value split
         // across a continuation rejoins seamlessly — no stray space injected.
         let result = import("curl https://e.com/n --data-raw \"a=1\\\nb=2\"");
-        assert_eq!(result.endpoint.request.body.unwrap().content, "a=1b=2");
+        assert_eq!(
+            simple_content(&result.endpoint.request.body.unwrap()),
+            "a=1b=2"
+        );
     }
 
     #[test]
@@ -496,8 +537,8 @@ mod tests {
     fn multiple_data_parts_join_with_ampersand() {
         let result = import("curl -d a=1 --data b=2 --data-raw c=3 https://e.com/f");
         let body = result.endpoint.request.body.unwrap();
-        assert_eq!(body.content, "a=1&b=2&c=3");
-        assert_eq!(body.kind, BodyKind::Form);
+        assert_eq!(simple_content(&body), "a=1&b=2&c=3");
+        assert_eq!(simple_kind(&body), BodyKind::Form);
     }
 
     #[test]
@@ -507,13 +548,13 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&body), BodyKind::Json);
         let array = import("curl -d '[1, 2]' https://e.com/f")
             .endpoint
             .request
             .body
             .unwrap();
-        assert_eq!(array.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&array), BodyKind::Json);
     }
 
     #[test]
@@ -523,7 +564,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Json);
+        assert_eq!(simple_kind(&body), BodyKind::Json);
     }
 
     #[test]
@@ -533,7 +574,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Text);
+        assert_eq!(simple_kind(&body), BodyKind::Text);
     }
 
     #[test]
@@ -543,7 +584,7 @@ mod tests {
             .request
             .body
             .unwrap();
-        assert_eq!(body.kind, BodyKind::Text);
+        assert_eq!(simple_kind(&body), BodyKind::Text);
     }
 
     #[test]
@@ -561,11 +602,111 @@ mod tests {
     }
 
     #[test]
+    fn form_text_value_imports_as_multipart_text_part() {
+        let result = import("curl -F field=hello https://e.com/upload");
+        assert_eq!(result.endpoint.request.method, Method::Post);
+        assert_eq!(
+            result.endpoint.request.body,
+            Some(Body::Multipart(vec![Part {
+                name: "field".to_owned(),
+                value: PartValue::Text("hello".to_owned()),
+            }]))
+        );
+    }
+
+    #[test]
+    fn form_file_value_imports_as_file_part_without_reading_it() {
+        // The path need not exist on disk — import only ever captures the
+        // string, it never opens the file (that's a send-time concern).
+        let result = import("curl -F upload=@/does/not/exist.pdf https://e.com/upload");
+        assert_eq!(
+            result.endpoint.request.body,
+            Some(Body::Multipart(vec![Part {
+                name: "upload".to_owned(),
+                value: PartValue::File {
+                    path: "/does/not/exist.pdf".to_owned(),
+                    filename: None,
+                    mime: None,
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn form_file_value_with_filename_and_type_modifiers() {
+        for command in [
+            "curl -F 'upload=@report.pdf;filename=custom.pdf;type=application/pdf' https://e.com/upload",
+            // Modifier order does not matter.
+            "curl -F 'upload=@report.pdf;type=application/pdf;filename=custom.pdf' https://e.com/upload",
+            // Long-flag form.
+            "curl --form 'upload=@report.pdf;filename=custom.pdf;type=application/pdf' https://e.com/upload",
+        ] {
+            let result = import(command);
+            assert_eq!(
+                result.endpoint.request.body,
+                Some(Body::Multipart(vec![Part {
+                    name: "upload".to_owned(),
+                    value: PartValue::File {
+                        path: "report.pdf".to_owned(),
+                        filename: Some("custom.pdf".to_owned()),
+                        mime: Some("application/pdf".to_owned()),
+                    },
+                }])),
+                "failed for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_form_flags_preserve_order() {
+        let result = import("curl -F a=1 -F b=@f.bin -F c=3 https://e.com/upload");
+        let Some(Body::Multipart(parts)) = result.endpoint.request.body else {
+            panic!("expected a Multipart body");
+        };
+        let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn form_mixed_with_data_is_a_hard_error() {
+        for command in [
+            "curl -F a=1 -d b=2 https://e.com/x",
+            "curl -d b=2 -F a=1 https://e.com/x",
+            "curl -F a=1 --json '{}' https://e.com/x",
+        ] {
+            assert!(
+                matches!(import_curl(command), Err(ImportError::MixedFormAndData)),
+                "expected MixedFormAndData for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_embedded_file_content_lt_at_is_rejected() {
+        // `-F name=<@file` (embed the file's CONTENT as the value) would
+        // require reading the file at import time — churl's import contract
+        // never does that, so this curl construct is rejected rather than
+        // silently mis-imported as literal text.
+        assert!(matches!(
+            import_curl("curl -F 'field=<@body.txt' https://e.com/x"),
+            Err(ImportError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn form_value_without_equals_is_rejected() {
+        assert!(matches!(
+            import_curl("curl -F justaname https://e.com/x"),
+            Err(ImportError::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn json_flag_sets_kind_method_and_accept() {
         let result = import(r#"curl --json '{"q": true}' https://e.com/search"#);
         let request = &result.endpoint.request;
         assert_eq!(request.method, Method::Post);
-        assert_eq!(request.body.as_ref().unwrap().kind, BodyKind::Json);
+        assert_eq!(simple_kind(request.body.as_ref().unwrap()), BodyKind::Json);
         assert!(
             request
                 .headers
@@ -595,15 +736,27 @@ mod tests {
         assert_eq!(accepts[0].value, "text/plain");
     }
 
+    /// Superseded by M8.6: `-F`/`--form` now imports as a `Multipart` body
+    /// (see `form_text_value_imports_as_multipart_text_part` and friends)
+    /// instead of being rejected. Kept as a short-flag/long-flag parity check.
     #[test]
-    fn multipart_is_unsupported() {
+    fn short_and_long_form_flags_both_import_a_file_part() {
         for command in [
             "curl -F 'file=@photo.png' https://e.com/upload",
-            "curl --form 'name=x' https://e.com/upload",
+            "curl --form 'file=@photo.png' https://e.com/upload",
         ] {
-            assert!(
-                matches!(import_curl(command), Err(ImportError::Unsupported(s)) if s.contains("multipart")),
-                "expected multipart rejection for {command:?}"
+            let result = import(command);
+            assert_eq!(
+                result.endpoint.request.body,
+                Some(Body::Multipart(vec![Part {
+                    name: "file".to_owned(),
+                    value: PartValue::File {
+                        path: "photo.png".to_owned(),
+                        filename: None,
+                        mime: None,
+                    },
+                }])),
+                "failed for {command:?}"
             );
         }
     }

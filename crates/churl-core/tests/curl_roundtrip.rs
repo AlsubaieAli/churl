@@ -7,7 +7,9 @@
 
 use churl_core::export::export_curl;
 use churl_core::import::import_curl;
-use churl_core::model::{ApiKeyPlacement, Auth, BodyKind, Endpoint, Method, Request};
+use churl_core::model::{
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, Part, PartValue, Request,
+};
 
 /// Realistic curl commands (GitHub/Stripe/Slack-style APIs) with mixed flags
 /// and quoting edge cases.
@@ -48,11 +50,17 @@ const CORPUS: &[&str] = &[
     // First-class auth (M5): placeholder credentials round-trip structurally.
     "curl -u 'alice:{{password}}' https://api.example.com/private",
     "curl -H 'Authorization: Bearer {{token}}' https://api.example.com/me",
+    // Multipart (M8.6): inline text + file parts, with and without modifiers,
+    // long/short flag spellings, templated part fields.
+    "curl -F field=hello -F upload=@report.pdf https://api.example.com/upload",
+    "curl -F 'upload=@report.pdf;filename=custom.pdf;type=application/pdf' https://api.example.com/upload",
+    "curl --form name=ada --form 'avatar=@/abs/path/avatar.png' https://api.example.com/profile",
+    "curl -F '{{field_name}}={{field_value}}' -F 'file=@{{upload_path}}' https://api.example.com/tmpl",
 ];
 
 #[test]
 fn corpus_round_trips_semantically() {
-    assert!(CORPUS.len() >= 27, "corpus must not shrink (M5 size: 27)");
+    assert!(CORPUS.len() >= 31, "corpus must not shrink (M8.6 size: 31)");
     for command in CORPUS {
         let first = import_curl(command)
             .unwrap_or_else(|err| panic!("first import failed for {command:?}: {err}"));
@@ -80,9 +88,13 @@ fn stripe_style_form_post_imports_faithfully() {
     let request = &result.endpoint.request;
     assert_eq!(request.method, Method::Post);
     assert_eq!(request.url, "https://api.stripe.com/v1/charges");
-    let body = request.body.as_ref().unwrap();
-    assert_eq!(body.content, "amount=2000&currency=usd");
-    assert_eq!(body.kind, BodyKind::Form);
+    assert_eq!(
+        request.body,
+        Some(Body::Simple {
+            kind: BodyKind::Form,
+            content: "amount=2000&currency=usd".to_owned(),
+        })
+    );
     // -u with an empty password: username kept, password placeholder-ized.
     assert_eq!(
         request.auth,
@@ -186,4 +198,78 @@ fn exported_command_is_a_single_paste_safe_line() {
 /// Returns whether shlex can re-tokenise the command.
 fn shlex_ok(command: &str) -> bool {
     import_curl(command).is_ok()
+}
+
+// ---- M8.6: -F/--form multipart --------------------------------------------
+
+#[test]
+fn multipart_command_imports_faithfully() {
+    let result =
+        import_curl("curl -F field=hello -F 'upload=@report.pdf;filename=r.pdf;type=application/pdf' https://api.example.com/upload")
+            .unwrap();
+    let request = &result.endpoint.request;
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(
+        request.body,
+        Some(Body::Multipart(vec![
+            Part {
+                name: "field".to_owned(),
+                value: PartValue::Text("hello".to_owned()),
+            },
+            Part {
+                name: "upload".to_owned(),
+                value: PartValue::File {
+                    path: "report.pdf".to_owned(),
+                    filename: Some("r.pdf".to_owned()),
+                    mime: Some("application/pdf".to_owned()),
+                },
+            },
+        ]))
+    );
+}
+
+#[test]
+fn multipart_export_re_imports_structurally_identical() {
+    let commands = [
+        "curl -F field=hello -F upload=@report.pdf https://api.example.com/upload",
+        "curl -F 'upload=@report.pdf;filename=custom.pdf;type=application/pdf' https://api.example.com/upload",
+        "curl -F 'upload=@/abs/path/file.bin' https://api.example.com/upload",
+    ];
+    for command in commands {
+        let first = import_curl(command).unwrap();
+        let exported = export_curl(&first.endpoint);
+        let second = import_curl(&exported)
+            .unwrap_or_else(|err| panic!("re-import failed for {exported:?}: {err}"));
+        assert_eq!(
+            first.endpoint.request, second.endpoint.request,
+            "multipart round-trip mismatch\ncommand:  {command}\nexported: {exported}"
+        );
+        assert!(
+            matches!(second.endpoint.request.body, Some(Body::Multipart(_))),
+            "re-imported body must still be Multipart for {command:?}"
+        );
+    }
+}
+
+#[test]
+fn form_and_data_together_is_a_curl_error() {
+    use churl_core::import::ImportError;
+    assert!(matches!(
+        import_curl("curl -F a=1 -d b=2 https://e.com/x"),
+        Err(ImportError::MixedFormAndData)
+    ));
+}
+
+#[test]
+fn exported_multipart_command_is_a_single_paste_safe_line() {
+    let result = import_curl(
+        "curl -F 'field=hello world' -F 'upload=@a b.txt;filename=a b.txt' https://api.example.com/upload",
+    )
+    .unwrap();
+    let exported = export_curl(&result.endpoint);
+    assert!(
+        !exported.contains('\n'),
+        "no line continuations: {exported}"
+    );
+    assert!(shlex_ok(&exported), "not shell-safe: {exported}");
 }

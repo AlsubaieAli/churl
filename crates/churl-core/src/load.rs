@@ -397,7 +397,7 @@ pub async fn run_load(
             .map(|i| {
                 let client = client.clone();
                 let request = request.clone();
-                let options = *options;
+                let options = options.clone();
                 async move {
                     // Absolute-target pacing: never start copy `i` before
                     // `start + i·interval`. A hard floor on when the launch happens,

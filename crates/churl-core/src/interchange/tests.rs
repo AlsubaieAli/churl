@@ -98,11 +98,21 @@ fn imports_raw_json_and_urlencoded_bodies() {
         }"#;
     let import = import_postman_v21(json).unwrap();
     let jbody = import.requests[0].endpoint.request.body.as_ref().unwrap();
-    assert_eq!(jbody.kind, BodyKind::Json);
-    assert_eq!(jbody.content, "{\"a\":1}");
+    assert_eq!(
+        jbody,
+        &Body::Simple {
+            kind: BodyKind::Json,
+            content: "{\"a\":1}".into()
+        }
+    );
     let fbody = import.requests[1].endpoint.request.body.as_ref().unwrap();
-    assert_eq!(fbody.kind, BodyKind::Form);
-    assert_eq!(fbody.content, "a=1&b=2");
+    assert_eq!(
+        fbody,
+        &Body::Simple {
+            kind: BodyKind::Form,
+            content: "a=1&b=2".into()
+        }
+    );
 }
 
 #[test]
@@ -258,7 +268,7 @@ fn sample_endpoints() -> Vec<Endpoint> {
                 url: "https://api.test/users".into(),
                 headers: Vec::new(),
                 params: Vec::new(),
-                body: Some(Body {
+                body: Some(Body::Simple {
                     kind: BodyKind::Json,
                     content: "{\"name\":\"Ada\"}".into(),
                 }),
@@ -280,7 +290,7 @@ fn sample_endpoints() -> Vec<Endpoint> {
                 url: "https://api.test/form".into(),
                 headers: Vec::new(),
                 params: Vec::new(),
-                body: Some(Body {
+                body: Some(Body::Simple {
                     kind: BodyKind::Form,
                     content: "a=1&b=2".into(),
                 }),
@@ -513,7 +523,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                         url: "https://api.test/users".into(),
                         headers: Vec::new(),
                         params: Vec::new(),
-                        body: Some(Body {
+                        body: Some(Body::Simple {
                             kind: BodyKind::Json,
                             content: "{\"name\":\"Ada\"}".into(),
                         }),
@@ -540,7 +550,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                         url: "https://api.test/form".into(),
                         headers: Vec::new(),
                         params: Vec::new(),
-                        body: Some(Body {
+                        body: Some(Body::Simple {
                             kind: BodyKind::Form,
                             content: "a=1&b=2".into(),
                         }),
@@ -563,7 +573,7 @@ fn seed_native_source(dir: &Path) -> Vec<(String, Vec<Endpoint>)> {
                         url: "https://api.test/ping".into(),
                         headers: Vec::new(),
                         params: Vec::new(),
-                        body: Some(Body {
+                        body: Some(Body::Simple {
                             kind: BodyKind::Text,
                             content: "ping".into(),
                         }),

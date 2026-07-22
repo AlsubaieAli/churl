@@ -6,6 +6,7 @@
 //! Methods are inherent on `App`, so declaring the submodules is all
 //! that's needed; every call site resolves via `self.`.
 
+mod body_parts;
 mod buffers;
 // `pub(in crate::tui::app)`: `mod.rs`'s `handle_paste` needs the free fn
 // `looks_like_curl` (not a method, so it can't reach it via `self.`) to keep

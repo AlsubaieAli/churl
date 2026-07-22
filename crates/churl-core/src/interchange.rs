@@ -19,7 +19,9 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::config::{auth_secret_violations, is_template_placeholder, looks_like_secret_name};
-use crate::model::{ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, Request, Workspace};
+use crate::model::{
+    ApiKeyPlacement, Auth, Body, BodyKind, Endpoint, Method, PartValue, Request, Workspace,
+};
 use crate::persistence::{self, OpenWorkspace, PersistenceError};
 
 /// The Postman v2.1 collection schema URL churl emits on export and (loosely)
@@ -445,7 +447,7 @@ fn map_body(body: Option<&Value>, ctx: &mut ImportCtx) -> Option<Body> {
             } else {
                 BodyKind::Text
             };
-            Some(Body { kind, content })
+            Some(Body::Simple { kind, content })
         }
         "urlencoded" => {
             let pairs = obj.get("urlencoded").and_then(Value::as_array);
@@ -461,7 +463,7 @@ fn map_body(body: Option<&Value>, ctx: &mut ImportCtx) -> Option<Body> {
                         .join("&")
                 })
                 .unwrap_or_default();
-            Some(Body {
+            Some(Body::Simple {
                 kind: BodyKind::Form,
                 content,
             })
@@ -855,22 +857,50 @@ fn postman_item(endpoint: &Endpoint) -> Value {
     })
 }
 
-/// Maps a churl [`Body`] to a Postman body object.
+/// Maps a churl [`Body`] to a Postman body object. `Multipart` (M8.6) maps to
+/// Postman's own `formdata` mode — a text part maps to a `text`-typed
+/// formdata entry, a file part to a `file`-typed one carrying `src` (the
+/// path, never read here — mirrors "import never reads files"). Not a tested
+/// round-trip contract (only curl `-F` is); this exists so a Postman export of
+/// a multipart endpoint does not silently drop the body.
 fn postman_body(body: &Body) -> Value {
-    match body.kind {
-        BodyKind::Form => {
-            let pairs: Vec<Value> = split_form(&body.content)
+    match body {
+        Body::Simple {
+            kind: BodyKind::Form,
+            content,
+        } => {
+            let pairs: Vec<Value> = split_form(content)
                 .into_iter()
                 .map(|(k, v)| json!({ "key": k, "value": v }))
                 .collect();
             json!({ "mode": "urlencoded", "urlencoded": pairs })
         }
-        BodyKind::Json => json!({
+        Body::Simple {
+            kind: BodyKind::Json,
+            content,
+        } => json!({
             "mode": "raw",
-            "raw": body.content,
+            "raw": content,
             "options": { "raw": { "language": "json" } },
         }),
-        BodyKind::Text => json!({ "mode": "raw", "raw": body.content }),
+        Body::Simple {
+            kind: BodyKind::Text,
+            content,
+        } => json!({ "mode": "raw", "raw": content }),
+        Body::Multipart(parts) => {
+            let formdata: Vec<Value> = parts
+                .iter()
+                .map(|part| match &part.value {
+                    PartValue::Text(text) => {
+                        json!({ "key": part.name, "value": text, "type": "text" })
+                    }
+                    PartValue::File { path, .. } => {
+                        json!({ "key": part.name, "src": path, "type": "file" })
+                    }
+                })
+                .collect();
+            json!({ "mode": "formdata", "formdata": formdata })
+        }
     }
 }
 
