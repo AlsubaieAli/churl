@@ -346,6 +346,7 @@ dependencies = [
  "futures",
  "insta",
  "nucleo-matcher",
+ "quick-xml 0.41.0",
  "ratatui",
  "reqwest",
  "self-replace",

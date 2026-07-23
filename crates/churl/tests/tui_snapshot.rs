@@ -1293,7 +1293,7 @@ fn every_palette_command_dispatches() {
                     "{label:?} must not open an overlay"
                 );
             }
-            Action::TogglePretty => expect_status(&mut app, "pretty: JSON body only"),
+            Action::TogglePretty => expect_status(&mut app, "pretty: not supported for this body"),
             Action::ToggleSortKeys => expect_status(&mut app, "sort: pretty JSON only"),
             // No response loaded in this fixture — the save gesture warns
             // rather than opening the destination prompt.

@@ -118,18 +118,22 @@ impl App {
 
     /// `p`: toggle raw↔pretty body rendering. Body text/line count change
     /// (and `toggle_pretty` resets folds), so reset cursor/scroll geometry and
-    /// clear the highlight cache. Pretty is JSON-only in v1 — no-op with a notice
-    /// outside a JSON body view, which would otherwise silently do nothing.
+    /// clear the highlight cache. Pretty reflows JSON, XML, and HTML bodies
+    /// (M8.7 widened this from JSON-only); a `Plain` body — or an unparseable
+    /// JSON/XML/HTML one, which silently falls back to raw inside
+    /// `reformat_body_if_needed` — has no pretty form, so this is a no-op with
+    /// a notice outside the headers view or a prettyable syntax, which would
+    /// otherwise silently do nothing.
     pub(in crate::tui::app) fn response_toggle_pretty(&mut self) {
-        let is_json_body = match self.active_response() {
+        let is_prettyable_body = match self.active_response() {
             ResponseState::Done { view } => {
                 view.view_mode() == ViewMode::Body
-                    && view.syntax() == crate::tui::highlight::SyntaxToken::Json
+                    && view.syntax() != crate::tui::highlight::SyntaxToken::Plain
             }
             _ => false,
         };
-        if !is_json_body {
-            self.notify("pretty: JSON body only");
+        if !is_prettyable_body {
+            self.notify("pretty: not supported for this body");
             return;
         }
         if let Some(view) = self.response_view_mut() {

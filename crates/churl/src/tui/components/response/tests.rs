@@ -487,6 +487,60 @@ fn malformed_json_falls_back_to_raw_no_panic() {
     assert_eq!(v.copy_all(), raw);
 }
 
+// ---- XML pretty-print (M8.7) ----
+
+fn xml_view(body: &str) -> ResponseView {
+    response_with(
+        body,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/xml".to_owned(),
+            enabled: true,
+        }],
+        false,
+    )
+}
+
+#[test]
+fn xml_pretty_reformats_minified_xml() {
+    let raw = "<root><a>1</a><b><c>2</c></b></root>";
+    let mut v = xml_view(raw);
+    assert!(!v.pretty(), "xml content-type does not default to pretty");
+    assert!(v.toggle_pretty(), "toggled on");
+    assert!(
+        v.text.lines().count() > 1,
+        "pretty XML should be multi-line, got: {:?}",
+        v.text
+    );
+    assert!(v.text.contains("<a>1</a>"));
+    assert!(v.text.contains("<c>2</c>"));
+}
+
+#[test]
+fn xml_pretty_toggle_is_byte_exact_on_copy() {
+    // The headline invariant (M8.7): the normalized pretty view must NEVER
+    // leak into what `y`/`Y` (and save) read — `raw_text`/`copy_all` stay the
+    // exact on-the-wire bytes regardless of the pretty toggle.
+    let raw = "<root><a>1</a></root>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert_ne!(v.text, raw, "displayed text is normalized/indented");
+    assert_eq!(v.copy_all(), raw, "copy must stay byte-exact");
+    assert_eq!(
+        v.raw_bytes(),
+        raw.as_bytes(),
+        "raw_bytes must stay byte-exact"
+    );
+}
+
+#[test]
+fn malformed_xml_falls_back_to_raw_no_panic() {
+    let raw = "<root><a>unclosed</root>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert_eq!(v.text, raw, "malformed XML must fall back to raw, silently");
+}
+
 #[test]
 fn toggle_pretty_bumps_generation_and_resets_folds() {
     let mut v = json_view(r#"{"a":{"b":1},"c":2}"#);

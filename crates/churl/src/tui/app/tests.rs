@@ -9293,7 +9293,7 @@ fn body_tab_browse_pretty_fold_jump_noop_on_text_kind() {
     assert!(
         app.message
             .as_ref()
-            .is_some_and(|m| m.text.contains("JSON body only")),
+            .is_some_and(|m| m.text.contains("not supported for this body")),
         "pretty must notify a no-op on a Text body: {:?}",
         app.message
     );

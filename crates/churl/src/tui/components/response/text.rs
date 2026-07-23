@@ -7,18 +7,21 @@
 
 use super::ResponseView;
 
-/// Reformats a response body for display when the viewer is in pretty mode and
-/// the body is JSON (JSON-only in v1). Parses `text` as a
-/// `serde_json::Value` and re-emits it with `to_string_pretty`. On **any** parse
-/// error — or when `pretty` is off, or the syntax is not JSON — the original
+/// Reformats a response body for display when the viewer is in pretty mode.
+/// JSON, XML, and HTML each get their own reformatter (M8.7 adds XML/HTML;
+/// JSON shipped first, M7.7); every other syntax (`Plain`) is returned
+/// unchanged. On **any** parse error — or when `pretty` is off — the original
 /// `text` is returned unchanged (silent raw fallback; never errors, never
 /// panics). Returns an owned string so the caller can store it as the
 /// displayed body.
 ///
-/// When `sort_keys` is set, every JSON object's keys are sorted A→Z recursively
-/// before emission (arrays keep element order); otherwise objects keep their
-/// server wire order (`serde_json`'s `preserve_order` feature is on, so the
-/// parsed `Value` is insertion-ordered).
+/// `sort_keys` only ever applies to the JSON arm (A→Z object-key sort,
+/// recursive; arrays keep element order) — XML/HTML have no analogous notion
+/// and ignore it.
+///
+/// This is a DISPLAY-ONLY transform: `raw_text`/`raw_bytes` (what copy and
+/// save read) are built from the untouched body and never pass through here —
+/// see `ResponseView::build`.
 pub(in crate::tui::components::response) fn reformat_body_if_needed(
     text: &str,
     syntax: crate::tui::highlight::SyntaxToken,
@@ -26,18 +29,48 @@ pub(in crate::tui::components::response) fn reformat_body_if_needed(
     sort_keys: bool,
 ) -> String {
     use crate::tui::highlight::SyntaxToken;
-    if !pretty || syntax != SyntaxToken::Json {
+    if !pretty {
         return text.to_owned();
     }
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(mut value) => {
-            if sort_keys {
-                sort_value_keys(&mut value);
+    match syntax {
+        SyntaxToken::Json => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(mut value) => {
+                if sort_keys {
+                    sort_value_keys(&mut value);
+                }
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned())
             }
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned())
-        }
-        Err(_) => text.to_owned(),
+            Err(_) => text.to_owned(),
+        },
+        SyntaxToken::Xml => reformat_xml(text).unwrap_or_else(|| text.to_owned()),
+        // HTML pretty-print lands in a follow-up commit (html5ever, gated on
+        // a `cargo deny check` pass) — raw for now, same as `Plain`.
+        SyntaxToken::Html => text.to_owned(),
+        SyntaxToken::Plain => text.to_owned(),
     }
+}
+
+/// Re-emits `text` as indented XML via `quick-xml`'s event stream (read every
+/// event, write it back through an indenting `Writer`) — whitespace is largely
+/// insignificant in XML, so a straight re-serialization reads fine. `None` on
+/// any parse error (malformed XML, or non-UTF-8-safe output), which the caller
+/// folds into the same silent raw fallback every reformatter uses.
+fn reformat_xml(text: &str) -> Option<String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+    use quick_xml::writer::Writer;
+
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => break,
+            Ok(event) => writer.write_event(event).ok()?,
+            Err(_) => return None,
+        }
+    }
+    String::from_utf8(writer.into_inner()).ok()
 }
 
 /// Recursively sorts the keys of every JSON object in `value` A→Z, in place.
