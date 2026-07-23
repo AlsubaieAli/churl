@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/AlsubaieAli/churl/compare/v0.9.1...v0.10.0) - 2026-07-23
+
+### Added
+
+- response output — save to file + HTML/XML pretty-print (M8.7) ([#118](https://github.com/AlsubaieAli/churl/pull/118))
+- *(tui)* request body browse/edit gate + de-globalize body-type (M8.6.1) ([#117](https://github.com/AlsubaieAli/churl/pull/117))
+- multipart / file upload (M8.6) ([#115](https://github.com/AlsubaieAli/churl/pull/115))
+
 ## [0.9.1](https://github.com/AlsubaieAli/churl/compare/v0.9.0...v0.9.1) - 2026-07-21
 
 ### Fixed
