@@ -68,11 +68,13 @@ pub(super) fn save_value<T: Serialize>(path: &Path, value: &T) -> Result<(), Per
 /// directory so the rename itself survives power loss. On any error the temp file is
 /// removed best-effort and the underlying I/O error is returned.
 ///
-/// `pub(crate)` (re-exported by `persistence::mod`) rather than `pub(super)`: the
-/// global-config settings writer (`crate::config::save_defaults`, M8.5) reuses this
-/// same durable-write primitive instead of duplicating it — the only cross-module
-/// caller, everything else in `persistence` reaches it via the local `use` below.
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// `pub` (re-exported by `persistence::mod`): the global-config settings writer
+/// (`crate::config::save_defaults`, M8.5) reuses this same durable-write
+/// primitive instead of duplicating it, and the `churl` binary's headless
+/// `-o/--output` write path and TUI save-response-body gesture (M8.7) both call
+/// it directly across the crate boundary for the exact same reason — one
+/// durable-write primitive, never duplicated.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));

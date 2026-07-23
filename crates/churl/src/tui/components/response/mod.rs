@@ -86,6 +86,20 @@ pub struct ResponseView {
     /// bytes, never reformatted. Copy (`y`/`Y`) reads from here so it stays
     /// byte-exact regardless of the pretty toggle.
     raw_text: String,
+    /// The exact on-the-wire response body bytes (M8.7) — never lossy, unlike
+    /// `raw_text` (a `String::from_utf8_lossy` decode, which replaces invalid
+    /// UTF-8 with U+FFFD and so is NOT byte-exact for a binary body). Save
+    /// (`S`) reads this so a binary response round-trips byte-for-byte; empty
+    /// for [`Self::build_over_text`] (the M8.6.1 request-body-browse view has
+    /// no response to save — callers guard on emptiness).
+    raw_bytes: Vec<u8>,
+    /// The file extension the `S` save-response-body prompt seeds its default
+    /// filename with, sniffed from the response `Content-Type` at build time
+    /// (see [`crate::tui::highlight::SyntaxToken::extension_for_content_type`]).
+    /// Meaningless (defaulted from `syntax`) for [`Self::build_over_text`],
+    /// which carries no response/Content-Type at all — harmless, since
+    /// `raw_bytes` is empty there and save is guarded on that first.
+    save_extension: &'static str,
     /// Byte offset of each line start (into `text`). Empty for an empty body.
     line_offsets: Vec<usize>,
     /// Byte offset of each line start (into `raw_text`). Sanitize is
@@ -166,6 +180,7 @@ impl ResponseView {
             .find(|header| header.name.eq_ignore_ascii_case("content-type"))
             .map(|header| header.value.as_str());
         let syntax = SyntaxToken::from_content_type(content_type);
+        let save_extension = SyntaxToken::extension_for_content_type(content_type);
         // Pretty-by-default for json-ish content-types; raw for
         // everything else. The reformat is a transform *before* the fold/wrap/
         // viewport stages — `text`/`line_offsets` describe what is displayed.
@@ -204,6 +219,8 @@ impl ResponseView {
             raw_line_offsets,
             text,
             raw_text,
+            raw_bytes: response.body.clone(),
+            save_extension,
             headers_text,
             headers_offsets,
             view_mode: ViewMode::Body,
@@ -229,7 +246,10 @@ impl ResponseView {
     /// does. `generation` should be bumped by the caller on every rebuild, so a
     /// stale render-geometry memo elsewhere is never mistaken for this
     /// instance's (though a fresh `Self` always starts with an empty memo
-    /// regardless).
+    /// regardless). `raw_bytes` is deliberately left EMPTY (M8.7) — there is no
+    /// *response* here to save, only the request body this view happens to
+    /// render through the response pipeline; the `S` save-response-body
+    /// handler guards on emptiness rather than saving this view's text.
     pub fn build_over_text(text: &str, syntax: SyntaxToken, generation: u64) -> Self {
         let raw_text = text.to_owned();
         let pretty = syntax == SyntaxToken::Json;
@@ -254,6 +274,13 @@ impl ResponseView {
             raw_line_offsets,
             text,
             raw_text,
+            raw_bytes: Vec::new(),
+            save_extension: match syntax {
+                SyntaxToken::Json => "json",
+                SyntaxToken::Html => "html",
+                SyntaxToken::Xml => "xml",
+                SyntaxToken::Plain => "txt",
+            },
             headers_text: String::new(),
             headers_offsets: Vec::new(),
             view_mode: ViewMode::Body,
@@ -350,6 +377,31 @@ impl ResponseView {
     /// The retained body size in bytes (the truncated size when truncated).
     pub fn body_len(&self) -> usize {
         self.byte_size
+    }
+
+    /// The exact on-the-wire response body bytes, for the `S` save-response-body
+    /// gesture (M8.7) — byte-exact regardless of view mode or the pretty
+    /// toggle, unlike [`Self::copy_all`] (which is view-mode-dependent text and,
+    /// for a non-UTF-8 body, `raw_text`'s lossy decode). Empty for a view built
+    /// via [`Self::build_over_text`] (no response to save there).
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+
+    /// The file extension sniffed from the response `Content-Type` at build
+    /// time, for the `S` prompt's default filename (M8.7).
+    pub fn save_extension(&self) -> &'static str {
+        self.save_extension
+    }
+
+    /// Whether the response body was truncated at the size cap — unlike
+    /// [`Self::truncated`] (which is gated to the body view, since it answers
+    /// "is what I'm looking at right now truncated"), this always reflects the
+    /// underlying response regardless of view mode. Used by save (`S`), which
+    /// always saves the response BODY bytes even while the headers view is
+    /// showing.
+    pub fn body_truncated(&self) -> bool {
+        self.truncated
     }
 
     /// The logical line shown at display-row `row`, computed through the current
