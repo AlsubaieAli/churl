@@ -541,6 +541,112 @@ fn malformed_xml_falls_back_to_raw_no_panic() {
     assert_eq!(v.text, raw, "malformed XML must fall back to raw, silently");
 }
 
+// ---- HTML pretty-print (M8.7) ----
+
+fn html_view(body: &str) -> ResponseView {
+    response_with(
+        body,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/html; charset=utf-8".to_owned(),
+            enabled: true,
+        }],
+        false,
+    )
+}
+
+#[test]
+fn html_pretty_reformats_minified_html() {
+    let raw = "<html><head><title>T</title></head><body><p>hi</p></body></html>";
+    let mut v = html_view(raw);
+    assert!(!v.pretty(), "html content-type does not default to pretty");
+    assert!(v.toggle_pretty());
+    assert!(
+        v.text.lines().count() > 1,
+        "pretty HTML should be multi-line, got: {:?}",
+        v.text
+    );
+    assert!(v.text.contains("<title>"));
+    assert!(v.text.contains("<p>"));
+    assert!(v.text.contains("hi"));
+}
+
+#[test]
+fn html_pretty_toggle_is_byte_exact_on_copy() {
+    // The headline invariant (M8.7): the normalized pretty view must NEVER
+    // leak into what `y`/`Y` (and save) read.
+    let raw = "<div><span>a</span><span>b</span></div>";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert_ne!(v.text, raw, "displayed text is normalized/indented");
+    assert_eq!(v.copy_all(), raw, "copy must stay byte-exact");
+    assert_eq!(
+        v.raw_bytes(),
+        raw.as_bytes(),
+        "raw_bytes must stay byte-exact"
+    );
+}
+
+#[test]
+fn html_pretty_self_closes_void_elements() {
+    let raw = "<div>line one<br>line two<img src=\"x.png\"></div>";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("<br />"),
+        "void element self-closes: {:?}",
+        v.text
+    );
+    assert!(
+        v.text.contains("<img src=\"x.png\" />"),
+        "void element with attrs self-closes: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_preserves_pre_whitespace_verbatim() {
+    let raw = "<pre>  line one\n    line two  \n</pre>";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("  line one\n    line two  \n"),
+        "pre content must survive with its exact whitespace: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_preserves_script_content_verbatim_unescaped() {
+    // Script content is raw JS, not HTML text — a literal `<`/`&` inside it
+    // must NOT be entity-escaped on reformat (that would misrepresent the
+    // source), and its exact layout must survive.
+    let raw = "<script>if (a < b) { x(); }</script>";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("if (a < b) { x(); }"),
+        "script body must be verbatim, unescaped: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_never_panics_on_ragged_markup_and_falls_back_when_empty() {
+    // html5ever is a browser-grade, always-recovers parser — there is no
+    // "malformed HTML" that makes it error the way JSON/XML would. Prove a
+    // ragged, half-open, mismatched-tag document reformats without panicking.
+    let raw = "<div><p>unclosed<b>bold</div>stray</html>";
+    let mut v = html_view(raw);
+    v.toggle_pretty(); // must not panic
+    assert!(v.pretty());
+
+    // A genuinely empty body has nothing to indent — falls back to raw (empty).
+    let mut empty = html_view("");
+    empty.toggle_pretty();
+    assert_eq!(empty.text, "");
+}
+
 #[test]
 fn toggle_pretty_bumps_generation_and_resets_folds() {
     let mut v = json_view(r#"{"a":{"b":1},"c":2}"#);

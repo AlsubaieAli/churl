@@ -43,9 +43,7 @@ pub(in crate::tui::components::response) fn reformat_body_if_needed(
             Err(_) => text.to_owned(),
         },
         SyntaxToken::Xml => reformat_xml(text).unwrap_or_else(|| text.to_owned()),
-        // HTML pretty-print lands in a follow-up commit (html5ever, gated on
-        // a `cargo deny check` pass) — raw for now, same as `Plain`.
-        SyntaxToken::Html => text.to_owned(),
+        SyntaxToken::Html => reformat_html(text).unwrap_or_else(|| text.to_owned()),
         SyntaxToken::Plain => text.to_owned(),
     }
 }
@@ -71,6 +69,187 @@ fn reformat_xml(text: &str) -> Option<String> {
         }
     }
     String::from_utf8(writer.into_inner()).ok()
+}
+
+/// Element names with NO closing tag / no children per the HTML spec
+/// ("void elements") — the indenting walk self-closes these instead of
+/// recursing into (nonexistent) children.
+const HTML_VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Elements whose content is whitespace-significant: reindenting or trimming
+/// their text would visibly change the content (a `<pre>`-formatted table, a
+/// `<textarea>` default value, or `<script>`/`<style>` source). The indenting
+/// walk preserves these subtrees VERBATIM instead of recursing indented.
+const HTML_VERBATIM_ELEMENTS: &[&str] = &["pre", "textarea", "script", "style"];
+
+/// Parses `text` as HTML5 (whole-document, browser-grade error recovery —
+/// html5ever's parser does not reject malformed input the way a strict XML/
+/// JSON parser does; it always produces SOME tree, exactly like a browser
+/// would) and re-emits it as indented markup via a custom walk — html5ever's
+/// own serializer emits no indentation at all, so the indenting walk here is
+/// the actual work. `None` only for a genuinely empty body (nothing to
+/// indent), folded by the caller into the same silent raw-fallback every
+/// reformatter uses.
+fn reformat_html(text: &str) -> Option<String> {
+    use html5ever::driver::ParseOpts;
+    use html5ever::parse_document;
+    use html5ever::tendril::TendrilSink;
+    use markup5ever_rcdom::RcDom;
+
+    if text.trim().is_empty() {
+        return None;
+    }
+    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(text);
+    let mut out = String::new();
+    for child in dom.document.children.borrow().iter() {
+        write_html_indented(child, 0, &mut out);
+    }
+    Some(out)
+}
+
+/// The indenting recursive walk: two spaces per depth level (mirrors the XML
+/// reformatter's indent width), one node per line, except a
+/// [`HTML_VERBATIM_ELEMENTS`] subtree, which is written through
+/// [`write_html_verbatim`] instead — no indentation, no trimming, so its exact
+/// whitespace survives.
+fn write_html_indented(handle: &markup5ever_rcdom::Handle, depth: usize, out: &mut String) {
+    use markup5ever_rcdom::NodeData;
+
+    let indent = "  ".repeat(depth);
+    match &handle.data {
+        NodeData::Document => {
+            for child in handle.children.borrow().iter() {
+                write_html_indented(child, depth, out);
+            }
+        }
+        NodeData::Doctype { name, .. } => {
+            out.push_str(&indent);
+            out.push_str("<!DOCTYPE ");
+            out.push_str(name);
+            out.push_str(">\n");
+        }
+        NodeData::Text { contents } => {
+            // Insignificant inter-tag whitespace (html5ever emits a Text node
+            // for it) collapses to nothing rather than a blank indented line.
+            let trimmed = contents.borrow();
+            let trimmed = trimmed.trim();
+            if !trimmed.is_empty() {
+                out.push_str(&indent);
+                out.push_str(&escape_html_text(trimmed));
+                out.push('\n');
+            }
+        }
+        NodeData::Comment { contents } => {
+            out.push_str(&indent);
+            out.push_str("<!--");
+            out.push_str(contents);
+            out.push_str("-->\n");
+        }
+        NodeData::ProcessingInstruction { target, contents } => {
+            out.push_str(&indent);
+            out.push_str("<?");
+            out.push_str(target);
+            out.push(' ');
+            out.push_str(contents);
+            out.push_str("?>\n");
+        }
+        NodeData::Element { name, attrs, .. } => {
+            // html5ever already lowercases HTML element/attribute local names
+            // per the tokenizer spec, so no extra normalization is needed here.
+            let tag: &str = &name.local;
+            out.push_str(&indent);
+            out.push('<');
+            out.push_str(tag);
+            for attr in attrs.borrow().iter() {
+                out.push(' ');
+                out.push_str(&attr.name.local);
+                out.push_str("=\"");
+                out.push_str(&escape_html_attr(&attr.value));
+                out.push('"');
+            }
+            if HTML_VOID_ELEMENTS.contains(&tag) {
+                out.push_str(" />\n");
+                return;
+            }
+            out.push_str(">\n");
+            if HTML_VERBATIM_ELEMENTS.contains(&tag) {
+                for child in handle.children.borrow().iter() {
+                    write_html_verbatim(child, out);
+                }
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else {
+                for child in handle.children.borrow().iter() {
+                    write_html_indented(child, depth + 1, out);
+                }
+            }
+            out.push_str(&indent);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push_str(">\n");
+        }
+    }
+}
+
+/// Writes a [`HTML_VERBATIM_ELEMENTS`] subtree with NO indentation and NO
+/// trimming — the exact original whitespace is what makes `<pre>`/
+/// `<textarea>`/`<script>`/`<style>` content meaningful, so reindenting it
+/// (like every other element) would corrupt it. Nested elements (legal inside
+/// `pre`/`textarea`) still get their tags written, just with no added
+/// structure around them.
+fn write_html_verbatim(handle: &markup5ever_rcdom::Handle, out: &mut String) {
+    use markup5ever_rcdom::NodeData;
+
+    match &handle.data {
+        NodeData::Text { contents } => out.push_str(&contents.borrow()),
+        NodeData::Comment { contents } => {
+            out.push_str("<!--");
+            out.push_str(contents);
+            out.push_str("-->");
+        }
+        NodeData::Element { name, attrs, .. } => {
+            let tag: &str = &name.local;
+            out.push('<');
+            out.push_str(tag);
+            for attr in attrs.borrow().iter() {
+                out.push(' ');
+                out.push_str(&attr.name.local);
+                out.push_str("=\"");
+                out.push_str(&escape_html_attr(&attr.value));
+                out.push('"');
+            }
+            if HTML_VOID_ELEMENTS.contains(&tag) {
+                out.push_str(" />");
+                return;
+            }
+            out.push('>');
+            for child in handle.children.borrow().iter() {
+                write_html_verbatim(child, out);
+            }
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        }
+        NodeData::Document | NodeData::Doctype { .. } | NodeData::ProcessingInstruction { .. } => {}
+    }
+}
+
+/// Escapes text-node content for re-embedding in the reformatted markup.
+/// `&` first, so escaping `<`/`>` never double-escapes an ampersand they
+/// introduce.
+fn escape_html_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escapes a double-quoted attribute value the same way.
+fn escape_html_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;")
 }
 
 /// Recursively sorts the keys of every JSON object in `value` A→Z, in place.
