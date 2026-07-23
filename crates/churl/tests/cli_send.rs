@@ -33,6 +33,23 @@ fn churl_with_config(args: &[&str], config: &std::path::Path) -> Output {
         .expect("failed to spawn churl")
 }
 
+/// Runs the binary with `cwd` set — for `-o <relative-path>` tests, which
+/// must resolve against the process's current directory. `CHURL_CONFIG`
+/// still points at a plain nonexistent path (never written, so sharing the
+/// path across calls is harmless — see [`churl`]).
+fn churl_in(dir: &std::path::Path, args: &[&str]) -> Output {
+    let missing_config = std::env::temp_dir().join(format!(
+        "churl-cli-send-test-nonexistent-config-{}.toml",
+        std::process::id()
+    ));
+    Command::new(env!("CARGO_BIN_EXE_churl"))
+        .args(args)
+        .current_dir(dir)
+        .env("CHURL_CONFIG", missing_config)
+        .output()
+        .expect("failed to spawn churl")
+}
+
 fn envelope(output: &Output) -> Value {
     let stdout = String::from_utf8(output.stdout.clone()).expect("stdout is utf-8");
     serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
@@ -723,4 +740,106 @@ async fn send_verbose_json_masking_adversarial_no_raw_secrets_anywhere() {
             .any(|h| h["name"] == "X-Api-Token" && h["value"] == "••••••"),
         "{headers:?}"
     );
+}
+
+// ---- M8.7: `-o/--output` ----
+
+/// `send -o <file>` writes the raw response body to disk byte-exact, and the
+/// `--json` envelope keeps printing to stdout independently of it.
+#[tokio::test]
+async fn send_output_flag_writes_raw_bytes_and_json_envelope_is_unaffected() {
+    let server = MockServer::start().await;
+    let body: Vec<u8> = vec![0x00, 0x01, 0xfe, 0xff, b'z'];
+    Mock::given(method("GET"))
+        .and(path("/bin"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let out_path = dir.path().join("out.bin");
+    let url = format!("{}/bin", server.uri());
+    let output = churl(&["--json", "send", &url, "-o", out_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&out_path).unwrap(), body);
+
+    let env = envelope(&output);
+    assert_eq!(env["data"]["response"]["body_encoding"], "base64");
+}
+
+/// A relative `-o` path resolves against the process cwd.
+#[tokio::test]
+async fn send_output_relative_path_resolves_against_cwd() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("{}/ping", server.uri());
+    let output = churl_in(dir.path(), &["--json", "send", &url, "-o", "saved.txt"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("saved.txt")).unwrap(),
+        "pong"
+    );
+}
+
+/// `-o -` writes the raw body to stdout (ahead of the JSON envelope line).
+#[tokio::test]
+async fn send_output_dash_writes_to_stdout() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong-body"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&["--json", "send", &url, "-o", "-"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("pong-body"),
+        "raw body must be written to stdout: {stdout:?}"
+    );
+    // The envelope is still there too (independent of -o).
+    assert!(stdout.contains("\"schema_version\""));
+}
+
+/// A write failure surfaces as `output-write-failed`, exit 5 — a
+/// post-execution I/O failure, not a request failure.
+#[tokio::test]
+async fn send_output_write_failure_is_exit_5_output_write_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bad_target = dir.path().join("not-a-file");
+    std::fs::create_dir(&bad_target).unwrap();
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&["--json", "send", &url, "-o", bad_target.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(5));
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "output-write-failed");
 }

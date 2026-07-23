@@ -103,6 +103,12 @@ enum Command {
         /// succeeded — see `docs/CLI.md`, "Assertions".
         #[arg(long = "assert", value_name = "EXPR")]
         assert: Vec<String>,
+        /// Write the raw response body to this file (byte-exact — no lossy
+        /// utf8/base64 round-trip), independent of `--json` (the envelope
+        /// still prints to stdout). `-` means stdout. A relative path
+        /// resolves against the current directory. See `docs/CLI.md`.
+        #[arg(short = 'o', long = "output", value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Run a saved request sequence headlessly — no TUI. Resolves
     /// `sequences/<name>.toml` in the cwd workspace, runs each step end-to-end
@@ -189,6 +195,12 @@ enum Command {
         /// request itself succeeded — see `docs/CLI.md`, "Assertions".
         #[arg(long = "assert", value_name = "EXPR")]
         assert: Vec<String>,
+        /// Write the raw response body to this file (byte-exact — no lossy
+        /// utf8/base64 round-trip), independent of `--json` (the envelope
+        /// still prints to stdout). `-` means stdout. A relative path
+        /// resolves against the current directory. See `docs/CLI.md`.
+        #[arg(short = 'o', long = "output", value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
@@ -327,6 +339,7 @@ async fn main() -> Result<()> {
             endpoint,
             verbose,
             assert,
+            output,
         }) => {
             // Every fallible pre-flight step (config, cwd, resolution, execution)
             // funnels into one `Result<ExecData, CliError>` so `emit` owns the
@@ -344,6 +357,7 @@ async fn main() -> Result<()> {
                     insecure: cli.insecure,
                     verbose,
                     cli_asserts: assert,
+                    output,
                 };
                 run_cmd::run(args, &cwd, &runtime).await
             }
@@ -417,6 +431,7 @@ async fn main() -> Result<()> {
             body,
             verbose,
             assert,
+            output,
         }) => {
             let cli_vars = vars_map(&cli.vars);
             let result = async {
@@ -435,6 +450,7 @@ async fn main() -> Result<()> {
                     insecure: cli.insecure,
                     verbose,
                     cli_asserts: assert,
+                    output,
                 };
                 send_cmd::run(args, &cwd, &runtime).await
             }

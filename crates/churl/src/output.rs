@@ -103,6 +103,13 @@ pub enum ErrorKind {
     /// asked for more than the configured maximum), hence band 5. Additive
     /// (M8.4.2). Raise `[load] max_total`/`max_concurrency` to allow it.
     LoadCapExceeded,
+    /// `-o/--output <path>` (M8.7): the request/response succeeded, but
+    /// writing the raw response body to `path` failed (bad/permission-denied
+    /// path, disk error). A post-execution I/O failure — grouped in band 5
+    /// alongside the other write/input failures (`ImportWriteFailed`).
+    /// Additive: a schema-compatible new closed-enum variant, per the module
+    /// docs' "new `ErrorKind` variants are additive" rule.
+    OutputWriteFailed,
 }
 
 impl ErrorKind {
@@ -119,7 +126,8 @@ impl ErrorKind {
             ErrorKind::NotACurlCommand
             | ErrorKind::ImportWriteFailed
             | ErrorKind::InvalidAssertion
-            | ErrorKind::LoadCapExceeded => 5,
+            | ErrorKind::LoadCapExceeded
+            | ErrorKind::OutputWriteFailed => 5,
         }
     }
 }

@@ -5,7 +5,7 @@
 //! absence is not an error.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use churl_core::http::{ClientConfig, ExecuteOptions};
 use churl_core::model::{Body, Header, Method, Request};
@@ -41,6 +41,11 @@ pub struct SendArgs {
     /// Raw `--assert` flag strings — `send` has no persisted endpoint, so
     /// these are the whole assertion set.
     pub cli_asserts: Vec<String>,
+    /// `-o/--output <path>` (M8.7): when set, the raw response body bytes are
+    /// written here (byte-exact, no lossy utf8/base64 round-trip), independent
+    /// of `--json` (the envelope keeps printing to stdout either way). `-`
+    /// means stdout.
+    pub output: Option<PathBuf>,
 }
 
 pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<ExecData, CliError> {
@@ -122,7 +127,16 @@ pub async fn run(args: SendArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exe
     };
 
     let assertions = crate::headless::parse_cli_assertions(&args.cli_asserts)?;
-    run_execution(request, scopes, inputs, &assertions, args.verbose).await
+    run_execution(
+        request,
+        scopes,
+        inputs,
+        &assertions,
+        args.verbose,
+        args.output.as_deref(),
+        cwd,
+    )
+    .await
 }
 
 /// Parses a `-H`/`--header` value as `NAME:VALUE` (curl shape), trimming
