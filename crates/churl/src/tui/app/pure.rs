@@ -264,6 +264,96 @@ pub(super) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Resolves a user-typed `S` save-response-body destination (M8.7) —
+/// curl `-o`-style, deliberately NOT [`export_target`]'s workspace-confined
+/// resolution: this is a download destination, not a workspace artifact.
+/// A leading `~`/`~/…` expands against `home` (when known); a relative path
+/// resolves against `cwd`; an absolute path is honored as-is anywhere on
+/// disk. `.`/`..` components are normalized lexically (mirroring
+/// `export_target`) but never checked against any root — an escaping/rooted
+/// path is exactly the point.
+pub(super) fn resolve_save_path(
+    cwd: &Path,
+    home: Option<&Path>,
+    input: &str,
+) -> Result<PathBuf, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("no path given".to_owned());
+    }
+    let expanded: PathBuf = if input == "~" {
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(input))
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        match home {
+            Some(home) => home.join(rest),
+            None => PathBuf::from(input),
+        }
+    } else {
+        PathBuf::from(input)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    Ok(lexical_normalize(&joined))
+}
+
+#[cfg(test)]
+mod resolve_save_path_tests {
+    use super::resolve_save_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn empty_input_is_an_error() {
+        assert!(resolve_save_path(Path::new("/cwd"), None, "").is_err());
+        assert!(resolve_save_path(Path::new("/cwd"), None, "   ").is_err());
+    }
+
+    #[test]
+    fn relative_path_resolves_against_cwd() {
+        let out = resolve_save_path(Path::new("/home/alice/work"), None, "out.json").unwrap();
+        assert_eq!(out, PathBuf::from("/home/alice/work/out.json"));
+    }
+
+    #[test]
+    fn absolute_path_is_honored_verbatim() {
+        let out = resolve_save_path(Path::new("/cwd"), None, "/tmp/somewhere/out.bin").unwrap();
+        assert_eq!(out, PathBuf::from("/tmp/somewhere/out.bin"));
+    }
+
+    #[test]
+    fn tilde_expands_against_home() {
+        let home = Path::new("/home/alice");
+        let out = resolve_save_path(Path::new("/cwd"), Some(home), "~/downloads/x.json").unwrap();
+        assert_eq!(out, PathBuf::from("/home/alice/downloads/x.json"));
+    }
+
+    #[test]
+    fn bare_tilde_expands_to_home_itself() {
+        let home = Path::new("/home/alice");
+        let out = resolve_save_path(Path::new("/cwd"), Some(home), "~").unwrap();
+        assert_eq!(out, PathBuf::from("/home/alice"));
+    }
+
+    #[test]
+    fn tilde_without_a_known_home_is_left_literal() {
+        // No confinement check here (unlike `export_target`) — an unexpandable
+        // `~foo` is simply treated as a literal relative path component.
+        let out = resolve_save_path(Path::new("/cwd"), None, "~/x.json").unwrap();
+        assert_eq!(out, PathBuf::from("/cwd/~/x.json"));
+    }
+
+    #[test]
+    fn dot_dot_escapes_freely_no_confinement() {
+        // Deliberately NOT `export_target`'s workspace confinement: a
+        // download-style destination may point anywhere on disk.
+        let out = resolve_save_path(Path::new("/home/alice/work"), None, "../../etc/out").unwrap();
+        assert_eq!(out, PathBuf::from("/home/etc/out"));
+    }
+}
+
 /// Resolves the session proxy from the M8 precedence chain: CLI `--proxy` >
 /// per-workspace `churl.toml` > global config `proxy`. A `None` result means no
 /// explicit proxy — the caller then calls no `.proxy()` at all, so reqwest honors

@@ -564,6 +564,104 @@ fn truncated_json_falls_back_to_raw_and_keeps_marker() {
     assert!(v.truncated(), "truncation marker is preserved");
 }
 
+// ---- raw_bytes / save_extension (M8.7 save-response-body) ----
+
+#[test]
+fn raw_bytes_is_byte_exact_for_non_utf8_body() {
+    // The invariant `raw_bytes` exists for: `raw_text` is a LOSSY UTF-8 decode
+    // (invalid bytes become U+FFFD), so it is not byte-exact for a binary
+    // body. `raw_bytes` must be the literal wire bytes, unaffected by the
+    // lossy decode that built `raw_text`.
+    let body: Vec<u8> = vec![0xff, 0xfe, b'h', b'i', 0x00, 0x01];
+    let response = Response {
+        status: 200,
+        headers: Vec::new(),
+        body: body.clone(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(5),
+        },
+    };
+    let v = ResponseView::build(&response, 1);
+    assert_eq!(v.raw_bytes(), body.as_slice());
+    // Sanity: the lossy text decode indeed differs from the raw bytes here
+    // (replacement chars), proving this body actually exercises the gap.
+    assert_ne!(v.raw_text.as_bytes(), body.as_slice());
+}
+
+#[test]
+fn build_over_text_leaves_raw_bytes_empty() {
+    // The Body-tab request-body-browse view (M8.6.1) has no *response* to
+    // save — `raw_bytes` must stay empty so the save handler's emptiness
+    // guard fires there.
+    let v = ResponseView::build_over_text("hello", crate::tui::highlight::SyntaxToken::Plain, 1);
+    assert!(v.raw_bytes().is_empty());
+}
+
+#[test]
+fn save_extension_sniffed_from_content_type() {
+    let json = response_with(
+        r#"{"a":1}"#,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/json".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(json.save_extension(), "json");
+
+    let html = response_with(
+        "<html></html>",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/html; charset=utf-8".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(html.save_extension(), "html");
+
+    let plain_text = response_with(
+        "hello",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/plain".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(plain_text.save_extension(), "txt");
+
+    let binary = response_with(
+        "ignored",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/octet-stream".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(binary.save_extension(), "bin");
+
+    let no_header = response_with("ignored", Vec::new(), false);
+    assert_eq!(no_header.save_extension(), "bin");
+}
+
+#[test]
+fn body_truncated_ignores_view_mode() {
+    // `truncated()` is gated to the body view (it answers "is what's on
+    // screen right now truncated"); `body_truncated()` must stay true
+    // regardless, since save always saves the response BODY bytes.
+    let mut v = response_with("partial", Vec::new(), true);
+    assert!(v.truncated());
+    assert!(v.body_truncated());
+    v.toggle_view_mode();
+    assert!(!v.truncated(), "headers view is never truncated");
+    assert!(v.body_truncated(), "body_truncated ignores view mode");
+}
+
 #[test]
 fn copy_all_is_raw_even_when_pretty() {
     // `y` copies raw on-the-wire bytes even while the body is shown pretty.

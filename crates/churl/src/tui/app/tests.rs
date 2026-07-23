@@ -5912,6 +5912,157 @@ fn failure_copy_text_shape() {
     );
 }
 
+// ---- M8.7: `S` save-response-body ----
+
+/// Builds a `Done` JSON response with the given headers/body over a loaded
+/// endpoint named `name`, Response pane focused — the M8.7 save-gesture
+/// fixture.
+fn save_app(name: &str, headers: Vec<Header>, body: Vec<u8>, truncated: bool) -> App {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    let mut selected = selected_with("a.toml", None);
+    selected.endpoint.name = name.to_owned();
+    app.open_or_focus_buffer(selected);
+    let response = Response {
+        status: 200,
+        headers,
+        body,
+        truncated,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(3),
+        },
+    };
+    *app.response_mut() = ResponseState::Done {
+        view: ResponseView::build(&response, 1),
+    };
+    app.set_focus(Pane::Response);
+    app
+}
+
+#[test]
+fn save_response_body_opens_prompt_seeded_with_slug_and_sniffed_extension() {
+    let mut app = save_app(
+        "Get user!!",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/json".to_owned(),
+            enabled: true,
+        }],
+        br#"{"id":1}"#.to_vec(),
+        false,
+    );
+    app.handle_key(shift('S')).unwrap();
+    assert!(matches!(
+        app.mode,
+        Mode::Prompt(PromptPurpose::SaveResponseBody)
+    ));
+    assert_eq!(app.prompt_editor.text(), "get-user.json");
+}
+
+#[test]
+fn save_response_body_guards_against_empty_body() {
+    let mut app = save_app("ep", Vec::new(), Vec::new(), false);
+    app.handle_key(shift('S')).unwrap();
+    assert!(
+        !matches!(app.mode, Mode::Prompt(PromptPurpose::SaveResponseBody)),
+        "an empty body must never open the save prompt"
+    );
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("nothing to save — empty body")
+    );
+}
+
+#[test]
+fn save_response_body_guards_when_no_response() {
+    let mut app = App::new(None, KeyMap::default()).unwrap();
+    app.open_or_focus_buffer(selected_with("a.toml", None));
+    app.set_focus(Pane::Response);
+    assert!(matches!(app.active_response(), ResponseState::Idle));
+    app.begin_save_response_body();
+    assert!(!matches!(
+        app.mode,
+        Mode::Prompt(PromptPurpose::SaveResponseBody)
+    ));
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("nothing to save")
+    );
+}
+
+#[test]
+fn save_response_body_writes_raw_bytes_byte_exact() {
+    // A non-UTF-8 body proves the write uses `raw_bytes`, not the lossy
+    // `raw_text` decode `copy_all` would return.
+    let raw_body: Vec<u8> = vec![0xff, 0xfe, b'o', b'k', 0x00];
+    let mut app = save_app("bin ep", Vec::new(), raw_body.clone(), false);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out.bin");
+    app.commit_save_response_body(target.display().to_string());
+    let on_disk = std::fs::read(&target).unwrap();
+    assert_eq!(on_disk, raw_body, "saved bytes must be byte-exact");
+    assert!(
+        app.message
+            .as_ref()
+            .unwrap()
+            .text
+            .contains(&format!("saved {} bytes", raw_body.len())),
+        "success message reports the byte count: {:?}",
+        app.message
+    );
+}
+
+#[test]
+fn save_response_body_warns_loudly_on_truncation() {
+    let body = b"partial-bo".to_vec();
+    let mut app = save_app("ep", Vec::new(), body, true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out.bin");
+    app.commit_save_response_body(target.display().to_string());
+    assert!(target.exists(), "the truncated body is still saved");
+    assert!(
+        app.message.as_ref().unwrap().text.contains("truncated"),
+        "truncation must be surfaced loudly, never silent: {:?}",
+        app.message
+    );
+}
+
+#[test]
+fn save_response_body_creates_missing_parent_dirs() {
+    let mut app = save_app("ep", Vec::new(), b"hi".to_vec(), false);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("nested/deeper/out.bin");
+    app.commit_save_response_body(target.display().to_string());
+    assert_eq!(std::fs::read(&target).unwrap(), b"hi");
+}
+
+#[test]
+fn save_response_body_overwrites_existing_file() {
+    let mut app = save_app("ep", Vec::new(), b"new-content".to_vec(), false);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out.bin");
+    std::fs::write(&target, b"stale-content-longer").unwrap();
+    app.commit_save_response_body(target.display().to_string());
+    assert_eq!(std::fs::read(&target).unwrap(), b"new-content");
+}
+
+#[test]
+fn save_response_body_on_body_browse_surface_guards_against_empty() {
+    // The Body-tab request-body-browse view (M8.6.1) has no *response* — `S`
+    // must fall through to the same emptiness guard, never save the request
+    // body it happens to render through this shared viewer.
+    let mut app = body_browse_app("{\n  \"a\": 1\n}");
+    app.handle_key(shift('S')).unwrap();
+    assert!(
+        !matches!(app.mode, Mode::Prompt(PromptPurpose::SaveResponseBody)),
+        "body-browse has no response body to save"
+    );
+    assert_eq!(
+        app.message.as_ref().map(|m| m.text.as_str()),
+        Some("nothing to save — empty body")
+    );
+}
+
 /// `j`/`k`/`g`/`G`/`Ctrl-D` move the runner Response cursor through the SAME
 /// path the main pane uses (mode-aware geometry), not a local table.
 #[test]

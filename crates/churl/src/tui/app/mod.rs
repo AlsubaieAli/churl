@@ -521,6 +521,16 @@ fn nothing_to_copy_message(state: &ResponseState) -> &'static str {
     }
 }
 
+/// The status message for an `S` save-response-body attempt on a row with no
+/// response to save (M8.7) — mirrors [`nothing_to_copy_message`]'s per-state
+/// specificity. Never a silent no-op.
+fn nothing_to_save_message(state: &ResponseState) -> &'static str {
+    match state {
+        ResponseState::Dropped { .. } => "nothing to save — response body not retained",
+        _ => "nothing to save",
+    }
+}
+
 /// The on-disk stem a create/rename landed on, or `None` when it matched the
 /// naive slug of the typed name (no disambiguation happened). Used to fail loud
 /// when a reserved-name collision bumped the filename — the user must see
@@ -2337,6 +2347,7 @@ impl App {
             Action::StructuralPrev => self.response_structural_jump(false),
             Action::CopyResponse => self.response_copy_view(),
             Action::CopyLine => self.response_copy_line(),
+            Action::SaveResponseBody => self.begin_save_response_body(),
             Action::ScrollBodyLeft => self.response_scroll_h(false),
             Action::ScrollBodyRight => self.response_scroll_h(true),
             // `<leader>f` reuses the endpoint-search overlay as the request picker.
@@ -3085,7 +3096,7 @@ pub use state::{
 // `tests` — resolve them unqualified, exactly as before the split.
 use pure::{
     auth_field_count, auth_field_text, default_export_path, export_target, merge_query_params,
-    part_value_is_empty, split_query, toggle_auth_placement, write_auth_field,
+    part_value_is_empty, resolve_save_path, split_query, toggle_auth_placement, write_auth_field,
 };
 pub use render::render;
 // Only the `tests` child module calls this render helper directly; re-exported

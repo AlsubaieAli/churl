@@ -203,6 +203,10 @@ pub enum Action {
     CopyResponse,
     /// Copy the response cursor's logical line to the clipboard.
     CopyLine,
+    /// Open a typed-path prompt to save the response body to disk, byte-exact
+    /// (M8.7). Bound to `S` in the Response overlay and the Body-tab browse
+    /// surface (which guards against saving there — no response to save).
+    SaveResponseBody,
     /// Pan the response horizontal window left (unwrapped long lines).
     ScrollBodyLeft,
     /// Pan the response horizontal window right (unwrapped long lines).
@@ -449,6 +453,11 @@ pub(in crate::tui::events) const ACTION_TABLE: &[(Action, &str, &str)] = &[
     ),
     (Action::CopyResponse, "copy-response", "copy response"),
     (Action::CopyLine, "copy-line", "copy line"),
+    (
+        Action::SaveResponseBody,
+        "save-response-body",
+        "save response body to file",
+    ),
     (
         Action::ScrollBodyLeft,
         "scroll-body-left",

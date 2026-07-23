@@ -657,6 +657,7 @@ impl App {
                 self.commit_export(purpose, text)
             }
             PromptPurpose::NewSequence => self.commit_new_sequence(text)?,
+            PromptPurpose::SaveResponseBody => self.commit_save_response_body(text),
         }
         Ok(())
     }
