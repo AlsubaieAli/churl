@@ -844,6 +844,9 @@ fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
         PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
             Some("destination path (must stay inside the workspace)".to_owned())
         }
+        PromptPurpose::SaveResponseBody => {
+            Some("destination path (relative to cwd, ~ expands, no confinement)".to_owned())
+        }
         _ => None,
     }
 }

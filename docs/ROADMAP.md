@@ -117,7 +117,12 @@ CLI, real testing, and the polish to launch — grouped by target release.
       row) backed by `ChurlCookieJar::upsert`. The headless `churl cookies` add/edit CLI is not
       in scope yet — TUI + jar only so far.
 - [ ] Multipart / file upload.
-- [ ] Response output — save response bodies to file, HTML/XML pretty-printing.
+- [x] Response output — save response bodies to file, byte-exact (`S` in the TUI's Response
+      overlay, seeded with a smart `<endpoint-name>.<ext>` default; `-o/--output <path>`
+      headless for `run`/`send`, frozen contract: [`docs/CLI.md`](CLI.md)), and HTML/XML
+      pretty-printing (`p` widened from JSON-only; XML via `quick-xml`, HTML via `html5ever` +
+      a custom indenting walk over its DOM). Copy (`y`/`Y`) and save both stay byte-exact
+      regardless of the pretty toggle.
 
 ### 0.10 — Reports & interop ⏳
 - [ ] Saved reports — persist, export, and reload completed sequence and load runs.

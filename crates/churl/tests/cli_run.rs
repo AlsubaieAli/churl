@@ -795,3 +795,138 @@ async fn run_non_multipart_endpoint_omits_body_parts_key() {
         "body_parts must be omitted, not null, for a non-multipart request: {env}"
     );
 }
+
+// ---- M8.7: `-o/--output` ----
+
+/// `run -o <file>` writes the raw response body to disk, byte-exact, while
+/// the `--json` envelope keeps printing to stdout unchanged (independent).
+#[tokio::test]
+async fn run_output_flag_writes_raw_bytes_and_json_envelope_is_unaffected() {
+    let server = MockServer::start().await;
+    let body: Vec<u8> = vec![0xff, 0xd8, 0xff, 0x00, b'x']; // a JPEG-ish binary blob
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+    let out_path = dir.path().join("out.bin");
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "-o", out_path.to_str().unwrap()],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&out_path).unwrap(),
+        body,
+        "-o must write the exact raw response bytes"
+    );
+
+    // The envelope is untouched: still base64-encodes the same binary body
+    // under `response.body`/`response.body_encoding`.
+    let env = envelope(&output);
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["response"]["body_encoding"], "base64");
+    assert_eq!(
+        env["data"]["response"]["body"],
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body)
+    );
+}
+
+/// A relative `-o` path resolves against the process cwd, not the workspace
+/// root — `run` executes from a workspace subtree in this fixture (the
+/// endpoint itself is nested), yet `-o` still lands at the cwd it was
+/// invoked from.
+#[tokio::test]
+async fn run_output_relative_path_resolves_against_cwd() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/users/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("alice"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "api/users/Get User", "-o", "saved.txt"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("saved.txt")).unwrap(),
+        "alice"
+    );
+}
+
+/// A write failure (an existing directory at the target path) surfaces as
+/// its own `output-write-failed` envelope error, band 5 — not a silent
+/// success and not a panic. The request itself succeeded, so this is purely
+/// a post-execution I/O failure.
+#[tokio::test]
+async fn run_output_write_failure_is_exit_5_output_write_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+    // A directory at the target path can never be `atomic_write`'s target.
+    let bad_target = dir.path().join("not-a-file");
+    std::fs::create_dir(&bad_target).unwrap();
+
+    let output = churl_in(
+        dir.path(),
+        &["--json", "run", "Ping", "-o", bad_target.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    let env = envelope(&output);
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "output-write-failed");
+}
+
+/// M8.7.1 P1 fix, `run` arm: `--json` + `-o -` is REJECTED (band 2), not
+/// allowed — same contract as `send` (see
+/// `cli_send::send_json_output_dash_is_rejected_exit_2_writes_nothing_to_stdout`),
+/// exercised here too because the rejection is wired into each subcommand's
+/// own match arm in `main.rs`, not a single shared call site.
+#[tokio::test]
+async fn run_json_output_dash_is_rejected_exit_2_writes_nothing_to_stdout() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(dir.path(), &["--json", "run", "Ping", "-o", "-"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no envelope, no body, nothing at all on stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

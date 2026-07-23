@@ -4,7 +4,7 @@
 //! `churl_core::http::execute` seam the TUI's `send_request` uses.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use churl_core::http::{ClientConfig, ExecuteOptions};
 use churl_core::template::Scope;
@@ -31,6 +31,12 @@ pub struct RunArgs {
     /// Raw `--assert` flag strings, parsed and appended after the resolved
     /// endpoint's own persisted `[[assertions]]`.
     pub cli_asserts: Vec<String>,
+    /// `-o/--output <path>` (M8.7): when set, the raw response body bytes are
+    /// written here (byte-exact, no lossy utf8/base64 round-trip), independent
+    /// of `--json` (the envelope keeps printing to stdout either way). `-`
+    /// means stdout. Resolved against the process cwd (never the workspace
+    /// root) when relative — a download destination, not a workspace artifact.
+    pub output: Option<PathBuf>,
 }
 
 /// Opens the cwd workspace, resolves `args.endpoint_path`, builds the
@@ -109,6 +115,8 @@ pub async fn run(args: RunArgs, cwd: &Path, runtime: &RuntimeCfg) -> Result<Exec
         inputs,
         &assertions,
         args.verbose,
+        args.output.as_deref(),
+        cwd,
     )
     .await
 }

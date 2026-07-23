@@ -99,7 +99,7 @@ pub fn render(frame: &mut Frame, area: Rect, ctx: RenderCtx) -> RenderOutcome {
     // BOTTOM edge so it never collides with the top-right Done-state stats.
     if let ResponseState::Done { .. } = ctx.state {
         let hint = Line::from(Span::styled(
-            " h header · j/k move · J/K block · o/O fold · y/Y copy · / search ",
+            " h header · j/k move · J/K block · o/O fold · y/Y copy · S save · / search ",
             ctx.theme.statusline,
         ))
         .right_aligned();

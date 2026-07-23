@@ -165,9 +165,11 @@ crates/
                            #   hard error's band (3/4/5), else 1 on any failed assertion OR broken extraction chain, else 0
       resolve.rs           # `collection/.../endpoint name` path resolution vs churl_core::persistence; --profile validation
       run_cmd.rs           # churl run <endpoint>: resolve a saved endpoint + its collection var chain, merge its
-                           #   persisted assertions with --assert flags (M8.4, append), execute headless
+                           #   persisted assertions with --assert flags (M8.4, append), execute headless;
+                           #   -o/--output (M8.7) threaded through to run_execution
       send_cmd.rs          # churl send: ad-hoc one-shot from curl-mnemonic (-X/-H/-d/--url) or churl-native flags;
-                           #   --assert flags are the whole assertion set (M8.4, no persisted endpoint)
+                           #   --assert flags are the whole assertion set (M8.4, no persisted endpoint);
+                           #   -o/--output (M8.7) threaded through to run_execution
       init.rs              # churl init [--demo]: scaffold a blank (or demo) workspace via real persistence seams
       update.rs            # churl update: verified self-replace from GitHub releases (self_replace crate);
                            #   pure target→asset/version-compare/checksum fns, network+swap bin-only
@@ -204,7 +206,9 @@ crates/
         highlight.rs       # off-thread syntect worker (std::thread + mpsc), viewport-only, theme-aware; spawn degrades to None
         clipboard.rs       # native (arboard) clipboard primary + OSC-52-with-passthrough (tmux/screen) fallback, 1 MB cap
         components/        # explorer, urlbar (focusable, inline edit + dirty dot), line_editor (shared 1-line editor),
-                           #   response/ (virtualised viewer pipeline: pretty/sort/headers/wrap/fold/search/copy/line-numbers;
+                           #   response/ (virtualised viewer pipeline: pretty/sort/headers/wrap/fold/search/copy/line-numbers/
+                           #     save (M8.7: S saves ResponseView::raw_bytes byte-exact; pretty widened to JSON/XML/HTML via
+                           #     quick-xml + html5ever/markup5ever_rcdom, raw_text/raw_bytes never pass through reformat);
                            #     sanitize_for_display strips ANSI/controls + expands tabs (TAB_WIDTH 4) + h_scroll horizontal window;
                            #     ResponseState::Dropped memory-bound placeholder: status/timing/size, no body; geometry cache),
                            #   request (tab bar + Params/Headers/Auth rows + edtui Body), request_tabs (tab/row state),

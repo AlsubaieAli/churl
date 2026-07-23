@@ -300,6 +300,13 @@ pub enum PromptPurpose {
     ExportWorkspace(JsonDialect),
     /// Name for a new request sequence; opens the editor on the created file.
     NewSequence,
+    /// Destination path for a `S` save-response-body write (M8.7). Unlike
+    /// [`Self::ExportCollection`]/[`Self::ExportWorkspace`], this path is
+    /// resolved curl-`-o`-download-style — against the process cwd, with `~`
+    /// expansion and no workspace-root confinement (see
+    /// `crate::tui::app::pure::resolve_save_path`) — a download destination,
+    /// not a workspace artifact.
+    SaveResponseBody,
 }
 
 impl PromptPurpose {
@@ -322,6 +329,7 @@ impl PromptPurpose {
             }
             PromptPurpose::ExportWorkspace(JsonDialect::Native) => "Export workspace · churl JSON",
             PromptPurpose::NewSequence => "New sequence",
+            PromptPurpose::SaveResponseBody => "Save response body",
         }
     }
 }

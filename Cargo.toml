@@ -67,6 +67,16 @@ semver = "1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 two-face = "0.4"
 
+# Response-body pretty-printing (churl bin only; never churl-core — M8.7).
+# quick-xml is already a transitive dep (0.41.0, via syntect -> plist) at this
+# exact version, so pinning it here adds no new resolved version to the tree.
+quick-xml = "0.41"
+# html5ever/markup5ever_rcdom (HTML pretty-print) are NET-NEW deps, gated on a
+# `cargo deny check` pass (license + advisories) before any code depends on
+# them — see docs/DECISIONS.md.
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+
 # Terminal cell widths (inline-edit viewport)
 unicode-width = "0.2"
 

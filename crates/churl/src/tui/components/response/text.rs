@@ -7,18 +7,21 @@
 
 use super::ResponseView;
 
-/// Reformats a response body for display when the viewer is in pretty mode and
-/// the body is JSON (JSON-only in v1). Parses `text` as a
-/// `serde_json::Value` and re-emits it with `to_string_pretty`. On **any** parse
-/// error — or when `pretty` is off, or the syntax is not JSON — the original
+/// Reformats a response body for display when the viewer is in pretty mode.
+/// JSON, XML, and HTML each get their own reformatter (M8.7 adds XML/HTML;
+/// JSON shipped first, M7.7); every other syntax (`Plain`) is returned
+/// unchanged. On **any** parse error — or when `pretty` is off — the original
 /// `text` is returned unchanged (silent raw fallback; never errors, never
 /// panics). Returns an owned string so the caller can store it as the
 /// displayed body.
 ///
-/// When `sort_keys` is set, every JSON object's keys are sorted A→Z recursively
-/// before emission (arrays keep element order); otherwise objects keep their
-/// server wire order (`serde_json`'s `preserve_order` feature is on, so the
-/// parsed `Value` is insertion-ordered).
+/// `sort_keys` only ever applies to the JSON arm (A→Z object-key sort,
+/// recursive; arrays keep element order) — XML/HTML have no analogous notion
+/// and ignore it.
+///
+/// This is a DISPLAY-ONLY transform: `raw_text`/`raw_bytes` (what copy and
+/// save read) are built from the untouched body and never pass through here —
+/// see `ResponseView::build`.
 pub(in crate::tui::components::response) fn reformat_body_if_needed(
     text: &str,
     syntax: crate::tui::highlight::SyntaxToken,
@@ -26,18 +29,543 @@ pub(in crate::tui::components::response) fn reformat_body_if_needed(
     sort_keys: bool,
 ) -> String {
     use crate::tui::highlight::SyntaxToken;
-    if !pretty || syntax != SyntaxToken::Json {
+    if !pretty {
         return text.to_owned();
     }
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(mut value) => {
-            if sort_keys {
-                sort_value_keys(&mut value);
+    match syntax {
+        SyntaxToken::Json => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(mut value) => {
+                if sort_keys {
+                    sort_value_keys(&mut value);
+                }
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned())
             }
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_owned())
-        }
-        Err(_) => text.to_owned(),
+            Err(_) => text.to_owned(),
+        },
+        SyntaxToken::Xml => reformat_xml(text).unwrap_or_else(|| text.to_owned()),
+        SyntaxToken::Html => reformat_html(text).unwrap_or_else(|| text.to_owned()),
+        SyntaxToken::Plain => text.to_owned(),
     }
+}
+
+fn reformat_xml(text: &str) -> Option<String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let mut reader = Reader::from_str(text);
+    // Whitespace is no longer blanket-trimmed at the reader level (M8.7.1 —
+    // that blanket trim is exactly what dropped significant inter-token
+    // whitespace from mixed content, e.g. `<p>Price: <b>5</b> USD</p>` →
+    // "Price:5USD"). Every event is captured into a small tree instead, and
+    // `xml_has_significant_text`/`write_xml_node` below decide PER ELEMENT
+    // whether its whitespace matters.
+    reader.config_mut().trim_text(false);
+
+    let mut stack: Vec<OpenXmlElement> = Vec::new();
+    let mut roots: Vec<XmlNode> = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                let name = String::from_utf8(e.name().into_inner().to_vec()).ok()?;
+                stack.push(OpenXmlElement {
+                    raw,
+                    name,
+                    children: Vec::new(),
+                });
+            }
+            Ok(Event::End(_)) => {
+                let open = stack.pop()?;
+                push_xml_child(
+                    &mut stack,
+                    &mut roots,
+                    XmlNode::Element {
+                        raw: open.raw,
+                        name: open.name,
+                        children: open.children,
+                        self_closing: false,
+                    },
+                );
+            }
+            Ok(Event::Empty(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                let name = String::from_utf8(e.name().into_inner().to_vec()).ok()?;
+                push_xml_child(
+                    &mut stack,
+                    &mut roots,
+                    XmlNode::Element {
+                        raw,
+                        name,
+                        children: Vec::new(),
+                        self_closing: true,
+                    },
+                );
+            }
+            Ok(Event::Text(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                push_xml_child(&mut stack, &mut roots, XmlNode::Text(raw));
+            }
+            Ok(Event::CData(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                push_xml_child(&mut stack, &mut roots, XmlNode::CData(raw));
+            }
+            Ok(Event::Comment(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                push_xml_child(&mut stack, &mut roots, XmlNode::Comment(raw));
+            }
+            Ok(Event::PI(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                push_xml_child(&mut stack, &mut roots, XmlNode::ProcessingInstruction(raw));
+            }
+            // Decl/DocType can only legally appear at the document level, so
+            // they always land in `roots`, never inside `stack`'s current
+            // element.
+            Ok(Event::Decl(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                roots.push(XmlNode::Decl(raw));
+            }
+            Ok(Event::DocType(e)) => {
+                let raw = String::from_utf8(e.to_vec()).ok()?;
+                roots.push(XmlNode::DocType(raw));
+            }
+            // A bare general/character reference outside decoded text isn't
+            // something this pretty-printer round-trips faithfully — bail to
+            // the same raw fallback every parse error takes rather than guess.
+            Ok(Event::GeneralRef(_)) => return None,
+            Err(_) => return None,
+        }
+    }
+    if !stack.is_empty() {
+        return None; // unclosed element(s) — malformed, same as before
+    }
+
+    let mut out = String::new();
+    for node in &roots {
+        write_xml_node(node, 0, &mut out);
+    }
+    Some(out)
+}
+
+/// An element still open while [`reformat_xml`] walks the event stream: its
+/// raw tag content (name + attributes, EXACTLY as `quick-xml` read them —
+/// never decoded/re-escaped, so unusual quoting/spacing round-trips
+/// untouched), its bare name (needed for the closing tag), and the children
+/// collected so far.
+struct OpenXmlElement {
+    raw: String,
+    name: String,
+    children: Vec<XmlNode>,
+}
+
+/// [`reformat_xml`]'s intermediate tree. Text/CDATA/comment/PI/decl/doctype
+/// content is kept exactly as `quick-xml` handed it back (still
+/// entity-escaped for text, raw for the rest) — reformatting only re-wraps
+/// and re-indents, it never round-trips through a decode/re-encode pass.
+enum XmlNode {
+    Element {
+        raw: String,
+        name: String,
+        children: Vec<XmlNode>,
+        /// True only when the source itself used `<tag/>` — an explicit
+        /// `<tag></tag>` pair is never rewritten into a self-closing one.
+        self_closing: bool,
+    },
+    Text(String),
+    CData(String),
+    Comment(String),
+    ProcessingInstruction(String),
+    /// Root-only: the `<?xml …?>` declaration.
+    Decl(String),
+    /// Root-only: `<!DOCTYPE …>`.
+    DocType(String),
+}
+
+/// Appends `node` to the currently-open element's children, or to `roots` if
+/// the stack is empty (a top-level node). Shared by every event arm in
+/// [`reformat_xml`]'s read loop.
+fn push_xml_child(stack: &mut [OpenXmlElement], roots: &mut Vec<XmlNode>, node: XmlNode) {
+    match stack.last_mut() {
+        Some(parent) => parent.children.push(node),
+        None => roots.push(node),
+    }
+}
+
+/// True if any DIRECT child of an element is non-whitespace text or CDATA —
+/// "mixed content" in XML terms. Gates [`write_xml_node`]'s indent-vs-
+/// verbatim choice: element-only content (child elements/comments/PIs plus
+/// purely-insignificant whitespace) is safe to reindent; the moment there is
+/// real text mixed in, reindenting would visibly change it (`<p>Price:
+/// <b>5</b> USD</p>` → "Price:5USD" if trimmed/reindented), so the whole
+/// subtree is written verbatim instead (see [`write_xml_node_verbatim`]).
+fn xml_has_significant_text(children: &[XmlNode]) -> bool {
+    children.iter().any(|child| match child {
+        XmlNode::Text(t) => !t.trim().is_empty(),
+        XmlNode::CData(_) => true,
+        _ => false,
+    })
+}
+
+/// The indenting recursive walk: two spaces per depth level, one node per
+/// line — mirrors [`write_html_indented`]'s shape. An element whose direct
+/// children are ELEMENT-ONLY (comments/PIs/child elements plus
+/// purely-insignificant whitespace text) gets its children indented on their
+/// own lines; an element with ANY direct non-whitespace text child is mixed
+/// content and is written byte-for-byte verbatim instead (via
+/// [`write_xml_node_verbatim`]), preserving every byte of its inter-token
+/// whitespace.
+fn write_xml_node(node: &XmlNode, depth: usize, out: &mut String) {
+    let indent = "  ".repeat(depth);
+    match node {
+        XmlNode::Decl(raw) => {
+            out.push_str("<?");
+            out.push_str(raw);
+            out.push_str("?>\n");
+        }
+        XmlNode::DocType(raw) => {
+            out.push_str(&indent);
+            out.push_str("<!DOCTYPE ");
+            out.push_str(raw);
+            out.push_str(">\n");
+        }
+        XmlNode::ProcessingInstruction(raw) => {
+            out.push_str(&indent);
+            out.push_str("<?");
+            out.push_str(raw);
+            out.push_str("?>\n");
+        }
+        XmlNode::Comment(raw) => {
+            out.push_str(&indent);
+            out.push_str("<!--");
+            out.push_str(raw);
+            out.push_str("-->\n");
+        }
+        XmlNode::CData(raw) => {
+            out.push_str(&indent);
+            out.push_str("<![CDATA[");
+            out.push_str(raw);
+            out.push_str("]]>\n");
+        }
+        XmlNode::Text(raw) => {
+            // Insignificant inter-tag whitespace collapses to nothing rather
+            // than a blank indented line — only reachable here at all when
+            // the enclosing element is element-only (mixed content never
+            // recurses through this arm; see `write_xml_node_verbatim`).
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                out.push_str(&indent);
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+        }
+        XmlNode::Element {
+            raw,
+            name,
+            children,
+            self_closing,
+        } => {
+            out.push_str(&indent);
+            out.push('<');
+            out.push_str(raw);
+            if *self_closing {
+                out.push_str("/>\n");
+                return;
+            }
+            out.push('>');
+            if xml_has_significant_text(children) {
+                for child in children {
+                    write_xml_node_verbatim(child, out);
+                }
+                out.push_str("</");
+                out.push_str(name);
+                out.push_str(">\n");
+            } else {
+                out.push('\n');
+                for child in children {
+                    write_xml_node(child, depth + 1, out);
+                }
+                out.push_str(&indent);
+                out.push_str("</");
+                out.push_str(name);
+                out.push_str(">\n");
+            }
+        }
+    }
+}
+
+/// Writes a mixed-content XML subtree with NO indentation and NO trimming —
+/// once an element is decided to be mixed content (see
+/// [`xml_has_significant_text`]), the ENTIRE subtree renders verbatim,
+/// recursively (mirrors [`write_html_verbatim`]'s all-or-nothing scope for a
+/// `<pre>`/`<script>` subtree): a nested element inside mixed content (`<p>a
+/// <b>bold <i>italic</i></b> c</p>`) keeps its own whitespace exactly as
+/// written too, never re-entering the indented walk.
+fn write_xml_node_verbatim(node: &XmlNode, out: &mut String) {
+    match node {
+        XmlNode::Text(raw) => out.push_str(raw),
+        XmlNode::CData(raw) => {
+            out.push_str("<![CDATA[");
+            out.push_str(raw);
+            out.push_str("]]>");
+        }
+        XmlNode::Comment(raw) => {
+            out.push_str("<!--");
+            out.push_str(raw);
+            out.push_str("-->");
+        }
+        XmlNode::ProcessingInstruction(raw) => {
+            out.push_str("<?");
+            out.push_str(raw);
+            out.push_str("?>");
+        }
+        XmlNode::Element {
+            raw,
+            name,
+            children,
+            self_closing,
+        } => {
+            out.push('<');
+            out.push_str(raw);
+            if *self_closing {
+                out.push_str("/>");
+                return;
+            }
+            out.push('>');
+            for child in children {
+                write_xml_node_verbatim(child, out);
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+        }
+        // Decl/DocType can never legally appear nested; defensively a no-op.
+        XmlNode::Decl(_) | XmlNode::DocType(_) => {}
+    }
+}
+
+/// Element names with NO closing tag / no children per the HTML spec
+/// ("void elements") — the indenting walk self-closes these instead of
+/// recursing into (nonexistent) children.
+const HTML_VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Elements whose content is whitespace-significant: reindenting or trimming
+/// their text would visibly change the content (a `<pre>`-formatted table, a
+/// `<textarea>` default value, or `<script>`/`<style>` source). The indenting
+/// walk preserves these subtrees VERBATIM instead of recursing indented.
+const HTML_VERBATIM_ELEMENTS: &[&str] = &["pre", "textarea", "script", "style"];
+
+fn reformat_html(text: &str) -> Option<String> {
+    use html5ever::driver::ParseOpts;
+    use html5ever::parse_document;
+    use html5ever::tendril::TendrilSink;
+    use markup5ever_rcdom::RcDom;
+
+    if text.trim().is_empty() {
+        return None;
+    }
+    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(text);
+    // Only normalize genuinely well-formed documents (M8.7.1). html5ever's
+    // browser-grade recovery never REJECTS input — it always builds SOME
+    // tree — but it does record a `dom.errors` entry for exactly the ragged
+    // cases that matter here: a bare HTMX/Turbo-style fragment (`<div>
+    // hi</div>`, no `<html>`/`<body>` wrapper) or a body cut short by `-o`'s
+    // `max_body_bytes` truncation. Reformatting either would fabricate
+    // scaffold/close tags the server never sent and, for a truncated body,
+    // hide the truncation entirely — so fall back to the raw text instead,
+    // the same silent fallback every other reformat error takes. A fully
+    // well-formed `<!DOCTYPE html>…</html>` document parses with zero
+    // errors and still normalizes/indents as before.
+    if !dom.errors.borrow().is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for child in dom.document.children.borrow().iter() {
+        write_html_indented(child, 0, &mut out);
+    }
+    Some(out)
+}
+
+fn write_html_indented(handle: &markup5ever_rcdom::Handle, depth: usize, out: &mut String) {
+    use markup5ever_rcdom::NodeData;
+
+    let indent = "  ".repeat(depth);
+    match &handle.data {
+        NodeData::Document => {
+            for child in handle.children.borrow().iter() {
+                write_html_indented(child, depth, out);
+            }
+        }
+        NodeData::Doctype { name, .. } => {
+            out.push_str(&indent);
+            out.push_str("<!DOCTYPE ");
+            out.push_str(name);
+            out.push_str(">\n");
+        }
+        NodeData::Text { contents } => {
+            // Insignificant inter-tag whitespace (html5ever emits a Text node
+            // for it) collapses to nothing rather than a blank indented line.
+            let trimmed = contents.borrow();
+            let trimmed = trimmed.trim();
+            if !trimmed.is_empty() {
+                out.push_str(&indent);
+                out.push_str(&escape_html_text(trimmed));
+                out.push('\n');
+            }
+        }
+        NodeData::Comment { contents } => {
+            out.push_str(&indent);
+            out.push_str("<!--");
+            out.push_str(contents);
+            out.push_str("-->\n");
+        }
+        NodeData::ProcessingInstruction { target, contents } => {
+            out.push_str(&indent);
+            out.push_str("<?");
+            out.push_str(target);
+            out.push(' ');
+            out.push_str(contents);
+            out.push_str("?>\n");
+        }
+        NodeData::Element { name, attrs, .. } => {
+            // html5ever already lowercases HTML element/attribute LOCAL names
+            // per the tokenizer spec, so no extra normalization is needed here
+            // — but a foreign-content NAMESPACE PREFIX (`xlink:href`, `xml:
+            // lang`) is preserved verbatim and must round-trip too (M8.7.1;
+            // dropping it silently breaks `xlink:href`, THE attribute SVG uses
+            // for links). `tag` stays the bare local name — that's what
+            // decides void/verbatim membership, never the qualified form.
+            let tag: &str = &name.local;
+            out.push_str(&indent);
+            out.push('<');
+            write_html_qualified_name(out, name);
+            for attr in attrs.borrow().iter() {
+                out.push(' ');
+                write_html_qualified_name(out, &attr.name);
+                out.push_str("=\"");
+                out.push_str(&escape_html_attr(&attr.value));
+                out.push('"');
+            }
+            if HTML_VOID_ELEMENTS.contains(&tag) {
+                out.push_str(" />\n");
+                return;
+            }
+            out.push_str(">\n");
+            if HTML_VERBATIM_ELEMENTS.contains(&tag) {
+                // RCDATA (`pre`, `textarea`) has its entities decoded by the
+                // tokenizer exactly like ordinary text, so it must be
+                // RE-ESCAPED on the way back out (`&lt;div&gt;` must display
+                // as written, not silently decoded to a literal `<div>`).
+                // RAWTEXT (`script`, `style`) is never decoded in the first
+                // place — escaping it would corrupt real JS/CSS source (`a<b`
+                // must survive unescaped). See `write_html_verbatim`.
+                let escape_text = matches!(tag, "pre" | "textarea");
+                for child in handle.children.borrow().iter() {
+                    write_html_verbatim(child, escape_text, out);
+                }
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else {
+                for child in handle.children.borrow().iter() {
+                    write_html_indented(child, depth + 1, out);
+                }
+            }
+            out.push_str(&indent);
+            out.push_str("</");
+            write_html_qualified_name(out, name);
+            out.push_str(">\n");
+        }
+    }
+}
+
+/// Writes a [`HTML_VERBATIM_ELEMENTS`] subtree with NO indentation and NO
+/// trimming — the exact original whitespace is what makes `<pre>`/
+/// `<textarea>`/`<script>`/`<style>` content meaningful, so reindenting it
+/// (like every other element) would corrupt it. Nested elements (legal inside
+/// `pre`/`textarea`) still get their tags written, just with no added
+/// structure around them. `escape_text` (M8.7.1) additionally decides whether
+/// TEXT within this subtree is re-escaped (RCDATA — `pre`/`textarea`, whose
+/// entities the tokenizer already decoded) or left byte-raw (RAWTEXT —
+/// `script`/`style`, never decoded in the first place).
+fn write_html_verbatim(handle: &markup5ever_rcdom::Handle, escape_text: bool, out: &mut String) {
+    use markup5ever_rcdom::NodeData;
+
+    match &handle.data {
+        // `escape_text` is decided once, where the verbatim walk is entered
+        // (`write_html_indented`), by which element triggered it — RCDATA
+        // (`pre`/`textarea`) re-escapes; RAWTEXT (`script`/`style`, which
+        // per the HTML5 tokenizer can never contain a nested real element
+        // anyway) stays raw. It is threaded through every recursive call so
+        // a nested element inside `<pre>` keeps escaping its own text too.
+        NodeData::Text { contents } => {
+            let text = contents.borrow();
+            if escape_text {
+                out.push_str(&escape_html_text(&text));
+            } else {
+                out.push_str(&text);
+            }
+        }
+        NodeData::Comment { contents } => {
+            out.push_str("<!--");
+            out.push_str(contents);
+            out.push_str("-->");
+        }
+        NodeData::Element { name, attrs, .. } => {
+            let tag: &str = &name.local;
+            out.push('<');
+            write_html_qualified_name(out, name);
+            for attr in attrs.borrow().iter() {
+                out.push(' ');
+                write_html_qualified_name(out, &attr.name);
+                out.push_str("=\"");
+                out.push_str(&escape_html_attr(&attr.value));
+                out.push('"');
+            }
+            if HTML_VOID_ELEMENTS.contains(&tag) {
+                out.push_str(" />");
+                return;
+            }
+            out.push('>');
+            for child in handle.children.borrow().iter() {
+                write_html_verbatim(child, escape_text, out);
+            }
+            out.push_str("</");
+            write_html_qualified_name(out, name);
+            out.push('>');
+        }
+        NodeData::Document | NodeData::Doctype { .. } | NodeData::ProcessingInstruction { .. } => {}
+    }
+}
+
+/// Writes an element or attribute name as `prefix:local` when the parsed
+/// name carries a foreign-content namespace prefix — `xlink:href` (SVG's
+/// link attribute), `xml:lang`/`xml:space` — `local` alone otherwise
+/// (M8.7.1; html5ever/markup5ever preserve a source-level prefix on
+/// `QualName` even though it lowercases/normalizes the local part).
+fn write_html_qualified_name(out: &mut String, name: &html5ever::QualName) {
+    if let Some(prefix) = &name.prefix {
+        out.push_str(prefix);
+        out.push(':');
+    }
+    out.push_str(&name.local);
+}
+
+/// Escapes text-node content for re-embedding in the reformatted markup.
+/// `&` first, so escaping `<`/`>` never double-escapes an ampersand they
+/// introduce.
+fn escape_html_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escapes a double-quoted attribute value the same way.
+fn escape_html_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;")
 }
 
 /// Recursively sorts the keys of every JSON object in `value` A→Z, in place.

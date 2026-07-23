@@ -49,6 +49,30 @@ impl SyntaxToken {
             Self::Plain
         }
     }
+
+    /// Sniffs a save-file extension from a response `Content-Type`, for the
+    /// `S` save-response-body prompt's default filename (M8.7). Independent of
+    /// [`Self::from_content_type`]'s 4-way syntax split — `Plain` there covers
+    /// both readable text and arbitrary binary, which this helper distinguishes
+    /// (`txt` vs `bin`) since a save destination needs a real extension.
+    /// `json`/`html`/`xml` mirror the syntax detection above; anything under
+    /// `text/*` (or carrying a `charset=` parameter — still textual) gets
+    /// `txt`; everything else (images, octet-stream, absent header, …) falls
+    /// back to `bin`.
+    pub fn extension_for_content_type(content_type: Option<&str>) -> &'static str {
+        let content_type = content_type.unwrap_or_default().to_ascii_lowercase();
+        if content_type.contains("json") {
+            "json"
+        } else if content_type.contains("html") {
+            "html"
+        } else if content_type.contains("xml") {
+            "xml"
+        } else if content_type.starts_with("text/") || content_type.contains("charset=") {
+            "txt"
+        } else {
+            "bin"
+        }
+    }
 }
 
 /// One unit of highlighting work: the lines of a single viewport, tagged with the

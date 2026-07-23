@@ -5,6 +5,8 @@
 //! `churl_core::http::execute` the TUI drives, then shape the frozen
 //! `send`/`run` JSON payload (`docs/CLI.md`).
 
+use std::path::Path;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
@@ -142,12 +144,26 @@ pub fn parse_cli_assertions(exprs: &[String]) -> Result<Vec<Assertion>, CliError
 /// ever built); `true` swaps in the traced twins
 /// (`substitute_request_traced` + `execute_traced`) and fills
 /// `ExecData::trace`.
+///
+/// `output` (M8.7, `-o/--output`) writes the RAW response body bytes to disk
+/// (or stdout for `-`) right here — this is the one place the actual
+/// `Response` is in hand, before `shape_exec_data` projects its body into the
+/// envelope's lossy-free utf8/base64 shape. `cwd` resolves a relative
+/// `output` path (curl `-o`-style; never the workspace root, which may differ
+/// from `cwd` for `run`). A write failure surfaces as its own `CliError`
+/// (`OutputWriteFailed`) even though the request itself succeeded. When the
+/// body was capped by `max_body_bytes`, `-o` still writes what it has (curl
+/// semantics — a partial save, not a failure) but a loud stderr warning
+/// accompanies it (M8.7.1), independent of `-v`, so `-o` never *silently*
+/// produces a truncated file.
 pub async fn run_execution(
     mut request: Request,
     scopes: Vec<Scope>,
     inputs: ExecInputs,
     assertions: &[Assertion],
     capture: bool,
+    output: Option<&Path>,
+    cwd: &Path,
 ) -> Result<ExecData, CliError> {
     let resolver = Resolver::new(scopes);
 
@@ -195,7 +211,60 @@ pub async fn run_execution(
             .map(churl_core::secrets::mask_url);
     }
 
+    if let Some(path) = output {
+        write_response_body(path, cwd, &response.body)?;
+        // Loud and independent of `-v`/`--json` (M8.7.1): `-o` silently
+        // wrote only the first `max_body_bytes` of the body — the same
+        // failure mode the TUI's save-response-body warns about. stderr
+        // keeps the `--json` stdout contract clean (envelope-only).
+        if response.truncated {
+            eprintln!(
+                "warning: saved {} bytes (response was truncated at max_body_bytes)",
+                response.body.len()
+            );
+        }
+    }
+
     Ok(shape_exec_data(&request, &response, assertions, trace))
+}
+
+/// Writes `-o/--output`'s raw response bytes to disk (or stdout for `-`),
+/// byte-exact — no lossy utf8/base64 round-trip through the envelope shape
+/// (the M8.2 base64-on-binary-stdout behaviour `-o` fixes). curl `-o`-style: a
+/// relative path resolves against `cwd` (the process cwd — a download
+/// destination, not a workspace artifact, so `run`'s workspace root is
+/// deliberately NOT used here); an absolute path is honored as-is. Parent
+/// directories are created as needed; the actual file write is atomic
+/// (temp+fsync+rename) via `churl_core::persistence::atomic_write`.
+fn write_response_body(path: &Path, cwd: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if path.as_os_str() == "-" {
+        use std::io::Write as _;
+        return std::io::stdout().write_all(bytes).map_err(|err| {
+            CliError::new(
+                ErrorKind::OutputWriteFailed,
+                format!("failed to write response body to stdout: {err}"),
+            )
+        });
+    }
+    let target = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    };
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            CliError::new(
+                ErrorKind::OutputWriteFailed,
+                format!("failed to create directory {}: {err}", parent.display()),
+            )
+        })?;
+    }
+    churl_core::persistence::atomic_write(&target, bytes).map_err(|err| {
+        CliError::new(
+            ErrorKind::OutputWriteFailed,
+            format!("failed to write output file {}: {err}", target.display()),
+        )
+    })
 }
 
 /// Shapes a completed exchange into the frozen `data` payload: the masked
@@ -282,7 +351,12 @@ pub fn shape_exec_data(
 /// response body on stdout (curl-like, so `churl send URL | jq` works), with
 /// a request/response debug trace on stderr when `verbose`, followed by an
 /// assertions checklist on stderr when any were given.
-pub fn print_human(data: &ExecData, verbose: bool) {
+///
+/// `suppress_body` (M8.7.1) is true iff `-o -` was given: `run_execution`
+/// already wrote the raw body to stdout in that case, so the default human
+/// body echo below is skipped — otherwise the body would print twice (curl's
+/// own `-o -` writes it exactly once).
+pub fn print_human(data: &ExecData, verbose: bool, suppress_body: bool) {
     if verbose {
         eprintln!("> {} {}", data.request.method, data.request.url);
         for h in &data.request.headers {
@@ -302,7 +376,12 @@ pub fn print_human(data: &ExecData, verbose: bool) {
             }
         );
     }
-    print!("{}", data.response.body);
+    // `-o -` (M8.7.1) already wrote the body to stdout once, in
+    // `run_execution` — never echo it a second time here (curl's own `-o -`
+    // writes the body exactly once).
+    if !suppress_body {
+        print!("{}", data.response.body);
+    }
 
     // The assertions checklist is a distinct, always-stderr surface (never
     // mixed into the stdout body an agent/script may be piping) — printed

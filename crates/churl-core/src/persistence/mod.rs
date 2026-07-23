@@ -48,9 +48,11 @@ use naming::{
 // modules resolve them unqualified, exactly as before the split.
 use atomic::{load_value, normalize_table, save_value, sort_endpoints};
 // `atomic_write` is ALSO reused outside `persistence` (`crate::config::save_defaults`,
-// M8.5's config writer), so it is re-exported `pub(crate)` under its full path
-// rather than only pulled into this module's local namespace.
-pub(crate) use atomic::atomic_write;
+// M8.5's config writer) and, since M8.7, outside the crate entirely (the `churl`
+// binary's headless `-o/--output` write and TUI save-response-body gesture), so
+// it is re-exported fully `pub` under its full path rather than only pulled into
+// this module's local namespace.
+pub use atomic::atomic_write;
 
 // The endpoint + collection CRUD, sequence CRUD, and workspace/collection types
 // live in child modules (endpoints/sequences/workspace). Their public items are

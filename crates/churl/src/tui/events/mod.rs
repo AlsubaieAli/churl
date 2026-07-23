@@ -275,6 +275,10 @@ impl Default for KeyMap {
         overlay(PaneCtx::Response, key!(shift - k), Action::StructuralPrev);
         overlay(PaneCtx::Response, key!(y), Action::CopyResponse);
         overlay(PaneCtx::Response, key!(shift - y), Action::CopyLine);
+        // `S` opens a typed-path prompt to save the response body to disk,
+        // byte-exact (M8.7). Free in the Response overlay (no prior `S`/
+        // `shift-s` bind anywhere in the keymap).
+        overlay(PaneCtx::Response, key!(shift - s), Action::SaveResponseBody);
         // Horizontal window pan for unwrapped long lines. `H`/`L`
         // (shift-h/shift-l) were free in the Response overlay; Left/Right arrows are
         // aliases (also free here — global Left/Right are unbound, only the Explorer

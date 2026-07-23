@@ -118,18 +118,22 @@ impl App {
 
     /// `p`: toggle raw↔pretty body rendering. Body text/line count change
     /// (and `toggle_pretty` resets folds), so reset cursor/scroll geometry and
-    /// clear the highlight cache. Pretty is JSON-only in v1 — no-op with a notice
-    /// outside a JSON body view, which would otherwise silently do nothing.
+    /// clear the highlight cache. Pretty reflows JSON, XML, and HTML bodies
+    /// (M8.7 widened this from JSON-only); a `Plain` body — or an unparseable
+    /// JSON/XML/HTML one, which silently falls back to raw inside
+    /// `reformat_body_if_needed` — has no pretty form, so this is a no-op with
+    /// a notice outside the headers view or a prettyable syntax, which would
+    /// otherwise silently do nothing.
     pub(in crate::tui::app) fn response_toggle_pretty(&mut self) {
-        let is_json_body = match self.active_response() {
+        let is_prettyable_body = match self.active_response() {
             ResponseState::Done { view } => {
                 view.view_mode() == ViewMode::Body
-                    && view.syntax() == crate::tui::highlight::SyntaxToken::Json
+                    && view.syntax() != crate::tui::highlight::SyntaxToken::Plain
             }
             _ => false,
         };
-        if !is_json_body {
-            self.notify("pretty: JSON body only");
+        if !is_prettyable_body {
+            self.notify("pretty: not supported for this body");
             return;
         }
         if let Some(view) = self.response_view_mut() {
@@ -421,5 +425,96 @@ impl App {
             payload,
             success_msg: msg,
         });
+    }
+
+    /// `S`: opens a typed-path prompt to save the response body to disk,
+    /// byte-exact (M8.7) — reads `raw_bytes`, never the pretty-reformatted
+    /// display, so the saved file matches the wire regardless of the `p`
+    /// toggle. Seeded with a smart default `<endpoint-name>.<ext>` (the
+    /// extension sniffed from the response's Content-Type at build time).
+    /// Guards loudly rather than opening a prompt with nothing to write: a
+    /// bodyless response state (Idle/InFlight/Cancelled/Dropped/Failed), or an
+    /// empty view — the Body-tab request-body-browse surface (M8.6.1) has no
+    /// *response* to save, only the request body it happens to render through
+    /// this same viewer.
+    pub(in crate::tui::app) fn begin_save_response_body(&mut self) {
+        let Some(view) = self.response_view_mut() else {
+            self.message = Some(Message::new(nothing_to_save_message(
+                self.active_response(),
+            )));
+            return;
+        };
+        if view.raw_bytes().is_empty() {
+            self.message = Some(Message::new("nothing to save — empty body"));
+            return;
+        }
+        let ext = view.save_extension();
+        let base = self
+            .active_endpoint_buffer()
+            .map(|b| persistence::slug_of(&b.endpoint.endpoint.name))
+            .unwrap_or_else(|| "response".to_owned());
+        self.open_prompt(PromptPurpose::SaveResponseBody, &format!("{base}.{ext}"));
+    }
+
+    /// Commits the `S` save-response-body prompt: resolves `path_input`
+    /// download-style (see [`resolve_save_path`] — cwd-relative, `~`-expanding,
+    /// no workspace confinement), creates any missing parent directories, and
+    /// writes the response's raw bytes atomically. Re-checks the same
+    /// emptiness guard [`Self::begin_save_response_body`] applied (the active
+    /// response could in principle have changed between opening the prompt and
+    /// committing it — e.g. a `send` landed while the prompt was open). A
+    /// truncated body is saved as-is but the success notice says so loudly, per
+    /// the locked design — never a silent partial save.
+    pub(in crate::tui::app) fn commit_save_response_body(&mut self, path_input: String) {
+        let Some(view) = self.response_view_mut() else {
+            self.message = Some(Message::new(nothing_to_save_message(
+                self.active_response(),
+            )));
+            return;
+        };
+        if view.raw_bytes().is_empty() {
+            self.message = Some(Message::new("nothing to save — empty body"));
+            return;
+        }
+        let bytes = view.raw_bytes().to_vec();
+        let truncated = view.body_truncated();
+
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(err) => {
+                self.notify(format!(
+                    "save failed: cannot determine current directory: {err}"
+                ));
+                return;
+            }
+        };
+        let home = dirs::home_dir();
+        let target = match resolve_save_path(&cwd, home.as_deref(), &path_input) {
+            Ok(target) => target,
+            Err(err) => {
+                self.notify(format!("save failed: {err}"));
+                return;
+            }
+        };
+        if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty())
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            self.notify(format!("save failed: {err}"));
+            return;
+        }
+        match persistence::atomic_write(&target, &bytes) {
+            Ok(()) => {
+                let mut msg = format!("saved {} bytes to {}", bytes.len(), target.display());
+                if truncated {
+                    msg = format!(
+                        "saved {} bytes (response was truncated) to {}",
+                        bytes.len(),
+                        target.display()
+                    );
+                }
+                self.notify(msg);
+            }
+            Err(err) => self.notify(format!("save failed: {err}")),
+        }
     }
 }

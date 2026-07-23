@@ -487,6 +487,302 @@ fn malformed_json_falls_back_to_raw_no_panic() {
     assert_eq!(v.copy_all(), raw);
 }
 
+// ---- XML pretty-print (M8.7) ----
+
+fn xml_view(body: &str) -> ResponseView {
+    response_with(
+        body,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/xml".to_owned(),
+            enabled: true,
+        }],
+        false,
+    )
+}
+
+#[test]
+fn xml_pretty_reformats_minified_xml() {
+    let raw = "<root><a>1</a><b><c>2</c></b></root>";
+    let mut v = xml_view(raw);
+    assert!(!v.pretty(), "xml content-type does not default to pretty");
+    assert!(v.toggle_pretty(), "toggled on");
+    assert!(
+        v.text.lines().count() > 1,
+        "pretty XML should be multi-line, got: {:?}",
+        v.text
+    );
+    assert!(v.text.contains("<a>1</a>"));
+    assert!(v.text.contains("<c>2</c>"));
+}
+
+#[test]
+fn xml_pretty_preserves_whitespace_in_mixed_content() {
+    // M8.7.1 fix #5: `reformat_xml` used to blanket-trim text (`trim_text(true)`),
+    // which silently dropped the significant whitespace around an inline
+    // element in mixed content — `<p>Price: <b>5</b> USD now</p>` became
+    // "Price:5USD now", corrupting any text-bearing XML with inline markup
+    // (RSS/Atom `<description>`, SVG `<text>`, XHTML). An element with ANY
+    // direct non-whitespace text child must now round-trip byte-for-byte,
+    // inter-token whitespace included.
+    let raw = "<p>Price: <b>5</b> USD now</p>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("Price: <b>5</b> USD now"),
+        "mixed-content whitespace must round-trip faithfully, got: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn xml_pretty_still_indents_pure_element_nesting() {
+    // The companion invariant to the mixed-content fix above: an element
+    // whose direct children are ALL elements (no significant text of its
+    // own) is still safe to reindent — pure structural XML keeps getting
+    // pretty-printed, this isn't a blanket "never reformat" regression.
+    let raw = "<root><a><b>1</b></a><a><b>2</b></a></root>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.lines().count() > 1,
+        "pure element-nesting should still indent multi-line, got: {:?}",
+        v.text
+    );
+    assert!(v.text.contains("<b>1</b>"));
+    assert!(v.text.contains("<b>2</b>"));
+    // `<a>` itself has only element children (no direct text) — it must be
+    // indented (its own opening tag on its own line), not collapsed to a
+    // single verbatim line like the mixed-content case above.
+    assert!(
+        v.text.contains("<a>\n"),
+        "an element-only container must still be indented: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn xml_pretty_toggle_is_byte_exact_on_copy() {
+    // The headline invariant (M8.7): the normalized pretty view must NEVER
+    // leak into what `y`/`Y` (and save) read — `raw_text`/`copy_all` stay the
+    // exact on-the-wire bytes regardless of the pretty toggle.
+    let raw = "<root><a>1</a></root>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert_ne!(v.text, raw, "displayed text is normalized/indented");
+    assert_eq!(v.copy_all(), raw, "copy must stay byte-exact");
+    assert_eq!(
+        v.raw_bytes(),
+        raw.as_bytes(),
+        "raw_bytes must stay byte-exact"
+    );
+}
+
+#[test]
+fn malformed_xml_falls_back_to_raw_no_panic() {
+    let raw = "<root><a>unclosed</root>";
+    let mut v = xml_view(raw);
+    v.toggle_pretty();
+    assert_eq!(v.text, raw, "malformed XML must fall back to raw, silently");
+}
+
+// ---- HTML pretty-print (M8.7) ----
+
+fn html_view(body: &str) -> ResponseView {
+    response_with(
+        body,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/html; charset=utf-8".to_owned(),
+            enabled: true,
+        }],
+        false,
+    )
+}
+
+/// Wraps `body` in a genuinely well-formed document — `<!DOCTYPE html>` plus
+/// a full `<html><head>…</head><body>…</body></html>` skeleton — the ONLY
+/// shape `reformat_html` normalizes (M8.7.1; see
+/// `html_pretty_fragment_falls_back_to_raw_no_fabricated_scaffold` for why).
+fn wrapped_html(body: &str) -> String {
+    format!("<!DOCTYPE html><html><head><title>T</title></head><body>{body}</body></html>")
+}
+
+#[test]
+fn html_pretty_reformats_minified_html() {
+    let raw = wrapped_html("<p>hi</p>");
+    let mut v = html_view(&raw);
+    assert!(!v.pretty(), "html content-type does not default to pretty");
+    assert!(v.toggle_pretty());
+    assert!(
+        v.text.lines().count() > 1,
+        "pretty HTML should be multi-line, got: {:?}",
+        v.text
+    );
+    assert!(v.text.contains("<title>"));
+    assert!(v.text.contains("<p>"));
+    assert!(v.text.contains("hi"));
+}
+
+#[test]
+fn html_pretty_toggle_is_byte_exact_on_copy() {
+    // The headline invariant (M8.7): the normalized pretty view must NEVER
+    // leak into what `y`/`Y` (and save) read.
+    let raw = wrapped_html("<div><span>a</span><span>b</span></div>");
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert_ne!(v.text, raw, "displayed text is normalized/indented");
+    assert_eq!(v.copy_all(), raw, "copy must stay byte-exact");
+    assert_eq!(
+        v.raw_bytes(),
+        raw.as_bytes(),
+        "raw_bytes must stay byte-exact"
+    );
+}
+
+#[test]
+fn html_pretty_self_closes_void_elements() {
+    let raw = wrapped_html("<div>line one<br>line two<img src=\"x.png\"></div>");
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("<br />"),
+        "void element self-closes: {:?}",
+        v.text
+    );
+    assert!(
+        v.text.contains("<img src=\"x.png\" />"),
+        "void element with attrs self-closes: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_preserves_pre_whitespace_verbatim() {
+    let raw = wrapped_html("<pre>  line one\n    line two  \n</pre>");
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("  line one\n    line two  \n"),
+        "pre content must survive with its exact whitespace: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_preserves_script_content_verbatim_unescaped() {
+    // Script content is raw JS, not HTML text — a literal `<`/`&` inside it
+    // must NOT be entity-escaped on reformat (that would misrepresent the
+    // source), and its exact layout must survive.
+    let raw = wrapped_html("<script>if (a < b) { x(); }</script>");
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("if (a < b) { x(); }"),
+        "script body must be verbatim, unescaped: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_reescapes_pre_entities_but_keeps_script_raw() {
+    // M8.7.1 fix #7: `<pre>`/`<textarea>` are RCDATA — the tokenizer already
+    // DECODED their entities into the DOM, so re-serializing must RE-ESCAPE
+    // them (`&lt;div&gt;` must display as written, never silently decoded to
+    // a literal `<div>`). `<script>`/`<style>` are RAWTEXT — never decoded in
+    // the first place — so a literal `<`/`&` there must stay byte-raw
+    // (JS `a<b` must survive unescaped).
+    let raw = wrapped_html("<pre>&lt;div&gt;</pre><script>a<b</script>");
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("&lt;div&gt;"),
+        "pre entities must be re-escaped, not decoded: {:?}",
+        v.text
+    );
+    assert!(
+        !v.text.contains("<div>"),
+        "pre entities must not silently decode to a literal tag: {:?}",
+        v.text
+    );
+    assert!(
+        v.text.contains("a<b"),
+        "script content must stay raw/unescaped: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_preserves_foreign_content_namespace_prefixes() {
+    // M8.7.1 fix #6: `xlink:href` (THE attribute SVG uses for links) and
+    // `xml:lang` carry a source-level namespace prefix that must round-trip,
+    // not collapse to the bare local name (`href`/`lang`).
+    let raw =
+        wrapped_html(r##"<svg><use xlink:href="#icon"></use><text xml:lang="en">hi</text></svg>"##);
+    let mut v = html_view(&raw);
+    v.toggle_pretty();
+    assert!(
+        v.text.contains("xlink:href=\"#icon\""),
+        "xlink:href prefix must survive: {:?}",
+        v.text
+    );
+    assert!(
+        v.text.contains("xml:lang=\"en\""),
+        "xml:lang prefix must survive: {:?}",
+        v.text
+    );
+}
+
+#[test]
+fn html_pretty_never_panics_on_ragged_markup_and_falls_back_when_empty() {
+    // html5ever is a browser-grade, always-recovers parser — there is no
+    // "malformed HTML" that makes it error the way JSON/XML would. Prove a
+    // ragged, half-open, mismatched-tag document reformats (falls back, per
+    // the M8.7.1 `dom.errors` gate below) without panicking.
+    let raw = "<div><p>unclosed<b>bold</div>stray</html>";
+    let mut v = html_view(raw);
+    v.toggle_pretty(); // must not panic
+    assert!(v.pretty());
+
+    // A genuinely empty body has nothing to indent — falls back to raw (empty).
+    let mut empty = html_view("");
+    empty.toggle_pretty();
+    assert_eq!(empty.text, "");
+}
+
+#[test]
+fn html_pretty_fragment_falls_back_to_raw_no_fabricated_scaffold() {
+    // M8.7.1 fix #4: an HTMX/Turbo/AJAX-style bare fragment (no `<html>`/
+    // `<body>` wrapper — extremely common) must NOT be wrapped in a
+    // fabricated `<html><head><body>…` the server never sent. html5ever
+    // records a `dom.errors` entry for exactly this shape (confirmed
+    // empirically: 0 errors for a full `<!DOCTYPE html>…</html>` document, 1+
+    // for a bare fragment) — `reformat_html` gates on it and falls back to
+    // the untouched raw body, same as any other reformat "parse error".
+    let raw = "<div>hi</div>";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert_eq!(
+        v.text, raw,
+        "a bare fragment must stay raw, not get a fabricated <html>/<body> scaffold"
+    );
+}
+
+#[test]
+fn html_pretty_truncated_body_falls_back_to_raw_not_a_fabricated_complete_doc() {
+    // M8.7.1 fix #4: a response cut short by `-o`'s/the TUI's `max_body_bytes`
+    // truncation must never render as though it were a COMPLETE document —
+    // html5ever would otherwise fabricate closing tags that hide the
+    // truncation entirely. Falls back to raw, same as the fragment case.
+    let raw = "<html><body><div>partial";
+    let mut v = html_view(raw);
+    v.toggle_pretty();
+    assert_eq!(
+        v.text, raw,
+        "a truncated body must stay raw, not render as a fabricated complete document"
+    );
+}
+
 #[test]
 fn toggle_pretty_bumps_generation_and_resets_folds() {
     let mut v = json_view(r#"{"a":{"b":1},"c":2}"#);
@@ -562,6 +858,104 @@ fn truncated_json_falls_back_to_raw_and_keeps_marker() {
     assert_eq!(v.text, r#"{"items":[{"id":1},{"id":2},{"na"#);
     assert_eq!(v.line_count(), 1);
     assert!(v.truncated(), "truncation marker is preserved");
+}
+
+// ---- raw_bytes / save_extension (M8.7 save-response-body) ----
+
+#[test]
+fn raw_bytes_is_byte_exact_for_non_utf8_body() {
+    // The invariant `raw_bytes` exists for: `raw_text` is a LOSSY UTF-8 decode
+    // (invalid bytes become U+FFFD), so it is not byte-exact for a binary
+    // body. `raw_bytes` must be the literal wire bytes, unaffected by the
+    // lossy decode that built `raw_text`.
+    let body: Vec<u8> = vec![0xff, 0xfe, b'h', b'i', 0x00, 0x01];
+    let response = Response {
+        status: 200,
+        headers: Vec::new(),
+        body: body.clone(),
+        truncated: false,
+        timing: Timing {
+            connect: None,
+            total: Duration::from_millis(5),
+        },
+    };
+    let v = ResponseView::build(&response, 1);
+    assert_eq!(v.raw_bytes(), body.as_slice());
+    // Sanity: the lossy text decode indeed differs from the raw bytes here
+    // (replacement chars), proving this body actually exercises the gap.
+    assert_ne!(v.raw_text.as_bytes(), body.as_slice());
+}
+
+#[test]
+fn build_over_text_leaves_raw_bytes_empty() {
+    // The Body-tab request-body-browse view (M8.6.1) has no *response* to
+    // save — `raw_bytes` must stay empty so the save handler's emptiness
+    // guard fires there.
+    let v = ResponseView::build_over_text("hello", crate::tui::highlight::SyntaxToken::Plain, 1);
+    assert!(v.raw_bytes().is_empty());
+}
+
+#[test]
+fn save_extension_sniffed_from_content_type() {
+    let json = response_with(
+        r#"{"a":1}"#,
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/json".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(json.save_extension(), "json");
+
+    let html = response_with(
+        "<html></html>",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/html; charset=utf-8".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(html.save_extension(), "html");
+
+    let plain_text = response_with(
+        "hello",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "text/plain".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(plain_text.save_extension(), "txt");
+
+    let binary = response_with(
+        "ignored",
+        vec![Header {
+            name: "Content-Type".to_owned(),
+            value: "application/octet-stream".to_owned(),
+            enabled: true,
+        }],
+        false,
+    );
+    assert_eq!(binary.save_extension(), "bin");
+
+    let no_header = response_with("ignored", Vec::new(), false);
+    assert_eq!(no_header.save_extension(), "bin");
+}
+
+#[test]
+fn body_truncated_ignores_view_mode() {
+    // `truncated()` is gated to the body view (it answers "is what's on
+    // screen right now truncated"); `body_truncated()` must stay true
+    // regardless, since save always saves the response BODY bytes.
+    let mut v = response_with("partial", Vec::new(), true);
+    assert!(v.truncated());
+    assert!(v.body_truncated());
+    v.toggle_view_mode();
+    assert!(!v.truncated(), "headers view is never truncated");
+    assert!(v.body_truncated(), "body_truncated ignores view mode");
 }
 
 #[test]

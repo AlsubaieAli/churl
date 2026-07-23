@@ -103,6 +103,12 @@ enum Command {
         /// succeeded — see `docs/CLI.md`, "Assertions".
         #[arg(long = "assert", value_name = "EXPR")]
         assert: Vec<String>,
+        /// Write the raw response body to this file (byte-exact — no lossy
+        /// utf8/base64 round-trip), independent of `--json` (the envelope
+        /// still prints to stdout). `-` means stdout. A relative path
+        /// resolves against the current directory. See `docs/CLI.md`.
+        #[arg(short = 'o', long = "output", value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Run a saved request sequence headlessly — no TUI. Resolves
     /// `sequences/<name>.toml` in the cwd workspace, runs each step end-to-end
@@ -189,6 +195,12 @@ enum Command {
         /// request itself succeeded — see `docs/CLI.md`, "Assertions".
         #[arg(long = "assert", value_name = "EXPR")]
         assert: Vec<String>,
+        /// Write the raw response body to this file (byte-exact — no lossy
+        /// utf8/base64 round-trip), independent of `--json` (the envelope
+        /// still prints to stdout). `-` means stdout. A relative path
+        /// resolves against the current directory. See `docs/CLI.md`.
+        #[arg(short = 'o', long = "output", value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Print the effective keymap (every action, its bindings, and default/overridden)
     Keymaps,
@@ -309,6 +321,27 @@ fn headless_cwd() -> std::result::Result<PathBuf, CliError> {
     })
 }
 
+/// Rejects `--json` combined with `-o -`: both would write to stdout, and
+/// `-o -` writes the RAW response body while `--json` must carry ONLY the
+/// envelope (`output.rs` module docs) — interleaved, the stream is neither
+/// valid JSON nor a clean body (`{body}{envelope}`), corrupting every
+/// agent/CI parse of it. A clap-style usage error (band 2, per the module
+/// docs' band-2 carve-out): fails loud BEFORE any bytes are written, and no
+/// envelope is ever constructed for it. `-o <file>` alongside `--json` stays
+/// fine (they write to different streams) — this only rejects the `-` case.
+fn reject_json_output_dash(json: bool, output: Option<&PathBuf>) {
+    let is_dash = output.is_some_and(|p| p.as_os_str() == "-");
+    if json && is_dash {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "the argument '--json' cannot be used with '-o -' (both write to stdout; \
+                 `-o -` would interleave the raw response body with the JSON envelope)",
+            )
+            .exit();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -327,7 +360,14 @@ async fn main() -> Result<()> {
             endpoint,
             verbose,
             assert,
+            output,
         }) => {
+            reject_json_output_dash(json, output.as_ref());
+            // `-o -` already writes the body to stdout inside `run_execution`
+            // — human mode must not echo it a second time (curl's own `-o -`
+            // writes the body exactly once). Captured before `output` moves
+            // into `RunArgs` below.
+            let output_is_stdout = output.as_deref() == Some(std::path::Path::new("-"));
             // Every fallible pre-flight step (config, cwd, resolution, execution)
             // funnels into one `Result<ExecData, CliError>` so `emit` owns the
             // stdout/stderr/exit-code triad — nothing bubbles out of `main` as an
@@ -344,12 +384,13 @@ async fn main() -> Result<()> {
                     insecure: cli.insecure,
                     verbose,
                     cli_asserts: assert,
+                    output,
                 };
                 run_cmd::run(args, &cwd, &runtime).await
             }
             .await;
             let code = output::emit("run", json, result, |data| {
-                headless::print_human(data, verbose)
+                headless::print_human(data, verbose, output_is_stdout)
             });
             std::process::exit(code);
         }
@@ -417,7 +458,12 @@ async fn main() -> Result<()> {
             body,
             verbose,
             assert,
+            output,
         }) => {
+            reject_json_output_dash(json, output.as_ref());
+            // See the `Run` arm: `-o -` already writes the body to stdout
+            // inside `run_execution`, so human mode must not echo it again.
+            let output_is_stdout = output.as_deref() == Some(std::path::Path::new("-"));
             let cli_vars = vars_map(&cli.vars);
             let result = async {
                 let runtime = build_runtime_cfg()?;
@@ -435,12 +481,13 @@ async fn main() -> Result<()> {
                     insecure: cli.insecure,
                     verbose,
                     cli_asserts: assert,
+                    output,
                 };
                 send_cmd::run(args, &cwd, &runtime).await
             }
             .await;
             let code = output::emit("send", json, result, |data| {
-                headless::print_human(data, verbose)
+                headless::print_human(data, verbose, output_is_stdout)
             });
             std::process::exit(code);
         }

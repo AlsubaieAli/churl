@@ -67,6 +67,12 @@ impl App {
             'i' | 'a' => self.enter_body_edit(EditorMode::Insert),
             'y' => self.response_copy_view(),
             'Y' => self.response_copy_line(),
+            // `S` reaches the same save-response-body handler as the Response
+            // pane; this surface's view is built via `build_over_text` (an
+            // empty `raw_bytes`), so `begin_save_response_body`'s emptiness
+            // guard fires here rather than saving the request body — there is
+            // no *response* to save while browsing.
+            'S' => self.begin_save_response_body(),
             '/' => self.open_body_search(),
             'n' => self.response_search_step(true),
             'N' => self.response_search_step(false),
