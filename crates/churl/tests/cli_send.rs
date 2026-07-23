@@ -795,9 +795,19 @@ async fn send_output_relative_path_resolves_against_cwd() {
     );
 }
 
-/// `-o -` writes the raw body to stdout (ahead of the JSON envelope line).
+/// M8.7.1 P1 fix: `--json` + `-o -` is a REJECTED usage combo, not an
+/// allowed one — both write to stdout, and `-o -` would interleave the raw
+/// response body with the JSON envelope (`{body}{envelope}`), corrupting
+/// every agent/CI `json.load` of it. Rejected BEFORE any bytes are written:
+/// exit 2 (clap-style usage error, band 2 per `output.rs`'s carve-out),
+/// nothing at all on stdout, no envelope ever constructed. Replaces the
+/// pre-M8.7.1 `send_output_dash_writes_to_stdout`, whose `stdout.contains(
+/// ...)` substring check hid the corruption instead of catching it — this
+/// test JSON-parses stdout (via [`envelope`], which panics loudly on
+/// anything that isn't exactly one clean JSON object) so a corrupt stream
+/// can never pass silently again.
 #[tokio::test]
-async fn send_output_dash_writes_to_stdout() {
+async fn send_json_output_dash_is_rejected_exit_2_writes_nothing_to_stdout() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/ping"))
@@ -807,18 +817,93 @@ async fn send_output_dash_writes_to_stdout() {
 
     let url = format!("{}/ping", server.uri());
     let output = churl(&["--json", "send", &url, "-o", "-"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no envelope, no body, nothing at all on stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // No request was ever made either (fails loud before any bytes are
+    // written) — the mock only expects to be hit zero times by default, so a
+    // stray call would already fail the mount's implicit `expect`, but
+    // spell it out: the server saw nothing.
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+}
+
+/// `-o -` in HUMAN mode (no `--json`) writes the raw body to stdout exactly
+/// ONCE. Before the M8.7.1 fix, `run_execution`'s `-o -` arm wrote the body
+/// to stdout AND `print_human` unconditionally echoed
+/// `data.response.body` again — curl's own `-o -` writes the body once, not
+/// twice.
+#[tokio::test]
+async fn send_output_dash_human_mode_prints_body_exactly_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong-body"))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/ping", server.uri());
+    let output = churl(&["send", &url, "-o", "-"]);
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
-    assert!(
-        stdout.contains("pong-body"),
-        "raw body must be written to stdout: {stdout:?}"
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout, "pong-body",
+        "the body must appear exactly once on stdout, not doubled"
     );
-    // The envelope is still there too (independent of -o).
-    assert!(stdout.contains("\"schema_version\""));
+}
+
+/// M8.7.1 fix #3: `-o` writing a body capped by `max_body_bytes` must warn
+/// LOUDLY on stderr, independent of `-v` — before the fix, `churl send URL -o
+/// backup.bin` against an over-cap body silently wrote a PARTIAL file, the
+/// exact failure mode the TUI's save-response-body warns about. stderr keeps
+/// the `--json` stdout contract clean (envelope-only).
+#[tokio::test]
+async fn send_output_truncated_body_warns_loudly_on_stderr() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 1024]))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, "max_body_bytes = 16\n").unwrap();
+    let out_path = dir.path().join("out.bin");
+
+    let url = format!("{}/big", server.uri());
+    let output = churl_with_config(
+        &["--json", "send", &url, "-o", out_path.to_str().unwrap()],
+        &cfg,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("truncated"),
+        "expected a loud truncation warning on stderr, got: {stderr:?}"
+    );
+    // Only the capped 16 bytes actually landed on disk — a PARTIAL file,
+    // silently, without this fix.
+    assert_eq!(std::fs::read(&out_path).unwrap().len(), 16);
+    // The `--json` envelope on stdout stays clean (envelope-only, unaffected
+    // by the stderr warning) and correctly reports the truncation too.
+    let env = envelope(&output);
+    assert_eq!(env["data"]["response"]["truncated"], true);
 }
 
 /// A write failure surfaces as `output-write-failed`, exit 5 — a

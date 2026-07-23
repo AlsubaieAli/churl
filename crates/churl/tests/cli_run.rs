@@ -899,3 +899,34 @@ async fn run_output_write_failure_is_exit_5_output_write_failed() {
     assert_eq!(env["ok"], false);
     assert_eq!(env["error"]["kind"], "output-write-failed");
 }
+
+/// M8.7.1 P1 fix, `run` arm: `--json` + `-o -` is REJECTED (band 2), not
+/// allowed — same contract as `send` (see
+/// `cli_send::send_json_output_dash_is_rejected_exit_2_writes_nothing_to_stdout`),
+/// exercised here too because the rejection is wired into each subcommand's
+/// own match arm in `main.rs`, not a single shared call site.
+#[tokio::test]
+async fn run_json_output_dash_is_rejected_exit_2_writes_nothing_to_stdout() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    scaffold_workspace(dir.path(), &server.uri());
+
+    let output = churl_in(dir.path(), &["--json", "run", "Ping", "-o", "-"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no envelope, no body, nothing at all on stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

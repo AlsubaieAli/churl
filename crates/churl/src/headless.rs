@@ -151,7 +151,11 @@ pub fn parse_cli_assertions(exprs: &[String]) -> Result<Vec<Assertion>, CliError
 /// envelope's lossy-free utf8/base64 shape. `cwd` resolves a relative
 /// `output` path (curl `-o`-style; never the workspace root, which may differ
 /// from `cwd` for `run`). A write failure surfaces as its own `CliError`
-/// (`OutputWriteFailed`) even though the request itself succeeded.
+/// (`OutputWriteFailed`) even though the request itself succeeded. When the
+/// body was capped by `max_body_bytes`, `-o` still writes what it has (curl
+/// semantics — a partial save, not a failure) but a loud stderr warning
+/// accompanies it (M8.7.1), independent of `-v`, so `-o` never *silently*
+/// produces a truncated file.
 pub async fn run_execution(
     mut request: Request,
     scopes: Vec<Scope>,
@@ -209,6 +213,16 @@ pub async fn run_execution(
 
     if let Some(path) = output {
         write_response_body(path, cwd, &response.body)?;
+        // Loud and independent of `-v`/`--json` (M8.7.1): `-o` silently
+        // wrote only the first `max_body_bytes` of the body — the same
+        // failure mode the TUI's save-response-body warns about. stderr
+        // keeps the `--json` stdout contract clean (envelope-only).
+        if response.truncated {
+            eprintln!(
+                "warning: saved {} bytes (response was truncated at max_body_bytes)",
+                response.body.len()
+            );
+        }
     }
 
     Ok(shape_exec_data(&request, &response, assertions, trace))
@@ -337,7 +351,12 @@ pub fn shape_exec_data(
 /// response body on stdout (curl-like, so `churl send URL | jq` works), with
 /// a request/response debug trace on stderr when `verbose`, followed by an
 /// assertions checklist on stderr when any were given.
-pub fn print_human(data: &ExecData, verbose: bool) {
+///
+/// `suppress_body` (M8.7.1) is true iff `-o -` was given: `run_execution`
+/// already wrote the raw body to stdout in that case, so the default human
+/// body echo below is skipped — otherwise the body would print twice (curl's
+/// own `-o -` writes it exactly once).
+pub fn print_human(data: &ExecData, verbose: bool, suppress_body: bool) {
     if verbose {
         eprintln!("> {} {}", data.request.method, data.request.url);
         for h in &data.request.headers {
@@ -357,7 +376,12 @@ pub fn print_human(data: &ExecData, verbose: bool) {
             }
         );
     }
-    print!("{}", data.response.body);
+    // `-o -` (M8.7.1) already wrote the body to stdout once, in
+    // `run_execution` — never echo it a second time here (curl's own `-o -`
+    // writes the body exactly once).
+    if !suppress_body {
+        print!("{}", data.response.body);
+    }
 
     // The assertions checklist is a distinct, always-stderr surface (never
     // mixed into the stdout body an agent/script may be piping) — printed
