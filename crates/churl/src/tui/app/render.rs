@@ -842,10 +842,10 @@ fn prompt_hint(app: &App, purpose: PromptPurpose) -> Option<String> {
             .map(|name| format!("type \"{name}\" to confirm")),
         PromptPurpose::ImportCollection => Some("path to a Postman v2.1 JSON file".to_owned()),
         PromptPurpose::ExportCollection(_) | PromptPurpose::ExportWorkspace(_) => {
-            Some("destination path (must stay inside the workspace)".to_owned())
+            Some("save path — inside the workspace".to_owned())
         }
         PromptPurpose::SaveResponseBody => {
-            Some("destination path (relative to cwd, ~ expands, no confinement)".to_owned())
+            Some("save path — cwd-relative, ~ expands".to_owned())
         }
         _ => None,
     }
